@@ -1,0 +1,12 @@
+[package]
+name = "galoy-agents-cli"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "galoy-agents"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+mcp-gateway = { path = "../mcp-gateway" }

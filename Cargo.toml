@@ -1,0 +1,10 @@
+[workspace]
+members = ["cli", "mcp-gateway"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.metadata.crane]
+name = "galoy-agents"
