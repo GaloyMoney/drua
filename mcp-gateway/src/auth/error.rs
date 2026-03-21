@@ -21,11 +21,17 @@ pub enum AuthError {
 
 impl axum::response::IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
-        tracing::error!(%self, "auth error");
+        tracing::error!(error = %self, "auth error");
         let status = match &self {
             AuthError::CsrfMismatch => axum::http::StatusCode::FORBIDDEN,
+            AuthError::OAuth(_) | AuthError::GitHubApi(_) => axum::http::StatusCode::BAD_GATEWAY,
             _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, self.to_string()).into_response()
+        let body = match status {
+            axum::http::StatusCode::FORBIDDEN => "Forbidden",
+            axum::http::StatusCode::BAD_GATEWAY => "Authentication provider error",
+            _ => "Internal server error",
+        };
+        (status, body).into_response()
     }
 }

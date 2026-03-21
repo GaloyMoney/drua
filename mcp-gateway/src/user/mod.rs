@@ -22,12 +22,12 @@ impl Users {
         Self { repo }
     }
 
-    #[instrument(name = "mcp_gateway.user.find_by_github_id", skip(self))]
+    #[instrument(name = "mcp_gateway.user.find_by_github_id", skip_all)]
     pub async fn find_by_github_id(&self, github_id: &str) -> Result<Option<User>, UserError> {
         Ok(self.repo.maybe_find_by_github_id(github_id).await?)
     }
 
-    #[instrument(name = "mcp_gateway.user.create_from_github_login", skip(self))]
+    #[instrument(name = "mcp_gateway.user.create_from_github_login", skip_all)]
     pub async fn create_from_github_login(
         &self,
         github_id: impl Into<String> + std::fmt::Debug,
@@ -39,10 +39,7 @@ impl Users {
         Ok(user)
     }
 
-    #[instrument(
-        name = "mcp_gateway.user.create_from_github_login_in_op",
-        skip(self, op)
-    )]
+    #[instrument(name = "mcp_gateway.user.create_from_github_login_in_op", skip_all)]
     pub async fn create_from_github_login_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -55,7 +52,7 @@ impl Users {
         Ok(user)
     }
 
-    #[instrument(name = "mcp_gateway.user.find_by_id", skip(self))]
+    #[instrument(name = "mcp_gateway.user.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
         id: impl Into<UserId> + std::fmt::Debug,

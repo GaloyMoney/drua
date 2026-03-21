@@ -22,7 +22,7 @@ impl Agents {
         Self { repo }
     }
 
-    #[instrument(name = "mcp_gateway.agent.create_for_user", skip(self))]
+    #[instrument(name = "mcp_gateway.agent.create_for_user", skip_all, fields(%user_id))]
     pub async fn create_for_user(
         &self,
         user_id: UserId,
@@ -43,7 +43,7 @@ impl Agents {
         Ok(agent)
     }
 
-    #[instrument(name = "mcp_gateway.agent.create_for_user_in_op", skip(self, op))]
+    #[instrument(name = "mcp_gateway.agent.create_for_user_in_op", skip_all, fields(%user_id))]
     pub async fn create_for_user_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -65,7 +65,7 @@ impl Agents {
         Ok(agent)
     }
 
-    #[instrument(name = "mcp_gateway.agent.revoke", skip(self))]
+    #[instrument(name = "mcp_gateway.agent.revoke", skip_all)]
     pub async fn revoke(
         &self,
         id: impl Into<AgentId> + std::fmt::Debug,
@@ -80,7 +80,7 @@ impl Agents {
         Ok(agent)
     }
 
-    #[instrument(name = "mcp_gateway.agent.list_for_user", skip(self))]
+    #[instrument(name = "mcp_gateway.agent.list_for_user", skip_all, fields(%user_id))]
     pub async fn list_for_user(
         &self,
         user_id: UserId,
@@ -96,7 +96,7 @@ impl Agents {
             .await?)
     }
 
-    #[instrument(name = "mcp_gateway.agent.find_by_id", skip(self))]
+    #[instrument(name = "mcp_gateway.agent.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
         id: impl Into<AgentId> + std::fmt::Debug,
@@ -104,7 +104,7 @@ impl Agents {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
 
-    #[instrument(name = "mcp_gateway.agent.find_by_token_hash", skip(self))]
+    #[instrument(name = "mcp_gateway.agent.find_by_token_hash", skip_all)]
     pub async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<Agent>, AgentError> {
         Ok(self.repo.maybe_find_by_token_hash(token_hash).await?)
     }

@@ -7,7 +7,7 @@ pub mod token;
 use axum::{
     extract::{Request, State},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -58,6 +58,9 @@ pub fn auth_router() -> Router<AppState> {
 }
 
 /// Axum middleware that resolves [`AuthContext`] and inserts it into request extensions.
+///
+/// Returns 401 when credentials are present but invalid. Only falls through to
+/// [`AuthContext::Anonymous`] when no credentials are provided at all.
 #[instrument(name = "mcp_gateway.auth.middleware", skip_all)]
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -65,46 +68,93 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let auth_context = resolve_auth_context(&state, &session, &request).await;
-    request.extensions_mut().insert(auth_context);
-    next.run(request).await
+    match resolve_auth_context(&state, &session, &request).await {
+        Ok(ctx) => {
+            request.extensions_mut().insert(ctx);
+            next.run(request).await
+        }
+        Err(resp) => resp,
+    }
 }
 
 async fn resolve_auth_context(
     state: &AppState,
     session: &Session,
     request: &Request,
-) -> AuthContext {
-    // 1. Check Authorization: Bearer header
-    if let Some(auth_context) = resolve_bearer_token(state, request).await {
-        return auth_context;
+) -> Result<AuthContext, Response> {
+    // 1. If Authorization: Bearer header is present, it MUST resolve or fail.
+    if let Some(result) = try_resolve_bearer_token(state, request).await {
+        return result;
     }
 
-    // 2. Check session cookie
-    if let Some(auth_context) = resolve_session(session).await {
-        return auth_context;
+    // 2. If session contains user_id, it MUST resolve or fail.
+    if let Some(result) = try_resolve_session(session).await {
+        return result;
     }
 
-    AuthContext::Anonymous
+    // 3. No credentials provided at all.
+    Ok(AuthContext::Anonymous)
 }
 
-async fn resolve_bearer_token(state: &AppState, request: &Request) -> Option<AuthContext> {
+/// Returns `Some` if a Bearer header is present (meaning the caller tried to
+/// authenticate with a token). Returns `None` if no Bearer header is present.
+async fn try_resolve_bearer_token(
+    state: &AppState,
+    request: &Request,
+) -> Option<Result<AuthContext, Response>> {
     let header_value = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
 
-    let raw_token = header_value.strip_prefix("Bearer ")?;
+    let raw_token = match header_value.strip_prefix("Bearer ") {
+        Some(t) => t,
+        None => return None,
+    };
+
     let token_hash = hash_token(raw_token);
 
-    match state.agents.find_by_token_hash(&token_hash).await {
-        Ok(Some(agent)) if !agent.is_revoked() => Some(AuthContext::Agent(agent.id, agent.user_id)),
-        _ => None,
+    let result = match state.agents.find_by_token_hash(&token_hash).await {
+        Ok(Some(agent)) if !agent.is_revoked() => Ok(AuthContext::Agent(agent.id, agent.user_id)),
+        Ok(Some(_)) => {
+            tracing::warn!("bearer token lookup matched a revoked agent");
+            Err(unauthorized())
+        }
+        Ok(None) => {
+            tracing::warn!("bearer token lookup found no matching agent");
+            Err(unauthorized())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "bearer token lookup failed");
+            Err(internal_error())
+        }
+    };
+
+    Some(result)
+}
+
+/// Returns `Some` if the session contains a user_id key (meaning the caller
+/// has an active session). Returns `None` if session is empty / no cookie.
+async fn try_resolve_session(session: &Session) -> Option<Result<AuthContext, Response>> {
+    match session.get::<UserId>("user_id").await {
+        Ok(Some(user_id)) => Some(Ok(AuthContext::User(user_id))),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(error = %e, "session lookup failed");
+            Some(Err(internal_error()))
+        }
     }
 }
 
-async fn resolve_session(session: &Session) -> Option<AuthContext> {
-    let user_id: UserId = session.get("user_id").await.ok()??;
-    Some(AuthContext::User(user_id))
+fn unauthorized() -> Response {
+    (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+}
+
+fn internal_error() -> Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "Internal server error",
+    )
+        .into_response()
 }

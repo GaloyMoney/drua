@@ -1,6 +1,7 @@
 use async_trait::async_trait;
+use tower_sessions::cookie::SameSite;
 use tower_sessions::session::{Id, Record};
-use tower_sessions::session_store;
+use tower_sessions::{session_store, Expiry, SessionManagerLayer};
 
 /// Postgres-backed session store for tower-sessions.
 ///
@@ -14,6 +15,16 @@ pub struct PgSessionStore {
 impl PgSessionStore {
     pub fn new(pool: &sqlx::PgPool) -> Self {
         Self { pool: pool.clone() }
+    }
+
+    /// Returns a [`SessionManagerLayer`] configured with secure defaults:
+    /// `SameSite=Lax`, `HttpOnly=true`, `Secure=true`, 24-hour inactivity expiry.
+    pub fn into_layer(self) -> SessionManagerLayer<Self> {
+        SessionManagerLayer::new(self)
+            .with_same_site(SameSite::Lax)
+            .with_http_only(true)
+            .with_secure(true)
+            .with_expiry(Expiry::OnInactivity(time::Duration::hours(24)))
     }
 }
 

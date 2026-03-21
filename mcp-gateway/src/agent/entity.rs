@@ -13,6 +13,7 @@ pub enum AgentEvent {
         id: AgentId,
         user_id: UserId,
         name: String,
+        #[serde(skip_serializing, default)]
         token_hash: String,
         scopes: Vec<String>,
     },
@@ -39,10 +40,6 @@ impl Agent {
         self.events
             .entity_first_persisted_at()
             .expect("entity_first_persisted_at not found")
-    }
-
-    pub fn token_hash(&self) -> &str {
-        &self.token_hash
     }
 
     pub fn is_revoked(&self) -> bool {
