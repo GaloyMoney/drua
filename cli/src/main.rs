@@ -6,5 +6,5 @@ struct Cli {}
 
 fn main() {
     let _cli = Cli::parse();
-    println!("{}", mcp_gateway::hello());
+    println!("galoy-agents CLI");
 }
