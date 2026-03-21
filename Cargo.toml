@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "mcp-gateway"]
+members = ["cli", "domain", "graphql", "web"]
 resolver = "2"
 
 [workspace.package]

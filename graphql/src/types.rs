@@ -1,7 +1,9 @@
 use async_graphql::*;
 
-use crate::agent::Agent;
-use crate::user::User;
+use galoy_agents_domain as domain;
+
+use domain::agent::Agent;
+use domain::user::User;
 
 #[derive(SimpleObject)]
 pub struct UserType {

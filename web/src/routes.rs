@@ -1,5 +1,3 @@
-mod templates;
-
 use std::sync::Arc;
 
 use axum::{
@@ -8,16 +6,16 @@ use axum::{
     routing::{get, post},
     Form, Router,
 };
-use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-use mcp_gateway::{
-    agent::{Agent, Agents},
-    primitives::{AgentId, UserId},
-    user::Users,
-};
+use galoy_agents_domain as domain;
 
-use templates::*;
+use domain::agent::{Agent, Agents};
+use domain::auth::token::generate_token;
+use domain::primitives::{AgentId, UserId};
+use domain::user::Users;
+
+use crate::templates::*;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,14 +23,14 @@ pub struct AppState {
     pub agents: Agents,
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/agents", get(agent_list))
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}/revoke", post(revoke_agent))
-        .with_state(Arc::new(state))
+        .with_state(state)
 }
 
 fn extract_user_id(_headers: &axum::http::HeaderMap) -> Option<UserId> {
@@ -49,11 +47,6 @@ fn agent_to_view(agent: &Agent) -> AgentView {
         created_at: agent.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
         is_revoked: agent.is_revoked(),
     }
-}
-
-fn hash_token(token: &str) -> String {
-    let hash = Sha256::digest(token.as_bytes());
-    format!("{hash:x}")
 }
 
 #[instrument(name = "web.index", skip_all)]
@@ -108,8 +101,7 @@ async fn create_agent(
         None => return Redirect::to("/").into_response(),
     };
 
-    let raw_token = uuid::Uuid::new_v4().to_string();
-    let token_hash = hash_token(&raw_token);
+    let (raw_token, token_hash) = generate_token();
     let scopes: Vec<String> = form
         .scopes
         .split(',')
