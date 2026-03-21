@@ -28,6 +28,7 @@
           filter = path: type:
             (builtins.match ".*\.sqlx/.*" path != null) ||
             (builtins.match ".*\.sql$" path != null) ||
+            (builtins.match ".*\.html$" path != null) ||
             craneLib.filterCargoSources path type;
         };
 

@@ -1,3 +1,5 @@
+mod web;
+
 use clap::Parser;
 
 #[derive(Parser)]
@@ -28,9 +30,11 @@ async fn main() -> anyhow::Result<()> {
     let users = mcp_gateway::user::Users::new(&pool);
     let agents = mcp_gateway::agent::Agents::new(&pool);
 
-    let schema = mcp_gateway::graphql::schema(users, agents);
+    let schema = mcp_gateway::graphql::schema(users.clone(), agents.clone());
 
-    let app = axum::Router::new()
+    let web_state = web::AppState { users, agents };
+
+    let app = web::router(web_state)
         .route(
             "/graphql",
             axum::routing::get(mcp_gateway::graphql::graphql_playground)

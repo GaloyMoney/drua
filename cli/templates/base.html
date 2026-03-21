@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Galoy Agents{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    .token-box {
+      position: relative;
+      background: var(--pico-code-background-color);
+      border: 2px solid var(--pico-primary-background);
+      border-radius: var(--pico-border-radius);
+      padding: 1rem;
+      margin: 1rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .token-box code {
+      flex: 1;
+      word-break: break-all;
+      background: none;
+      padding: 0;
+    }
+    .token-box button {
+      width: auto;
+      margin: 0;
+      padding: 0.25rem 0.75rem;
+      white-space: nowrap;
+    }
+    .token-warning {
+      color: var(--pico-del-color);
+      font-weight: bold;
+    }
+    .badge-active {
+      color: var(--pico-ins-color);
+    }
+    .badge-revoked {
+      color: var(--pico-del-color);
+    }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
