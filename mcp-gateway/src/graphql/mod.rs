@@ -1,14 +1,12 @@
-mod auth;
 mod types;
 
 use async_graphql::*;
-use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-pub use auth::*;
 pub use types::*;
 
 use crate::agent::Agents;
+use crate::auth::AuthContext;
 use crate::primitives::*;
 use crate::user::Users;
 
@@ -19,7 +17,7 @@ impl Query {
     #[instrument(name = "mcp_gateway.graphql.me", skip_all)]
     async fn me(&self, ctx: &Context<'_>) -> async_graphql::Result<UserType> {
         let auth = ctx.data::<AuthContext>()?;
-        let user_id = auth.user_id()?;
+        let user_id = auth.subject_user_id()?;
 
         let users = ctx.data::<Users>()?;
         let user = users.find_by_id(user_id).await?;
@@ -30,7 +28,7 @@ impl Query {
     #[instrument(name = "mcp_gateway.graphql.my_agents", skip_all)]
     async fn my_agents(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<AgentType>> {
         let auth = ctx.data::<AuthContext>()?;
-        let user_id = auth.user_id()?;
+        let user_id = auth.subject_user_id()?;
 
         let agents = ctx.data::<Agents>()?;
         let query = es_entity::PaginatedQueryArgs {
@@ -56,14 +54,11 @@ impl Mutation {
         input: CreateAgentInput,
     ) -> async_graphql::Result<CreateAgentPayload> {
         let auth = ctx.data::<AuthContext>()?;
-        let user_id = auth.user_id()?;
-
-        let raw_token = format!("gla_{}", uuid::Uuid::new_v4().simple());
-        let token_hash = format!("{:x}", Sha256::digest(raw_token.as_bytes()));
+        let user_id = auth.subject_user_id()?;
 
         let agents = ctx.data::<Agents>()?;
-        let agent = agents
-            .create_for_user(user_id, input.name, token_hash, input.scopes)
+        let (agent, raw_token) = agents
+            .create_agent_with_token(user_id, input.name, input.scopes)
             .await?;
 
         Ok(CreateAgentPayload {
@@ -76,24 +71,13 @@ impl Mutation {
     async fn revoke_agent(
         &self,
         ctx: &Context<'_>,
-        agent_id: ID,
+        agent_id: AgentId,
     ) -> async_graphql::Result<RevokeAgentPayload> {
         let auth = ctx.data::<AuthContext>()?;
-        let user_id = auth.user_id()?;
-
-        let id: AgentId = agent_id
-            .parse::<uuid::Uuid>()
-            .map_err(|e| async_graphql::Error::new(format!("Invalid agent ID: {e}")))?
-            .into();
+        let user_id = auth.subject_user_id()?;
 
         let agents = ctx.data::<Agents>()?;
-        let agent = agents.find_by_id(id).await?;
-
-        if agent.user_id != user_id {
-            return Err(async_graphql::Error::new("Agent not found"));
-        }
-
-        let agent = agents.revoke(id).await?;
+        let agent = agents.revoke_for_user(user_id, agent_id).await?;
 
         Ok(RevokeAgentPayload {
             agent: AgentType::from(&agent),
@@ -118,10 +102,11 @@ pub fn schema(users: Users, agents: Agents) -> McpGatewaySchema {
 
 pub async fn graphql_handler(
     schema: axum::Extension<McpGatewaySchema>,
+    auth_context: axum::Extension<AuthContext>,
     req: async_graphql_axum::GraphQLRequest,
 ) -> async_graphql_axum::GraphQLResponse {
     let mut req = req.into_inner();
-    req = req.data(AuthContext::Anonymous);
+    req = req.data(auth_context.0);
     schema.execute(req).await.into()
 }
 

@@ -9,6 +9,7 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
+use crate::auth::token::generate_token;
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -65,6 +66,24 @@ impl Agents {
         Ok(agent)
     }
 
+    /// Creates a new agent with a generated bearer token.
+    ///
+    /// Returns `(Agent, raw_token)` where `raw_token` is the one-time
+    /// bearer token to return to the caller. Only the hash is stored.
+    #[instrument(name = "mcp_gateway.agent.create_agent_with_token", skip(self))]
+    pub async fn create_agent_with_token(
+        &self,
+        user_id: UserId,
+        name: impl Into<String> + std::fmt::Debug,
+        scopes: Vec<String>,
+    ) -> Result<(Agent, String), AgentError> {
+        let (raw_token, token_hash) = generate_token();
+        let agent = self
+            .create_for_user(user_id, name, token_hash, scopes)
+            .await?;
+        Ok((agent, raw_token))
+    }
+
     #[instrument(name = "mcp_gateway.agent.revoke", skip(self))]
     pub async fn revoke(
         &self,
@@ -72,6 +91,26 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         let id = id.into();
         let mut agent = self.repo.find_by_id(id).await?;
+
+        if agent.revoke().did_execute() {
+            self.repo.update(&mut agent).await?;
+        }
+
+        Ok(agent)
+    }
+
+    #[instrument(name = "mcp_gateway.agent.revoke_for_user", skip(self))]
+    pub async fn revoke_for_user(
+        &self,
+        user_id: UserId,
+        agent_id: impl Into<AgentId> + std::fmt::Debug,
+    ) -> Result<Agent, AgentError> {
+        let agent_id = agent_id.into();
+        let mut agent = self.repo.find_by_id(agent_id).await?;
+
+        if agent.user_id != user_id {
+            return Err(AgentError::NotOwner);
+        }
 
         if agent.revoke().did_execute() {
             self.repo.update(&mut agent).await?;
