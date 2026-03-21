@@ -26,12 +26,15 @@
         src = pkgs.lib.cleanSourceWith {
           src = craneLib.path ./.;
           filter = path: type:
+            (builtins.match ".*\.sqlx/.*" path != null) ||
+            (builtins.match ".*\.sql$" path != null) ||
             craneLib.filterCargoSources path type;
         };
 
         commonArgs = {
           inherit src;
           strictDeps = true;
+          SQLX_OFFLINE = true;
           buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
           ];
