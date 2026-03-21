@@ -2,7 +2,6 @@ pub mod config;
 pub mod error;
 mod oauth;
 pub mod session_store;
-pub mod token;
 
 use axum::{
     extract::{Request, State},
@@ -17,30 +16,25 @@ use tracing::instrument;
 pub use config::AuthConfig;
 pub use error::AuthError;
 
-use crate::agent::Agents;
-use crate::primitives::*;
-use crate::user::Users;
+use galoy_agents_domain as domain;
+
+use domain::agent::Agents;
+use domain::auth::token::hash_token;
+use domain::auth::AuthContext;
+use domain::primitives::*;
+use domain::user::Users;
 
 use self::config::OAuthClient;
-use self::token::hash_token;
-
-/// Unified authentication context resolved from session or bearer token.
-#[derive(Debug, Clone)]
-pub enum AuthContext {
-    User(UserId),
-    Agent(AgentId, UserId),
-    Anonymous,
-}
 
 /// Shared application state for auth routes and middleware.
 #[derive(Clone)]
-pub struct AppState {
+pub struct AuthAppState {
     pub(crate) users: Users,
     pub(crate) agents: Agents,
     pub(crate) oauth_client: OAuthClient,
 }
 
-impl AppState {
+impl AuthAppState {
     pub fn new(users: Users, agents: Agents, oauth_client: OAuthClient) -> Self {
         Self {
             users,
@@ -51,16 +45,16 @@ impl AppState {
 }
 
 /// Build the router for GitHub OAuth endpoints.
-pub fn auth_router() -> Router<AppState> {
+pub fn auth_router() -> Router<AuthAppState> {
     Router::new()
         .route("/auth/github", get(oauth::github_redirect))
         .route("/auth/github/callback", get(oauth::github_callback))
 }
 
 /// Axum middleware that resolves [`AuthContext`] and inserts it into request extensions.
-#[instrument(name = "mcp_gateway.auth.middleware", skip_all)]
+#[instrument(name = "web.auth.middleware", skip_all)]
 pub async fn auth_middleware(
-    State(state): State<AppState>,
+    State(state): State<AuthAppState>,
     session: Session,
     mut request: Request,
     next: Next,
@@ -71,7 +65,7 @@ pub async fn auth_middleware(
 }
 
 async fn resolve_auth_context(
-    state: &AppState,
+    state: &AuthAppState,
     session: &Session,
     request: &Request,
 ) -> AuthContext {
@@ -88,7 +82,7 @@ async fn resolve_auth_context(
     AuthContext::Anonymous
 }
 
-async fn resolve_bearer_token(state: &AppState, request: &Request) -> Option<AuthContext> {
+async fn resolve_bearer_token(state: &AuthAppState, request: &Request) -> Option<AuthContext> {
     let header_value = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)?

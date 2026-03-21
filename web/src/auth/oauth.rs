@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::instrument;
 
-use super::{error::AuthError, AppState};
+use super::{error::AuthError, AuthAppState};
 
 const CSRF_SESSION_KEY: &str = "oauth_csrf_token";
 
@@ -24,9 +24,9 @@ struct GitHubUser {
     name: Option<String>,
 }
 
-#[instrument(name = "mcp_gateway.auth.github_redirect", skip_all)]
+#[instrument(name = "web.auth.github_redirect", skip_all)]
 pub async fn github_redirect(
-    State(state): State<AppState>,
+    State(state): State<AuthAppState>,
     session: Session,
 ) -> Result<impl IntoResponse, AuthError> {
     let (auth_url, csrf_token) = state
@@ -43,9 +43,9 @@ pub async fn github_redirect(
     Ok(Redirect::temporary(auth_url.as_str()))
 }
 
-#[instrument(name = "mcp_gateway.auth.github_callback", skip_all)]
+#[instrument(name = "web.auth.github_callback", skip_all)]
 pub async fn github_callback(
-    State(state): State<AppState>,
+    State(state): State<AuthAppState>,
     session: Session,
     Query(params): Query<CallbackParams>,
 ) -> Result<impl IntoResponse, AuthError> {

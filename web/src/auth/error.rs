@@ -1,7 +1,9 @@
 use thiserror::Error;
 
-use crate::agent::error::AgentError;
-use crate::user::error::UserError;
+use galoy_agents_domain as domain;
+
+use domain::agent::error::AgentError;
+use domain::user::error::UserError;
 
 #[derive(Error, Debug)]
 pub enum AuthError {

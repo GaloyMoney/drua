@@ -1,5 +1,3 @@
-mod web;
-
 use clap::Parser;
 
 #[derive(Parser)]
@@ -27,18 +25,16 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = sqlx::PgPool::connect(&cli.database_url).await?;
 
-    let users = mcp_gateway::user::Users::new(&pool);
-    let agents = mcp_gateway::agent::Agents::new(&pool);
+    let users = galoy_agents_domain::user::Users::new(&pool);
+    let agents = galoy_agents_domain::agent::Agents::new(&pool);
 
-    let schema = mcp_gateway::graphql::schema(users.clone(), agents.clone());
+    let schema = galoy_agents_graphql::schema(users.clone(), agents.clone());
 
-    let web_state = web::AppState { users, agents };
-
-    let app = web::router(web_state)
+    let app = galoy_agents_web::router(users, agents)
         .route(
             "/graphql",
-            axum::routing::get(mcp_gateway::graphql::graphql_playground)
-                .post(mcp_gateway::graphql::graphql_handler),
+            axum::routing::get(galoy_agents_graphql::graphql_playground)
+                .post(galoy_agents_graphql::graphql_handler),
         )
         .layer(axum::Extension(schema));
 

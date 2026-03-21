@@ -8,16 +8,13 @@ name = "galoy-agents"
 path = "src/main.rs"
 
 [dependencies]
+galoy-agents-domain = { path = "../domain" }
+galoy-agents-graphql = { path = "../graphql" }
+galoy-agents-web = { path = "../web" }
 anyhow = "1"
-askama = "0.15"
-askama_web = { version = "0.15", features = ["axum-0.8"] }
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
-mcp-gateway = { path = "../mcp-gateway" }
-serde = { version = "1.0", features = ["derive"] }
-sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
