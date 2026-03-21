@@ -1,0 +1,21 @@
+<article aria-label="Agent token created">
+  <header>
+    <h3>Agent Created Successfully</h3>
+  </header>
+  <p class="token-warning">This token will not be shown again. Copy it now.</p>
+  <div class="token-box">
+    <code id="token-value">{{ token }}</code>
+    <button
+      onclick="navigator.clipboard.writeText(document.getElementById('token-value').textContent).then(function(){this.textContent='Copied!'}.bind(this))"
+      class="outline"
+    >
+      Copy
+    </button>
+  </div>
+  <p>Agent name: <strong>{{ agent_name }}</strong></p>
+</article>
+
+<script>
+  document.querySelector('#agent-list')
+    && htmx.ajax('GET', '/dashboard/agents', {target: '#agent-list', swap: 'innerHTML'});
+</script>

@@ -96,6 +96,19 @@ impl Agents {
             .await?)
     }
 
+    #[instrument(name = "mcp_gateway.agent.list_all_for_user", skip(self))]
+    pub async fn list_all_for_user(&self, user_id: UserId) -> Result<Vec<Agent>, AgentError> {
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_user_id_by_created_at(user_id, query, es_entity::ListDirection::Descending)
+            .await?;
+        Ok(result.entities)
+    }
+
     #[instrument(name = "mcp_gateway.agent.find_by_id", skip(self))]
     pub async fn find_by_id(
         &self,
