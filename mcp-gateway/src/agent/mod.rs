@@ -103,4 +103,9 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
+
+    #[instrument(name = "mcp_gateway.agent.find_by_token_hash", skip(self))]
+    pub async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<Agent>, AgentError> {
+        Ok(self.repo.maybe_find_by_token_hash(token_hash).await?)
+    }
 }
