@@ -9,7 +9,10 @@ use super::entity::*;
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "Agent",
-    columns(user_id(ty = "UserId", list_for(by(created_at))))
+    columns(
+        user_id(ty = "UserId", list_for(by(created_at))),
+        token_hash(ty = "String", list_by)
+    )
 )]
 pub struct AgentRepo {
     #[allow(dead_code)]

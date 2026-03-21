@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO agents (id, user_id, token_hash, created_at) VALUES ($1, $2, $3, COALESCE($4, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41980c76dbcf603240fcc4f94f93be740eb6ff827cf460d8d301bef9653a7485"
+}
