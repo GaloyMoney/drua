@@ -68,10 +68,15 @@ impl Agents {
     #[instrument(name = "domain.agent.revoke", skip(self))]
     pub async fn revoke(
         &self,
+        user_id: UserId,
         id: impl Into<AgentId> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
         let id = id.into();
         let mut agent = self.repo.find_by_id(id).await?;
+
+        if agent.user_id != user_id {
+            return Err(AgentError::AuthorizationError);
+        }
 
         if agent.revoke().did_execute() {
             self.repo.update(&mut agent).await?;

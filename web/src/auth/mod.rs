@@ -3,13 +3,7 @@ pub mod error;
 mod oauth;
 pub mod session_store;
 
-use axum::{
-    extract::{Request, State},
-    middleware::Next,
-    response::Response,
-    routing::get,
-    Router,
-};
+use axum::{extract::Request, middleware::Next, response::Response, routing::get, Router};
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -18,87 +12,77 @@ pub use error::AuthError;
 
 use galoy_agents_domain as domain;
 
-use domain::agent::Agents;
 use domain::auth::token::hash_token;
 use domain::auth::AuthContext;
-use domain::primitives::*;
-use domain::user::Users;
+use domain::primitives::UserId;
 
-use self::config::OAuthClient;
-
-/// Shared application state for auth routes and middleware.
-#[derive(Clone)]
-pub struct AuthAppState {
-    pub(crate) users: Users,
-    pub(crate) agents: Agents,
-    pub(crate) oauth_client: OAuthClient,
-}
-
-impl AuthAppState {
-    pub fn new(users: Users, agents: Agents, oauth_client: OAuthClient) -> Self {
-        Self {
-            users,
-            agents,
-            oauth_client,
-        }
-    }
-}
+use crate::AppState;
 
 /// Build the router for GitHub OAuth endpoints.
-pub fn auth_router() -> Router<AuthAppState> {
+pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route("/auth/github", get(oauth::github_redirect))
         .route("/auth/github/callback", get(oauth::github_callback))
+        .route("/auth/logout", get(logout))
 }
 
 /// Axum middleware that resolves [`AuthContext`] and inserts it into request extensions.
+///
+/// Extracts headers and session synchronously from the request, then performs
+/// async lookups, to avoid holding `&Request` across `.await` boundaries.
 #[instrument(name = "web.auth.middleware", skip_all)]
-pub async fn auth_middleware(
-    State(state): State<AuthAppState>,
-    session: Session,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let auth_context = resolve_auth_context(&state, &session, &request).await;
+pub async fn auth_middleware(mut request: Request, next: Next) -> Response {
+    let state = request.extensions().get::<AppState>().cloned();
+    let session = request.extensions().get::<Session>().cloned();
+    let bearer_token = extract_bearer_token(&request);
+
+    let auth_context = resolve_auth_context(state.as_ref(), session.as_ref(), bearer_token).await;
     request.extensions_mut().insert(auth_context);
     next.run(request).await
 }
 
-async fn resolve_auth_context(
-    state: &AuthAppState,
-    session: &Session,
-    request: &Request,
-) -> AuthContext {
-    // 1. Check Authorization: Bearer header
-    if let Some(auth_context) = resolve_bearer_token(state, request).await {
-        return auth_context;
-    }
-
-    // 2. Check session cookie
-    if let Some(auth_context) = resolve_session(session).await {
-        return auth_context;
-    }
-
-    AuthContext::Anonymous
-}
-
-async fn resolve_bearer_token(state: &AuthAppState, request: &Request) -> Option<AuthContext> {
+fn extract_bearer_token(request: &Request) -> Option<String> {
     let header_value = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
-
     let raw_token = header_value.strip_prefix("Bearer ")?;
-    let token_hash = hash_token(raw_token);
-
-    match state.agents.find_by_token_hash(&token_hash).await {
-        Ok(Some(agent)) if !agent.is_revoked() => Some(AuthContext::Agent(agent.id, agent.user_id)),
-        _ => None,
-    }
+    Some(raw_token.to_string())
 }
 
-async fn resolve_session(session: &Session) -> Option<AuthContext> {
-    let user_id: UserId = session.get("user_id").await.ok()??;
-    Some(AuthContext::User(user_id))
+async fn resolve_auth_context(
+    state: Option<&AppState>,
+    session: Option<&Session>,
+    bearer_token: Option<String>,
+) -> AuthContext {
+    let state = match state {
+        Some(s) => s,
+        None => return AuthContext::Anonymous,
+    };
+
+    // 1. Check Authorization: Bearer header
+    if let Some(raw_token) = bearer_token {
+        let token_hash = hash_token(&raw_token);
+        if let Ok(Some(agent)) = state.agents.find_by_token_hash(&token_hash).await {
+            if !agent.is_revoked() {
+                return AuthContext::Agent(agent.id, agent.user_id);
+            }
+        }
+    }
+
+    // 2. Check session cookie
+    if let Some(session) = session {
+        if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
+            return AuthContext::User(user_id);
+        }
+    }
+
+    AuthContext::Anonymous
+}
+
+#[instrument(name = "web.auth.logout", skip_all)]
+async fn logout(session: Session) -> axum::response::Redirect {
+    let _ = session.flush().await;
+    axum::response::Redirect::to("/")
 }

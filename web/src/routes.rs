@@ -1,42 +1,32 @@
-use std::sync::Arc;
-
 use axum::{
     extract::{Path, State},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Form, Router,
 };
+use tower_sessions::Session;
 use tracing::instrument;
 
 use galoy_agents_domain as domain;
 
-use domain::agent::{Agent, Agents};
+use domain::agent::Agent;
 use domain::auth::token::generate_token;
 use domain::primitives::{AgentId, UserId};
-use domain::user::Users;
 
 use crate::templates::*;
+use crate::AppState;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub users: Users,
-    pub agents: Agents,
-}
-
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/agents", get(agent_list))
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}/revoke", post(revoke_agent))
-        .with_state(state)
 }
 
-fn extract_user_id(_headers: &axum::http::HeaderMap) -> Option<UserId> {
-    // TODO: Extract user_id from session cookie once OAuth is implemented.
-    // For now, this is a placeholder that returns None (not authenticated).
-    None
+async fn extract_user_id(session: &Session) -> Option<UserId> {
+    session.get("user_id").await.ok()?
 }
 
 fn agent_to_view(agent: &Agent) -> AgentView {
@@ -50,17 +40,16 @@ fn agent_to_view(agent: &Agent) -> AgentView {
 }
 
 #[instrument(name = "web.index", skip_all)]
-async fn index(State(state): State<Arc<AppState>>) -> Response {
-    let _state = state;
-
-    // TODO: Check session for logged-in user, redirect to dashboard if found.
-    // For now, always show login page.
+async fn index(session: Session) -> Response {
+    if extract_user_id(&session).await.is_some() {
+        return Redirect::to("/dashboard").into_response();
+    }
     LoginTemplate.into_response()
 }
 
 #[instrument(name = "web.dashboard", skip_all)]
-async fn dashboard(State(state): State<Arc<AppState>>) -> Response {
-    let user_id = match extract_user_id(&axum::http::HeaderMap::new()) {
+async fn dashboard(State(state): State<AppState>, session: Session) -> Response {
+    let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };
@@ -93,10 +82,11 @@ pub struct CreateAgentForm {
 
 #[instrument(name = "web.create_agent", skip_all)]
 async fn create_agent(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
+    session: Session,
     Form(form): Form<CreateAgentForm>,
 ) -> Response {
-    let user_id = match extract_user_id(&axum::http::HeaderMap::new()) {
+    let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };
@@ -124,14 +114,18 @@ async fn create_agent(
 }
 
 #[instrument(name = "web.revoke_agent", skip_all)]
-async fn revoke_agent(State(state): State<Arc<AppState>>, Path(id): Path<uuid::Uuid>) -> Response {
-    let _user_id = match extract_user_id(&axum::http::HeaderMap::new()) {
+async fn revoke_agent(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };
 
     let agent_id = AgentId::from(id);
-    match state.agents.revoke(agent_id).await {
+    match state.agents.revoke(user_id, agent_id).await {
         Ok(agent) => AgentRowTemplate {
             agent: agent_to_view(&agent),
         }
@@ -141,8 +135,8 @@ async fn revoke_agent(State(state): State<Arc<AppState>>, Path(id): Path<uuid::U
 }
 
 #[instrument(name = "web.agent_list", skip_all)]
-async fn agent_list(State(state): State<Arc<AppState>>) -> Response {
-    let user_id = match extract_user_id(&axum::http::HeaderMap::new()) {
+async fn agent_list(State(state): State<AppState>, session: Session) -> Response {
+    let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };

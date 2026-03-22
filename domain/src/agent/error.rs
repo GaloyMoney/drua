@@ -16,4 +16,6 @@ pub enum AgentError {
     Query(#[from] AgentQueryError),
     #[error("AgentError - AgentAlreadyRevoked")]
     AgentAlreadyRevoked,
+    #[error("AgentError - AuthorizationError")]
+    AuthorizationError,
 }
