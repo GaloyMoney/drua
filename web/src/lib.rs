@@ -2,8 +2,6 @@ pub mod auth;
 mod routes;
 mod templates;
 
-use std::sync::Arc;
-
 use axum::Router;
 
 use galoy_agents_domain as domain;
@@ -11,13 +9,30 @@ use galoy_agents_domain as domain;
 use domain::agent::Agents;
 use domain::user::Users;
 
-pub use routes::AppState;
+use auth::config::OAuthClient;
 
-/// Build the web router with page routes.
+/// Unified application state shared by all routes and middleware.
+#[derive(Clone)]
+pub struct AppState {
+    pub users: Users,
+    pub agents: Agents,
+    pub oauth_client: OAuthClient,
+}
+
+impl AppState {
+    pub fn new(users: Users, agents: Agents, oauth_client: OAuthClient) -> Self {
+        Self {
+            users,
+            agents,
+            oauth_client,
+        }
+    }
+}
+
+/// Build the web router with page routes and auth routes.
 ///
-/// The returned router is not yet merged with auth or graphql routes —
-/// the caller (cli) is responsible for composing routers.
-pub fn router(users: Users, agents: Agents) -> Router {
-    let state = Arc::new(AppState { users, agents });
-    routes::router(state)
+/// The returned router is not yet layered with session or auth middleware —
+/// the caller (cli) is responsible for adding those layers and calling `.with_state()`.
+pub fn router() -> Router<AppState> {
+    routes::router().merge(auth::auth_router())
 }

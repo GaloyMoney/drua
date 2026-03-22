@@ -1037,6 +1037,7 @@ dependencies = [
  "galoy-agents-web",
  "sqlx",
  "tokio",
+ "tower-sessions",
  "tracing",
  "tracing-subscriber",
 ]

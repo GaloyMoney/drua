@@ -88,13 +88,7 @@ impl Mutation {
             .into();
 
         let agents = ctx.data::<Agents>()?;
-        let agent = agents.find_by_id(id).await?;
-
-        if agent.user_id != user_id {
-            return Err(async_graphql::Error::new("Agent not found"));
-        }
-
-        let agent = agents.revoke(id).await?;
+        let agent = agents.revoke(user_id, id).await?;
 
         Ok(RevokeAgentPayload {
             agent: AgentType::from(&agent),
@@ -119,10 +113,12 @@ pub fn schema(users: Users, agents: Agents) -> McpGatewaySchema {
 
 pub async fn graphql_handler(
     schema: axum::Extension<McpGatewaySchema>,
+    extensions: axum::extract::Extension<AuthContext>,
     req: async_graphql_axum::GraphQLRequest,
 ) -> async_graphql_axum::GraphQLResponse {
+    let auth_context = extensions.0;
     let mut req = req.into_inner();
-    req = req.data(AuthContext::Anonymous);
+    req = req.data(auth_context);
     schema.execute(req).await.into()
 }
 
