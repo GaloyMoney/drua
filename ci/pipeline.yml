@@ -1,7 +1,6 @@
 #@ load("@ytt:data", "data")
 #@ load("fragments.lib.yml",
 #@   "nix_flake_cachix_image_config",
-#@   "release_task_image_config",
 #@ )
 
 groups:
@@ -38,40 +37,30 @@ jobs:
 - name: build-edge-image
   serial: true
   plan:
-  - in_parallel:
-    - get: repo
-      trigger: true
-      passed: [check-code]
-    - { get: pipeline-tasks }
-  - task: prepare-docker-build
+  - get: repo
+    trigger: true
+    passed: [check-code]
+  - task: build-image
     config:
       platform: linux
-      image_resource: #@ release_task_image_config()
-      inputs:
-      - name: pipeline-tasks
-      - name: repo
-      outputs:
-      - name: repo
-      run:
-        path: pipeline-tasks/ci/tasks/prep-docker-build-env.sh
-  - task: build
-    privileged: true
-    config:
-      platform: linux
-      image_resource:
-        type: registry-image
-        source:
-          repository: concourse/oci-build-task
+      image_resource: #@ nix_flake_cachix_image_config()
       inputs:
       - name: repo
       outputs:
       - name: image
       params:
-        CONTEXT: repo
-        BUILD_ARGS_FILE: repo/.env
-        DOCKERFILE: repo/Dockerfile
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
       run:
-        path: build
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#docker-image
+            cp -L result ../image/image.tar
   - put: edge-image
     params:
       image: image/image.tar
@@ -86,14 +75,6 @@ resources:
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
   webhook_token: ((webhook.secret))
-
-- name: pipeline-tasks
-  type: git
-  source:
-    paths: [ci/tasks/*, Dockerfile]
-    uri: #@ data.values.git_uri
-    branch: #@ data.values.git_branch
-    private_key: #@ data.values.github_private_key
 
 - name: edge-image
   type: registry-image

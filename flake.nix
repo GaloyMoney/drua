@@ -66,6 +66,10 @@
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        galoy-agents = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+        });
       in
       {
         checks = {
@@ -82,9 +86,22 @@
           });
         };
 
-        packages.default = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-        });
+        packages.default = galoy-agents;
+
+        packages.docker-image = pkgs.dockerTools.buildLayeredImage {
+          name = "galoy-agents";
+          tag = "latest";
+          contents = [
+            galoy-agents
+            pkgs.cacert
+          ];
+          config = {
+            Cmd = [ "${galoy-agents}/bin/galoy-agents" ];
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+            ];
+          };
+        };
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
