@@ -8,7 +8,7 @@ if [[ $(which ytt) == "" ]]; then
 fi
 
 target="${FLY_TARGET:-galoy}"
-team=dev
+team=galoy-agents
 
 TMPDIR=""
 TMPDIR=$(mktemp -d -t repipe.XXXXXX)
@@ -18,5 +18,5 @@ ytt -f ci > ${TMPDIR}/pipeline.yml
 
 echo "Updating pipeline @ ${target}"
 
-fly -t ${target} set-pipeline --team=${team} -p galoy-agents -c ${TMPDIR}/pipeline.yml
+fly -t ${target} set-pipeline --team=${team} -p galoy-agents -c ${TMPDIR}/pipeline.yml -n
 fly -t ${target} unpause-pipeline --team=${team} -p galoy-agents
