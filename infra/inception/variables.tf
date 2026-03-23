@@ -11,6 +11,7 @@ variable "name_prefix" {
 variable "inception_sa" {
   description = "Service account email from bootstrap phase"
   type        = string
+  default     = "galoy-agents-inception-tf@galoy-agents.iam.gserviceaccount.com"
 }
 
 variable "tf_state_bucket_name" {
@@ -42,5 +43,13 @@ variable "users" {
     platform  = bool
     logs      = bool
   }))
-  default = []
+  default = [
+    {
+      id        = "user:justin@galoy.io"
+      bastion   = true
+      inception = true
+      platform  = true
+      logs      = true
+    },
+  ]
 }

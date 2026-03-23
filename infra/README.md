@@ -61,5 +61,5 @@ make fmt         # Format all .tf files
 ## Module Source
 
 All modules reference [galoy-infra](https://github.com/GaloyMoney/galoy-infra) at
-commit `29a90ad` via git source URLs. To upgrade, update the `?ref=` parameter in
+commit `4666137` via git source URLs. To upgrade, update the `?ref=` parameter in
 each `main.tf`.

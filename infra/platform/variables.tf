@@ -11,6 +11,12 @@ variable "name_prefix" {
 variable "node_service_account" {
   description = "Service account email for GKE cluster nodes (from inception output)"
   type        = string
+  default     = "galoy-agents-cluster@galoy-agents.iam.gserviceaccount.com"
+}
+
+variable "region" {
+  description = "GCP region"
+  default     = "us-east1"
 }
 
 variable "cluster_zone" {
@@ -30,5 +36,5 @@ variable "min_default_node_count" {
 
 variable "max_default_node_count" {
   description = "Maximum number of nodes in the default pool"
-  default     = 3
+  default     = 1
 }

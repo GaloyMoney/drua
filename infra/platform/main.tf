@@ -1,5 +1,5 @@
 module "platform" {
-  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/platform/gcp?ref=29a90ad"
+  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/platform/gcp?ref=4666137"
 
   name_prefix               = var.name_prefix
   gcp_project               = var.gcp_project
@@ -8,4 +8,5 @@ module "platform" {
   min_default_node_count    = var.min_default_node_count
   max_default_node_count    = var.max_default_node_count
   cluster_zone              = var.cluster_zone
+  node_pool_zone            = "${var.region}-${var.cluster_zone}"
 }

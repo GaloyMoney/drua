@@ -1,5 +1,5 @@
 module "bootstrap" {
-  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/bootstrap/gcp?ref=29a90ad"
+  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/bootstrap/gcp?ref=4666137"
 
   name_prefix                   = var.name_prefix
   gcp_project                   = var.gcp_project

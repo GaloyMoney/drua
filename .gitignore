@@ -2,3 +2,10 @@ target/
 result
 .direnv/
 .claude/
+
+# Terraform / OpenTofu
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
