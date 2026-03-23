@@ -1,0 +1,104 @@
+#@ load("@ytt:data", "data")
+#@ load("fragments.lib.yml",
+#@   "nix_flake_cachix_image_config",
+#@   "release_task_image_config",
+#@ )
+
+groups:
+- name: galoy-agents
+  jobs:
+  - check-code
+  - build-edge-image
+
+jobs:
+- name: check-code
+  serial: true
+  plan:
+  - get: repo
+    trigger: true
+  - task: nix-flake-check
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            nix flake check
+
+- name: build-edge-image
+  serial: true
+  plan:
+  - in_parallel:
+    - get: repo
+      trigger: true
+      passed: [check-code]
+    - { get: pipeline-tasks }
+  - task: prepare-docker-build
+    config:
+      platform: linux
+      image_resource: #@ release_task_image_config()
+      inputs:
+      - name: pipeline-tasks
+      - name: repo
+      outputs:
+      - name: repo
+      run:
+        path: pipeline-tasks/ci/tasks/prep-docker-build-env.sh
+  - task: build
+    privileged: true
+    config:
+      platform: linux
+      image_resource:
+        type: registry-image
+        source:
+          repository: concourse/oci-build-task
+      inputs:
+      - name: repo
+      outputs:
+      - name: image
+      params:
+        CONTEXT: repo
+        BUILD_ARGS_FILE: repo/.env
+        DOCKERFILE: repo/Dockerfile
+      run:
+        path: build
+  - put: edge-image
+    params:
+      image: image/image.tar
+
+resources:
+- name: repo
+  type: git
+  source:
+    ignore_paths: ["ci/*[^md]"]
+    fetch_tags: true
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+  webhook_token: ((webhook.secret))
+
+- name: pipeline-tasks
+  type: git
+  source:
+    paths: [ci/tasks/*, Dockerfile]
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+
+- name: edge-image
+  type: registry-image
+  source:
+    tag: edge
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+    repository: #@ data.values.gar_registry + "/" + data.values.folder_registry_image

@@ -1,0 +1,16 @@
+#@ load("@ytt:data", "data")
+
+#@ def nix_flake_cachix_image_config():
+type: registry-image
+source:
+  repository: ghcr.io/nix-community/docker-nixpkgs/cachix-flakes
+  tag: latest-x86_64-linux
+#@ end
+
+#@ def release_task_image_config():
+type: registry-image
+source:
+  username: ((gar-creds.username))
+  password: ((gar-creds.password))
+  repository: us.gcr.io/galoyorg/release-pipeline
+#@ end
