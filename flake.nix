@@ -94,8 +94,8 @@
             pkgs.docker-compose
             pkgs.opentofu
             pkgs.ytt
-            fly
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            fly
             pkgs.libiconv
           ];
 
