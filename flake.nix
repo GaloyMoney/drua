@@ -68,6 +68,7 @@
             pkgs.cargo-nextest
             pkgs.pkg-config
             pkgs.docker-compose
+            pkgs.opentofu
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
           ];
