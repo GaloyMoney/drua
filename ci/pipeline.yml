@@ -60,7 +60,7 @@ jobs:
             cd repo
             cachix use $CACHIX_CACHE_NAME
             cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#docker-image
-            cp -L result ../image/image.tar
+            gunzip -c result > ../image/image.tar
   - put: edge-image
     params:
       image: image/image.tar
