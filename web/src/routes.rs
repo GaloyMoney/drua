@@ -54,13 +54,14 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
         None => return Redirect::to("/").into_response(),
     };
 
-    let user = match state.users.find_by_id(user_id).await {
+    let user = match state.app.users().find_by_id(user_id).await {
         Ok(user) => user,
         Err(_) => return Redirect::to("/").into_response(),
     };
 
     let agents = state
-        .agents
+        .app
+        .agents()
         .list_all_for_user(user.id)
         .await
         .unwrap_or_default();
@@ -100,7 +101,8 @@ async fn create_agent(
         .collect();
 
     match state
-        .agents
+        .app
+        .agents()
         .create_for_user(user_id, &form.name, token_hash, scopes)
         .await
     {
@@ -125,7 +127,7 @@ async fn revoke_agent(
     };
 
     let agent_id = AgentId::from(id);
-    match state.agents.revoke(user_id, agent_id).await {
+    match state.app.agents().revoke(user_id, agent_id).await {
         Ok(agent) => AgentRowTemplate {
             agent: agent_to_view(&agent),
         }
@@ -142,7 +144,8 @@ async fn agent_list(State(state): State<AppState>, session: Session) -> Response
     };
 
     let agents = state
-        .agents
+        .app
+        .agents()
         .list_all_for_user(user_id)
         .await
         .unwrap_or_default();

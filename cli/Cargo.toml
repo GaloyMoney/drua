@@ -9,15 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
-galoy-agents-graphql = { path = "../graphql" }
 galoy-agents-web = { path = "../web" }
 anyhow = "1"
-axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 tokio = { version = "1", features = ["full"] }
-tower-sessions = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

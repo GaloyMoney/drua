@@ -109,6 +109,7 @@
             rustToolchain
             pkgs.cargo-nextest
             pkgs.sqlx-cli
+            pkgs.postgresql
             pkgs.pkg-config
             pkgs.docker-compose
             pkgs.opentofu

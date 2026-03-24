@@ -64,7 +64,7 @@ async fn resolve_auth_context(
     // 1. Check Authorization: Bearer header
     if let Some(raw_token) = bearer_token {
         let token_hash = hash_token(&raw_token);
-        if let Ok(Some(agent)) = state.agents.find_by_token_hash(&token_hash).await {
+        if let Ok(Some(agent)) = state.app.agents().find_by_token_hash(&token_hash).await {
             if !agent.is_revoked() {
                 return AuthContext::Agent(agent.id, agent.user_id);
             }

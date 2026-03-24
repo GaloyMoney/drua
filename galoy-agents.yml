@@ -1,5 +1,6 @@
 server:
   port: 4200
   host: "0.0.0.0"
+  secure_cookies: false
 oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"

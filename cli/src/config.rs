@@ -22,6 +22,8 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_host")]
     pub host: String,
+    #[serde(default = "default_true")]
+    pub secure_cookies: bool,
 }
 
 fn default_port() -> u16 {
@@ -32,11 +34,16 @@ fn default_host() -> String {
     "0.0.0.0".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
             host: default_host(),
+            secure_cookies: true,
         }
     }
 }

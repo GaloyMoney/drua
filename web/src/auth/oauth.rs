@@ -2,6 +2,7 @@ use axum::{
     extract::{Query, State},
     response::{IntoResponse, Redirect},
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar};
 use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use serde::Deserialize;
 use tower_sessions::Session;
@@ -10,7 +11,7 @@ use tracing::instrument;
 use super::error::AuthError;
 use crate::AppState;
 
-const CSRF_SESSION_KEY: &str = "oauth_csrf_token";
+const CSRF_COOKIE_NAME: &str = "oauth_csrf_token";
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackParams {
@@ -28,7 +29,7 @@ struct GitHubUser {
 #[instrument(name = "web.auth.github_redirect", skip_all)]
 pub async fn github_redirect(
     State(state): State<AppState>,
-    session: Session,
+    jar: CookieJar,
 ) -> Result<impl IntoResponse, AuthError> {
     let (auth_url, csrf_token) = state
         .oauth_client
@@ -37,21 +38,23 @@ pub async fn github_redirect(
         .add_scope(Scope::new("user:email".to_string()))
         .url();
 
-    session
-        .insert(CSRF_SESSION_KEY, csrf_token.secret().clone())
-        .await?;
+    let cookie = Cookie::build((CSRF_COOKIE_NAME, csrf_token.secret().clone()))
+        .path("/")
+        .http_only(true)
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .build();
 
-    Ok(Redirect::temporary(auth_url.as_str()))
+    Ok((jar.add(cookie), Redirect::temporary(auth_url.as_str())))
 }
 
 #[instrument(name = "web.auth.github_callback", skip_all)]
 pub async fn github_callback(
     State(state): State<AppState>,
+    jar: CookieJar,
     session: Session,
     Query(params): Query<CallbackParams>,
 ) -> Result<impl IntoResponse, AuthError> {
-    let stored_csrf: Option<String> = session.get(CSRF_SESSION_KEY).await?;
-    session.remove::<String>(CSRF_SESSION_KEY).await?;
+    let stored_csrf = jar.get(CSRF_COOKIE_NAME).map(|c| c.value().to_string());
 
     match stored_csrf {
         Some(ref csrf) if csrf == &params.state => {}
@@ -69,11 +72,12 @@ pub async fn github_callback(
     let github_user = fetch_github_user(token_result.access_token().secret()).await?;
 
     let github_id_str = github_user.id.to_string();
-    let user = match state.users.find_by_github_id(&github_id_str).await? {
+    let user = match state.app.users().find_by_github_id(&github_id_str).await? {
         Some(user) => user,
         None => {
             state
-                .users
+                .app
+                .users()
                 .create_from_github_login(github_id_str, github_user.email, github_user.name)
                 .await?
         }
@@ -81,7 +85,12 @@ pub async fn github_callback(
 
     session.insert("user_id", user.id).await?;
 
-    Ok(Redirect::temporary("/"))
+    let remove_cookie = Cookie::build((CSRF_COOKIE_NAME, ""))
+        .path("/")
+        .removal()
+        .build();
+
+    Ok((jar.add(remove_cookie), Redirect::temporary("/")))
 }
 
 async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Error> {
