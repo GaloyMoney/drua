@@ -1,0 +1,29 @@
+data_dir = "./data"
+
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_user_ids = [549666761]
+
+[services]
+classifier_model_dir = "../models/onnx"
+llm_model = "qwen2.5-coder:7b"
+llm_context_examples = 10 
+
+
+[[repos]]
+name = "cala"
+url = "/Users/jcarter/projects/galoymoney/cala"
+exclude_dirs = ["cala-cel-interpreter", "cala-cel-parser"]
+
+[[repos]]
+name = "lana-bank"
+url = "/Users/jcarter/projects/galoymoney/lana-bank"
+exclude_dirs = ["dev"]
+
+[[repos]]
+name = "job"
+url = "/Users/jcarter/projects/galoymoney/job"
+
+[[repos]]
+name = "obix"
+url = "/Users/jcarter/projects/galoymoney/obix"

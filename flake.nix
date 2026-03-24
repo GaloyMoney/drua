@@ -32,6 +32,8 @@
             (builtins.match ".*\.yml$" path != null) ||
             (builtins.match ".*\.bash$" path != null) ||
             (builtins.match ".*\.bats$" path != null) ||
+            (builtins.match ".*\.toml$" path != null) ||
+            (builtins.match ".*\.jsonl$" path != null) ||
             craneLib.filterCargoSources path type;
         };
 
@@ -39,6 +41,9 @@
           inherit src;
           strictDeps = true;
           SQLX_OFFLINE = true;
+          nativeBuildInputs = [
+            pkgs.pkg-config
+          ];
           buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
           ];
