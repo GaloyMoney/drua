@@ -93,6 +93,10 @@ spec:
             secretKeyRef:
               name: {{ template "galoyAgents.fullname" . }}
               key: "github-redirect-uri"
+        {{- if .Values.galoyAgents.githubAllowedTeams }}
+        - name: GITHUB_ALLOWED_TEAMS
+          value: {{ .Values.galoyAgents.githubAllowedTeams | join "," | quote }}
+        {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:

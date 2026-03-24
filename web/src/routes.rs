@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Form, Router,
 };
+use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -15,6 +16,11 @@ use domain::primitives::{AgentId, UserId};
 
 use crate::templates::*;
 use crate::AppState;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct IndexParams {
+    pub error: Option<String>,
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -39,11 +45,14 @@ fn agent_to_view(agent: &Agent) -> AgentView {
 }
 
 #[instrument(name = "web.index", skip_all)]
-async fn index(session: Session) -> Response {
+async fn index(session: Session, Query(params): Query<IndexParams>) -> Response {
     if extract_user_id(&session).await.is_some() {
         return Redirect::to("/dashboard").into_response();
     }
-    LoginTemplate.into_response()
+    LoginTemplate {
+        error: params.error,
+    }
+    .into_response()
 }
 
 #[instrument(name = "web.dashboard", skip_all)]

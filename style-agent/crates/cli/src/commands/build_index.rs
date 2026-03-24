@@ -23,9 +23,7 @@ pub async fn run(config: &Config, repos_dir_arg: &str) -> anyhow::Result<()> {
     // Discover repo subdirectories (follow symlinks, skip hidden dirs)
     let mut repo_dirs: Vec<_> = std::fs::read_dir(repos_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.')
-        })
+        .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'))
         .collect();
     repo_dirs.sort_by_key(|e| e.file_name());
 
@@ -89,10 +87,7 @@ pub async fn run(config: &Config, repos_dir_arg: &str) -> anyhow::Result<()> {
     }
 
     println!("\n=== Build-index complete ===");
-    println!(
-        "Repos: {} | Total chunks: {total_chunks}",
-        repo_dirs.len()
-    );
+    println!("Repos: {} | Total chunks: {total_chunks}", repo_dirs.len());
     println!("Database: {}", db_path.display());
 
     Ok(())

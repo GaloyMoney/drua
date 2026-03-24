@@ -15,6 +15,8 @@ pub enum AuthError {
     OAuth(String),
     #[error("AuthError - CsrfMismatch")]
     CsrfMismatch,
+    #[error("AuthError - TeamNotAuthorized")]
+    TeamNotAuthorized,
     #[error("AuthError - Session: {0}")]
     Session(#[from] tower_sessions::session::Error),
     #[error("AuthError - GitHubApi: {0}")]
@@ -24,10 +26,19 @@ pub enum AuthError {
 impl axum::response::IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!(%self, "auth error");
-        let status = match &self {
-            AuthError::CsrfMismatch => axum::http::StatusCode::FORBIDDEN,
-            _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (status, self.to_string()).into_response()
+        match &self {
+            AuthError::TeamNotAuthorized => axum::response::Redirect::to(
+                "/?error=Your+GitHub+account+is+not+in+an+authorized+team",
+            )
+            .into_response(),
+            AuthError::CsrfMismatch => {
+                (axum::http::StatusCode::FORBIDDEN, self.to_string()).into_response()
+            }
+            _ => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                self.to_string(),
+            )
+                .into_response(),
+        }
     }
 }

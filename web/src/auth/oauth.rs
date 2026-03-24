@@ -26,6 +26,17 @@ struct GitHubUser {
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitHubTeam {
+    slug: String,
+    organization: GitHubOrganization,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubOrganization {
+    login: String,
+}
+
 #[instrument(name = "web.auth.github_redirect", skip_all)]
 pub async fn github_redirect(
     State(state): State<AppState>,
@@ -36,6 +47,7 @@ pub async fn github_redirect(
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new("read:user".to_string()))
         .add_scope(Scope::new("user:email".to_string()))
+        .add_scope(Scope::new("read:org".to_string()))
         .url();
 
     let cookie = Cookie::build((CSRF_COOKIE_NAME, csrf_token.secret().clone()))
@@ -69,7 +81,26 @@ pub async fn github_callback(
         .await
         .map_err(|e| AuthError::OAuth(e.to_string()))?;
 
-    let github_user = fetch_github_user(token_result.access_token().secret()).await?;
+    let access_token = token_result.access_token().secret();
+    let github_user = fetch_github_user(access_token).await?;
+
+    if !state.github_allowed_teams.is_empty() {
+        let user_teams = fetch_github_teams(access_token).await?;
+        let is_member = user_teams.iter().any(|team| {
+            let full_slug = format!("{}/{}", team.organization.login, team.slug);
+            state
+                .github_allowed_teams
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&full_slug))
+        });
+        if !is_member {
+            tracing::warn!(
+                github_id = github_user.id,
+                "user not in any allowed GitHub team"
+            );
+            return Err(AuthError::TeamNotAuthorized);
+        }
+    }
 
     let github_id_str = github_user.id.to_string();
     let user = match state.app.users().find_by_github_id(&github_id_str).await? {
@@ -103,5 +134,19 @@ async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Er
         .await?
         .error_for_status()?
         .json::<GitHubUser>()
+        .await
+}
+
+async fn fetch_github_teams(access_token: &str) -> Result<Vec<GitHubTeam>, reqwest::Error> {
+    reqwest::Client::new()
+        .get("https://api.github.com/user/teams")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "galoy-agents")
+        .header("Accept", "application/vnd.github+json")
+        .query(&[("per_page", "100")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<GitHubTeam>>()
         .await
 }

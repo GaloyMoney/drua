@@ -64,6 +64,8 @@ pub struct OAuthConfig {
     pub github_client_id: String,
     #[serde(skip)]
     pub github_client_secret: String,
+    #[serde(default)]
+    pub github_allowed_teams: Vec<String>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -77,6 +79,7 @@ pub struct EnvSecrets {
     pub pg_con: String,
     pub github_client_id: String,
     pub github_client_secret: String,
+    pub github_allowed_teams: Vec<String>,
 }
 
 impl Config {
@@ -95,6 +98,9 @@ impl Config {
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_id = secrets.github_client_id;
         config.oauth.github_client_secret = secrets.github_client_secret;
+        if !secrets.github_allowed_teams.is_empty() {
+            config.oauth.github_allowed_teams = secrets.github_allowed_teams;
+        }
 
         Ok(config)
     }
@@ -104,6 +110,7 @@ impl Config {
             github_client_id: self.oauth.github_client_id.clone(),
             github_client_secret: self.oauth.github_client_secret.clone(),
             github_redirect_uri: self.oauth.github_redirect_uri.clone(),
+            github_allowed_teams: self.oauth.github_allowed_teams.clone(),
         }
     }
 }

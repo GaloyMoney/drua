@@ -8,6 +8,11 @@
     <h1>Galoy Agents</h1>
     <p>Manage your MCP gateway agents</p>
   </header>
+  {% if let Some(msg) = error %}
+  <div role="alert" style="padding: 1rem; margin-bottom: 1rem; background: var(--pico-del-color, #c62828); color: white; border-radius: 4px;">
+    {{ msg }}
+  </div>
+  {% endif %}
   <a href="/auth/github" role="button" style="display: block; text-align: center;">
     Sign in with GitHub
   </a>
