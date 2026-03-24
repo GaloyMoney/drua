@@ -108,6 +108,7 @@ jobs:
     - get: obix-repo
       trigger: true
   - task: build-and-upload-index
+    tags: [galoy-agents]
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
