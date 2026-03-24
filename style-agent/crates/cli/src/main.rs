@@ -22,6 +22,13 @@ enum Command {
     /// Clone repos, start services, pull model, index everything
     Bootstrap,
 
+    /// Build index from pre-cloned repos on disk (for CI)
+    BuildIndex {
+        /// Directory containing repo subdirectories
+        #[arg(long)]
+        repos_dir: String,
+    },
+
     /// Re-index one or all repos from config
     Reindex {
         /// Repo name to re-index (omit to re-index all)
@@ -105,6 +112,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Up => commands::up::run(&config).await,
         Command::Bootstrap => commands::bootstrap::run(&config).await,
+        Command::BuildIndex { repos_dir } => {
+            commands::build_index::run(&config, &repos_dir).await
+        }
         Command::Reindex { repo_name } => {
             commands::reindex::run(&config, repo_name.as_deref()).await
         }

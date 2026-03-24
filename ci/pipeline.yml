@@ -9,6 +9,7 @@ groups:
   - check-code
   - test-bats
   - build-edge-image
+  - build-style-index
 
 jobs:
 - name: check-code
@@ -92,6 +93,57 @@ jobs:
     params:
       image: image/image.tar
 
+- name: build-style-index
+  serial: true
+  plan:
+  - in_parallel:
+    - get: repo
+      trigger: true
+    - get: cala-repo
+      trigger: true
+    - get: lana-repo
+      trigger: true
+    - get: job-repo
+      trigger: true
+    - get: obix-repo
+      trigger: true
+  - task: build-and-upload-index
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      - name: cala-repo
+      - name: lana-repo
+      - name: job-repo
+      - name: obix-repo
+      outputs:
+      - name: index
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+        GCS_CREDS_JSON: #@ data.values.gcs_creds_json
+        GCS_BUCKET: #@ data.values.style_agent_gcs_bucket
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cachix use $CACHIX_CACHE_NAME
+
+            mkdir -p /tmp/repos
+            ln -s "$(pwd)/cala-repo" /tmp/repos/cala
+            ln -s "$(pwd)/lana-repo" /tmp/repos/lana-bank
+            ln -s "$(pwd)/job-repo" /tmp/repos/job
+            ln -s "$(pwd)/obix-repo" /tmp/repos/obix
+
+            echo "$GCS_CREDS_JSON" > /tmp/gcs-key.json
+            export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-key.json
+
+            cd repo
+            nix run ./ci#build-style-index -- /tmp/repos "$GCS_BUCKET"
+
 resources:
 - name: repo
   type: git
@@ -102,6 +154,34 @@ resources:
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
   webhook_token: ((webhook.secret))
+
+- name: cala-repo
+  type: git
+  source:
+    uri: #@ data.values.cala_git_uri
+    branch: main
+    private_key: #@ data.values.github_private_key
+
+- name: lana-repo
+  type: git
+  source:
+    uri: #@ data.values.lana_git_uri
+    branch: main
+    private_key: #@ data.values.github_private_key
+
+- name: job-repo
+  type: git
+  source:
+    uri: #@ data.values.job_git_uri
+    branch: main
+    private_key: #@ data.values.github_private_key
+
+- name: obix-repo
+  type: git
+  source:
+    uri: #@ data.values.obix_git_uri
+    branch: main
+    private_key: #@ data.values.github_private_key
 
 - name: edge-image
   type: registry-image

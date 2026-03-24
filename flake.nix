@@ -79,6 +79,12 @@
           inherit cargoArtifacts;
         });
 
+        style-agent-unwrapped = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "style-agent";
+          cargoExtraArgs = "-p style-agent";
+        });
+
         podmanPkgs = import ./nix/podman-runner.nix {
           inherit pkgs;
           inherit (pkgs) lib stdenv;
@@ -117,6 +123,11 @@
         };
 
         packages.default = galoy-agents;
+
+        packages.style-agent = pkgs.writeShellScriptBin "style-agent" ''
+          export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
+          exec "${style-agent-unwrapped}/bin/style-agent" "$@"
+        '';
 
         apps.bats = {
           type = "app";

@@ -1,5 +1,6 @@
 pub mod audit_labels;
 pub mod bootstrap;
+pub mod build_index;
 pub mod classify;
 pub mod eval;
 pub mod eval_ml;

@@ -1,0 +1,29 @@
+# CI configuration for style-agent index builds.
+#
+# Repos are NOT listed here with URLs — they arrive as Concourse resource
+# inputs and are passed via --repos-dir. Only per-repo overrides
+# (exclude_dirs, paths) are needed.
+
+data_dir = "./data"
+labels_dir = "./labels"
+
+[services]
+classifier_confidence_threshold = 0.7
+
+[[repos]]
+name = "cala"
+url = "unused"
+exclude_dirs = ["cala-cel-interpreter", "cala-cel-parser"]
+
+[[repos]]
+name = "lana-bank"
+url = "unused"
+exclude_dirs = ["dev"]
+
+[[repos]]
+name = "job"
+url = "unused"
+
+[[repos]]
+name = "obix"
+url = "unused"

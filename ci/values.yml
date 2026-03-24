@@ -12,3 +12,11 @@ cachix_auth_token: ((cachix-token.token))
 cachix_cache_name: galoymoney
 
 folder_registry_image: galoy-agents
+
+cala_git_uri: git@github.com:GaloyMoney/cala.git
+lana_git_uri: git@github.com:GaloyMoney/lana-bank.git
+job_git_uri: git@github.com:GaloyMoney/job.git
+obix_git_uri: git@github.com:GaloyMoney/obix.git
+
+gcs_creds_json: ((gcs-creds.json))
+style_agent_gcs_bucket: galoy-style-agent
