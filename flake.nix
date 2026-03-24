@@ -82,15 +82,17 @@
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
           set -euo pipefail
 
-          cleanup() {
-            ''${COMPOSE_CMD:-docker compose} -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
+          export TERM="''${TERM:-dumb}"
           export REPO_ROOT="$(pwd)"
           export GALOY_AGENTS_BIN="${galoy-agents}/bin/galoy-agents"
           export PG_CON="postgres://user:password@localhost:5432/galoy_agents"
           export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
+
+          cleanup() {
+            $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
           exec bats bats/*.bats
         '';
       in
