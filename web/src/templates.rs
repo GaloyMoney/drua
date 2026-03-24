@@ -10,7 +10,9 @@ pub struct AgentView {
 
 #[derive(Template, WebTemplate)]
 #[template(path = "login.html")]
-pub struct LoginTemplate;
+pub struct LoginTemplate {
+    pub error: Option<String>,
+}
 
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard.html")]

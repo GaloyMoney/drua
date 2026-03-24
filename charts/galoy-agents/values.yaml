@@ -17,6 +17,7 @@ galoyAgents:
     tag: edge
   replicas: 1
   annotations:
+  githubAllowedTeams: []
   secrets:
     create: true
     pgCon: ""

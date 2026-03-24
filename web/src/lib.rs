@@ -17,14 +17,21 @@ pub struct AppState {
     pub app: App,
     pub oauth_client: OAuthClient,
     pub mcp_endpoint: String,
+    pub github_allowed_teams: Vec<String>,
 }
 
 impl AppState {
-    pub fn new(app: App, oauth_client: OAuthClient, mcp_endpoint: String) -> Self {
+    pub fn new(
+        app: App,
+        oauth_client: OAuthClient,
+        mcp_endpoint: String,
+        github_allowed_teams: Vec<String>,
+    ) -> Self {
         Self {
             app,
             oauth_client,
             mcp_endpoint,
+            github_allowed_teams,
         }
     }
 }

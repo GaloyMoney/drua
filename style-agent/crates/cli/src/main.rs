@@ -112,9 +112,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Up => commands::up::run(&config).await,
         Command::Bootstrap => commands::bootstrap::run(&config).await,
-        Command::BuildIndex { repos_dir } => {
-            commands::build_index::run(&config, &repos_dir).await
-        }
+        Command::BuildIndex { repos_dir } => commands::build_index::run(&config, &repos_dir).await,
         Command::Reindex { repo_name } => {
             commands::reindex::run(&config, repo_name.as_deref()).await
         }

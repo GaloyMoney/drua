@@ -5,3 +5,4 @@ server:
   mcp_endpoint: "http://localhost:4200/mcp"
 oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
+  github_allowed_teams: []
