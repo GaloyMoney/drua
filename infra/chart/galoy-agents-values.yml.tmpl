@@ -1,0 +1,13 @@
+galoyAgents:
+  image:
+    tag: ${image_tag}
+  secrets:
+    create: false
+
+postgresql:
+  image:
+    tag: latest
+  auth:
+    existingSecret: galoy-agents
+    secretKeys:
+      userPasswordKey: "pg-user-pw"
