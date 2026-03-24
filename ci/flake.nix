@@ -38,9 +38,11 @@
             style-agent build-index --repos-dir "$REPOS_DIR"
 
             tar -czf /tmp/style-agent-index.tar.gz -C ./data style-agent.db
+            HASH=$(sha256sum /tmp/style-agent-index.tar.gz | cut -d' ' -f1)
             gsutil cp /tmp/style-agent-index.tar.gz \
-              "gs://$GCS_BUCKET/index/style-agent-index.tar.gz"
-            echo "Uploaded to gs://$GCS_BUCKET/index/style-agent-index.tar.gz"
+              "gs://$GCS_BUCKET/index/$HASH.tar.gz"
+            echo "Uploaded to gs://$GCS_BUCKET/index/$HASH.tar.gz"
+            echo "Index hash: $HASH"
           '';
         in "${wrapped}/bin/build-style-index";
       };

@@ -48,14 +48,23 @@ spec:
             secretKeyRef:
               name: {{ template "galoyAgents.fullname" . }}
               key: "pg-con"
-      - name: init-data
-        image: {{ .Values.galoyAgents.initContainer.image }}
+      {{- if .Values.galoyAgents.styleAgent.indexHash }}
+      - name: init-style-agent
+        image: {{ .Values.galoyAgents.styleAgent.initImage }}
         command:
           - "sh"
           - "-c"
           - |
-            echo "init-data: placeholder for data loading"
-            echo "this will eventually load the style-agent search DB"
+            gsutil cp \
+              "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/index/{{ .Values.galoyAgents.styleAgent.indexHash }}.tar.gz" \
+              /tmp/style-agent-index.tar.gz
+            mkdir -p /data
+            tar -xzf /tmp/style-agent-index.tar.gz -C /data
+            echo "Loaded style-agent index {{ .Values.galoyAgents.styleAgent.indexHash }}"
+        volumeMounts:
+        - name: style-agent-data
+          mountPath: /data
+      {{- end }}
       containers:
       - name: {{ .Chart.Name }}
         image: "{{ .Values.galoyAgents.image.repository }}{{- if .Values.galoyAgents.image.tag -}}:{{ .Values.galoyAgents.image.tag }}{{- else -}}@{{ .Values.galoyAgents.image.digest }}{{- end }}"
@@ -102,5 +111,15 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName
+        {{- if .Values.galoyAgents.styleAgent.indexHash }}
+        volumeMounts:
+        - name: style-agent-data
+          mountPath: /data/style-agent
+        {{- end }}
         resources:
         {{- toYaml .Values.galoyAgents.resources | nindent 10 }}
+      {{- if .Values.galoyAgents.styleAgent.indexHash }}
+      volumes:
+      - name: style-agent-data
+        emptyDir: {}
+      {{- end }}

@@ -25,8 +25,10 @@ galoyAgents:
     githubClientSecret: ""
     githubRedirectUri: ""
     annotations:
-  initContainer:
-    image: busybox:1.36
+  styleAgent:
+    indexHash: ""
+    gcsBucket: galoy-style-agent
+    initImage: google/cloud-sdk:slim
 postgresql:
   enabled: true
   auth:

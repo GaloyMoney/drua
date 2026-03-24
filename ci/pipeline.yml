@@ -4,7 +4,7 @@
 #@ )
 
 groups:
-- name: galoy-agents
+- name: galoy-agents-bin
   jobs:
   - check-code
   - test-bats
