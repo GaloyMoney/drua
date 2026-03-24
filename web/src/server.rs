@@ -1,5 +1,10 @@
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+};
 use tower_sessions::{cookie::SameSite, SessionManagerLayer};
 use tracing::instrument;
+
+use galoy_agents_mcp_gateway::McpGateway;
 
 use crate::auth::session_store::PgSessionStore;
 use crate::AppState;
@@ -21,7 +26,15 @@ pub async fn run(
         .with_same_site(SameSite::Lax)
         .with_secure(config.secure_cookies);
 
+    let app_for_mcp = app_state.app.clone();
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(McpGateway::new(app_for_mcp.clone())),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+
     let app = crate::router()
+        .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
         .layer(axum::Extension(app_state.clone()))
         .layer(session_layer)

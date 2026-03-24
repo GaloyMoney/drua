@@ -24,6 +24,8 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_true")]
     pub secure_cookies: bool,
+    #[serde(default = "default_mcp_endpoint")]
+    pub mcp_endpoint: String,
 }
 
 fn default_port() -> u16 {
@@ -38,12 +40,17 @@ fn default_true() -> bool {
     true
 }
 
+fn default_mcp_endpoint() -> String {
+    "http://localhost:4200/mcp".to_string()
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
             host: default_host(),
             secure_cookies: true,
+            mcp_endpoint: default_mcp_endpoint(),
         }
     }
 }

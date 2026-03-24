@@ -33,7 +33,6 @@ fn agent_to_view(agent: &Agent) -> AgentView {
     AgentView {
         id: agent.id.to_string(),
         name: agent.name.clone(),
-        scopes: agent.scopes.join(", "),
         created_at: agent.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
         is_revoked: agent.is_revoked(),
     }
@@ -78,7 +77,19 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
 #[derive(serde::Deserialize)]
 pub struct CreateAgentForm {
     name: String,
-    scopes: String,
+}
+
+fn build_mcp_json(mcp_endpoint: &str, token: &str) -> String {
+    serde_json::json!({
+        "galoy-agents": {
+            "type": "http",
+            "url": mcp_endpoint,
+            "headers": {
+                "Authorization": format!("Bearer {token}")
+            }
+        }
+    })
+    .to_string()
 }
 
 #[instrument(name = "web.create_agent", skip_all)]
@@ -93,24 +104,21 @@ async fn create_agent(
     };
 
     let (raw_token, token_hash) = generate_token();
-    let scopes: Vec<String> = form
-        .scopes
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
 
     match state
         .app
         .agents()
-        .create_for_user(user_id, &form.name, token_hash, scopes)
+        .create_for_user(user_id, &form.name, token_hash, vec![])
         .await
     {
-        Ok(_agent) => AgentCreatedTemplate {
-            token: raw_token,
-            agent_name: form.name,
+        Ok(_agent) => {
+            let mcp_json = build_mcp_json(&state.mcp_endpoint, &raw_token);
+            AgentCreatedTemplate {
+                agent_name: form.name,
+                mcp_json,
+            }
+            .into_response()
         }
-        .into_response(),
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

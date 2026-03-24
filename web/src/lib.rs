@@ -16,11 +16,16 @@ use auth::config::OAuthClient;
 pub struct AppState {
     pub app: App,
     pub oauth_client: OAuthClient,
+    pub mcp_endpoint: String,
 }
 
 impl AppState {
-    pub fn new(app: App, oauth_client: OAuthClient) -> Self {
-        Self { app, oauth_client }
+    pub fn new(app: App, oauth_client: OAuthClient, mcp_endpoint: String) -> Self {
+        Self {
+            app,
+            oauth_client,
+            mcp_endpoint,
+        }
     }
 }
 

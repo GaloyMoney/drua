@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "domain", "web"]
+members = ["cli", "domain", "mcp-gateway", "web"]
 resolver = "2"
 
 [workspace.package]

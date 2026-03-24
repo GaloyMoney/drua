@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = galoy_agents_domain::App::new(&pool);
     let oauth_client = config.auth_config().oauth_client();
-    let app_state = galoy_agents_web::AppState::new(app, oauth_client);
+    let app_state = galoy_agents_web::AppState::new(app, oauth_client, config.server.mcp_endpoint);
 
     galoy_agents_web::server::run(
         galoy_agents_web::server::ServerConfig {

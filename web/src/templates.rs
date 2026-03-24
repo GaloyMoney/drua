@@ -4,7 +4,6 @@ use askama_web::WebTemplate;
 pub struct AgentView {
     pub id: String,
     pub name: String,
-    pub scopes: String,
     pub created_at: String,
     pub is_revoked: bool,
 }
@@ -23,8 +22,8 @@ pub struct DashboardTemplate {
 #[derive(Template, WebTemplate)]
 #[template(path = "agent_created.html")]
 pub struct AgentCreatedTemplate {
-    pub token: String,
     pub agent_name: String,
+    pub mcp_json: String,
 }
 
 #[derive(Template, WebTemplate)]

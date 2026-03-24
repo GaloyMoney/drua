@@ -1,18 +1,18 @@
-<article aria-label="Agent token created">
+<article aria-label="Agent created">
   <header>
-    <h3>Agent Created Successfully</h3>
+    <h3>Agent Created: {{ agent_name }}</h3>
   </header>
-  <p class="token-warning">This token will not be shown again. Copy it now.</p>
+  <p class="token-warning">This configuration will not be shown again. Copy it now.</p>
+  <p>Add this to your MCP client configuration:</p>
   <div class="token-box">
-    <code id="token-value">{{ token }}</code>
+    <pre id="mcp-config"><code>{{ mcp_json }}</code></pre>
     <button
-      onclick="navigator.clipboard.writeText(document.getElementById('token-value').textContent).then(function(){this.textContent='Copied!'}.bind(this))"
+      onclick="navigator.clipboard.writeText(document.getElementById('mcp-config').textContent).then(function(){this.textContent='Copied!'}.bind(this))"
       class="outline"
     >
       Copy
     </button>
   </div>
-  <p>Agent name: <strong>{{ agent_name }}</strong></p>
 </article>
 
 <script>

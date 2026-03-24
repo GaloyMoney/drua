@@ -14,16 +14,10 @@
 <section>
   <h2>Create Agent</h2>
   <form hx-post="/agents/create" hx-target="#agent-result" hx-swap="innerHTML">
-    <div class="grid">
-      <label>
-        Name
-        <input type="text" name="name" required placeholder="my-agent">
-      </label>
-      <label>
-        Scopes (comma-separated)
-        <input type="text" name="scopes" value="read" placeholder="read,write">
-      </label>
-    </div>
+    <label>
+      Name
+      <input type="text" name="name" required placeholder="my-agent">
+    </label>
     <button type="submit">Create Agent</button>
   </form>
   <div id="agent-result"></div>
@@ -36,7 +30,6 @@
       <thead>
         <tr>
           <th>Name</th>
-          <th>Scopes</th>
           <th>Created</th>
           <th>Status</th>
           <th></th>
