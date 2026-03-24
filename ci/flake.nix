@@ -16,7 +16,19 @@
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = nixpkgs.legacyPackages.${system};
       style-agent = parent.packages.${system}.style-agent;
-      pythonEnv = parent.devShells.${system}.training.buildInputs;
+
+      pythonEnv = pkgs.python3.withPackages (ps:
+        with ps; [
+          torch
+          sentence-transformers
+          transformers
+          tokenizers
+          scikit-learn
+          onnx
+          onnxruntime
+          joblib
+          numpy
+        ]);
     in {
       formatter = pkgs.alejandra;
 
@@ -28,7 +40,7 @@
 
             OUTPUT_DIR="''${1:?Usage: train-classifier <output-dir>}"
 
-            export PATH="${pkgs.lib.makeBinPath [ pkgs.coreutils ]}:$PATH"
+            export PATH="${pkgs.lib.makeBinPath [ pythonEnv pkgs.coreutils ]}:$PATH"
 
             cd style-agent
 
