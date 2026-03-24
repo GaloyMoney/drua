@@ -937,9 +937,11 @@ name = "galoy-agents-mcp-gateway"
 version = "0.1.0"
 dependencies = [
  "galoy-agents-domain",
+ "http",
  "rmcp",
  "schemars 0.8.22",
  "serde",
+ "serde_json",
  "tracing",
 ]
 
@@ -957,7 +959,6 @@ dependencies = [
  "galoy-agents-mcp-gateway",
  "oauth2",
  "reqwest",
- "rmcp",
  "serde",
  "serde_json",
  "sha2",

@@ -1,8 +1,7 @@
-pub mod token;
-
 use crate::primitives::*;
 
 /// Unified authentication context resolved from session or bearer token.
+/// Shared between web and mcp-gateway crates.
 #[derive(Debug, Clone)]
 pub enum AuthContext {
     User(UserId),

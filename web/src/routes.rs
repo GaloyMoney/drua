@@ -9,8 +9,8 @@ use tracing::instrument;
 
 use galoy_agents_domain as domain;
 
+use domain::agent::token::generate_token;
 use domain::agent::Agent;
-use domain::auth::token::generate_token;
 use domain::primitives::{AgentId, UserId};
 
 use crate::templates::*;

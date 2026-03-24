@@ -30,6 +30,8 @@
             (builtins.match ".*\.sql$" path != null) ||
             (builtins.match ".*\.html$" path != null) ||
             (builtins.match ".*\.yml$" path != null) ||
+            (builtins.match ".*\.bash$" path != null) ||
+            (builtins.match ".*\.bats$" path != null) ||
             craneLib.filterCargoSources path type;
         };
 
@@ -71,6 +73,26 @@
         galoy-agents = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
         });
+
+        podmanPkgs = import ./nix/podman-runner.nix {
+          inherit pkgs;
+          inherit (pkgs) lib stdenv;
+        };
+
+        bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
+          set -euo pipefail
+
+          cleanup() {
+            ''${COMPOSE_CMD:-docker compose} -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          export REPO_ROOT="$(pwd)"
+          export GALOY_AGENTS_BIN="${galoy-agents}/bin/galoy-agents"
+          export PG_CON="postgres://user:password@localhost:5432/galoy_agents"
+          export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
+          exec bats bats/*.bats
+        '';
       in
       {
         checks = {
@@ -88,6 +110,28 @@
         };
 
         packages.default = galoy-agents;
+
+        apps.bats = {
+          type = "app";
+          program = let
+            wrapped = pkgs.writeShellScriptBin "run-bats" ''
+              export PATH="${pkgs.lib.makeBinPath [
+                bats-runner
+                galoy-agents
+                podmanPkgs.podman-compose-runner
+                pkgs.bats
+                pkgs.jq
+                pkgs.curl
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.postgresql
+                pkgs.procps
+                pkgs.util-linux
+              ]}:$PATH"
+              exec bats-runner
+            '';
+          in "${wrapped}/bin/run-bats";
+        };
 
         packages.docker-image = pkgs.dockerTools.buildLayeredImage {
           name = "galoy-agents";
@@ -107,6 +151,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rustToolchain
+            pkgs.bats
             pkgs.cargo-nextest
             pkgs.sqlx-cli
             pkgs.postgresql

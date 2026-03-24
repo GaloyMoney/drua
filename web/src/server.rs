@@ -1,6 +1,3 @@
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-};
 use tower_sessions::{cookie::SameSite, SessionManagerLayer};
 use tracing::instrument;
 
@@ -26,12 +23,7 @@ pub async fn run(
         .with_same_site(SameSite::Lax)
         .with_secure(config.secure_cookies);
 
-    let app_for_mcp = app_state.app.clone();
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(McpGateway::new(app_for_mcp.clone())),
-        LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
-    );
+    let mcp_service = McpGateway::service(app_state.app.clone());
 
     let app = crate::router()
         .nest_service("/mcp", mcp_service)

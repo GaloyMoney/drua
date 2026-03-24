@@ -7,7 +7,9 @@ edition.workspace = true
 
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
+http = "1"
 rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "macros"] }
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1"

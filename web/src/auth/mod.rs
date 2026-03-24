@@ -12,7 +12,7 @@ pub use error::AuthError;
 
 use galoy_agents_domain as domain;
 
-use domain::auth::token::hash_token;
+use domain::agent::token::hash_token;
 use domain::auth::AuthContext;
 use domain::primitives::UserId;
 

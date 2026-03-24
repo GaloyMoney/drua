@@ -7,6 +7,7 @@ groups:
 - name: galoy-agents
   jobs:
   - check-code
+  - test-bats
   - build-edge-image
 
 jobs:
@@ -34,12 +35,39 @@ jobs:
             cachix use $CACHIX_CACHE_NAME
             nix flake check
 
-- name: build-edge-image
+- name: test-bats
   serial: true
   plan:
   - get: repo
     trigger: true
     passed: [check-code]
+  - task: bats-e2e
+    privileged: true
+    attempts: 2
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            nix run .#bats
+
+- name: build-edge-image
+  serial: true
+  plan:
+  - get: repo
+    trigger: true
+    passed: [test-bats]
   - task: build-image
     config:
       platform: linux
