@@ -139,8 +139,10 @@ jobs:
             ln -s "$(pwd)/job-repo" /tmp/repos/job
             ln -s "$(pwd)/obix-repo" /tmp/repos/obix
 
+            set +x
             echo "$GCS_CREDS_JSON" > /tmp/gcs-key.json
             export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-key.json
+            set -x
 
             cd repo
             nix run ./ci#build-style-index -- /tmp/repos "$GCS_BUCKET"
