@@ -125,6 +125,7 @@
                 pkgs.jq
                 pkgs.curl
                 pkgs.coreutils
+                pkgs.gawk
                 pkgs.gnugrep
                 pkgs.postgresql
                 pkgs.procps
