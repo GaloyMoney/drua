@@ -40,7 +40,6 @@ jobs:
   plan:
   - get: repo
     trigger: true
-    passed: [check-code]
   - task: bats-e2e
     privileged: true
     attempts: 2
@@ -59,7 +58,6 @@ jobs:
           - |
             set -euo pipefail
             cd repo
-            export TERM=dumb
             cachix use $CACHIX_CACHE_NAME
             nix run .#bats
 
@@ -68,7 +66,7 @@ jobs:
   plan:
   - get: repo
     trigger: true
-    passed: [test-bats]
+    passed: [check-code, test-bats]
   - task: build-image
     config:
       platform: linux
