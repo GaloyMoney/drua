@@ -31,3 +31,4 @@ url = "unused"
 [[repos]]
 name = "galoy-agents"
 url = "unused"
+exclude_dirs = ["style-agent"]
