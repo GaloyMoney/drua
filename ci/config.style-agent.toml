@@ -9,6 +9,7 @@ labels_dir = "./labels"
 
 [services]
 classifier_confidence_threshold = 0.7
+classifier_model_dir = "./data/models/onnx"
 
 [[repos]]
 name = "cala"

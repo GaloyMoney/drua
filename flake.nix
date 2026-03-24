@@ -85,6 +85,19 @@
           cargoExtraArgs = "-p style-agent";
         });
 
+        pythonEnv = pkgs.python3.withPackages (ps:
+          with ps; [
+            torch
+            sentence-transformers
+            transformers
+            tokenizers
+            scikit-learn
+            onnx
+            onnxruntime
+            joblib
+            numpy
+          ]);
+
         podmanPkgs = import ./nix/podman-runner.nix {
           inherit pkgs;
           inherit (pkgs) lib stdenv;
@@ -165,6 +178,13 @@
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
             ];
           };
+        };
+
+        devShells.training = pkgs.mkShell {
+          buildInputs = [ pythonEnv ];
+          shellHook = ''
+            echo "style-agent training shell loaded (Python $(python3 --version 2>&1 | cut -d' ' -f2))"
+          '';
         };
 
         devShells.default = pkgs.mkShell {

@@ -27,7 +27,7 @@ galoyAgents:
     annotations:
   styleAgent:
     indexHash: ""
-    gcsBucket: galoy-style-agent
+    gcsBucket: galoy-agents-models
     initImage: google/cloud-sdk:slim
 postgresql:
   enabled: true

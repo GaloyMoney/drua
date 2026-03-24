@@ -9,6 +9,7 @@ groups:
   - check-code
   - test-bats
   - build-edge-image
+  - train-classifier
   - build-style-index
 
 jobs:
@@ -92,6 +93,72 @@ jobs:
   - put: edge-image
     params:
       image: image/image.tar
+    get_params:
+      skip_download: true
+  - task: commit-edge-digest
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      - name: edge-image
+      outputs:
+      - name: repo-updated
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cachix use $CACHIX_CACHE_NAME
+
+            DIGEST=$(cat edge-image/digest)
+
+            cp -a repo/. repo-updated/
+            cd repo-updated
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run ./ci#commit-hash -- "$(pwd)" \
+                charts/galoy-agents/values.yaml \
+                "galoyAgents.image.digest" \
+                "$DIGEST"
+  - put: repo
+    params:
+      repository: repo-updated
+      rebase: true
+
+- name: train-classifier
+  serial: true
+  plan:
+  - get: repo
+    trigger: true
+  - task: train-and-export
+    tags: [galoy-agents]
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      outputs:
+      - name: model
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cachix use $CACHIX_CACHE_NAME
+
+            cd repo
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#train-classifier -- "$(pwd)/../model"
+  - put: style-agent-model
+    params:
+      file: model/*.tar.gz
 
 - name: build-style-index
   serial: true
@@ -107,7 +174,9 @@ jobs:
       trigger: true
     - get: obix-repo
       trigger: true
-  - task: build-and-upload-index
+    - get: style-agent-model
+      passed: [train-classifier]
+  - task: build-index
     tags: [galoy-agents]
     config:
       platform: linux
@@ -118,6 +187,7 @@ jobs:
       - name: lana-repo
       - name: job-repo
       - name: obix-repo
+      - name: style-agent-model
       outputs:
       - name: index
       params:
@@ -139,10 +209,44 @@ jobs:
             ln -s "$(pwd)/repo" /tmp/repos/galoy-agents
 
             cd repo
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#build-style-index -- /tmp/repos "$(pwd)/../index"
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run ./ci#build-style-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../style-agent-model"
   - put: style-agent-index
     params:
       file: index/*.tar.gz
+  - task: commit-index-hash
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      - name: index
+      outputs:
+      - name: repo-updated
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cachix use $CACHIX_CACHE_NAME
+
+            HASH=$(ls index/*.tar.gz | sed 's|.*/||; s|\.tar\.gz$||')
+
+            cp -a repo/. repo-updated/
+            cd repo-updated
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run ./ci#commit-hash -- "$(pwd)" \
+                charts/galoy-agents/values.yaml \
+                "galoyAgents.styleAgent.indexHash" \
+                "$HASH"
+  - put: repo
+    params:
+      repository: repo-updated
+      rebase: true
 
 resource_types:
 - name: gcs-resource
@@ -203,3 +307,10 @@ resources:
     bucket: #@ data.values.style_agent_gcs_bucket
     json_key: #@ data.values.gcs_creds_json
     regexp: index/(.*).tar.gz
+
+- name: style-agent-model
+  type: gcs-resource
+  source:
+    bucket: #@ data.values.style_agent_gcs_bucket
+    json_key: #@ data.values.gcs_creds_json
+    regexp: model/(.*).tar.gz
