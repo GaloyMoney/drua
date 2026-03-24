@@ -9,7 +9,7 @@ gar_registry_user: ((gar-creds.username))
 gar_registry_password: ((gar-creds.password))
 
 cachix_auth_token: ((cachix-token.token))
-cachix_cache_name: galoymoney
+cachix_cache_name: galoy-agents
 
 folder_registry_image: galoy-agents
 
@@ -18,5 +18,5 @@ lana_git_uri: git@github.com:GaloyMoney/lana-bank.git
 job_git_uri: git@github.com:GaloyMoney/job.git
 obix_git_uri: git@github.com:GaloyMoney/obix.git
 
-gcs_creds_json: ((gcs-creds.json))
-style_agent_gcs_bucket: galoy-style-agent
+gcs_creds_json: ((galoy-agents-gcp-creds.creds_json))
+style_agent_gcs_bucket: galoy-agents-models
