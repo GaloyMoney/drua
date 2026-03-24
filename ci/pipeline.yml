@@ -123,8 +123,6 @@ jobs:
       params:
         CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
         CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
-        GCS_CREDS_JSON: #@ data.values.gcs_creds_json
-        GCS_BUCKET: #@ data.values.style_agent_gcs_bucket
       run:
         path: sh
         args:
@@ -140,13 +138,17 @@ jobs:
             ln -s "$(pwd)/obix-repo" /tmp/repos/obix
             ln -s "$(pwd)/repo" /tmp/repos/galoy-agents
 
-            set +x
-            echo "$GCS_CREDS_JSON" > /tmp/gcs-key.json
-            export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-key.json
-            set -x
-
             cd repo
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#build-style-index -- /tmp/repos "$GCS_BUCKET"
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#build-style-index -- /tmp/repos "$(pwd)/../index"
+  - put: style-agent-index
+    params:
+      file: index/*.tar.gz
+
+resource_types:
+- name: gcs-resource
+  type: registry-image
+  source:
+    repository: frodenas/gcs-resource
 
 resources:
 - name: repo
@@ -194,3 +196,10 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/" + data.values.folder_registry_image
+
+- name: style-agent-index
+  type: gcs-resource
+  source:
+    bucket: #@ data.values.style_agent_gcs_bucket
+    json_key: #@ data.values.gcs_creds_json
+    regexp: index/(.*).tar.gz

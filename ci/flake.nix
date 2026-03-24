@@ -25,23 +25,18 @@
           wrapped = pkgs.writeShellScriptBin "build-style-index" ''
             set -euo pipefail
 
-            REPOS_DIR="''${1:?Usage: build-style-index <repos-dir> <gcs-bucket>}"
-            GCS_BUCKET="''${2:?Usage: build-style-index <repos-dir> <gcs-bucket>}"
+            REPOS_DIR="''${1:?Usage: build-style-index <repos-dir> <output-dir>}"
+            OUTPUT_DIR="''${2:?Usage: build-style-index <repos-dir> <output-dir>}"
 
             export STYLE_AGENT_CONFIG="$(pwd)/ci/config.style-agent.toml"
-            export PATH="${pkgs.lib.makeBinPath [
-              style-agent
-              pkgs.google-cloud-sdk
-            ]}:$PATH"
+            export PATH="${pkgs.lib.makeBinPath [ style-agent ]}:$PATH"
 
             cd style-agent
             style-agent build-index --repos-dir "$REPOS_DIR"
 
-            tar -czf /tmp/style-agent-index.tar.gz -C ./data style-agent.db
-            HASH=$(sha256sum /tmp/style-agent-index.tar.gz | cut -d' ' -f1)
-            gsutil cp /tmp/style-agent-index.tar.gz \
-              "gs://$GCS_BUCKET/index/$HASH.tar.gz"
-            echo "Uploaded to gs://$GCS_BUCKET/index/$HASH.tar.gz"
+            mkdir -p "$OUTPUT_DIR"
+            HASH=$(sha256sum ./data/style-agent.db | cut -d' ' -f1)
+            tar -czf "$OUTPUT_DIR/$HASH.tar.gz" -C ./data style-agent.db
             echo "Index hash: $HASH"
           '';
         in "${wrapped}/bin/build-style-index";
