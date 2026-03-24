@@ -1,5 +1,13 @@
 [workspace]
-members = ["cli", "domain", "mcp-gateway", "web"]
+members = [
+  "cli",
+  "domain",
+  "mcp-gateway",
+  "web",
+  "style-agent/crates/core",
+  "style-agent/crates/server",
+  "style-agent/crates/cli",
+]
 resolver = "2"
 
 [workspace.package]
@@ -8,3 +16,76 @@ version = "0.1.0"
 
 [workspace.metadata.crane]
 name = "galoy-agents"
+
+[workspace.dependencies]
+# Internal style-agent crates
+style-agent-core = { path = "style-agent/crates/core" }
+style-agent-server = { path = "style-agent/crates/server" }
+
+# MCP
+rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "macros"] }
+
+# HTTP server
+axum = "0.8"
+
+# Vector store (SQLite + sqlite-vec)
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlite-vec = "0.1"
+zerocopy = { version = "0.7", features = ["derive"] }
+
+# Parsing
+tree-sitter = "0.25"
+tree-sitter-rust = "0.23"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+
+# Config
+toml = "0.8"
+dirs = "6"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "macos-system-configuration"] }
+
+# IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Encoding
+base64 = "0.22"
+
+# Hashing
+sha2 = "0.10"
+
+# Randomization
+rand = "0.8"
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Telegram bot
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
+
+# Embedding (fastembed ONNX in-process)
+fastembed = { version = "5", default-features = false, features = ["ort-load-dynamic", "hf-hub-rustls-tls"] }
+
+# ONNX inference (classifier)
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+ndarray = "0.16"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
