@@ -29,6 +29,7 @@
             (builtins.match ".*\.sqlx/.*" path != null) ||
             (builtins.match ".*\.sql$" path != null) ||
             (builtins.match ".*\.html$" path != null) ||
+            (builtins.match ".*\.yml$" path != null) ||
             craneLib.filterCargoSources path type;
         };
 
@@ -107,6 +108,7 @@
           buildInputs = [
             rustToolchain
             pkgs.cargo-nextest
+            pkgs.sqlx-cli
             pkgs.pkg-config
             pkgs.docker-compose
             pkgs.opentofu

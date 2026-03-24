@@ -32,17 +32,6 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
-    pub fn from_env() -> Self {
-        Self {
-            github_client_id: std::env::var("GITHUB_CLIENT_ID")
-                .expect("GITHUB_CLIENT_ID must be set"),
-            github_client_secret: std::env::var("GITHUB_CLIENT_SECRET")
-                .expect("GITHUB_CLIENT_SECRET must be set"),
-            github_redirect_uri: std::env::var("GITHUB_REDIRECT_URI")
-                .expect("GITHUB_REDIRECT_URI must be set"),
-        }
-    }
-
     pub fn oauth_client(&self) -> OAuthClient {
         BasicClient::new(ClientId::new(self.github_client_id.clone()))
             .set_client_secret(ClientSecret::new(self.github_client_secret.clone()))

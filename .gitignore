@@ -2,6 +2,7 @@ target/
 result
 .direnv/
 .claude/
+.env
 
 # Terraform / OpenTofu
 **/.terraform/

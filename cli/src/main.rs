@@ -1,18 +1,30 @@
+mod config;
+
 use clap::Parser;
 use tower_sessions::SessionManagerLayer;
 
-use galoy_agents_web::auth::{config::AuthConfig, session_store::PgSessionStore};
+use galoy_agents_web::auth::session_store::PgSessionStore;
+
+use config::{Config, EnvSecrets};
 
 #[derive(Parser)]
 #[command(name = "galoy-agents", about = "Galoy Agents CLI")]
 struct Cli {
-    /// Port to listen on
-    #[arg(long, env = "GALOY_AGENTS_PORT", default_value = "4200")]
-    port: u16,
+    /// Path to config file
+    #[arg(long, env = "GALOY_AGENTS_CONFIG", default_value = "galoy-agents.yml")]
+    config: String,
 
     /// PostgreSQL connection URL
-    #[arg(long, env = "DATABASE_URL")]
-    database_url: String,
+    #[arg(long, env = "PG_CON")]
+    pg_con: String,
+
+    /// GitHub OAuth client ID
+    #[arg(long, env = "GITHUB_CLIENT_ID")]
+    github_client_id: String,
+
+    /// GitHub OAuth client secret
+    #[arg(long, env = "GITHUB_CLIENT_SECRET")]
+    github_client_secret: String,
 }
 
 #[tokio::main]
@@ -26,13 +38,22 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let pool = sqlx::PgPool::connect(&cli.database_url).await?;
+    let config = Config::try_new(
+        &cli.config,
+        EnvSecrets {
+            pg_con: cli.pg_con,
+            github_client_id: cli.github_client_id,
+            github_client_secret: cli.github_client_secret,
+        },
+    )?;
+
+    let pool = sqlx::PgPool::connect(&config.db.pg_con).await?;
     sqlx::migrate!("../domain/migrations").run(&pool).await?;
 
     let users = galoy_agents_domain::user::Users::new(&pool);
     let agents = galoy_agents_domain::agent::Agents::new(&pool);
 
-    let auth_config = AuthConfig::from_env();
+    let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
 
     let app_state = galoy_agents_web::AppState::new(users.clone(), agents.clone(), oauth_client);
@@ -56,7 +77,9 @@ async fn main() -> anyhow::Result<()> {
         .layer(session_layer)
         .with_state(app_state);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cli.port));
+    let addr: std::net::SocketAddr = format!("{}:{}", config.server.host, config.server.port)
+        .parse()
+        .expect("invalid bind address");
     tracing::info!("Starting server on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
