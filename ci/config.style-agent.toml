@@ -27,3 +27,7 @@ url = "unused"
 [[repos]]
 name = "obix"
 url = "unused"
+
+[[repos]]
+name = "galoy-agents"
+url = "unused"

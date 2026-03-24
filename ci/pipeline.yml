@@ -34,7 +34,7 @@ jobs:
             set -euo pipefail
             cd repo
             cachix use $CACHIX_CACHE_NAME
-            nix flake check
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix flake check
 
 - name: test-bats
   serial: true
@@ -60,7 +60,7 @@ jobs:
             set -euo pipefail
             cd repo
             cachix use $CACHIX_CACHE_NAME
-            nix run .#bats
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix run .#bats
 
 - name: build-edge-image
   serial: true
@@ -138,6 +138,7 @@ jobs:
             ln -s "$(pwd)/lana-repo" /tmp/repos/lana-bank
             ln -s "$(pwd)/job-repo" /tmp/repos/job
             ln -s "$(pwd)/obix-repo" /tmp/repos/obix
+            ln -s "$(pwd)/repo" /tmp/repos/galoy-agents
 
             set +x
             echo "$GCS_CREDS_JSON" > /tmp/gcs-key.json
@@ -145,7 +146,7 @@ jobs:
             set -x
 
             cd repo
-            nix run ./ci#build-style-index -- /tmp/repos "$GCS_BUCKET"
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#build-style-index -- /tmp/repos "$GCS_BUCKET"
 
 resources:
 - name: repo
