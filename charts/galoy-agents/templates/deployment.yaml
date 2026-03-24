@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+    kube-monkey/identifier: {{ template "galoyAgents.fullname" . }}
+    kube-monkey/enabled: enabled
+    kube-monkey/kill-mode: fixed
+    kube-monkey/kill-value: "1"
+    kube-monkey/mtbf: "3"
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "galoyAgents.fullname" . }}
+      release: {{ .Release.Name }}
+  replicas: {{ .Values.galoyAgents.replicas }}
+  template:
+    metadata:
+      labels:
+        app: {{ template "galoyAgents.fullname" . }}
+        chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+        release: "{{ .Release.Name }}"
+        kube-monkey/identifier: {{ template "galoyAgents.fullname" . }}
+        kube-monkey/enabled: enabled
+      {{- with .Values.galoyAgents.labels }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      initContainers:
+      - name: wait-for-postgresql
+        image: postgres
+        command:
+          - "bash"
+          - "-c"
+          - |
+            while ! pg_isready -d $PG_CON > /dev/null 2>&1
+            do
+              echo "waiting for postgres to come up"
+              sleep 5
+            done
+        env:
+        - name: PG_CON
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "pg-con"
+      - name: init-data
+        image: {{ .Values.galoyAgents.initContainer.image }}
+        command:
+          - "sh"
+          - "-c"
+          - |
+            echo "init-data: placeholder for data loading"
+            echo "this will eventually load the style-agent search DB"
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.galoyAgents.image.repository }}{{- if .Values.galoyAgents.image.tag -}}:{{ .Values.galoyAgents.image.tag }}{{- else -}}@{{ .Values.galoyAgents.image.digest }}{{- end }}"
+        ports:
+        - name: server
+          containerPort: {{ .Values.galoyAgents.server.service.port }}
+          protocol: TCP
+        env:
+        - name: GALOY_AGENTS_PORT
+          value: {{ .Values.galoyAgents.server.service.port | quote }}
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "pg-con"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
+        - name: PG_CON
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "pg-con"
+        - name: GITHUB_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "github-client-id"
+        - name: GITHUB_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "github-client-secret"
+        - name: GITHUB_REDIRECT_URI
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "github-redirect-uri"
+        - name: KUBE_NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        resources:
+        {{- toYaml .Values.galoyAgents.resources | nindent 10 }}

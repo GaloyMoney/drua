@@ -1,0 +1,36 @@
+fullnameOverride: ""
+nameOverride: ""
+galoyAgents:
+  resources: {}
+  tracing:
+    serviceName: galoy-agents-dev
+    otelExporterOtlpEndpoint: "http://localhost:4317"
+  server:
+    service:
+      type: ClusterIP
+      port: 5254
+      annotations: {}
+  labels: {}
+  image:
+    repository: us.gcr.io/galoyorg/galoy-agents
+    digest: ""
+    tag: edge
+  replicas: 1
+  annotations:
+  secrets:
+    create: true
+    pgCon: ""
+    githubClientId: ""
+    githubClientSecret: ""
+    githubRedirectUri: ""
+    annotations:
+  initContainer:
+    image: busybox:1.36
+postgresql:
+  enabled: true
+  auth:
+    enablePostgresUser: false
+    username: galoy-agents
+    password: galoy-agents
+    database: galoy-agents
+resources: {}

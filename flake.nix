@@ -111,6 +111,9 @@
             pkgs.docker-compose
             pkgs.opentofu
             pkgs.ytt
+            pkgs.kubernetes-helm
+            pkgs.minikube
+            pkgs.kubectl
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             fly
             pkgs.libiconv

@@ -1,0 +1,20 @@
+galoyAgents:
+  image:
+    repository: us.gcr.io/galoyorg/galoy-agents
+    tag: edge
+    digest: ""
+  secrets:
+    create: true
+    pgCon: "postgresql://galoy-agents:galoy-agents@galoy-agents-postgresql:5432/galoy-agents"
+    githubClientId: "dummy-client-id"
+    githubClientSecret: "dummy-client-secret"
+    githubRedirectUri: "http://localhost:5254/auth/callback"
+postgresql:
+  enabled: true
+  image:
+    tag: latest
+  auth:
+    enablePostgresUser: false
+    username: galoy-agents
+    password: galoy-agents
+    database: galoy-agents
