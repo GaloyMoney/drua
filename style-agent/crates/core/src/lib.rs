@@ -1,6 +1,7 @@
 pub mod bats_chunker;
 pub mod chunker;
 pub mod classifier;
+pub mod config;
 pub mod embedder;
 pub mod error;
 pub mod label_store;
@@ -12,4 +13,5 @@ pub mod search;
 pub mod store;
 
 pub use classifier::Classifier;
+pub use config::CoreConfig;
 pub use error::CoreError;

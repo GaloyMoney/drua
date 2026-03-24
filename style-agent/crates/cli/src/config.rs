@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use style_agent_core::CoreConfig;
 
 const DEFAULT_BIND: &str = "127.0.0.1:9222";
 const DEFAULT_DATA_DIR: &str = "./data";
@@ -171,6 +172,14 @@ impl Config {
                 .unwrap_or_default()
                 .join("models")
                 .join("onnx"),
+        }
+    }
+
+    /// Build the core config with resolved paths for storage and models.
+    pub fn core_config(&self) -> CoreConfig {
+        CoreConfig {
+            db_path: self.db_path(),
+            model_dir: self.model_dir(),
         }
     }
 

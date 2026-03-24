@@ -10,3 +10,4 @@ result
 *.tfstate.*
 *.tfvars
 .terraform.lock.hcl
+style-agent/labels/audit-suspects.jsonl
