@@ -1,3 +1,7 @@
+mod pg_request_logger;
+
+use std::sync::Arc;
+
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
@@ -9,8 +13,9 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
 use galoy_agents_domain::auth::AuthContext;
 use galoy_agents_domain::App;
-use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
+use style_agent_server::{RequestLogger, SearchCodeParams, StyleAgentEndpoints};
 
+pub use pg_request_logger::PgRequestLogger;
 pub use style_agent_server::StyleAgentConfig;
 
 #[derive(Clone)]
@@ -30,22 +35,40 @@ impl McpGateway {
         }
     }
 
+    /// Build the MCP service using the default SQLite logger.
     pub fn service(
         app: App,
         style_agent_config: &StyleAgentConfig,
     ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
         let style_agent = style_agent_server::init_endpoints(style_agent_config)?;
+        Ok(Self::build_service(app, style_agent))
+    }
 
+    /// Build the MCP service with a custom [`RequestLogger`].
+    pub fn service_with_logger(
+        app: App,
+        style_agent_config: &StyleAgentConfig,
+        logger: Arc<dyn RequestLogger>,
+    ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
+        let style_agent =
+            style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?;
+        Ok(Self::build_service(app, style_agent))
+    }
+
+    fn build_service(
+        app: App,
+        style_agent: Option<StyleAgentEndpoints>,
+    ) -> StreamableHttpService<Self, LocalSessionManager> {
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
             json_response: true,
             ..Default::default()
         };
-        Ok(StreamableHttpService::new(
+        StreamableHttpService::new(
             move || Ok(McpGateway::new(app.clone(), style_agent.clone())),
             LocalSessionManager::default().into(),
             config,
-        ))
+        )
     }
 
     fn require_auth(parts: &http::request::Parts) -> Result<(), ErrorData> {

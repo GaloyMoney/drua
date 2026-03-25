@@ -1,6 +1,8 @@
 use askama::Template;
 use askama_web::WebTemplate;
 
+use galoy_agents_domain::style_agent_logs::{DashboardStats, StyleAgentRequestRow};
+
 pub struct AgentView {
     pub id: String,
     pub name: String,
@@ -38,4 +40,16 @@ pub struct AgentRowTemplate {
 #[template(path = "agent_list.html")]
 pub struct AgentListTemplate {
     pub agents: Vec<AgentView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "style_agent.html")]
+pub struct StyleAgentTemplate {
+    pub stats: DashboardStats,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "style_agent_recent.html")]
+pub struct StyleAgentRecentTemplate {
+    pub rows: Vec<StyleAgentRequestRow>,
 }
