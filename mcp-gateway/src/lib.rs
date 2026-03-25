@@ -1,7 +1,7 @@
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ErrorCode, ErrorData, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ErrorCode, ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -9,33 +9,43 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
 use galoy_agents_domain::auth::AuthContext;
 use galoy_agents_domain::App;
+use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
+
+pub use style_agent_server::StyleAgentConfig;
 
 #[derive(Clone)]
 pub struct McpGateway {
     #[allow(dead_code)]
     app: App,
+    style_agent: StyleAgentEndpoints,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpGateway {
-    pub fn new(app: App) -> Self {
+    fn new(app: App, style_agent: StyleAgentEndpoints) -> Self {
         Self {
             app,
+            style_agent,
             tool_router: Self::tool_router(),
         }
     }
 
-    pub fn service(app: App) -> StreamableHttpService<Self, LocalSessionManager> {
+    pub fn service(
+        app: App,
+        style_agent_config: &StyleAgentConfig,
+    ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
+        let style_agent = style_agent_server::init_endpoints(style_agent_config)?;
+
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
             json_response: true,
             ..Default::default()
         };
-        StreamableHttpService::new(
-            move || Ok(McpGateway::new(app.clone())),
+        Ok(StreamableHttpService::new(
+            move || Ok(McpGateway::new(app.clone(), style_agent.clone())),
             LocalSessionManager::default().into(),
             config,
-        )
+        ))
     }
 
     fn require_auth(parts: &http::request::Parts) -> Result<(), ErrorData> {
@@ -65,6 +75,19 @@ impl McpGateway {
     ) -> Result<String, ErrorData> {
         Self::require_auth(&parts)?;
         Ok(format!("Hello, {}!", params.name))
+    }
+
+    /// Search indexed code repositories for patterns and conventions.
+    #[tool(
+        description = "Search indexed codebases for code patterns matching a query.\n\nUsage tips:\n- Pass a code snippet as the query (e.g. the pattern you are about to write) — code-as-query gives much better results than natural language\n- Always pass a `label` filter for precise results\n- Adopt the style, naming, and structure from the returned examples — don't guess conventions, search first\n\nAvailable labels: entity, entity_event, entity_command, entity_query, entity_hydration, error, service, service_method, repository, domain_primitives, value_object, type_conversion, config, test, api, job, event_handler, authorization, published_event, new_entity, none (unlabeled chunks)\n\nAvailable filters: query (required), limit, repo, language, label"
+    )]
+    async fn search_code(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<SearchCodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.style_agent.search_code(params).await
     }
 }
 
