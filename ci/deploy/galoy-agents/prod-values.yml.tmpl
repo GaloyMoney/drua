@@ -1,6 +1,9 @@
 galoyAgents:
   image:
     digest: "${image_digest}"
+  config:
+    server:
+      secureCookies: true
   secrets:
     create: false
   resources:

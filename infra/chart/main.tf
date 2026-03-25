@@ -17,18 +17,6 @@ variable "galoy_agents_secrets" {
   default     = "{}"
 }
 
-variable "galoy_agents_github_client_id" {
-  description = "GitHub OAuth client ID"
-  type        = string
-  default     = ""
-}
-
-variable "galoy_agents_github_redirect_uri" {
-  description = "GitHub OAuth redirect URI"
-  type        = string
-  default     = ""
-}
-
 terraform {
   required_version = ">= 1.0"
 
@@ -64,7 +52,9 @@ locals {
   pg_password = try(local.secrets.pg_password, "galoy-agents")
   pg_con      = try(local.secrets.pg_con, "postgresql://galoy-agents:${local.pg_password}@galoy-agents-postgresql:5432/galoy-agents")
 
+  github_client_id     = try(local.secrets.github_client_id, "dummy-client-id")
   github_client_secret = try(local.secrets.github_client_secret, "dummy-client-secret")
+  github_redirect_uri  = try(local.secrets.github_redirect_uri, "http://localhost:5254/auth/callback")
 }
 
 resource "kubernetes_namespace" "galoy_agents" {
@@ -82,7 +72,9 @@ resource "kubernetes_secret" "galoy_agents" {
   data = {
     pg-user-pw           = local.pg_password
     pg-con               = local.pg_con
+    github-client-id     = local.github_client_id
     github-client-secret = local.github_client_secret
+    github-redirect-uri  = local.github_redirect_uri
   }
 }
 
@@ -93,9 +85,7 @@ resource "helm_release" "galoy_agents" {
 
   values = [
     templatefile("${path.module}/galoy-agents-values.yml.tmpl", {
-      image_tag            = var.galoy_agents_image_tag
-      github_client_id     = var.galoy_agents_github_client_id
-      github_redirect_uri  = var.galoy_agents_github_redirect_uri
+      image_tag = var.galoy_agents_image_tag
     })
   ]
 
