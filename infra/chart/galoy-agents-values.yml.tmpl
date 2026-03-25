@@ -1,6 +1,10 @@
 galoyAgents:
   image:
     tag: ${image_tag}
+  config:
+    oauth:
+      githubClientId: ${github_client_id}
+      githubRedirectUri: ${github_redirect_uri}
   secrets:
     create: false
 

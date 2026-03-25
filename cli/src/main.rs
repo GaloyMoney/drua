@@ -15,10 +15,6 @@ struct Cli {
     #[arg(long, env = "PG_CON")]
     pg_con: String,
 
-    /// GitHub OAuth client ID
-    #[arg(long, env = "GITHUB_CLIENT_ID")]
-    github_client_id: String,
-
     /// GitHub OAuth client secret
     #[arg(long, env = "GITHUB_CLIENT_SECRET")]
     github_client_secret: String,
@@ -52,7 +48,6 @@ async fn main() -> anyhow::Result<()> {
         &cli.config,
         EnvSecrets {
             pg_con: cli.pg_con,
-            github_client_id: cli.github_client_id,
             github_client_secret: cli.github_client_secret,
             github_allowed_teams: allowed_teams,
         },
