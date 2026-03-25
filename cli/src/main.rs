@@ -1,5 +1,7 @@
 mod config;
 
+use std::sync::Arc;
+
 use clap::Parser;
 
 use config::{Config, EnvSecrets};
@@ -67,18 +69,51 @@ async fn main() -> anyhow::Result<()> {
     let app_state = galoy_agents_web::AppState::new(
         app,
         oauth_client,
-        config.server.mcp_endpoint,
+        config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
     );
 
-    galoy_agents_web::server::run(
-        galoy_agents_web::server::ServerConfig {
-            host: config.server.host,
-            port: config.server.port,
-            secure_cookies: config.server.secure_cookies,
-        },
-        &pool,
-        app_state,
-    )
-    .await
+    let server_config = galoy_agents_web::server::ServerConfig {
+        host: config.server.host.clone(),
+        port: config.server.port,
+        secure_cookies: config.server.secure_cookies,
+    };
+
+    let mut router = galoy_agents_web::server::build_app(&server_config, &pool, app_state);
+
+    if config.style_agent.enabled {
+        let style_agent_router = init_style_agent(&config.style_agent)?;
+        router = router.nest("/style-agent", style_agent_router);
+    }
+
+    let addr: std::net::SocketAddr =
+        format!("{}:{}", config.server.host, config.server.port).parse()?;
+    tracing::info!("Starting server on {addr}");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, router).await?;
+
+    Ok(())
+}
+
+/// Initialise the style-agent search engine and return its axum router.
+fn init_style_agent(config: &config::StyleAgentConfig) -> anyhow::Result<axum::Router> {
+    use std::path::Path;
+    use style_agent_core::embedder::Embedder;
+    use style_agent_core::search::SearchEngine;
+    use style_agent_core::store::VectorStore;
+
+    tracing::info!(db_path = %config.db_path, "Initialising style-agent");
+
+    let store = VectorStore::new(Path::new(&config.db_path))?;
+    store.ensure_collection()?;
+    store.ensure_anti_pattern_tables()?;
+
+    let embedder = Embedder::new()?;
+    let search_engine = Arc::new(SearchEngine::new(embedder, store));
+
+    let router = style_agent_server::router(search_engine);
+
+    tracing::info!("Style-agent mounted at /style-agent/mcp");
+    Ok(router)
 }
