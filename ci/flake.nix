@@ -28,6 +28,7 @@
           onnxruntime
           joblib
           numpy
+          einops
         ]);
     in {
       formatter = pkgs.alejandra;

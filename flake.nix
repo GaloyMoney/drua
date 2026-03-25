@@ -96,6 +96,7 @@
             onnxruntime
             joblib
             numpy
+            einops
           ]);
 
         podmanPkgs = import ./nix/podman-runner.nix {
