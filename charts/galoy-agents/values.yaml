@@ -26,7 +26,7 @@ galoyAgents:
     githubRedirectUri: ""
     annotations:
   styleAgent:
-    indexHash: ""
+    indexHash: "825ef7dd2d3b0ae5c61a97f4eb92d09e11c222d452e339d5614edc59c27bfd84"
     gcsBucket: galoy-agents-models
     initImage: google/cloud-sdk:slim
 postgresql:
