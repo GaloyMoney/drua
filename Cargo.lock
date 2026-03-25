@@ -1281,7 +1281,6 @@ dependencies = [
  "axum",
  "axum-extra",
  "galoy-agents-domain",
- "galoy-agents-mcp-gateway",
  "oauth2",
  "reqwest",
  "serde",
