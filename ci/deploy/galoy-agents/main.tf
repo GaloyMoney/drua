@@ -18,6 +18,7 @@ resource "helm_release" "galoy_agents" {
     })
   ]
 
+  create_namespace  = true
   dependency_update = true
   timeout           = 900 # 15 minutes
 }
