@@ -166,7 +166,6 @@ jobs:
   plan:
   - in_parallel:
     - get: repo
-      trigger: true
     - get: cala-repo
       trigger: true
     - get: lana-repo
