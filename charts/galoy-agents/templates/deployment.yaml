@@ -106,12 +106,6 @@ spec:
         - name: GITHUB_ALLOWED_TEAMS
           value: {{ .Values.galoyAgents.githubAllowedTeams | join "," | quote }}
         {{- end }}
-        {{- if .Values.galoyAgents.styleAgent.indexHash }}
-        - name: STYLE_AGENT_ENABLED
-          value: "true"
-        - name: STYLE_AGENT_DB_PATH
-          value: "/data/style-agent/style-agent.db"
-        {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:

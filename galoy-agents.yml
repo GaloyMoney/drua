@@ -6,6 +6,3 @@ server:
 oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
-style_agent:
-  enabled: false
-  db_path: "/data/style-agent/style-agent.db"

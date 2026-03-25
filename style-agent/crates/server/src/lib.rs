@@ -560,41 +560,6 @@ async fn stats_handler(
     }
 }
 
-/// Handler for `GET /health` — simple liveness check.
-async fn health_handler() -> &'static str {
-    "ok"
-}
-
-/// Build the style-agent axum [`Router`] with `/mcp`, `/stats`, and `/health` routes.
-///
-/// Use this to embed style-agent routes in an existing axum server via
-/// [`axum::Router::nest`]. For a standalone server, use [`run_server`].
-pub fn router(search_engine: Arc<SearchEngine>) -> axum::Router {
-    use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-    };
-
-    let config = StreamableHttpServerConfig {
-        stateful_mode: false,
-        json_response: true,
-        ..Default::default()
-    };
-
-    let stats_engine = Arc::clone(&search_engine);
-
-    let service = StreamableHttpService::new(
-        move || Ok(StyleAgentServer::new(Arc::clone(&search_engine))),
-        LocalSessionManager::default().into(),
-        config,
-    );
-
-    axum::Router::new()
-        .route("/health", axum::routing::get(health_handler))
-        .route("/stats", axum::routing::get(stats_handler))
-        .with_state(stats_engine)
-        .nest_service("/mcp", service)
-}
-
 /// Start the HTTP MCP server from a `CoreConfig` and block until shutdown.
 pub async fn run_server_with_config(
     config: &style_agent_core::CoreConfig,
@@ -614,13 +579,34 @@ pub async fn run_server_with_config(
 
 /// Start the HTTP MCP server and block until shutdown.
 pub async fn run_server(search_engine: Arc<SearchEngine>, bind_addr: &str) -> anyhow::Result<()> {
-    let app = router(search_engine);
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let config = StreamableHttpServerConfig {
+        stateful_mode: false,
+        json_response: true,
+        ..Default::default()
+    };
+
+    let stats_engine = Arc::clone(&search_engine);
+
+    let service = StreamableHttpService::new(
+        move || Ok(StyleAgentServer::new(Arc::clone(&search_engine))),
+        LocalSessionManager::default().into(),
+        config,
+    );
+
+    let router = axum::Router::new()
+        .route("/stats", axum::routing::get(stats_handler))
+        .with_state(stats_engine)
+        .nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let url = format!("http://{bind_addr}/mcp");
 
     tracing::info!(%url, "Style Agent MCP server listening");
     println!("Style Agent MCP server listening at {url}");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, router).await?;
     Ok(())
 }

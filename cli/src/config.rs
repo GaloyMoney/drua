@@ -13,8 +13,6 @@ pub struct Config {
     pub oauth: OAuthConfig,
     #[serde(default)]
     pub db: DbConfig,
-    #[serde(default)]
-    pub style_agent: StyleAgentConfig,
 }
 
 #[derive(Clone, Deserialize)]
@@ -77,19 +75,6 @@ pub struct DbConfig {
     pub pg_con: String,
 }
 
-#[derive(Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StyleAgentConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_style_agent_db_path")]
-    pub db_path: String,
-}
-
-fn default_style_agent_db_path() -> String {
-    "/data/style-agent/style-agent.db".to_string()
-}
-
 pub struct EnvSecrets {
     pub pg_con: String,
     pub github_client_id: String,
@@ -115,14 +100,6 @@ impl Config {
         config.oauth.github_client_secret = secrets.github_client_secret;
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
-        }
-
-        // Style-agent env overrides
-        if let Ok(val) = std::env::var("STYLE_AGENT_ENABLED") {
-            config.style_agent.enabled = val == "true" || val == "1";
-        }
-        if let Ok(val) = std::env::var("STYLE_AGENT_DB_PATH") {
-            config.style_agent.db_path = val;
         }
 
         Ok(config)
