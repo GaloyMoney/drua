@@ -124,7 +124,7 @@ jobs:
                 charts/galoy-agents/values.yaml \
                 "galoyAgents.image.digest" \
                 "$DIGEST"
-  - put: repo
+  - put: repo-chart-values
     params:
       repository: repo-updated
       rebase: true
@@ -132,14 +132,15 @@ jobs:
 - name: train-classifier
   serial: true
   plan:
-  - get: repo
+  - get: repo-labels
     trigger: true
   - task: train-and-export
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
       inputs:
-      - name: repo
+      - name: repo-labels
+        path: repo
       outputs:
       - name: model
       params:
@@ -234,7 +235,8 @@ jobs:
             set -euo pipefail
             cachix use $CACHIX_CACHE_NAME
 
-            HASH=$(ls index/*.tar.gz | sed 's|.*/||; s|\.tar\.gz$||')
+            INDEX_FILE=$(ls index/*.tar.gz)
+            HASH=$(basename "$INDEX_FILE" .tar.gz)
 
             cp -a repo/. repo-updated/
             cd repo-updated
@@ -243,7 +245,7 @@ jobs:
                 charts/galoy-agents/values.yaml \
                 "galoyAgents.styleAgent.indexHash" \
                 "$HASH"
-  - put: repo
+  - put: repo-chart-values
     params:
       repository: repo-updated
       rebase: true
@@ -255,19 +257,42 @@ resource_types:
     repository: frodenas/gcs-resource
 
 resources:
+#@ repo_source = {
+#@   "uri": data.values.git_uri,
+#@   "branch": data.values.git_branch,
+#@   "private_key": data.values.github_private_key,
+#@ }
+
 - name: repo
   type: git
   source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
     ignore_paths:
     - ci/pipeline.yml
     - ci/values.yml
     - ci/repipe
     - ci/fragments.lib.yml
-    fetch_tags: true
+    - charts/galoy-agents/values.yaml
+    - style-agent/labels/*
+  webhook_token: ((webhook.secret))
+
+- name: repo-labels
+  type: git
+  source:
     uri: #@ data.values.git_uri
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
-  webhook_token: ((webhook.secret))
+    paths:
+    - style-agent/labels/
+
+- name: repo-chart-values
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
 
 - name: cala-repo
   type: git
