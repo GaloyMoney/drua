@@ -9,6 +9,16 @@ galoyAgents:
       githubRedirectUri: "https://agents.galoy.io/auth/github/callback"
       githubAllowedTeams:
         - "GaloyMoney/galoy-devs"
+  ingress:
+    enabled: true
+    host: agents.galoy.io
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      - hosts:
+          - agents.galoy.io
+        secretName: galoy-agents-tls
   secrets:
     create: false
   resources:

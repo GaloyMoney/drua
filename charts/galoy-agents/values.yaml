@@ -10,6 +10,12 @@ galoyAgents:
       type: ClusterIP
       port: 5254
       annotations: {}
+  ingress:
+    enabled: false
+    host: ""
+    ingressClassName: ""
+    annotations: {}
+    tls: []
   labels: {}
   image:
     repository: us.gcr.io/galoyorg/galoy-agents
