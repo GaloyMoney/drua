@@ -1,5 +1,6 @@
 galoyAgents:
-  replicas: 1
+  image:
+    digest: "${image_digest}"
   secrets:
     create: false
   resources:
@@ -11,10 +12,6 @@ galoyAgents:
   tracing:
     serviceName: galoy-agents
     otelExporterOtlpEndpoint: "http://opentelemetry-collector.otel.svc.cluster.local:4317"
-  server:
-    service:
-      type: ClusterIP
-      port: 5254
 
 postgresql:
   enabled: false
