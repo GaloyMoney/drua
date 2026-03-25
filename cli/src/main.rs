@@ -72,8 +72,12 @@ async fn main() -> anyhow::Result<()> {
         secure_cookies: config.server.secure_cookies,
     };
 
-    let mcp_service =
-        galoy_agents_mcp_gateway::McpGateway::service(app_state.app.clone(), &config.style_agent)?;
+    let pg_logger = std::sync::Arc::new(galoy_agents_mcp_gateway::PgRequestLogger::new(&pool));
+    let mcp_service = galoy_agents_mcp_gateway::McpGateway::service_with_logger(
+        app_state.app.clone(),
+        &config.style_agent,
+        pg_logger,
+    )?;
 
     let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);
 

@@ -1,0 +1,37 @@
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Tool</th>
+        <th>Query</th>
+        <th>Results</th>
+        <th>Score</th>
+        <th>Latency</th>
+        <th>Label</th>
+        <th>Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.created_at }}</td>
+        <td>{{ row.tool_name }}</td>
+        <td class="query-text"><code>{{ row.query }}</code></td>
+        <td>{{ row.num_results }}</td>
+        <td>{{ row.top_score_fmt }}</td>
+        <td>{{ row.latency_ms }}ms</td>
+        <td>{{ row.label_filter.as_deref().unwrap_or("—") }}</td>
+        <td>
+          {% if row.has_error %}
+          <span class="error-text" title="{{ row.error.as_deref().unwrap_or("") }}">✗</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% if rows.is_empty() %}
+      <tr><td colspan="8">No requests logged yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</figure>

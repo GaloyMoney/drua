@@ -9,6 +9,7 @@ use style_agent_core::search::SearchEngine;
 use style_agent_core::store::SearchResult;
 
 use crate::config::StyleAgentConfig;
+use crate::request_logger::{RequestLogger, SqliteRequestLogger};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchCodeParams {
@@ -40,12 +41,29 @@ pub struct SearchCodeParams {
 }
 
 /// Facade for style-agent endpoints, to be held by the MCP gateway.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StyleAgentEndpoints {
     pub(crate) search_engine: Arc<SearchEngine>,
+    pub(crate) logger: Arc<dyn RequestLogger>,
+}
+
+impl std::fmt::Debug for StyleAgentEndpoints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StyleAgentEndpoints")
+            .field("search_engine", &self.search_engine)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StyleAgentEndpoints {
+    /// Create endpoints with a custom [`RequestLogger`] implementation.
+    pub fn with_logger(search_engine: Arc<SearchEngine>, logger: Arc<dyn RequestLogger>) -> Self {
+        Self {
+            search_engine,
+            logger,
+        }
+    }
+
     /// Execute a `search_code` query.
     pub async fn search_code(
         &self,
@@ -85,7 +103,7 @@ impl StyleAgentEndpoints {
                 let top_score = results.first().map(|r| r.score as f64);
 
                 fire_and_forget_log(
-                    &self.search_engine,
+                    &self.logger,
                     "search_code",
                     &params.query,
                     &filters,
@@ -106,7 +124,7 @@ impl StyleAgentEndpoints {
             }
             Err(e) => {
                 fire_and_forget_log(
-                    &self.search_engine,
+                    &self.logger,
                     "search_code",
                     &params.query,
                     &filters,
@@ -124,7 +142,7 @@ impl StyleAgentEndpoints {
     }
 }
 
-/// Initialise the style-agent endpoints from config.
+/// Initialise the style-agent endpoints from config (standalone SQLite logger).
 ///
 /// Returns `Ok(None)` when `db_path` is empty — style-agent is disabled and
 /// the server starts normally without it.  Returns `Ok(Some(...))` on success.
@@ -148,8 +166,45 @@ pub fn init_endpoints(config: &StyleAgentConfig) -> anyhow::Result<Option<StyleA
     let embedder = Embedder::new()?;
     let search_engine = Arc::new(SearchEngine::new(embedder, store));
 
+    let logger: Arc<dyn RequestLogger> =
+        Arc::new(SqliteRequestLogger::new(Arc::clone(&search_engine)));
+
     tracing::info!("Style-agent search engine ready");
-    Ok(Some(StyleAgentEndpoints { search_engine }))
+    Ok(Some(StyleAgentEndpoints {
+        search_engine,
+        logger,
+    }))
+}
+
+/// Initialise endpoints with an external logger.
+///
+/// Returns `Ok(None)` when `db_path` is empty (style-agent disabled).
+pub fn init_endpoints_with_logger(
+    config: &StyleAgentConfig,
+    logger: Arc<dyn RequestLogger>,
+) -> anyhow::Result<Option<StyleAgentEndpoints>> {
+    use style_agent_core::embedder::Embedder;
+    use style_agent_core::store::VectorStore;
+
+    if config.db_path.is_empty() {
+        tracing::info!("Style-agent disabled (db_path is empty)");
+        return Ok(None);
+    }
+
+    tracing::info!(db_path = %config.db_path, "Initialising style-agent (external logger)");
+
+    let store = VectorStore::new(std::path::Path::new(&config.db_path))?;
+    store.ensure_collection()?;
+    store.ensure_anti_pattern_tables()?;
+
+    let embedder = Embedder::new()?;
+    let search_engine = Arc::new(SearchEngine::new(embedder, store));
+
+    tracing::info!("Style-agent search engine ready");
+    Ok(Some(StyleAgentEndpoints {
+        search_engine,
+        logger,
+    }))
 }
 
 /// Generate an ISO 8601 UTC timestamp string.
@@ -186,10 +241,10 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-/// Fire-and-forget: spawn a blocking task to INSERT the log entry.
+/// Fire-and-forget: spawn an async task to INSERT the log entry.
 #[allow(clippy::too_many_arguments)]
 fn fire_and_forget_log(
-    engine: &Arc<SearchEngine>,
+    logger: &Arc<dyn RequestLogger>,
     tool: &str,
     query: &str,
     filters: &serde_json::Value,
@@ -198,7 +253,7 @@ fn fire_and_forget_log(
     latency_ms: i64,
     error: Option<&str>,
 ) {
-    let engine = Arc::clone(engine);
+    let logger = Arc::clone(logger);
     let entry = RequestLogEntry {
         ts: iso8601_now(),
         tool: tool.to_string(),
@@ -210,8 +265,8 @@ fn fire_and_forget_log(
         error: error.map(|s| s.to_string()),
     };
 
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = engine.log_request(&entry) {
+    tokio::spawn(async move {
+        if let Err(e) = logger.log_request(&entry).await {
             tracing::warn!(error = %e, "Failed to log request");
         }
     });

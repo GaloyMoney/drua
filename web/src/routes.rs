@@ -29,6 +29,8 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/agents", get(agent_list))
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}/revoke", post(revoke_agent))
+        .route("/style-agent", get(style_agent_dashboard))
+        .route("/style-agent/recent", get(style_agent_recent))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -171,4 +173,38 @@ async fn agent_list(State(state): State<AppState>, session: Session) -> Response
         agents: agents.iter().map(agent_to_view).collect(),
     }
     .into_response()
+}
+
+#[instrument(name = "web.style_agent_dashboard", skip_all)]
+async fn style_agent_dashboard(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let stats = match state.app.style_agent_logs().dashboard_stats().await {
+        Ok(stats) => stats,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load style-agent stats");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    StyleAgentTemplate { stats }.into_response()
+}
+
+#[instrument(name = "web.style_agent_recent", skip_all)]
+async fn style_agent_recent(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let rows = match state.app.style_agent_logs().recent_requests(50).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load recent requests");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    StyleAgentRecentTemplate { rows }.into_response()
 }

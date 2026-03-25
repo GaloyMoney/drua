@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}Style Agent — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .stat-card {
+    background: var(--pico-card-background-color);
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    padding: 1rem;
+    text-align: center;
+  }
+  .stat-card .stat-value {
+    font-size: 1.8rem;
+    font-weight: bold;
+    margin: 0.25rem 0;
+  }
+  .stat-card .stat-label {
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+  }
+  .query-text {
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .error-text {
+    color: var(--pico-del-color);
+    font-size: 0.85rem;
+  }
+  .score-low {
+    color: var(--pico-del-color);
+  }
+  .score-ok {
+    color: var(--pico-ins-color);
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<nav>
+  <ul><li><strong>Galoy Agents</strong></li></ul>
+  <ul>
+    <li><a href="/dashboard">Dashboard</a></li>
+    <li><a href="/auth/logout">Logout</a></li>
+  </ul>
+</nav>
+
+<h2>Style Agent Metrics</h2>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">Requests (24h)</div>
+    <div class="stat-value">{{ stats.total_requests_24h }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Requests (7d)</div>
+    <div class="stat-value">{{ stats.total_requests_7d }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Avg Latency</div>
+    <div class="stat-value">{{ stats.avg_latency_ms_fmt }}ms</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Error Rate (7d)</div>
+    <div class="stat-value">{{ stats.error_rate_fmt }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Low Score Rate (7d)</div>
+    <div class="stat-value">{{ stats.low_score_rate_fmt }}</div>
+  </div>
+</div>
+
+{% if !stats.top_queries.is_empty() %}
+<section>
+  <h3>Top Queries (7d)</h3>
+  <figure>
+    <table>
+      <thead>
+        <tr>
+          <th>Query</th>
+          <th>Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for q in stats.top_queries %}
+        <tr>
+          <td class="query-text"><code>{{ q.query }}</code></td>
+          <td>{{ q.count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </figure>
+</section>
+{% endif %}
+
+<section>
+  <h3>Recent Requests</h3>
+  <div
+    hx-get="/style-agent/recent"
+    hx-trigger="load"
+    hx-swap="innerHTML"
+    id="recent-requests"
+  >
+    <p aria-busy="true">Loading recent requests…</p>
+  </div>
+</section>
+{% endblock %}

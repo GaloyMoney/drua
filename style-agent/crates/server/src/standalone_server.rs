@@ -10,18 +10,26 @@ use style_agent_core::search::SearchEngine;
 
 use crate::config::StyleAgentConfig;
 use crate::endpoints::{SearchCodeParams, StyleAgentEndpoints};
+use crate::request_logger::SqliteRequestLogger;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StyleAgentServer {
     endpoints: StyleAgentEndpoints,
     tool_router: ToolRouter<Self>,
 }
 
+impl std::fmt::Debug for StyleAgentServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StyleAgentServer").finish_non_exhaustive()
+    }
+}
+
 #[tool_router]
 impl StyleAgentServer {
     pub fn new(search_engine: Arc<SearchEngine>) -> Self {
+        let logger = Arc::new(SqliteRequestLogger::new(Arc::clone(&search_engine)));
         Self {
-            endpoints: StyleAgentEndpoints { search_engine },
+            endpoints: StyleAgentEndpoints::with_logger(search_engine, logger),
             tool_router: Self::tool_router(),
         }
     }
