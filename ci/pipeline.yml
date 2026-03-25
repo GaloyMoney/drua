@@ -259,7 +259,11 @@ resources:
 - name: repo
   type: git
   source:
-    ignore_paths: ["ci/*[^md]"]
+    ignore_paths:
+    - ci/pipeline.yml
+    - ci/values.yml
+    - ci/repipe
+    - ci/fragments.lib.yml
     fetch_tags: true
     uri: #@ data.values.git_uri
     branch: #@ data.values.git_branch
