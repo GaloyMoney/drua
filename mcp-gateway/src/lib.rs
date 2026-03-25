@@ -34,16 +34,7 @@ impl McpGateway {
         app: App,
         style_agent_config: &StyleAgentConfig,
     ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
-        let style_agent = match style_agent_server::init_endpoints(style_agent_config) {
-            Ok(endpoints) => Some(endpoints),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Style-agent initialisation failed — search_code will be unavailable"
-                );
-                None
-            }
-        };
+        let style_agent = style_agent_server::init_endpoints(style_agent_config)?;
 
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
@@ -100,7 +91,7 @@ impl McpGateway {
             Some(agent) => agent.search_code(params).await,
             None => Err(ErrorData::new(
                 ErrorCode::INTERNAL_ERROR,
-                "Style-agent is not available on this server",
+                "Style-agent is disabled (no db_path configured)",
                 None::<serde_json::Value>,
             )),
         }

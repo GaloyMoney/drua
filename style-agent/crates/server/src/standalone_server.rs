@@ -117,7 +117,9 @@ pub fn router(search_engine: Arc<SearchEngine>) -> axum::Router {
 
 /// Initialise the style-agent search engine and return its axum router.
 pub fn init_router(config: &StyleAgentConfig) -> anyhow::Result<axum::Router> {
-    let endpoints = crate::endpoints::init_endpoints(config)?;
+    let endpoints = crate::endpoints::init_endpoints(config)?.ok_or_else(|| {
+        anyhow::anyhow!("db_path must be set to run the standalone style-agent server")
+    })?;
     Ok(router(Arc::clone(&endpoints.search_engine)))
 }
 

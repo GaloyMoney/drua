@@ -125,9 +125,19 @@ impl StyleAgentEndpoints {
 }
 
 /// Initialise the style-agent endpoints from config.
-pub fn init_endpoints(config: &StyleAgentConfig) -> anyhow::Result<StyleAgentEndpoints> {
+///
+/// Returns `Ok(None)` when `db_path` is empty — style-agent is disabled and
+/// the server starts normally without it.  Returns `Ok(Some(...))` on success.
+/// Returns `Err(...)` when `db_path` is set but initialisation fails — the
+/// caller should treat this as a hard error.
+pub fn init_endpoints(config: &StyleAgentConfig) -> anyhow::Result<Option<StyleAgentEndpoints>> {
     use style_agent_core::embedder::Embedder;
     use style_agent_core::store::VectorStore;
+
+    if config.db_path.is_empty() {
+        tracing::info!("Style-agent disabled (db_path is empty)");
+        return Ok(None);
+    }
 
     tracing::info!(db_path = %config.db_path, "Initialising style-agent");
 
@@ -139,7 +149,7 @@ pub fn init_endpoints(config: &StyleAgentConfig) -> anyhow::Result<StyleAgentEnd
     let search_engine = Arc::new(SearchEngine::new(embedder, store));
 
     tracing::info!("Style-agent search engine ready");
-    Ok(StyleAgentEndpoints { search_engine })
+    Ok(Some(StyleAgentEndpoints { search_engine }))
 }
 
 /// Generate an ISO 8601 UTC timestamp string.
