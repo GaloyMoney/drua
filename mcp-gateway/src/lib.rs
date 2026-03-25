@@ -17,12 +17,12 @@ pub use style_agent_server::StyleAgentConfig;
 pub struct McpGateway {
     #[allow(dead_code)]
     app: App,
-    style_agent: StyleAgentEndpoints,
+    style_agent: Option<StyleAgentEndpoints>,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpGateway {
-    fn new(app: App, style_agent: StyleAgentEndpoints) -> Self {
+    fn new(app: App, style_agent: Option<StyleAgentEndpoints>) -> Self {
         Self {
             app,
             style_agent,
@@ -34,7 +34,16 @@ impl McpGateway {
         app: App,
         style_agent_config: &StyleAgentConfig,
     ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
-        let style_agent = style_agent_server::init_endpoints(style_agent_config)?;
+        let style_agent = match style_agent_server::init_endpoints(style_agent_config) {
+            Ok(endpoints) => Some(endpoints),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Style-agent initialisation failed — search_code will be unavailable"
+                );
+                None
+            }
+        };
 
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
@@ -87,7 +96,14 @@ impl McpGateway {
         Parameters(params): Parameters<SearchCodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
-        self.style_agent.search_code(params).await
+        match self.style_agent.as_ref() {
+            Some(agent) => agent.search_code(params).await,
+            None => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Style-agent is not available on this server",
+                None::<serde_json::Value>,
+            )),
+        }
     }
 }
 
