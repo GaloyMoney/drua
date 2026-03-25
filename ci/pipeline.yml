@@ -142,35 +142,35 @@ jobs:
       passed: [build-edge-image]
       params:
         skip_download: true
-  - task: deploy
-    tags: [galoy-agents]
+  - task: prepare-deployment
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
       inputs:
       - name: repo
       - name: edge-image
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
-        GCP_CREDS_JSON: #@ data.values.deploy_gcp_creds_json
-        GKE_CLUSTER: #@ data.values.deploy_gke_cluster
-        GKE_ZONE: #@ data.values.deploy_gke_zone
-        GKE_PROJECT: #@ data.values.deploy_gke_project
-        DEPLOY_NAMESPACE: #@ data.values.deploy_namespace
+      outputs:
+      - name: deployment
       run:
         path: sh
         args:
           - -exc
           - |
             set -euo pipefail
-            cachix use $CACHIX_CACHE_NAME
 
-            export IMAGE_DIGEST=$(cat edge-image/digest)
+            DIGEST=$(cat edge-image/digest)
 
-            cd repo
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#deploy-galoy-agents -- "$(pwd)"
+            cp -r repo/ci/deploy/galoy-agents deployment/tf
+            cp -r repo/charts/galoy-agents deployment/tf/chart
+
+            cat <<EOF > deployment/tf/terraform.tfvars
+            image_digest = "${DIGEST}"
+            EOF
+  - put: tf-galoy-agents-prod
+    tags: [galoy-agents]
+    params:
+      vars_files: [deployment/tf/terraform.tfvars]
+      terraform_source: deployment/tf
 
 - name: train-classifier
   serial: true
@@ -304,6 +304,14 @@ jobs:
       rebase: true
 
 resource_types:
+- name: terraform
+  type: registry-image
+  source:
+    repository: #@ data.values.gar_registry + "/terraform-resource"
+    tag: latest
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+
 - name: gcs-resource
   type: registry-image
   source:
@@ -382,6 +390,17 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/" + data.values.folder_registry_image
+
+- name: tf-galoy-agents-prod
+  type: terraform
+  source:
+    backend_type: gcs
+    backend_config:
+      bucket: #@ data.values.deploy_tf_state_bucket
+      prefix: galoy-agents/prod
+      credentials: #@ data.values.deploy_gcp_creds_json
+    env:
+      GOOGLE_CREDENTIALS: #@ data.values.deploy_gcp_creds_json
 
 - name: style-agent-index
   type: gcs-resource
