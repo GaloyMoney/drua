@@ -20,3 +20,9 @@ obix_git_uri: git@github.com:GaloyMoney/obix.git
 
 gcs_creds_json: ((galoy-agents-gcp-creds.creds_json))
 style_agent_gcs_bucket: galoy-agents-models
+
+deploy_gcp_creds_json: ((galoy-agents-gcp-creds.creds_json))
+deploy_gke_cluster: galoy-agents-cluster
+deploy_gke_zone: us-east1
+deploy_gke_project: galoyorg
+deploy_namespace: galoy-agents
