@@ -135,7 +135,6 @@ jobs:
   - get: repo
     trigger: true
   - task: train-and-export
-    tags: [galoy-agents]
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
