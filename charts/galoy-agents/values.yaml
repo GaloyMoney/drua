@@ -13,7 +13,7 @@ galoyAgents:
   labels: {}
   image:
     repository: us.gcr.io/galoyorg/galoy-agents
-    digest: "sha256:e1ac476f3180bb6b3f28ca865640a3c0886d6ef46cfdae700d3abfdddb5b85a6"
+    digest: "sha256:1b2a7b953cd44ad09a816aa95a508c7a5aa4b737d7e7b9073f88a304a2dd04dc"
     tag: edge
   replicas: 1
   annotations:
