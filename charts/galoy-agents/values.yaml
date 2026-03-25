@@ -28,6 +28,7 @@ galoyAgents:
   styleAgent:
     indexHash: "825ef7dd2d3b0ae5c61a97f4eb92d09e11c222d452e339d5614edc59c27bfd84"
     modelHash: "5049594d7ce4b8bd3c29c2aa9b7d64575b939e64db935f7922bacee466076696"
+    embedderHash: ""
     gcsBucket: galoy-agents-models
     gcsCreds: ""
     initImage: google/cloud-sdk:slim

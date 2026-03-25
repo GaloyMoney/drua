@@ -60,9 +60,10 @@
       packages.build-style-index = pkgs.writeShellScriptBin "build-style-index" ''
         set -euo pipefail
 
-        REPOS_DIR="''${1:?Usage: build-style-index <repos-dir> <output-dir> [model-dir]}"
-        OUTPUT_DIR="''${2:?Usage: build-style-index <repos-dir> <output-dir> [model-dir]}"
-        MODEL_DIR="''${3:-}"
+        REPOS_DIR="''${1:?Usage: build-style-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
+        OUTPUT_DIR="''${2:?Usage: build-style-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
+        EMBEDDER_DIR="''${3:?Usage: build-style-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
+        MODEL_DIR="''${4:-}"
 
         export STYLE_AGENT_CONFIG="$(pwd)/ci/config.style-agent.toml"
         export PATH="${pkgs.lib.makeBinPath [ style-agent ]}:$PATH"
@@ -85,6 +86,14 @@
         HASH=$(sha256sum ./data/style-agent.db | cut -d' ' -f1)
         tar -czf "$OUTPUT_DIR/$HASH.tar.gz" -C ./data style-agent.db
         echo "Index hash: $HASH"
+
+        # Package fastembed model cache for init container
+        if [ -d .fastembed_cache ]; then
+          mkdir -p "$EMBEDDER_DIR"
+          EMBED_HASH=$(find .fastembed_cache -type f -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1)
+          tar -czf "$EMBEDDER_DIR/$EMBED_HASH.tar.gz" .fastembed_cache
+          echo "Embedder hash: $EMBED_HASH"
+        fi
       '';
 
       packages.commit-hash = pkgs.writeShellScriptBin "commit-hash" ''

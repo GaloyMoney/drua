@@ -191,6 +191,7 @@ jobs:
       - name: style-agent-model
       outputs:
       - name: index
+      - name: embedder
       params:
         CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
         CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
@@ -211,10 +212,13 @@ jobs:
 
             cd repo
             cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#build-style-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../style-agent-model"
+              nix run ./ci#build-style-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../embedder" "$(pwd)/../style-agent-model"
   - put: style-agent-index
     params:
       file: index/*.tar.gz
+  - put: style-agent-embedder
+    params:
+      file: embedder/*.tar.gz
   - task: commit-index-hash
     config:
       platform: linux
@@ -222,6 +226,7 @@ jobs:
       inputs:
       - name: repo
       - name: index
+      - name: embedder
       outputs:
       - name: repo-updated
       params:
@@ -235,8 +240,8 @@ jobs:
             set -euo pipefail
             cachix use $CACHIX_CACHE_NAME
 
-            INDEX_FILE=$(ls index/*.tar.gz)
-            HASH=$(basename "$INDEX_FILE" .tar.gz)
+            INDEX_HASH=$(basename "$(ls index/*.tar.gz)" .tar.gz)
+            EMBEDDER_HASH=$(basename "$(ls embedder/*.tar.gz)" .tar.gz)
 
             cp -a repo/. repo-updated/
             cd repo-updated
@@ -244,7 +249,12 @@ jobs:
               nix run ./ci#commit-hash -- "$(pwd)" \
                 charts/galoy-agents/values.yaml \
                 "galoyAgents.styleAgent.indexHash" \
-                "$HASH"
+                "$INDEX_HASH"
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run ./ci#commit-hash -- "$(pwd)" \
+                charts/galoy-agents/values.yaml \
+                "galoyAgents.styleAgent.embedderHash" \
+                "$EMBEDDER_HASH"
   - put: repo-chart-values
     params:
       repository: repo-updated
@@ -343,3 +353,10 @@ resources:
     bucket: #@ data.values.style_agent_gcs_bucket
     json_key: #@ data.values.gcs_creds_json
     regexp: model/(.*).tar.gz
+
+- name: style-agent-embedder
+  type: gcs-resource
+  source:
+    bucket: #@ data.values.style_agent_gcs_bucket
+    json_key: #@ data.values.gcs_creds_json
+    regexp: embedder/(.*).tar.gz

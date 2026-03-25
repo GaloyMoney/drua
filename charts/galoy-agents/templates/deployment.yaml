@@ -74,6 +74,13 @@ spec:
               /tmp/style-agent-index.tar.gz
             mkdir -p /data
             tar -xzf /tmp/style-agent-index.tar.gz -C /data
+            {{- if .Values.galoyAgents.styleAgent.embedderHash }}
+            echo "Downloading embedder {{ .Values.galoyAgents.styleAgent.embedderHash }}..."
+            gsutil cp \
+              "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/embedder/{{ .Values.galoyAgents.styleAgent.embedderHash }}.tar.gz" \
+              /tmp/embedder.tar.gz
+            tar -xzf /tmp/embedder.tar.gz -C /data
+            {{- end }}
             echo "Style-agent data loaded"
         env:
         - name: GCS_CREDS
@@ -133,6 +140,8 @@ spec:
               apiVersion: v1
               fieldPath: spec.nodeName
         {{- if .Values.galoyAgents.styleAgent.indexHash }}
+        - name: FASTEMBED_CACHE_DIR
+          value: /data/style-agent/.fastembed_cache
         volumeMounts:
         - name: style-agent-data
           mountPath: /data/style-agent
