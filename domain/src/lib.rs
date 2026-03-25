@@ -4,6 +4,8 @@ pub mod primitives;
 pub mod style_agent_logs;
 pub mod user;
 
+use std::sync::Arc;
+
 use agent::Agents;
 use style_agent_logs::StyleAgentLogs;
 use user::Users;
@@ -12,7 +14,7 @@ use user::Users;
 pub struct App {
     users: Users,
     agents: Agents,
-    style_agent_logs: StyleAgentLogs,
+    style_agent_logs: Arc<StyleAgentLogs>,
 }
 
 impl App {
@@ -20,7 +22,7 @@ impl App {
         Self {
             users: Users::new(pool),
             agents: Agents::new(pool),
-            style_agent_logs: StyleAgentLogs::new(pool),
+            style_agent_logs: Arc::new(StyleAgentLogs::new(pool)),
         }
     }
 
@@ -32,7 +34,7 @@ impl App {
         &self.agents
     }
 
-    pub fn style_agent_logs(&self) -> &StyleAgentLogs {
+    pub fn style_agent_logs(&self) -> &Arc<StyleAgentLogs> {
         &self.style_agent_logs
     }
 }

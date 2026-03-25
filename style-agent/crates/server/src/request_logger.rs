@@ -1,7 +1,7 @@
-use std::sync::Arc;
-
 use style_agent_core::request_log::{RequestLogEntry, StatsResponse};
-use style_agent_core::search::SearchEngine;
+
+/// Boxed error type used by [`RequestLogger`] trait methods.
+pub type LoggerError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A row returned by `recent_requests`.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -22,63 +22,47 @@ pub struct RequestLogRow {
 
 /// Trait for logging style-agent requests and querying metrics.
 ///
-/// Implementations may write to SQLite (standalone) or Postgres (gateway).
+/// Implementations may write to Postgres (gateway) or silently discard (standalone).
 #[async_trait::async_trait]
 pub trait RequestLogger: Send + Sync + 'static {
     /// Record a completed request.
-    async fn log_request(&self, entry: &RequestLogEntry) -> anyhow::Result<()>;
+    async fn log_request(&self, entry: &RequestLogEntry) -> Result<(), LoggerError>;
 
     /// Return aggregated stats (counts, rates, top queries).
-    async fn query_stats(&self, low_score_threshold: f64) -> anyhow::Result<StatsResponse>;
+    async fn query_stats(&self, low_score_threshold: f64) -> Result<StatsResponse, LoggerError>;
 
     /// Return the most recent request log rows.
-    async fn recent_requests(&self, limit: i64) -> anyhow::Result<Vec<RequestLogRow>>;
+    async fn recent_requests(&self, limit: i64) -> Result<Vec<RequestLogRow>, LoggerError>;
 }
 
-/// [`RequestLogger`] backed by the style-agent SQLite database via [`SearchEngine`].
+/// No-op [`RequestLogger`] that silently discards all entries.
+///
+/// Used as the default when no external logger (e.g. Postgres) is configured.
 #[derive(Clone)]
-pub struct SqliteRequestLogger {
-    engine: Arc<SearchEngine>,
-}
-
-impl SqliteRequestLogger {
-    pub fn new(engine: Arc<SearchEngine>) -> Self {
-        Self { engine }
-    }
-}
+pub struct NoopRequestLogger;
 
 #[async_trait::async_trait]
-impl RequestLogger for SqliteRequestLogger {
-    async fn log_request(&self, entry: &RequestLogEntry) -> anyhow::Result<()> {
-        let engine = Arc::clone(&self.engine);
-        let entry = RequestLogEntry {
-            ts: entry.ts.clone(),
-            tool: entry.tool.clone(),
-            query: entry.query.clone(),
-            filters: entry.filters.clone(),
-            result_count: entry.result_count,
-            top_score: entry.top_score,
-            latency_ms: entry.latency_ms,
-            error: entry.error.clone(),
-        };
-        tokio::task::spawn_blocking(move || engine.log_request(&entry)).await??;
+impl RequestLogger for NoopRequestLogger {
+    async fn log_request(&self, _entry: &RequestLogEntry) -> Result<(), LoggerError> {
         Ok(())
     }
 
-    async fn query_stats(&self, low_score_threshold: f64) -> anyhow::Result<StatsResponse> {
-        let engine = Arc::clone(&self.engine);
-        tokio::task::spawn_blocking(move || engine.query_stats(low_score_threshold)).await?
+    async fn query_stats(&self, low_score_threshold: f64) -> Result<StatsResponse, LoggerError> {
+        Ok(StatsResponse {
+            total_requests_24h: 0,
+            total_requests_7d: 0,
+            total_requests_30d: 0,
+            empty_result_rate: 0.0,
+            low_score_rate: 0.0,
+            low_score_threshold,
+            error_rate: 0.0,
+            avg_latency_ms: 0.0,
+            top_queries: vec![],
+            top_labels: vec![],
+        })
     }
 
-    async fn recent_requests(&self, limit: i64) -> anyhow::Result<Vec<RequestLogRow>> {
-        let engine = Arc::clone(&self.engine);
-        tokio::task::spawn_blocking(move || {
-            // SQLite recent_requests is not implemented in the core store,
-            // so we return an empty vec for standalone mode.
-            let _ = limit;
-            let _ = engine;
-            Ok(vec![])
-        })
-        .await?
+    async fn recent_requests(&self, _limit: i64) -> Result<Vec<RequestLogRow>, LoggerError> {
+        Ok(vec![])
     }
 }

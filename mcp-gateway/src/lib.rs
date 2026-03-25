@@ -1,7 +1,3 @@
-mod pg_request_logger;
-
-use std::sync::Arc;
-
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
@@ -13,9 +9,8 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
 use galoy_agents_domain::auth::AuthContext;
 use galoy_agents_domain::App;
-use style_agent_server::{RequestLogger, SearchCodeParams, StyleAgentEndpoints};
+use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
 
-pub use pg_request_logger::PgRequestLogger;
 pub use style_agent_server::StyleAgentConfig;
 
 #[derive(Clone)]
@@ -35,21 +30,12 @@ impl McpGateway {
         }
     }
 
-    /// Build the MCP service using the default SQLite logger.
+    /// Build the MCP service, using `app.style_agent_logs()` as the request logger.
     pub fn service(
         app: App,
         style_agent_config: &StyleAgentConfig,
     ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
-        let style_agent = style_agent_server::init_endpoints(style_agent_config)?;
-        Ok(Self::build_service(app, style_agent))
-    }
-
-    /// Build the MCP service with a custom [`RequestLogger`].
-    pub fn service_with_logger(
-        app: App,
-        style_agent_config: &StyleAgentConfig,
-        logger: Arc<dyn RequestLogger>,
-    ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
+        let logger = app.style_agent_logs().clone();
         let style_agent =
             style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?;
         Ok(Self::build_service(app, style_agent))

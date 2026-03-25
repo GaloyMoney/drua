@@ -9,7 +9,7 @@ use style_agent_core::search::SearchEngine;
 use style_agent_core::store::SearchResult;
 
 use crate::config::StyleAgentConfig;
-use crate::request_logger::{RequestLogger, SqliteRequestLogger};
+use crate::request_logger::{NoopRequestLogger, RequestLogger};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchCodeParams {
@@ -101,6 +101,7 @@ impl StyleAgentEndpoints {
             Ok(results) => {
                 let result_count = results.len() as i64;
                 let top_score = results.first().map(|r| r.score as f64);
+                let results_json = build_results_json(&results);
 
                 fire_and_forget_log(
                     &self.logger,
@@ -111,6 +112,7 @@ impl StyleAgentEndpoints {
                     top_score,
                     latency_ms,
                     None,
+                    Some(&results_json),
                 );
 
                 if results.is_empty() {
@@ -132,6 +134,7 @@ impl StyleAgentEndpoints {
                     None,
                     latency_ms,
                     Some(&e.to_string()),
+                    None,
                 );
                 Err(rmcp::ErrorData::internal_error(
                     format!("Search failed: {e}"),
@@ -166,8 +169,7 @@ pub fn init_endpoints(config: &StyleAgentConfig) -> anyhow::Result<Option<StyleA
     let embedder = Embedder::new()?;
     let search_engine = Arc::new(SearchEngine::new(embedder, store));
 
-    let logger: Arc<dyn RequestLogger> =
-        Arc::new(SqliteRequestLogger::new(Arc::clone(&search_engine)));
+    let logger: Arc<dyn RequestLogger> = Arc::new(NoopRequestLogger);
 
     tracing::info!("Style-agent search engine ready");
     Ok(Some(StyleAgentEndpoints {
@@ -241,6 +243,23 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
+/// Build a compact JSON summary of returned search results for logging.
+fn build_results_json(results: &[SearchResult]) -> String {
+    let summaries: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "file": r.file_path,
+                "repo": r.repo,
+                "score": format!("{:.3}", r.score),
+                "labels": r.labels,
+                "lines": format!("{}-{}", r.line_start, r.line_end),
+            })
+        })
+        .collect();
+    serde_json::to_string(&summaries).unwrap_or_default()
+}
+
 /// Fire-and-forget: spawn an async task to INSERT the log entry.
 #[allow(clippy::too_many_arguments)]
 fn fire_and_forget_log(
@@ -252,6 +271,7 @@ fn fire_and_forget_log(
     top_score: Option<f64>,
     latency_ms: i64,
     error: Option<&str>,
+    results_json: Option<&str>,
 ) {
     let logger = Arc::clone(logger);
     let entry = RequestLogEntry {
@@ -263,6 +283,7 @@ fn fire_and_forget_log(
         top_score,
         latency_ms,
         error: error.map(|s| s.to_string()),
+        results_json: results_json.map(|s| s.to_string()),
     };
 
     tokio::spawn(async move {
