@@ -15,6 +15,7 @@ impl SearchEngine {
     }
 
     /// Embed the query text and search for similar code chunks.
+    /// // @@ drop support for layer and uses - also in the model.. I don't think it has much value
     #[allow(clippy::too_many_arguments)]
     pub async fn search(
         &self,

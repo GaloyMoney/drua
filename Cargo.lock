@@ -1226,12 +1226,11 @@ dependencies = [
  "axum",
  "clap",
  "galoy-agents-domain",
+ "galoy-agents-mcp-gateway",
  "galoy-agents-web",
  "serde",
  "serde_yaml",
  "sqlx",
- "style-agent-core",
- "style-agent-server",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1259,12 +1258,15 @@ dependencies = [
 name = "galoy-agents-mcp-gateway"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "axum",
  "galoy-agents-domain",
  "http",
  "rmcp",
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "style-agent-server",
  "tracing",
 ]
 
@@ -1290,6 +1292,7 @@ dependencies = [
  "time",
  "tokio",
  "tower-http",
+ "tower-service",
  "tower-sessions",
  "tracing",
  "uuid",

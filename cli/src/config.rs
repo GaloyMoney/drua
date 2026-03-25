@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use galoy_agents_mcp_gateway::StyleAgentConfig;
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -77,19 +78,6 @@ pub struct DbConfig {
     pub pg_con: String,
 }
 
-#[derive(Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StyleAgentConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_style_agent_db_path")]
-    pub db_path: String,
-}
-
-fn default_style_agent_db_path() -> String {
-    "/data/style-agent/style-agent.db".to_string()
-}
-
 pub struct EnvSecrets {
     pub pg_con: String,
     pub github_client_id: String,
@@ -118,9 +106,6 @@ impl Config {
         }
 
         // Style-agent env overrides
-        if let Ok(val) = std::env::var("STYLE_AGENT_ENABLED") {
-            config.style_agent.enabled = val == "true" || val == "1";
-        }
         if let Ok(val) = std::env::var("STYLE_AGENT_DB_PATH") {
             config.style_agent.db_path = val;
         }
