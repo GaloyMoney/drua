@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+data:
+  galoy-agents.yml: |-
+    server:
+      port: {{ .Values.galoyAgents.server.service.port }}
+      host: {{ .Values.galoyAgents.config.server.host | quote }}
+      secure_cookies: {{ .Values.galoyAgents.config.server.secureCookies }}
+      mcp_endpoint: {{ .Values.galoyAgents.config.server.mcpEndpoint | quote }}
+    oauth:
+      github_client_id: {{ .Values.galoyAgents.config.oauth.githubClientId | quote }}
+      github_redirect_uri: {{ .Values.galoyAgents.config.oauth.githubRedirectUri | quote }}
+    {{- if .Values.galoyAgents.config.oauth.githubAllowedTeams }}
+      github_allowed_teams:
+      {{- range .Values.galoyAgents.config.oauth.githubAllowedTeams }}
+        - {{ . | quote }}
+      {{- end }}
+    {{- end }}
+    style_agent:
+      db_path: {{ .Values.galoyAgents.config.styleAgent.dbPath | quote }}

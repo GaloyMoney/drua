@@ -29,6 +29,8 @@ spec:
       {{- with .Values.galoyAgents.labels }}
         {{ toYaml . | nindent 8 }}
       {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       initContainers:
       - name: wait-for-postgresql
@@ -100,14 +102,18 @@ spec:
         - name: server
           containerPort: {{ .Values.galoyAgents.server.service.port }}
           protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: "/config/galoy-agents.yml"
+          subPath: "galoy-agents.yml"
+          readOnly: true
+        {{- if .Values.galoyAgents.styleAgent.indexHash }}
+        - name: style-agent-data
+          mountPath: /data/style-agent
+        {{- end }}
         env:
-        - name: GALOY_AGENTS_PORT
-          value: {{ .Values.galoyAgents.server.service.port | quote }}
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
-              key: "pg-con"
+        - name: GALOY_AGENTS_CONFIG
+          value: "/config/galoy-agents.yml"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
         - name: PG_CON
@@ -115,29 +121,11 @@ spec:
             secretKeyRef:
               name: {{ template "galoyAgents.fullname" . }}
               key: "pg-con"
-        - name: GITHUB_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
-              key: "github-client-id"
         - name: GITHUB_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
               name: {{ template "galoyAgents.fullname" . }}
               key: "github-client-secret"
-        - name: GITHUB_REDIRECT_URI
-          valueFrom:
-            secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
-              key: "github-redirect-uri"
-        {{- if .Values.galoyAgents.githubAllowedTeams }}
-        - name: GITHUB_ALLOWED_TEAMS
-          value: {{ .Values.galoyAgents.githubAllowedTeams | join "," | quote }}
-        {{- end }}
-        {{- if .Values.galoyAgents.styleAgent.indexHash }}
-        - name: STYLE_AGENT_DB_PATH
-          value: "/data/style-agent/style-agent.db"
-        {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:
@@ -146,14 +134,14 @@ spec:
         {{- if .Values.galoyAgents.styleAgent.indexHash }}
         - name: FASTEMBED_CACHE_DIR
           value: /data/style-agent/.fastembed_cache
-        volumeMounts:
-        - name: style-agent-data
-          mountPath: /data/style-agent
         {{- end }}
         resources:
         {{- toYaml .Values.galoyAgents.resources | nindent 10 }}
-      {{- if .Values.galoyAgents.styleAgent.indexHash }}
       volumes:
+      - name: config
+        configMap:
+          name: {{ template "galoyAgents.fullname" . }}-config
+      {{- if .Values.galoyAgents.styleAgent.indexHash }}
       - name: style-agent-data
         emptyDir: {}
       {{- end }}

@@ -63,7 +63,7 @@ impl Default for ServerConfig {
 pub struct OAuthConfig {
     #[serde(default)]
     pub github_redirect_uri: String,
-    #[serde(skip)]
+    #[serde(default)]
     pub github_client_id: String,
     #[serde(skip)]
     pub github_client_secret: String,
@@ -80,7 +80,6 @@ pub struct DbConfig {
 
 pub struct EnvSecrets {
     pub pg_con: String,
-    pub github_client_id: String,
     pub github_client_secret: String,
     pub github_allowed_teams: Vec<String>,
 }
@@ -99,7 +98,6 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
 
         config.db.pg_con = secrets.pg_con;
-        config.oauth.github_client_id = secrets.github_client_id;
         config.oauth.github_client_secret = secrets.github_client_secret;
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
