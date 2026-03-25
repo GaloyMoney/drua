@@ -9,8 +9,12 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
 use galoy_agents_domain::auth::AuthContext;
 use galoy_agents_domain::App;
+use galoy_agents_memory::{
+    ListMemoriesParams, MemoryEndpoints, SearchMemoryParams, StoreMemoryParams,
+};
 use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
 
+pub use galoy_agents_memory::MemoryConfig;
 pub use style_agent_server::StyleAgentConfig;
 
 #[derive(Clone)]
@@ -18,36 +22,49 @@ pub struct McpGateway {
     #[allow(dead_code)]
     app: App,
     style_agent: Option<StyleAgentEndpoints>,
+    memory: MemoryEndpoints,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpGateway {
-    fn new(app: App, style_agent: Option<StyleAgentEndpoints>) -> Self {
+    fn new(app: App, style_agent: Option<StyleAgentEndpoints>, memory: MemoryEndpoints) -> Self {
         Self {
             app,
             style_agent,
+            memory,
             tool_router: Self::tool_router(),
         }
     }
 
     /// Build the MCP service, using `app.style_agent_logs()` as the request logger.
+    ///
+    /// Accepts an optional shared [`Embedder`] so the caller can reuse it for
+    /// other services (e.g. the memory crate).  When `None`, falls back to
+    /// `init_endpoints_with_logger` which creates its own embedder only if
+    /// style-agent is actually enabled.
     pub fn service(
         app: App,
         style_agent_config: &StyleAgentConfig,
+        embedder: Option<style_agent_core::embedder::Embedder>,
+        memory: MemoryEndpoints,
     ) -> anyhow::Result<(
         StreamableHttpService<Self, LocalSessionManager>,
         Option<StyleAgentEndpoints>,
     )> {
         let logger = app.style_agent_logs().clone();
-        let style_agent =
-            style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?;
-        let svc = Self::build_service(app, style_agent.clone());
+        let style_agent = if let Some(embedder) = embedder {
+            style_agent_server::init_endpoints_with_embedder(style_agent_config, embedder, logger)?
+        } else {
+            style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?
+        };
+        let svc = Self::build_service(app, style_agent.clone(), memory);
         Ok((svc, style_agent))
     }
 
     fn build_service(
         app: App,
         style_agent: Option<StyleAgentEndpoints>,
+        memory: MemoryEndpoints,
     ) -> StreamableHttpService<Self, LocalSessionManager> {
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
@@ -55,7 +72,13 @@ impl McpGateway {
             ..Default::default()
         };
         StreamableHttpService::new(
-            move || Ok(McpGateway::new(app.clone(), style_agent.clone())),
+            move || {
+                Ok(McpGateway::new(
+                    app.clone(),
+                    style_agent.clone(),
+                    memory.clone(),
+                ))
+            },
             LocalSessionManager::default().into(),
             config,
         )
@@ -108,6 +131,45 @@ impl McpGateway {
                 None::<serde_json::Value>,
             )),
         }
+    }
+
+    /// Store a research finding, decision, or piece of knowledge for future agents.
+    #[tool(
+        description = "Store a research finding, decision, or piece of knowledge for future agents. Always store important findings before completing a task."
+    )]
+    async fn store_memory(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<StoreMemoryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.memory.store_memory(params).await
+    }
+
+    /// Search stored memories and research reports.
+    #[tool(
+        description = "Search stored memories and research reports. Always search before starting research — someone may have already investigated your topic."
+    )]
+    async fn search_memory(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<SearchMemoryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.memory.search_memory(params).await
+    }
+
+    /// List stored memories and research reports.
+    #[tool(
+        description = "List stored memories and research reports, optionally filtered by project or type."
+    )]
+    async fn list_memories(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<ListMemoriesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.memory.list_memories(params).await
     }
 }
 

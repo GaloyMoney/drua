@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use galoy_agents_mcp_gateway::StyleAgentConfig;
+use galoy_agents_mcp_gateway::{MemoryConfig, StyleAgentConfig};
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -16,6 +16,8 @@ pub struct Config {
     pub db: DbConfig,
     #[serde(default)]
     pub style_agent: StyleAgentConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Clone, Deserialize)]
@@ -106,6 +108,11 @@ impl Config {
         // Style-agent env overrides
         if let Ok(val) = std::env::var("STYLE_AGENT_DB_PATH") {
             config.style_agent.db_path = val;
+        }
+
+        // Memory env overrides
+        if let Ok(val) = std::env::var("MEMORY_DB_PATH") {
+            config.memory.db_path = val;
         }
 
         Ok(config)

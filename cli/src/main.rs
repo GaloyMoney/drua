@@ -1,5 +1,7 @@
 mod config;
 
+use std::sync::Arc;
+
 use clap::Parser;
 
 use config::{Config, EnvSecrets};
@@ -65,8 +67,32 @@ async fn main() -> anyhow::Result<()> {
         secure_cookies: config.server.secure_cookies,
     };
 
-    let (mcp_service, style_agent_endpoints) =
-        galoy_agents_mcp_gateway::McpGateway::service(app.clone(), &config.style_agent)?;
+    // Create shared embedder only if at least one service needs it.
+    let needs_embedder =
+        !config.style_agent.db_path.is_empty() || !config.memory.db_path.is_empty();
+    let embedder = if needs_embedder {
+        Some(style_agent_core::embedder::Embedder::new()?)
+    } else {
+        None
+    };
+
+    // Init memory service with shared embedder (disabled when db_path is empty).
+    let memory_endpoints = if config.memory.db_path.is_empty() {
+        tracing::info!("Memory service disabled (db_path is empty)");
+        galoy_agents_memory::MemoryEndpoints::disabled()
+    } else {
+        let emb = embedder.clone().expect("embedder needed for memory");
+        let svc = galoy_agents_memory::MemoryService::new(&config.memory, Arc::new(emb))?;
+        galoy_agents_memory::MemoryEndpoints::new(svc)
+    };
+
+    // Build MCP service; style-agent uses app.style_agent_logs() logger.
+    let (mcp_service, style_agent_endpoints) = galoy_agents_mcp_gateway::McpGateway::service(
+        app.clone(),
+        &config.style_agent,
+        embedder,
+        memory_endpoints,
+    )?;
 
     let app_state = galoy_agents_web::AppState::new(
         app,

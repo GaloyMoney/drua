@@ -9,3 +9,6 @@ oauth:
   github_allowed_teams: []
 style_agent:
   db_path: "./data/style-agent.db"
+memory:
+  db_path: "./data/memory.db"
+  decay_half_life_days: 14.0

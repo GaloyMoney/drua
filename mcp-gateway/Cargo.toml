@@ -7,6 +7,8 @@ edition.workspace = true
 
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
+galoy-agents-memory = { workspace = true }
+style-agent-core = { workspace = true }
 style-agent-server = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }

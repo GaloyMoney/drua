@@ -3,6 +3,7 @@ members = [
   "cli",
   "domain",
   "mcp-gateway",
+  "memory",
   "web",
   "style-agent/crates/core",
   "style-agent/crates/server",
@@ -18,9 +19,10 @@ version = "0.1.0"
 name = "galoy-agents"
 
 [workspace.dependencies]
-# Internal style-agent crates
+# Internal crates
 style-agent-core = { path = "style-agent/crates/core" }
 style-agent-server = { path = "style-agent/crates/server" }
+galoy-agents-memory = { path = "memory" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "macros"] }
@@ -51,6 +53,9 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "macos-system-configuration"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
 
 # IDs
 uuid = { version = "1", features = ["v4"] }

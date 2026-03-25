@@ -1227,10 +1227,13 @@ dependencies = [
  "clap",
  "galoy-agents-domain",
  "galoy-agents-mcp-gateway",
+ "galoy-agents-memory",
  "galoy-agents-web",
  "serde",
  "serde_yaml",
  "sqlx",
+ "style-agent-core",
+ "style-agent-server",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1264,13 +1267,35 @@ dependencies = [
  "anyhow",
  "axum",
  "galoy-agents-domain",
+ "galoy-agents-memory",
  "http",
  "rmcp",
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "style-agent-core",
  "style-agent-server",
  "tracing",
+]
+
+[[package]]
+name = "galoy-agents-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rmcp",
+ "rusqlite",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "sqlite-vec",
+ "style-agent-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]

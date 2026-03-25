@@ -20,6 +20,7 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// In-process embedding via fastembed ONNX (nomic-embed-text-v1.5 quantized).
+#[derive(Clone)]
 pub struct Embedder {
     model: Arc<Mutex<TextEmbedding>>,
 }

@@ -1,0 +1,20 @@
+[package]
+name = "galoy-agents-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+style-agent-core = { workspace = true }
+rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
+zerocopy = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }

@@ -9,8 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
+galoy-agents-memory = { workspace = true }
 galoy-agents-mcp-gateway = { path = "../mcp-gateway" }
 galoy-agents-web = { path = "../web" }
+style-agent-core = { workspace = true }
+style-agent-server = { workspace = true }
 anyhow = "1"
 axum = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }

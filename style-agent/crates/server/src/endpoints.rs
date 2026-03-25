@@ -185,6 +185,26 @@ fn init_endpoints_inner(
     logger: Arc<dyn RequestLogger>,
 ) -> anyhow::Result<Option<StyleAgentEndpoints>> {
     use style_agent_core::embedder::Embedder;
+
+    // Check before loading the model — avoids loading when disabled.
+    if config.db_path.is_empty() {
+        tracing::info!("Style-agent disabled (db_path is empty)");
+        return Ok(None);
+    }
+
+    let embedder = Embedder::new()?;
+    init_endpoints_with_embedder(config, embedder, logger)
+}
+
+/// Initialise the style-agent endpoints with a shared embedder and external logger.
+///
+/// Returns `Ok(None)` when `db_path` is empty — style-agent is disabled.
+/// Returns `Ok(Some(...))` on success.
+pub fn init_endpoints_with_embedder(
+    config: &StyleAgentConfig,
+    embedder: style_agent_core::embedder::Embedder,
+    logger: Arc<dyn RequestLogger>,
+) -> anyhow::Result<Option<StyleAgentEndpoints>> {
     use style_agent_core::store::VectorStore;
 
     if config.db_path.is_empty() {
@@ -207,7 +227,6 @@ fn init_endpoints_inner(
     store.ensure_collection()?;
     store.ensure_anti_pattern_tables()?;
 
-    let embedder = Embedder::new()?;
     let search_engine = Arc::new(SearchEngine::new(embedder, store));
 
     tracing::info!("Style-agent search engine ready");
