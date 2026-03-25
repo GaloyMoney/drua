@@ -17,4 +17,7 @@ galoyAgents:
     otelExporterOtlpEndpoint: "http://opentelemetry-collector.otel.svc.cluster.local:4317"
 
 postgresql:
-  enabled: false
+  auth:
+    existingSecret: galoy-agents
+    secretKeys:
+      userPasswordKey: "pg-user-pw"

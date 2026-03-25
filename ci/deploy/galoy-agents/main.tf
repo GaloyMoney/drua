@@ -1,10 +1,37 @@
 variable "image_digest" {}
+variable "github_client_secret" {}
 
 locals {
   cluster_name     = "galoy-agents-cluster"
   cluster_location = "us-east1-b"
   gcp_project      = "galoy-agents"
   namespace        = "galoy-agents"
+}
+
+resource "random_password" "postgresql" {
+  length  = 20
+  special = false
+}
+
+resource "kubernetes_namespace" "galoy_agents" {
+  metadata {
+    name = local.namespace
+  }
+}
+
+resource "kubernetes_secret" "galoy_agents" {
+  metadata {
+    name      = "galoy-agents"
+    namespace = local.namespace
+  }
+
+  data = {
+    "pg-user-pw"           = random_password.postgresql.result
+    "pg-con"               = "postgres://galoy-agents:${random_password.postgresql.result}@galoy-agents-postgresql:5432/galoy-agents"
+    "github-client-secret" = var.github_client_secret
+  }
+
+  depends_on = [kubernetes_namespace.galoy_agents]
 }
 
 resource "helm_release" "galoy_agents" {
@@ -18,9 +45,10 @@ resource "helm_release" "galoy_agents" {
     })
   ]
 
-  create_namespace  = true
   dependency_update = true
   timeout           = 900 # 15 minutes
+
+  depends_on = [kubernetes_secret.galoy_agents]
 }
 
 data "google_container_cluster" "primary" {

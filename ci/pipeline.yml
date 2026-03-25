@@ -151,6 +151,8 @@ jobs:
       - name: edge-image
       outputs:
       - name: deployment
+      params:
+        GITHUB_CLIENT_SECRET: #@ data.values.deploy_github_client_secret
       run:
         path: sh
         args:
@@ -165,6 +167,7 @@ jobs:
 
             cat <<EOF > deployment/tf/terraform.tfvars
             image_digest = "${DIGEST}"
+            github_client_secret = "${GITHUB_CLIENT_SECRET}"
             EOF
   - put: tf-galoy-agents-prod
     tags: [galoy-agents]
