@@ -169,6 +169,7 @@ jobs:
   - put: tf-galoy-agents-prod
     tags: [galoy-agents]
     params:
+      env_name: prod
       vars_files: [deployment/tf/terraform.tfvars]
       terraform_source: deployment/tf
 
