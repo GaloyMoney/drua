@@ -10,6 +10,8 @@ pub struct RequestLogEntry {
     pub top_score: Option<f64>,
     pub latency_ms: i64,
     pub error: Option<String>,
+    /// JSON-serialised summary of the returned results (file paths, scores, labels).
+    pub results_json: Option<String>,
 }
 
 /// Aggregated stats returned by `GET /stats`.

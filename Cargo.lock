@@ -1240,6 +1240,8 @@ dependencies = [
 name = "galoy-agents-domain"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "derive_builder",
@@ -1249,6 +1251,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "style-agent-server",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -1259,17 +1262,13 @@ name = "galoy-agents-mcp-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
- "chrono",
  "galoy-agents-domain",
  "http",
  "rmcp",
  "schemars 0.8.22",
  "serde",
  "serde_json",
- "sqlx",
- "style-agent-core",
  "style-agent-server",
  "tracing",
 ]

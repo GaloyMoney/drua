@@ -10,6 +10,7 @@ CREATE TABLE style_agent_request_log (
     layer_filter TEXT,
     repo_filter TEXT,
     error TEXT,
+    results JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
