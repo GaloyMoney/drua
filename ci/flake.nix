@@ -96,6 +96,60 @@
         fi
       '';
 
+      packages.deploy-galoy-agents = pkgs.writeShellScriptBin "deploy-galoy-agents" ''
+        set -euo pipefail
+
+        REPO_DIR="''${1:?Usage: deploy-galoy-agents <repo-dir>}"
+
+        export PATH="${pkgs.lib.makeBinPath [
+          pkgs.google-cloud-sdk
+          pkgs.kubernetes-helm
+          pkgs.kubectl
+          pkgs.coreutils
+          pkgs.yq-go
+        ]}:$PATH"
+
+        : "''${GCP_CREDS_JSON:?GCP_CREDS_JSON must be set}"
+        : "''${GKE_CLUSTER:?GKE_CLUSTER must be set}"
+        : "''${GKE_ZONE:?GKE_ZONE must be set}"
+        : "''${GKE_PROJECT:?GKE_PROJECT must be set}"
+        : "''${DEPLOY_NAMESPACE:?DEPLOY_NAMESPACE must be set}"
+        : "''${IMAGE_DIGEST:?IMAGE_DIGEST must be set}"
+
+        echo "=== Authenticating to GKE ==="
+        echo "$GCP_CREDS_JSON" > /tmp/gcp-key.json
+        trap 'rm -f /tmp/gcp-key.json' EXIT
+        gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+        gcloud container clusters get-credentials "$GKE_CLUSTER" \
+          --region "$GKE_ZONE" \
+          --project "$GKE_PROJECT"
+
+        echo "=== Deploying galoy-agents ==="
+        echo "Image digest: $IMAGE_DIGEST"
+        echo "Namespace: $DEPLOY_NAMESPACE"
+
+        cd "$REPO_DIR"
+
+        helm dependency build charts/galoy-agents
+
+        helm upgrade --install galoy-agents charts/galoy-agents \
+          --namespace "$DEPLOY_NAMESPACE" \
+          --create-namespace \
+          --values charts/galoy-agents/values.yaml \
+          --values ci/prod-values.yml \
+          --set "galoyAgents.image.digest=$IMAGE_DIGEST" \
+          --set "galoyAgents.image.tag=" \
+          --timeout 600s \
+          --wait
+
+        echo "=== Waiting for rollout ==="
+        kubectl rollout status deployment/galoy-agents \
+          --namespace "$DEPLOY_NAMESPACE" \
+          --timeout=300s
+
+        echo "=== Deploy complete ==="
+      '';
+
       packages.commit-hash = pkgs.writeShellScriptBin "commit-hash" ''
         set -euo pipefail
 

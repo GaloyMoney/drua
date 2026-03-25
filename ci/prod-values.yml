@@ -1,0 +1,20 @@
+galoyAgents:
+  replicas: 1
+  secrets:
+    create: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  tracing:
+    serviceName: galoy-agents
+    otelExporterOtlpEndpoint: "http://opentelemetry-collector.otel.svc.cluster.local:4317"
+  server:
+    service:
+      type: ClusterIP
+      port: 5254
+
+postgresql:
+  enabled: false

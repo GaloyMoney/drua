@@ -9,6 +9,7 @@ groups:
   - check-code
   - test-bats
   - build-edge-image
+  - deploy-to-prod
   - train-classifier
   - build-style-index
 
@@ -128,6 +129,48 @@ jobs:
     params:
       repository: repo-updated
       rebase: true
+
+- name: deploy-to-prod
+  serial: true
+  plan:
+  - in_parallel:
+    - get: repo
+      trigger: true
+      passed: [build-edge-image]
+    - get: edge-image
+      trigger: true
+      passed: [build-edge-image]
+      params:
+        skip_download: true
+  - task: deploy
+    tags: [galoy-agents]
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      - name: edge-image
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+        GCP_CREDS_JSON: #@ data.values.deploy_gcp_creds_json
+        GKE_CLUSTER: #@ data.values.deploy_gke_cluster
+        GKE_ZONE: #@ data.values.deploy_gke_zone
+        GKE_PROJECT: #@ data.values.deploy_gke_project
+        DEPLOY_NAMESPACE: #@ data.values.deploy_namespace
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cachix use $CACHIX_CACHE_NAME
+
+            export IMAGE_DIGEST=$(cat edge-image/digest)
+
+            cd repo
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run ./ci#deploy-galoy-agents -- "$(pwd)"
 
 - name: train-classifier
   serial: true
