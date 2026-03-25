@@ -97,6 +97,8 @@
             joblib
             numpy
             einops
+            datasets
+            accelerate
           ]);
 
         podmanPkgs = import ./nix/podman-runner.nix {

@@ -29,6 +29,8 @@
           joblib
           numpy
           einops
+          datasets
+          accelerate
         ]);
     in {
       formatter = pkgs.alejandra;
