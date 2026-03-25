@@ -31,6 +31,7 @@
           einops
           datasets
           accelerate
+          onnxscript
         ]);
     in {
       formatter = pkgs.alejandra;

@@ -99,6 +99,7 @@
             einops
             datasets
             accelerate
+            onnxscript
           ]);
 
         podmanPkgs = import ./nix/podman-runner.nix {
