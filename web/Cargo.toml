@@ -7,7 +7,6 @@ edition.workspace = true
 
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
-galoy-agents-mcp-gateway = { path = "../mcp-gateway" }
 anyhow = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
