@@ -6,18 +6,18 @@ galoyAgents:
       secureCookies: true
     oauth:
       githubClientId: "Ov23livtQjMQ1fB0toPF"
-      githubRedirectUri: "https://agents.galoy.io/auth/github/callback"
+      githubRedirectUri: "https://dashboard.agents.galoy.io/auth/github/callback"
       githubAllowedTeams:
         - "GaloyMoney/galoy-devs"
   ingress:
     enabled: true
-    host: agents.galoy.io
+    host: dashboard.agents.galoy.io
     ingressClassName: nginx
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-prod
     tls:
       - hosts:
-          - agents.galoy.io
+          - dashboard.agents.galoy.io
         secretName: galoy-agents-tls
   secrets:
     create: false
