@@ -102,6 +102,9 @@
 
         cd "$REPO_DIR"
 
+        git config user.email "bot@galoy.io"
+        git config user.name "CI Bot"
+
         yq -i ".$YAML_PATH = \"$HASH\"" "$VALUES_FILE"
 
         if git diff --quiet "$VALUES_FILE"; then

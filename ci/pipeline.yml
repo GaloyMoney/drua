@@ -132,15 +132,16 @@ jobs:
 - name: train-classifier
   serial: true
   plan:
-  - get: repo-labels
-    trigger: true
+  - in_parallel:
+    - get: repo-labels
+      trigger: true
+    - get: repo
   - task: train-and-export
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
       inputs:
-      - name: repo-labels
-        path: repo
+      - name: repo
       outputs:
       - name: model
       params:
