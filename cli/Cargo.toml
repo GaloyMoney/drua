@@ -10,7 +10,10 @@ path = "src/main.rs"
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
 galoy-agents-web = { path = "../web" }
+style-agent-core = { workspace = true }
+style-agent-server = { workspace = true }
 anyhow = "1"
+axum = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

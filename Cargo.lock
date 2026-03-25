@@ -1223,12 +1223,15 @@ name = "galoy-agents-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "galoy-agents-domain",
  "galoy-agents-web",
  "serde",
  "serde_yaml",
  "sqlx",
+ "style-agent-core",
+ "style-agent-server",
  "tokio",
  "tracing",
  "tracing-subscriber",
