@@ -55,12 +55,33 @@ spec:
           - "sh"
           - "-c"
           - |
+            set -e
+            if [ -n "$GCS_CREDS" ]; then
+              echo "$GCS_CREDS" > /tmp/gcs-key.json
+              export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-key.json
+            fi
+            {{- if .Values.galoyAgents.styleAgent.modelHash }}
+            echo "Downloading model {{ .Values.galoyAgents.styleAgent.modelHash }}..."
+            gsutil cp \
+              "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/model/{{ .Values.galoyAgents.styleAgent.modelHash }}.tar.gz" \
+              /tmp/style-agent-model.tar.gz
+            mkdir -p /data/models
+            tar -xzf /tmp/style-agent-model.tar.gz -C /data/models
+            {{- end }}
+            echo "Downloading index {{ .Values.galoyAgents.styleAgent.indexHash }}..."
             gsutil cp \
               "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/index/{{ .Values.galoyAgents.styleAgent.indexHash }}.tar.gz" \
               /tmp/style-agent-index.tar.gz
             mkdir -p /data
             tar -xzf /tmp/style-agent-index.tar.gz -C /data
-            echo "Loaded style-agent index {{ .Values.galoyAgents.styleAgent.indexHash }}"
+            echo "Style-agent data loaded"
+        env:
+        - name: GCS_CREDS
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "gcs-creds"
+              optional: true
         volumeMounts:
         - name: style-agent-data
           mountPath: /data
