@@ -14,3 +14,4 @@ style-agent/labels/audit-suspects.jsonl
 data/
 .fastembed_cache/
 style-agent/models/
+.playwright-mcp/

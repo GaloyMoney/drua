@@ -7,6 +7,39 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <style>
+    body { display: flex; min-height: 100vh; margin: 0; }
+    .sidebar {
+      width: 220px;
+      background: var(--pico-card-background-color);
+      border-right: 1px solid var(--pico-muted-border-color);
+      padding: 1.5rem 1rem;
+      flex-shrink: 0;
+    }
+    .sidebar h4 { margin-bottom: 1.5rem; }
+    .sidebar nav ul { list-style: none; padding: 0; margin: 0; }
+    .sidebar nav ul li { margin-bottom: 0.25rem; }
+    .sidebar nav ul li a {
+      display: block;
+      padding: 0.5rem 0.75rem;
+      border-radius: var(--pico-border-radius);
+      text-decoration: none;
+      color: var(--pico-color);
+    }
+    .sidebar nav ul li a:hover,
+    .sidebar nav ul li a.active {
+      background: var(--pico-primary-background);
+      color: var(--pico-primary-inverse);
+    }
+    .sidebar .sidebar-bottom {
+      margin-top: auto;
+      padding-top: 1rem;
+      border-top: 1px solid var(--pico-muted-border-color);
+    }
+    .content-area {
+      flex: 1;
+      padding: 2rem;
+      overflow-y: auto;
+    }
     .token-box {
       position: relative;
       background: var(--pico-code-background-color);
@@ -44,8 +77,20 @@
   {% block head %}{% endblock %}
 </head>
 <body>
-  <main class="container">
+  <aside class="sidebar">
+    <h4>Galoy Agents</h4>
+    <nav>
+      <ul>
+        <li><a href="/dashboard" {% block nav_dashboard %}{% endblock %}>Agents</a></li>
+        <li><a href="/style-agent" {% block nav_style_agent %}{% endblock %}>Style Agent</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-bottom">
+      <a href="/auth/logout">Logout</a>
+    </div>
+  </aside>
+  <div class="content-area">
     {% block content %}{% endblock %}
-  </main>
+  </div>
 </body>
 </html>

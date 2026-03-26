@@ -2,11 +2,13 @@
 
 {% block title %}Style Agent — Galoy Agents{% endblock %}
 
+{% block nav_style_agent %}class="active"{% endblock %}
+
 {% block head %}
 <style>
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
   }
@@ -32,29 +34,42 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .error-text {
-    color: var(--pico-del-color);
-    font-size: 0.85rem;
+  .error-text { color: var(--pico-del-color); font-size: 0.85rem; }
+  .score-low { color: var(--pico-del-color); }
+  .score-ok { color: var(--pico-ins-color); }
+  .tab-bar {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--pico-muted-border-color);
+    margin-bottom: 1rem;
   }
-  .score-low {
-    color: var(--pico-del-color);
+  .tab-bar button {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    padding: 0.5rem 1.25rem;
+    cursor: pointer;
+    color: var(--pico-muted-color);
+    font-weight: 500;
   }
-  .score-ok {
-    color: var(--pico-ins-color);
+  .tab-bar button.active {
+    border-bottom-color: var(--pico-primary);
+    color: var(--pico-primary);
+  }
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+  }
+  @media (max-width: 900px) {
+    .two-col { grid-template-columns: 1fr; }
   }
 </style>
 {% endblock %}
 
 {% block content %}
-<nav>
-  <ul><li><strong>Galoy Agents</strong></li></ul>
-  <ul>
-    <li><a href="/dashboard">Dashboard</a></li>
-    <li><a href="/auth/logout">Logout</a></li>
-  </ul>
-</nav>
-
-<h2>Style Agent Metrics</h2>
+<h2>Style Agent</h2>
 
 <div class="stats-grid">
   <div class="stat-card">
@@ -80,15 +95,12 @@
 </div>
 
 {% if !stats.top_queries.is_empty() %}
-<section>
-  <h3>Top Queries (7d)</h3>
+<details open>
+  <summary><strong>Top Queries (7d)</strong></summary>
   <figure>
     <table>
       <thead>
-        <tr>
-          <th>Query</th>
-          <th>Count</th>
-        </tr>
+        <tr><th>Query</th><th>Count</th></tr>
       </thead>
       <tbody>
         {% for q in stats.top_queries %}
@@ -100,18 +112,31 @@
       </tbody>
     </table>
   </figure>
-</section>
+</details>
 {% endif %}
 
-<section>
-  <h3>Recent Requests</h3>
-  <div
-    hx-get="/style-agent/recent"
-    hx-trigger="load"
-    hx-swap="innerHTML"
-    id="recent-requests"
-  >
-    <p aria-busy="true">Loading recent requests…</p>
-  </div>
-</section>
+<div class="tab-bar">
+  <button class="active"
+          onclick="switchTab(this, 'recent-tab')"
+          hx-get="/style-agent/recent" hx-target="#recent-tab" hx-swap="innerHTML"
+          hx-trigger="click, load">Recent Requests</button>
+  <button
+          onclick="switchTab(this, 'least-useful-tab')"
+          hx-get="/style-agent/least-useful" hx-target="#least-useful-tab" hx-swap="innerHTML"
+          hx-trigger="click">Least Useful</button>
+</div>
+
+<div id="recent-tab">
+  <p aria-busy="true">Loading...</p>
+</div>
+<div id="least-useful-tab" style="display: none;"></div>
+
+<script>
+function switchTab(btn, tabId) {
+  document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('recent-tab').style.display = tabId === 'recent-tab' ? '' : 'none';
+  document.getElementById('least-useful-tab').style.display = tabId === 'least-useful-tab' ? '' : 'none';
+}
+</script>
 {% endblock %}

@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/agents/{id}/revoke", post(revoke_agent))
         .route("/style-agent", get(style_agent_dashboard))
         .route("/style-agent/recent", get(style_agent_recent))
+        .route("/style-agent/least-useful", get(style_agent_least_useful))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -202,6 +203,23 @@ async fn style_agent_recent(State(state): State<AppState>, session: Session) -> 
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load recent requests");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    StyleAgentRecentTemplate { rows }.into_response()
+}
+
+#[instrument(name = "web.style_agent_least_useful", skip_all)]
+async fn style_agent_least_useful(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let rows = match state.app.style_agent_logs().least_useful(50).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load least useful requests");
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
