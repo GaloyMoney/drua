@@ -86,8 +86,23 @@ fn row_to_view(r: RawRequestRow) -> StyleAgentRequestRow {
     let has_error = r.9.is_some();
     let sc = score_class(r.4);
     let results_json =
-        r.10.map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
-            .unwrap_or_default();
+        r.10.and_then(|v| {
+            let arr = v.as_array()?;
+            let code_blocks: Vec<String> = arr
+                .iter()
+                .filter_map(|item| {
+                    let file = item.get("file")?.as_str()?;
+                    let content = item.get("content")?.as_str()?;
+                    Some(format!("// {file}\n{content}"))
+                })
+                .collect();
+            if code_blocks.is_empty() {
+                None
+            } else {
+                Some(code_blocks.join("\n\n"))
+            }
+        })
+        .unwrap_or_default();
     StyleAgentRequestRow {
         id: r.0,
         tool_name: r.1,
