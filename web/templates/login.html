@@ -1,20 +1,27 @@
-{% extends "base.html" %}
-
-{% block title %}Login — Galoy Agents{% endblock %}
-
-{% block content %}
-<article style="margin-top: 4rem; max-width: 480px; margin-left: auto; margin-right: auto;">
-  <header>
-    <h1>Galoy Agents</h1>
-    <p>Manage your MCP gateway agents</p>
-  </header>
-  {% if let Some(msg) = error %}
-  <div role="alert" style="padding: 1rem; margin-bottom: 1rem; background: var(--pico-del-color, #c62828); color: white; border-radius: 4px;">
-    {{ msg }}
-  </div>
-  {% endif %}
-  <a href="/auth/github" role="button" style="display: block; text-align: center;">
-    Sign in with GitHub
-  </a>
-</article>
-{% endblock %}
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — Galoy Agents</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+</head>
+<body>
+  <main class="container">
+    <article style="margin-top: 4rem; max-width: 480px; margin-left: auto; margin-right: auto;">
+      <header>
+        <h1>Galoy Agents</h1>
+        <p>Manage your MCP gateway agents</p>
+      </header>
+      {% if let Some(msg) = error %}
+      <div role="alert" style="padding: 1rem; margin-bottom: 1rem; background: var(--pico-del-color, #c62828); color: white; border-radius: 4px;">
+        {{ msg }}
+      </div>
+      {% endif %}
+      <a href="/auth/github" role="button" style="display: block; text-align: center;">
+        Sign in with GitHub
+      </a>
+    </article>
+  </main>
+</body>
+</html>

@@ -2,14 +2,10 @@
 
 {% block title %}Dashboard — Galoy Agents{% endblock %}
 
+{% block nav_dashboard %}class="active"{% endblock %}
+
 {% block content %}
-<nav>
-  <ul><li><strong>Galoy Agents</strong></li></ul>
-  <ul>
-    <li>{{ user_name }}</li>
-    <li><a href="/auth/logout">Logout</a></li>
-  </ul>
-</nav>
+<p>Welcome, {{ user_name }}</p>
 
 <section>
   <h2>Create Agent</h2>
