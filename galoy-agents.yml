@@ -9,3 +9,7 @@ oauth:
   github_allowed_teams: []
 style_agent:
   db_path: "./data/style-agent.db"
+concourse:
+  enabled: true
+  url: https://ci.galoy.io
+  team: dev
