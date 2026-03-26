@@ -170,7 +170,7 @@ jobs:
             github_client_secret = "${GITHUB_CLIENT_SECRET}"
             EOF
 
-            echo "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json
+            printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json
             set -x
             echo "Deployment files prepared"
   - put: tf-galoy-agents-prod
