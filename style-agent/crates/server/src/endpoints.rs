@@ -64,6 +64,20 @@ impl StyleAgentEndpoints {
         }
     }
 
+    /// Run a search and return the raw results (for the web dashboard).
+    pub async fn search_raw(
+        &self,
+        query: &str,
+        limit: u64,
+        label: Option<&str>,
+    ) -> Result<Vec<SearchResult>, anyhow::Error> {
+        let results = self
+            .search_engine
+            .search(query, limit, None, None, label, None, None)
+            .await?;
+        Ok(results)
+    }
+
     /// Execute a `search_code` query.
     pub async fn search_code(
         &self,

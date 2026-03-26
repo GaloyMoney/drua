@@ -71,6 +71,40 @@
 {% block content %}
 <h2>Style Agent</h2>
 
+<section>
+  <h3>Search Code</h3>
+  <form hx-get="/style-agent/search" hx-target="#search-results" hx-swap="innerHTML"
+        hx-indicator="#search-spinner">
+    <div style="display: flex; gap: 0.5rem; align-items: end;">
+      <label style="flex: 1;">
+        Query
+        <input type="text" name="q" placeholder="impl TryFromEvents for" required>
+      </label>
+      <label>
+        Label
+        <select name="label">
+          <option value="">All</option>
+          <option>entity</option>
+          <option>entity_event</option>
+          <option>entity_command</option>
+          <option>entity_hydration</option>
+          <option>service</option>
+          <option>service_method</option>
+          <option>repository</option>
+          <option>error</option>
+          <option>domain_primitives</option>
+          <option>api</option>
+          <option>test</option>
+          <option>config</option>
+        </select>
+      </label>
+      <button type="submit">Search</button>
+    </div>
+  </form>
+  <div id="search-results" style="margin-top: 1rem;"></div>
+  <span id="search-spinner" class="htmx-indicator" aria-busy="true"></span>
+</section>
+
 <div class="stats-grid">
   <div class="stat-card">
     <div class="stat-label">Requests (24h)</div>

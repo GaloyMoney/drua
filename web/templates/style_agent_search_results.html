@@ -1,0 +1,17 @@
+{% if let Some(err) = error %}
+<p style="color: var(--pico-del-color);">{{ err }}</p>
+{% endif %}
+
+{% if results.is_empty() && error.is_none() && !query.is_empty() %}
+<p>No matching code patterns found.</p>
+{% endif %}
+
+{% for r in results %}
+<details open>
+  <summary>
+    <code>{{ r.file_path }}</code>
+    <small>({{ r.repo }}) — score: {{ r.score }} | lines: {{ r.lines }}{% if !r.labels.is_empty() %} | {{ r.labels }}{% endif %}</small>
+  </summary>
+  <pre><code class="language-{{ r.language }}">{{ r.content }}</code></pre>
+</details>
+{% endfor %}

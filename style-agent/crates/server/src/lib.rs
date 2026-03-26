@@ -14,3 +14,4 @@ pub use standalone_server::{
 
 pub use style_agent_core::request_log;
 pub use style_agent_core::search::SearchEngine;
+pub use style_agent_core::store::SearchResult;

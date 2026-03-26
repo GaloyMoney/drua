@@ -32,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/style-agent", get(style_agent_dashboard))
         .route("/style-agent/recent", get(style_agent_recent))
         .route("/style-agent/least-useful", get(style_agent_least_useful))
+        .route("/style-agent/search", get(style_agent_search))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -225,4 +226,78 @@ async fn style_agent_least_useful(State(state): State<AppState>, session: Sessio
     };
 
     StyleAgentRecentTemplate { rows }.into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    q: Option<String>,
+    label: Option<String>,
+}
+
+#[instrument(name = "web.style_agent_search", skip_all)]
+async fn style_agent_search(
+    State(state): State<AppState>,
+    session: Session,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return StyleAgentSearchResultsTemplate {
+            query,
+            results: vec![],
+            error: None,
+        }
+        .into_response();
+    }
+
+    let endpoints = match state.style_agent.as_ref() {
+        Some(ep) => ep,
+        None => {
+            return StyleAgentSearchResultsTemplate {
+                query,
+                results: vec![],
+                error: Some("Style-agent is not configured".to_string()),
+            }
+            .into_response();
+        }
+    };
+
+    let label = params.label.as_deref().filter(|s| !s.is_empty());
+
+    match endpoints.search_raw(&query, 10, label).await {
+        Ok(raw_results) => {
+            let results = raw_results
+                .iter()
+                .map(|r| SearchResultView {
+                    file_path: r.file_path.clone(),
+                    repo: r.repo.clone(),
+                    score: format!("{:.3}", r.score),
+                    labels: r.labels.join(", "),
+                    lines: format!("{}-{}", r.line_start, r.line_end),
+                    content: r.content.clone(),
+                    language: if r.language.is_empty() {
+                        "rust".to_string()
+                    } else {
+                        r.language.clone()
+                    },
+                })
+                .collect();
+            StyleAgentSearchResultsTemplate {
+                query,
+                results,
+                error: None,
+            }
+            .into_response()
+        }
+        Err(e) => StyleAgentSearchResultsTemplate {
+            query,
+            results: vec![],
+            error: Some(e.to_string()),
+        }
+        .into_response(),
+    }
 }

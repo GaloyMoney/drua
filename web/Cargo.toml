@@ -7,6 +7,7 @@ edition.workspace = true
 
 [dependencies]
 galoy-agents-domain = { path = "../domain" }
+style-agent-server = { workspace = true }
 anyhow = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
