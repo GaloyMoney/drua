@@ -9,8 +9,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
-use galoy_agents_domain::auth::AuthContext;
-use galoy_agents_domain::App;
+use galoy_agents_core::auth::AuthContext;
+use galoy_agents_core::App;
 use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
 
 pub use concourse::ConcourseConfig;

@@ -54,9 +54,9 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     let pool = sqlx::PgPool::connect(&config.db.pg_con).await?;
-    sqlx::migrate!("../domain/migrations").run(&pool).await?;
+    sqlx::migrate!("../core/migrations").run(&pool).await?;
 
-    let app = galoy_agents_domain::App::new(&pool);
+    let app = galoy_agents_core::App::new(&pool);
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
     let server_config = galoy_agents_web::server::ServerConfig {

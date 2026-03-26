@@ -2,7 +2,7 @@
 members = [
   "cli",
   "concourse-client",
-  "domain",
+  "core",
   "mcp-gateway",
   "web",
   "style-agent/crates/core",

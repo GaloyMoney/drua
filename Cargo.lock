@@ -1238,7 +1238,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "galoy-agents-domain",
+ "galoy-agents-core",
  "galoy-agents-mcp-gateway",
  "galoy-agents-web",
  "serde",
@@ -1250,7 +1250,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "galoy-agents-domain"
+name = "galoy-agents-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1277,7 +1277,7 @@ dependencies = [
  "anyhow",
  "axum",
  "concourse-client",
- "galoy-agents-domain",
+ "galoy-agents-core",
  "http",
  "rmcp",
  "schemars 0.8.22",
@@ -1297,7 +1297,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
- "galoy-agents-domain",
+ "galoy-agents-core",
  "oauth2",
  "reqwest",
  "serde",

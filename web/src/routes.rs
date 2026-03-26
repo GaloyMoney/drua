@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::instrument;
 
-use galoy_agents_domain as domain;
+use galoy_agents_core as domain;
 
 use domain::agent::token::generate_token;
 use domain::agent::Agent;

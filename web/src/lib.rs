@@ -5,7 +5,7 @@ mod templates;
 
 use axum::Router;
 
-use galoy_agents_domain as domain;
+use galoy_agents_core as domain;
 
 use domain::App;
 

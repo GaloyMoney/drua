@@ -8,7 +8,7 @@ name = "galoy-agents"
 path = "src/main.rs"
 
 [dependencies]
-galoy-agents-domain = { path = "../domain" }
+galoy-agents-core = { path = "../core" }
 galoy-agents-mcp-gateway = { path = "../mcp-gateway" }
 galoy-agents-web = { path = "../web" }
 anyhow = "1"

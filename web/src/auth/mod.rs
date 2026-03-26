@@ -10,7 +10,7 @@ use tracing::instrument;
 pub use config::AuthConfig;
 pub use error::AuthError;
 
-use galoy_agents_domain as domain;
+use galoy_agents_core as domain;
 
 use domain::agent::token::hash_token;
 use domain::auth::AuthContext;

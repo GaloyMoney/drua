@@ -1,5 +1,5 @@
 [package]
-name = "galoy-agents-domain"
+name = "galoy-agents-core"
 version.workspace = true
 edition.workspace = true
 

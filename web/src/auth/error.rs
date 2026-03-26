@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use galoy_agents_domain as domain;
+use galoy_agents_core as domain;
 
 use domain::agent::error::AgentError;
 use domain::user::error::UserError;

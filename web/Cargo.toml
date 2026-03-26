@@ -6,7 +6,7 @@ edition.workspace = true
 [lib]
 
 [dependencies]
-galoy-agents-domain = { path = "../domain" }
+galoy-agents-core = { path = "../core" }
 style-agent-server = { workspace = true }
 anyhow = "1"
 askama = "0.15"
