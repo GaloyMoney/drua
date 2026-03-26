@@ -62,14 +62,6 @@ spec:
               printf '%s' "$GCS_CREDS" > /tmp/gcs-key.json
               gcloud auth activate-service-account --key-file=/tmp/gcs-key.json
             fi
-            {{- if .Values.galoyAgents.styleAgent.modelHash }}
-            echo "Downloading model {{ .Values.galoyAgents.styleAgent.modelHash }}..."
-            gsutil cp \
-              "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/model/{{ .Values.galoyAgents.styleAgent.modelHash }}.tar.gz" \
-              /tmp/style-agent-model.tar.gz
-            mkdir -p /data/models
-            tar -xzf /tmp/style-agent-model.tar.gz -C /data/models
-            {{- end }}
             echo "Downloading index {{ .Values.galoyAgents.styleAgent.indexHash }}..."
             gsutil cp \
               "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/index/{{ .Values.galoyAgents.styleAgent.indexHash }}.tar.gz" \
