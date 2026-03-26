@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "cli",
+  "concourse-client",
   "domain",
   "mcp-gateway",
   "web",
@@ -18,7 +19,8 @@ version = "0.1.0"
 name = "galoy-agents"
 
 [workspace.dependencies]
-# Internal style-agent crates
+# Internal crates
+concourse-client = { path = "concourse-client" }
 style-agent-core = { path = "style-agent/crates/core" }
 style-agent-server = { path = "style-agent/crates/server" }
 

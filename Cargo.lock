@@ -533,6 +533,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "concourse-client"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1263,6 +1276,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "concourse-client",
  "galoy-agents-domain",
  "http",
  "rmcp",

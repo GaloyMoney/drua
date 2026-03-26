@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use galoy_agents_mcp_gateway::StyleAgentConfig;
+use galoy_agents_mcp_gateway::{ConcourseConfig, StyleAgentConfig};
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -16,6 +16,8 @@ pub struct Config {
     pub db: DbConfig,
     #[serde(default)]
     pub style_agent: StyleAgentConfig,
+    #[serde(default)]
+    pub concourse: ConcourseConfig,
 }
 
 #[derive(Clone, Deserialize)]
@@ -106,6 +108,14 @@ impl Config {
         // Style-agent env overrides
         if let Ok(val) = std::env::var("STYLE_AGENT_DB_PATH") {
             config.style_agent.db_path = val;
+        }
+
+        // Concourse env overrides (credentials are never in the config file)
+        if let Ok(val) = std::env::var("CONCOURSE_USERNAME") {
+            config.concourse.username = val;
+        }
+        if let Ok(val) = std::env::var("CONCOURSE_PASSWORD") {
+            config.concourse.password = val;
         }
 
         Ok(config)

@@ -1,3 +1,5 @@
+mod concourse;
+
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
@@ -11,6 +13,8 @@ use galoy_agents_domain::auth::AuthContext;
 use galoy_agents_domain::App;
 use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
 
+pub use concourse::ConcourseConfig;
+use concourse::ConcourseEndpoints;
 pub use style_agent_server::StyleAgentConfig;
 
 #[derive(Clone)]
@@ -18,14 +22,20 @@ pub struct McpGateway {
     #[allow(dead_code)]
     app: App,
     style_agent: Option<StyleAgentEndpoints>,
+    concourse: Option<ConcourseEndpoints>,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpGateway {
-    fn new(app: App, style_agent: Option<StyleAgentEndpoints>) -> Self {
+    fn new(
+        app: App,
+        style_agent: Option<StyleAgentEndpoints>,
+        concourse: Option<ConcourseEndpoints>,
+    ) -> Self {
         Self {
             app,
             style_agent,
+            concourse,
             tool_router: Self::tool_router(),
         }
     }
@@ -34,6 +44,7 @@ impl McpGateway {
     pub fn service(
         app: App,
         style_agent_config: &StyleAgentConfig,
+        concourse_config: &ConcourseConfig,
     ) -> anyhow::Result<(
         StreamableHttpService<Self, LocalSessionManager>,
         Option<StyleAgentEndpoints>,
@@ -41,13 +52,15 @@ impl McpGateway {
         let logger = app.style_agent_logs().clone();
         let style_agent =
             style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?;
-        let svc = Self::build_service(app, style_agent.clone());
+        let concourse = ConcourseEndpoints::try_new(concourse_config)?;
+        let svc = Self::build_service(app, style_agent.clone(), concourse);
         Ok((svc, style_agent))
     }
 
     fn build_service(
         app: App,
         style_agent: Option<StyleAgentEndpoints>,
+        concourse: Option<ConcourseEndpoints>,
     ) -> StreamableHttpService<Self, LocalSessionManager> {
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
@@ -55,7 +68,13 @@ impl McpGateway {
             ..Default::default()
         };
         StreamableHttpService::new(
-            move || Ok(McpGateway::new(app.clone(), style_agent.clone())),
+            move || {
+                Ok(McpGateway::new(
+                    app.clone(),
+                    style_agent.clone(),
+                    concourse.clone(),
+                ))
+            },
             LocalSessionManager::default().into(),
             config,
         )
@@ -71,11 +90,49 @@ impl McpGateway {
             )),
         }
     }
+
+    fn require_concourse(&self) -> Result<&ConcourseEndpoints, ErrorData> {
+        self.concourse.as_ref().ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Concourse integration is disabled",
+                None::<serde_json::Value>,
+            )
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct HelloParams {
     name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListJobsParams {
+    /// The pipeline name to list jobs for
+    pipeline: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetBuildStatusParams {
+    /// The pipeline name
+    pipeline: String,
+    /// The job name
+    job: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetBuildLogsParams {
+    /// The numeric build ID
+    build_id: i64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct TriggerBuildParams {
+    /// The pipeline name
+    pipeline: String,
+    /// The job name to trigger
+    job: String,
 }
 
 #[tool_router]
@@ -108,6 +165,76 @@ impl McpGateway {
                 None::<serde_json::Value>,
             )),
         }
+    }
+
+    /// List all pipelines for the configured Concourse team.
+    #[tool(
+        description = "List all pipelines for the configured Concourse CI team. Returns pipeline names, paused/archived status."
+    )]
+    async fn list_pipelines(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?.list_pipelines().await
+    }
+
+    /// List jobs in a Concourse pipeline.
+    #[tool(
+        description = "List jobs in a Concourse pipeline. Returns job names, paused state, and last build status."
+    )]
+    async fn list_jobs(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<ListJobsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?.list_jobs(&params.pipeline).await
+    }
+
+    /// Get the latest build status for a Concourse job.
+    #[tool(
+        description = "Get the latest build status for a specific job in a Concourse pipeline. Returns build ID, status, and timestamps."
+    )]
+    async fn get_build_status(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<GetBuildStatusParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .get_build_status(&params.pipeline, &params.job)
+            .await
+    }
+
+    /// Get build output/logs from Concourse.
+    #[tool(
+        description = "Get the build output/logs for a Concourse build by its numeric build ID."
+    )]
+    async fn get_build_logs(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<GetBuildLogsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .get_build_logs(params.build_id)
+            .await
+    }
+
+    /// Trigger a new build for a Concourse job.
+    #[tool(
+        description = "Trigger a new build for a job in a Concourse pipeline. Returns the new build ID and status."
+    )]
+    async fn trigger_build(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<TriggerBuildParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .trigger_build(&params.pipeline, &params.job)
+            .await
     }
 }
 

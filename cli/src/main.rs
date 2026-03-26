@@ -65,8 +65,11 @@ async fn main() -> anyhow::Result<()> {
         secure_cookies: config.server.secure_cookies,
     };
 
-    let (mcp_service, style_agent_endpoints) =
-        galoy_agents_mcp_gateway::McpGateway::service(app.clone(), &config.style_agent)?;
+    let (mcp_service, style_agent_endpoints) = galoy_agents_mcp_gateway::McpGateway::service(
+        app.clone(),
+        &config.style_agent,
+        &config.concourse,
+    )?;
 
     let app_state = galoy_agents_web::AppState::new(
         app,
