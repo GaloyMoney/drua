@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::walker;
 
-const EMBED_BATCH_SIZE: usize = 4;
+const EMBED_BATCH_SIZE: usize = 32;
 
 /// Index a single repository from a local path.
 ///
@@ -83,21 +83,25 @@ pub async fn index_repo(
     // Delete existing chunks for this repo (for clean re-indexing)
     store.delete_repo(repo_name)?;
 
-    // Build embed texts
-    let embed_texts: Vec<String> = all_chunks
-        .iter()
-        .map(|c| build_embed_text(&c.content, &c.file_path, c.entity_name.as_deref()))
-        .collect();
+    // Embed, upsert, and label in streaming batches to bound memory usage.
+    // Each batch builds embed texts on-the-fly and labels immediately,
+    // avoiding accumulation of the full corpus in memory.
+    let mut ml_count = 0usize;
+    let mut heuristic_count = 0usize;
 
-    // Embed and upsert in batches, collecting assigned IDs
-    let mut all_ids: Vec<String> = Vec::with_capacity(total_chunks);
     for batch_start in (0..total_chunks).step_by(EMBED_BATCH_SIZE) {
         let batch_end = (batch_start + EMBED_BATCH_SIZE).min(total_chunks);
-        let text_batch: Vec<String> = embed_texts[batch_start..batch_end].to_vec();
+        let batch = &all_chunks[batch_start..batch_end];
+
+        // Build embed texts on-the-fly for this batch only
+        let text_batch: Vec<String> = batch
+            .iter()
+            .map(|c| build_embed_text(&c.content, &c.file_path, c.entity_name.as_deref()))
+            .collect();
 
         let embeddings = embedder.embed_document_batch(text_batch).await?;
 
-        let indexed: Vec<IndexedChunk> = all_chunks[batch_start..batch_end]
+        let indexed: Vec<IndexedChunk> = batch
             .iter()
             .zip(embeddings)
             .map(|(data, embedding)| IndexedChunk {
@@ -115,37 +119,34 @@ pub async fn index_repo(
             })
             .collect();
 
-        for ic in &indexed {
-            all_ids.push(ic.id.clone());
-        }
+        // Classify and label this batch immediately
+        let label_updates: Vec<_> = batch
+            .iter()
+            .zip(indexed.iter())
+            .map(|(chunk, ic)| {
+                let label_data = LabelChunkData {
+                    content: chunk.content.clone(),
+                    file_path: chunk.file_path.clone(),
+                    chunk_type: chunk.chunk_type.clone(),
+                    entity_name: chunk.entity_name.clone().unwrap_or_default(),
+                };
+                let (cls, source) =
+                    classify_with_fallback(classifier, &label_data, confidence_threshold);
+                match source.as_str() {
+                    "ml" => ml_count += 1,
+                    _ => heuristic_count += 1,
+                }
+                (ic.id.clone(), cls, source)
+            })
+            .collect();
+
         store.upsert_chunks(indexed)?;
+        store.set_labels(&label_updates)?;
         tracing::info!(progress = batch_end, total = total_chunks, "Embedded");
     }
 
-    // Auto-label every chunk (ML with heuristic fallback)
-    let mut label_updates = Vec::with_capacity(total_chunks);
-    let mut ml_count = 0usize;
-    let mut heuristic_count = 0usize;
-
-    for (chunk, id) in all_chunks.iter().zip(all_ids.iter()) {
-        let label_data = LabelChunkData {
-            content: chunk.content.clone(),
-            file_path: chunk.file_path.clone(),
-            chunk_type: chunk.chunk_type.clone(),
-            entity_name: chunk.entity_name.clone().unwrap_or_default(),
-        };
-
-        let (cls, source) = classify_with_fallback(classifier, &label_data, confidence_threshold);
-
-        match source.as_str() {
-            "ml" => ml_count += 1,
-            _ => heuristic_count += 1,
-        }
-
-        label_updates.push((id.clone(), cls, source));
-    }
-
-    store.set_labels(&label_updates)?;
+    // Drop chunks eagerly now that indexing is done
+    drop(all_chunks);
 
     let source_info = if classifier.is_some() {
         format!(" (ml: {ml_count}, heuristic: {heuristic_count})")
