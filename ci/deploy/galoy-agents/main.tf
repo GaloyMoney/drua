@@ -1,5 +1,6 @@
 variable "image_digest" {}
 variable "github_client_secret" {}
+variable "gcs_creds_json" {}
 
 locals {
   cluster_name     = "galoy-agents-cluster"
@@ -39,6 +40,7 @@ resource "kubernetes_secret" "galoy_agents" {
   data = {
     "pg-con"               = module.postgresql.creds["galoy-agents"].conn
     "github-client-secret" = var.github_client_secret
+    "gcs-creds"            = var.gcs_creds_json
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]

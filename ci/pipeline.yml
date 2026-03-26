@@ -153,6 +153,7 @@ jobs:
       - name: deployment
       params:
         GITHUB_CLIENT_SECRET: #@ data.values.deploy_github_client_secret
+        GCS_CREDS_JSON: #@ data.values.gcs_creds_json
       run:
         path: sh
         args:
@@ -165,15 +166,18 @@ jobs:
             cp -r repo/ci/deploy/galoy-agents deployment/tf
             cp -r repo/charts/galoy-agents deployment/tf/chart
 
-            cat <<EOF > deployment/tf/terraform.tfvars
-            image_digest = "${DIGEST}"
-            github_client_secret = "${GITHUB_CLIENT_SECRET}"
+            cat <<EOF > deployment/tf/terraform.tfvars.json
+            {
+              "image_digest": "${DIGEST}",
+              "github_client_secret": "${GITHUB_CLIENT_SECRET}",
+              "gcs_creds_json": $(echo "$GCS_CREDS_JSON" | jq -Rs .)
+            }
             EOF
   - put: tf-galoy-agents-prod
     tags: [galoy-agents]
     params:
       env_name: prod
-      vars_files: [deployment/tf/terraform.tfvars]
+      vars_files: [deployment/tf/terraform.tfvars.json]
       terraform_source: deployment/tf
 
 - name: train-classifier
