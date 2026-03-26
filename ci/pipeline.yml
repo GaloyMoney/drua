@@ -152,6 +152,8 @@ jobs:
       params:
         GITHUB_CLIENT_SECRET: #@ data.values.deploy_github_client_secret
         GCS_CREDS_JSON: #@ data.values.gcs_creds_json
+        CONCOURSE_USERNAME: #@ data.values.deploy_concourse_username
+        CONCOURSE_PASSWORD: #@ data.values.deploy_concourse_password
       run:
         path: sh
         args:
@@ -168,6 +170,8 @@ jobs:
             cat <<EOF > deployment/tf/terraform.tfvars
             image_digest = "${DIGEST}"
             github_client_secret = "${GITHUB_CLIENT_SECRET}"
+            concourse_username = "${CONCOURSE_USERNAME}"
+            concourse_password = "${CONCOURSE_PASSWORD}"
             EOF
 
             printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json

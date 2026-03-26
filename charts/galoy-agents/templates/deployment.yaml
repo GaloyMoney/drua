@@ -118,6 +118,18 @@ spec:
             secretKeyRef:
               name: {{ template "galoyAgents.fullname" . }}
               key: "github-client-secret"
+        - name: CONCOURSE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "concourse-username"
+              optional: true
+        - name: CONCOURSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "concourse-password"
+              optional: true
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:

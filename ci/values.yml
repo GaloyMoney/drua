@@ -24,3 +24,5 @@ style_agent_gcs_bucket: galoy-agents-models
 deploy_gcp_creds_json: ((galoy-agents-gcp-creds.creds_json))
 deploy_tf_state_bucket: galoy-agents-tf-state
 deploy_github_client_secret: ((galoy-agents-prod-secrets.github_client_secret))
+deploy_concourse_username: ((galoybot-concourse-creds.username))
+deploy_concourse_password: ((galoybot-concourse-creds.password))

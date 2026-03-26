@@ -21,6 +21,10 @@ galoyAgents:
       - hosts:
           - dashboard.agents.galoy.io
         secretName: galoy-agents-tls
+    concourse:
+      enabled: true
+      url: "https://ci.galoy.io"
+      team: "dev"
   secrets:
     create: false
   resources:

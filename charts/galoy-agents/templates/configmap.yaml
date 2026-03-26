@@ -21,3 +21,7 @@ data:
     {{- end }}
     style_agent:
       db_path: {{ .Values.galoyAgents.config.styleAgent.dbPath | quote }}
+    concourse:
+      enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
+      url: {{ .Values.galoyAgents.config.concourse.url | quote }}
+      team: {{ .Values.galoyAgents.config.concourse.team | quote }}
