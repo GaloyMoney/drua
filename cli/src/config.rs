@@ -105,11 +105,6 @@ impl Config {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }
 
-        // Style-agent env overrides
-        if let Ok(val) = std::env::var("STYLE_AGENT_DB_PATH") {
-            config.style_agent.db_path = val;
-        }
-
         // Concourse env overrides (credentials are never in the config file)
         if let Ok(val) = std::env::var("CONCOURSE_USERNAME") {
             config.concourse.username = val;
