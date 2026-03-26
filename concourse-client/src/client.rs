@@ -165,9 +165,23 @@ impl ConcourseClient {
     /// `GET /api/v1/builds/{id}/events` — fetch build log output.
     ///
     /// Reads the SSE event stream and extracts log lines from `"log"` events,
-    /// returning them as a single string.
+    /// returning them as a single string. Best for finished builds.
     #[tracing::instrument(name = "concourse_client.get_build_logs", skip_all)]
     pub async fn get_build_logs(&self, build_id: i64) -> Result<String, ConcourseError> {
+        let resp = self.open_build_events(build_id).await?;
+        let body = resp.text().await?;
+        let mut logs = String::new();
+        extract_logs_from_sse(&body, &mut logs);
+        Ok(logs)
+    }
+
+    /// Open an authenticated SSE connection to build events.
+    ///
+    /// Returns the raw response for streaming consumption by [`BuildLogStore`].
+    pub(crate) async fn open_build_events(
+        &self,
+        build_id: i64,
+    ) -> Result<reqwest::Response, ConcourseError> {
         self.auth.ensure_token(&self.http, &self.base_url).await?;
         let url = self.api_url(&format!("/builds/{build_id}/events"))?;
 
@@ -188,10 +202,7 @@ impl ConcourseClient {
             });
         }
 
-        let body = resp.text().await?;
-        let mut logs = String::new();
-        extract_logs_from_sse(&body, &mut logs);
-        Ok(logs)
+        Ok(resp)
     }
 
     /// `POST /api/v1/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds` —

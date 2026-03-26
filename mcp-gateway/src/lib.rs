@@ -125,6 +125,13 @@ struct GetBuildStatusParams {
 struct GetBuildLogsParams {
     /// The numeric build ID
     build_id: i64,
+    /// Starting line offset for paginated reads (enables live tailing mode).
+    /// When omitted, returns all logs at once (best for finished builds).
+    /// Use 0 for the first poll, then use `next_offset` from the response.
+    offset: Option<usize>,
+    /// Maximum number of lines to return per request (default: 200).
+    /// Only used when `offset` is provided.
+    limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -209,7 +216,7 @@ impl McpGateway {
 
     /// Get build output/logs from Concourse.
     #[tool(
-        description = "Get the build output/logs for a Concourse build by its numeric build ID."
+        description = "Get build output/logs for a Concourse build by its numeric build ID.\n\nTwo modes:\n- **All-at-once** (offset omitted): returns complete log output as plain text. Best for finished builds.\n- **Live tailing** (offset provided): returns paginated lines with next_offset for polling. Use offset=0 for the first call, then pass next_offset from the response. Response includes is_complete and build_status fields.\n\nExample polling loop: call with offset=0, then keep calling with next_offset until is_complete is true."
     )]
     async fn get_build_logs(
         &self,
@@ -218,7 +225,7 @@ impl McpGateway {
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
         self.require_concourse()?
-            .get_build_logs(params.build_id)
+            .get_build_logs(params.build_id, params.offset, params.limit)
             .await
     }
 
