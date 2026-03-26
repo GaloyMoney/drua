@@ -223,11 +223,13 @@
           contents = [
             galoy-agents
             pkgs.cacert
+            pkgs.onnxruntime
           ];
           config = {
             Cmd = [ "${galoy-agents}/bin/galoy-agents" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "ORT_DYLIB_PATH=${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
             ];
           };
         };
