@@ -216,17 +216,14 @@ jobs:
   serial: true
   plan:
   - in_parallel:
+    - get: nightly
+      trigger: true
     - get: repo
     - get: cala-repo
-      trigger: true
     - get: lana-repo
-      trigger: true
     - get: job-repo
-      trigger: true
     - get: obix-repo
-      trigger: true
     - get: style-agent-model
-      trigger: true
       passed: [train-classifier]
   - task: build-index
     tags: [galoy-agents]
@@ -430,3 +427,10 @@ resources:
     bucket: #@ data.values.style_agent_gcs_bucket
     json_key: #@ data.values.gcs_creds_json
     regexp: embedder/(.*).tar.gz
+
+- name: nightly
+  type: time
+  source:
+    start: "04:00"
+    stop: "04:30"
+    location: UTC
