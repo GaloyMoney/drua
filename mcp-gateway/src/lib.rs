@@ -11,11 +11,10 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
 use galoy_agents_core::auth::AuthContext;
 use galoy_agents_core::App;
-use style_agent_server::{SearchCodeParams, StyleAgentEndpoints};
+use style_agent_server::SearchCodeParams;
 
-pub use concourse::ConcourseConfig;
-use concourse::ConcourseEndpoints;
-pub use style_agent_server::StyleAgentConfig;
+pub use concourse::{ConcourseConfig, ConcourseEndpoints};
+pub use style_agent_server::{self, StyleAgentConfig, StyleAgentEndpoints};
 
 #[derive(Clone)]
 pub struct McpGateway {
@@ -40,21 +39,13 @@ impl McpGateway {
         }
     }
 
-    /// Build the MCP service, using `app.style_agent_logs()` as the request logger.
+    /// Build the MCP service from pre-constructed endpoints.
     pub fn service(
         app: App,
-        style_agent_config: &StyleAgentConfig,
-        concourse_config: &ConcourseConfig,
-    ) -> anyhow::Result<(
-        StreamableHttpService<Self, LocalSessionManager>,
-        Option<StyleAgentEndpoints>,
-    )> {
-        let logger = app.style_agent_logs().clone();
-        let style_agent =
-            style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?;
-        let concourse = ConcourseEndpoints::try_new(concourse_config)?;
-        let svc = Self::build_service(app, style_agent.clone(), concourse);
-        Ok((svc, style_agent))
+        style_agent: Option<StyleAgentEndpoints>,
+        concourse: Option<ConcourseEndpoints>,
+    ) -> StreamableHttpService<Self, LocalSessionManager> {
+        Self::build_service(app, style_agent, concourse)
     }
 
     fn build_service(
