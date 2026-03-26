@@ -152,36 +152,21 @@ impl StyleAgentEndpoints {
 /// Returns `Err(...)` when `db_path` is set but initialisation fails — the
 /// caller should treat this as a hard error.
 pub fn init_endpoints(config: &StyleAgentConfig) -> anyhow::Result<Option<StyleAgentEndpoints>> {
-    use style_agent_core::embedder::Embedder;
-    use style_agent_core::store::VectorStore;
-
-    if config.db_path.is_empty() {
-        tracing::info!("Style-agent disabled (db_path is empty)");
-        return Ok(None);
-    }
-
-    tracing::info!(db_path = %config.db_path, "Initialising style-agent");
-
-    let store = VectorStore::new(std::path::Path::new(&config.db_path))?;
-    store.ensure_collection()?;
-    store.ensure_anti_pattern_tables()?;
-
-    let embedder = Embedder::new()?;
-    let search_engine = Arc::new(SearchEngine::new(embedder, store));
-
     let logger: Arc<dyn RequestLogger> = Arc::new(NoopRequestLogger);
-
-    tracing::info!("Style-agent search engine ready");
-    Ok(Some(StyleAgentEndpoints {
-        search_engine,
-        logger,
-    }))
+    init_endpoints_inner(config, logger)
 }
 
 /// Initialise endpoints with an external logger.
 ///
 /// Returns `Ok(None)` when `db_path` is empty (style-agent disabled).
 pub fn init_endpoints_with_logger(
+    config: &StyleAgentConfig,
+    logger: Arc<dyn RequestLogger>,
+) -> anyhow::Result<Option<StyleAgentEndpoints>> {
+    init_endpoints_inner(config, logger)
+}
+
+fn init_endpoints_inner(
     config: &StyleAgentConfig,
     logger: Arc<dyn RequestLogger>,
 ) -> anyhow::Result<Option<StyleAgentEndpoints>> {
@@ -193,9 +178,18 @@ pub fn init_endpoints_with_logger(
         return Ok(None);
     }
 
-    tracing::info!(db_path = %config.db_path, "Initialising style-agent (external logger)");
+    let db = std::path::Path::new(&config.db_path);
+    if db.exists() {
+        tracing::info!(db_path = %config.db_path, "Style-agent database found");
+    } else {
+        tracing::warn!(
+            db_path = %config.db_path,
+            "Style-agent database not found — run 'nix run .#prep-style-agent' to bootstrap"
+        );
+        return Ok(None);
+    }
 
-    let store = VectorStore::new(std::path::Path::new(&config.db_path))?;
+    let store = VectorStore::new(db)?;
     store.ensure_collection()?;
     store.ensure_anti_pattern_tables()?;
 
