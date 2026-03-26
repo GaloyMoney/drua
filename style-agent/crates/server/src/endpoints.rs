@@ -262,6 +262,7 @@ fn build_results_json(results: &[SearchResult]) -> String {
                 "score": format!("{:.3}", r.score),
                 "labels": r.labels,
                 "lines": format!("{}-{}", r.line_start, r.line_end),
+                "content": r.content,
             })
         })
         .collect();
