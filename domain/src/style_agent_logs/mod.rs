@@ -15,6 +15,7 @@ pub struct StyleAgentRequestRow {
     pub num_results: i32,
     pub top_score: Option<f64>,
     pub top_score_fmt: String,
+    pub score_class: String,
     pub latency_ms: i32,
     pub label_filter: Option<String>,
     pub language_filter: Option<String>,
@@ -22,6 +23,7 @@ pub struct StyleAgentRequestRow {
     pub error: Option<String>,
     pub has_error: bool,
     pub created_at: String,
+    pub results_json: String,
 }
 
 /// A query string and how often it was used (for the dashboard).
@@ -54,6 +56,7 @@ type RawRequestRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<serde_json::Value>,
     chrono::DateTime<chrono::Utc>,
 );
 
@@ -66,6 +69,50 @@ pub struct StyleAgentLogs {
     pool: sqlx::PgPool,
 }
 
+fn score_class(score: Option<f64>) -> String {
+    match score {
+        Some(s) if s >= 0.5 => "score-green",
+        Some(s) if s >= 0.3 => "score-orange",
+        Some(_) => "score-red",
+        None => "score-none",
+    }
+    .to_string()
+}
+
+fn row_to_view(r: RawRequestRow) -> StyleAgentRequestRow {
+    let top_score_fmt =
+        r.4.map(|s| format!("{s:.3}"))
+            .unwrap_or_else(|| "—".to_string());
+    let has_error = r.9.is_some();
+    let sc = score_class(r.4);
+    let results_json =
+        r.10.map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+            .unwrap_or_default();
+    StyleAgentRequestRow {
+        id: r.0,
+        tool_name: r.1,
+        query: r.2,
+        num_results: r.3,
+        top_score: r.4,
+        top_score_fmt,
+        score_class: sc,
+        latency_ms: r.5,
+        label_filter: r.6,
+        language_filter: r.7,
+        repo_filter: r.8,
+        error: r.9,
+        has_error,
+        created_at: r.11.format("%Y-%m-%d %H:%M:%S").to_string(),
+        results_json,
+    }
+}
+
+const SELECT_COLS: &str = r#"SELECT
+    id, tool_name, query, num_results, top_score, latency_ms,
+    label_filter, language_filter, repo_filter, error, results,
+    created_at
+FROM style_agent_request_log"#;
+
 impl StyleAgentLogs {
     pub fn new(pool: &sqlx::PgPool) -> Self {
         Self { pool: pool.clone() }
@@ -77,91 +124,21 @@ impl StyleAgentLogs {
         &self,
         limit: i64,
     ) -> Result<Vec<StyleAgentRequestRow>, StyleAgentLogsError> {
-        let rows: Vec<RawRequestRow> = sqlx::query_as(
-            r#"SELECT
-                id, tool_name, query, num_results, top_score, latency_ms,
-                label_filter, language_filter, repo_filter, error,
-                created_at
-            FROM style_agent_request_log
-            ORDER BY created_at DESC
-            LIMIT $1"#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let top_score_fmt =
-                    r.4.map(|s| format!("{s:.3}"))
-                        .unwrap_or_else(|| "—".to_string());
-                let has_error = r.9.is_some();
-                StyleAgentRequestRow {
-                    id: r.0,
-                    tool_name: r.1,
-                    query: r.2,
-                    num_results: r.3,
-                    top_score: r.4,
-                    top_score_fmt,
-                    latency_ms: r.5,
-                    label_filter: r.6,
-                    language_filter: r.7,
-                    repo_filter: r.8,
-                    error: r.9,
-                    has_error,
-                    created_at: r.10.format("%Y-%m-%d %H:%M:%S").to_string(),
-                }
-            })
-            .collect())
+        let q = format!("{SELECT_COLS} ORDER BY created_at DESC LIMIT $1");
+        let rows: Vec<RawRequestRow> = sqlx::query_as(&q).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_view).collect())
     }
 
-    /// Return least useful requests: low scores, errors, empty results.
+    /// Return requests ordered by score ascending (least useful first).
     #[instrument(name = "domain.style_agent_logs.least_useful", skip_all)]
     pub async fn least_useful(
         &self,
         limit: i64,
     ) -> Result<Vec<StyleAgentRequestRow>, StyleAgentLogsError> {
-        let rows: Vec<RawRequestRow> = sqlx::query_as(
-            r#"SELECT
-                id, tool_name, query, num_results, top_score, latency_ms,
-                label_filter, language_filter, repo_filter, error,
-                created_at
-            FROM style_agent_request_log
-            WHERE error IS NOT NULL
-               OR num_results = 0
-               OR (top_score IS NOT NULL AND top_score < 0.3)
-            ORDER BY created_at DESC
-            LIMIT $1"#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let top_score_fmt =
-                    r.4.map(|s| format!("{s:.3}"))
-                        .unwrap_or_else(|| "—".to_string());
-                let has_error = r.9.is_some();
-                StyleAgentRequestRow {
-                    id: r.0,
-                    tool_name: r.1,
-                    query: r.2,
-                    num_results: r.3,
-                    top_score: r.4,
-                    top_score_fmt,
-                    latency_ms: r.5,
-                    label_filter: r.6,
-                    language_filter: r.7,
-                    repo_filter: r.8,
-                    error: r.9,
-                    has_error,
-                    created_at: r.10.format("%Y-%m-%d %H:%M:%S").to_string(),
-                }
-            })
-            .collect())
+        let q =
+            format!("{SELECT_COLS} ORDER BY COALESCE(top_score, 0) ASC, created_at DESC LIMIT $1");
+        let rows: Vec<RawRequestRow> = sqlx::query_as(&q).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_view).collect())
     }
 
     /// Return aggregated dashboard stats for the web UI.

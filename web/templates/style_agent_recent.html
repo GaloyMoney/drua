@@ -3,7 +3,6 @@
     <thead>
       <tr>
         <th>Time</th>
-        <th>Tool</th>
         <th>Query</th>
         <th>Results</th>
         <th>Score</th>
@@ -16,21 +15,30 @@
       {% for row in rows %}
       <tr>
         <td>{{ row.created_at }}</td>
-        <td>{{ row.tool_name }}</td>
         <td class="query-text"><code>{{ row.query }}</code></td>
         <td>{{ row.num_results }}</td>
-        <td>{{ row.top_score_fmt }}</td>
+        <td><span class="{{ row.score_class }}">{{ row.top_score_fmt }}</span></td>
         <td>{{ row.latency_ms }}ms</td>
         <td>{{ row.label_filter.as_deref().unwrap_or("—") }}</td>
         <td>
           {% if row.has_error %}
-          <span class="error-text" title="{{ row.error.as_deref().unwrap_or("") }}">✗</span>
+          <span class="error-text" title="{{ row.error.as_deref().unwrap_or("") }}">error</span>
           {% endif %}
         </td>
       </tr>
+      {% if !row.results_json.is_empty() %}
+      <tr>
+        <td colspan="7" style="padding: 0;">
+          <details>
+            <summary style="padding: 0.25rem 0.5rem; font-size: 0.8rem; cursor: pointer;">Show returned results</summary>
+            <pre style="font-size: 0.75rem; max-height: 300px; overflow: auto; margin: 0; padding: 0.5rem;">{{ row.results_json }}</pre>
+          </details>
+        </td>
+      </tr>
+      {% endif %}
       {% endfor %}
       {% if rows.is_empty() %}
-      <tr><td colspan="8">No requests logged yet.</td></tr>
+      <tr><td colspan="7">No requests logged yet.</td></tr>
       {% endif %}
     </tbody>
   </table>
