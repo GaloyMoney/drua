@@ -135,8 +135,6 @@ jobs:
   plan:
   - in_parallel:
     - get: repo
-      trigger: true
-      passed: [build-edge-image]
     - get: edge-image
       trigger: true
       passed: [build-edge-image]
