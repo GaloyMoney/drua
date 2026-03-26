@@ -77,12 +77,12 @@
   <h3>Search Code</h3>
   <form hx-get="/style-agent/search" hx-target="#search-results" hx-swap="innerHTML"
         hx-indicator="#search-spinner">
-    <div style="display: flex; gap: 0.5rem; align-items: end;">
-      <label style="flex: 1;">
-        Query
-        <input type="text" name="q" placeholder="impl TryFromEvents for" required>
-      </label>
-      <label>
+    <label>
+      Query
+      <input type="text" name="q" placeholder="impl TryFromEvents for" required>
+    </label>
+    <div style="display: flex; gap: 1rem; align-items: end;">
+      <label style="width: 200px;">
         Label
         <select name="label">
           <option value="">All</option>
@@ -100,7 +100,7 @@
           <option>config</option>
         </select>
       </label>
-      <button type="submit">Search</button>
+      <button type="submit" style="width: auto; margin-bottom: 0;">Search</button>
     </div>
   </form>
   <div id="search-results" style="margin-top: 1rem;"></div>
