@@ -40,7 +40,7 @@ galoyAgents:
     githubClientSecret: ""
     annotations:
   styleAgent:
-    indexHash: "dd542ee7542491aaef125acd2f6e697171ecd2721f24a9d4dfb0641ed50ecd72"
+    indexHash: "825ef7dd2d3b0ae5c61a97f4eb92d09e11c222d452e339d5614edc59c27bfd84"
     embedderHash: ""
     gcsBucket: galoy-agents-models
     gcsCreds: ""
