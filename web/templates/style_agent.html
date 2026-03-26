@@ -130,27 +130,6 @@
   </div>
 </div>
 
-{% if !stats.top_queries.is_empty() %}
-<details open>
-  <summary><strong>Top Queries (7d)</strong></summary>
-  <figure>
-    <table>
-      <thead>
-        <tr><th>Query</th><th>Count</th></tr>
-      </thead>
-      <tbody>
-        {% for q in stats.top_queries %}
-        <tr>
-          <td class="query-text"><code>{{ q.query }}</code></td>
-          <td>{{ q.count }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </figure>
-</details>
-{% endif %}
-
 <div class="tab-bar">
   <button class="active"
           onclick="switchTab(this, 'recent-tab')"

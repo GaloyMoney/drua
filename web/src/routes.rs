@@ -200,7 +200,7 @@ async fn style_agent_recent(State(state): State<AppState>, session: Session) -> 
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state.app.style_agent_logs().recent_requests(50).await {
+    let rows = match state.app.style_agent_logs().recent_requests(10).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load recent requests");
@@ -217,7 +217,7 @@ async fn style_agent_least_useful(State(state): State<AppState>, session: Sessio
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state.app.style_agent_logs().least_useful(50).await {
+    let rows = match state.app.style_agent_logs().least_useful(10).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load least useful requests");
