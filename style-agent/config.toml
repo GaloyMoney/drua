@@ -5,7 +5,7 @@ bot_token_env = "TELEGRAM_BOT_TOKEN"
 allowed_user_ids = [549666761]
 
 [services]
-classifier_model_dir = "../models/onnx"
+classifier_model_dir = "./models/onnx"
 llm_model = "qwen2.5-coder:7b"
 llm_context_examples = 10 
 
