@@ -155,7 +155,7 @@ jobs:
       run:
         path: sh
         args:
-          - -exc
+          - -ec
           - |
             set -euo pipefail
 
@@ -164,12 +164,15 @@ jobs:
             cp -r repo/ci/deploy/galoy-agents deployment/tf
             cp -r repo/charts/galoy-agents deployment/tf/chart
 
+            set +x
             cat <<EOF > deployment/tf/terraform.tfvars
             image_digest = "${DIGEST}"
             github_client_secret = "${GITHUB_CLIENT_SECRET}"
             EOF
 
             echo "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json
+            set -x
+            echo "Deployment files prepared"
   - put: tf-galoy-agents-prod
     tags: [galoy-agents]
     params:
