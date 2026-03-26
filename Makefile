@@ -1,4 +1,5 @@
 PG_CON ?= postgres://user:password@localhost:5432/galoy_agents
+GITHUB_CLIENT_SECRET ?= dev-secret
 
 clean-deps:
 	docker compose down -v
@@ -15,6 +16,6 @@ setup-db:
 reset-deps: clean-deps start-deps setup-db
 
 run-server:
-	PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=dev-secret cargo run --bin galoy-agents
+	PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) cargo run --bin galoy-agents
 
 start: reset-deps run-server
