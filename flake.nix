@@ -139,7 +139,12 @@
           });
         };
 
-        packages.default = galoy-agents;
+        packages.galoy-agents-unwrapped = galoy-agents;
+
+        packages.default = pkgs.writeShellScriptBin "galoy-agents" ''
+          export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
+          exec "${galoy-agents}/bin/galoy-agents" "$@"
+        '';
 
         packages.style-agent = pkgs.writeShellScriptBin "style-agent" ''
           export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
