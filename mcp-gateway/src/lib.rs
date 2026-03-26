@@ -112,9 +112,25 @@ struct GetBuildStatusParams {
     job: String,
 }
 
+/// Deserialize an i64 from either a JSON number or a string.
+fn deserialize_i64_or_string<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde::Deserialize;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match &value {
+        serde_json::Value::Number(n) => n.as_i64().ok_or_else(|| D::Error::custom("invalid i64")),
+        serde_json::Value::String(s) => s.parse::<i64>().map_err(D::Error::custom),
+        _ => Err(D::Error::custom("expected a number or string")),
+    }
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct GetBuildLogsParams {
     /// The numeric build ID
+    #[serde(deserialize_with = "deserialize_i64_or_string")]
     build_id: i64,
     /// Starting line offset for paginated reads (enables live tailing mode).
     /// When omitted, returns all logs at once (best for finished builds).
