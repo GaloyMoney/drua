@@ -11,6 +11,10 @@ galoyAgents:
       githubRedirectUri: "https://dashboard.agents.galoy.io/auth/github/callback"
       githubAllowedTeams:
         - "GaloyMoney/galoy-devs"
+    concourse:
+      enabled: true
+      url: "https://ci.galoy.io"
+      team: "dev"
   ingress:
     enabled: true
     host: dashboard.agents.galoy.io
@@ -21,10 +25,6 @@ galoyAgents:
       - hosts:
           - dashboard.agents.galoy.io
         secretName: galoy-agents-tls
-    concourse:
-      enabled: true
-      url: "https://ci.galoy.io"
-      team: "dev"
   secrets:
     create: false
   resources:
