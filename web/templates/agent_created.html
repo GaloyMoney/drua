@@ -3,7 +3,19 @@
     <h3>Agent Created: {{ agent_name }}</h3>
   </header>
   <p class="token-warning">This configuration will not be shown again. Copy it now.</p>
-  <p>Add this to your MCP client configuration:</p>
+
+  <p><strong>Claude Code CLI:</strong></p>
+  <div class="token-box">
+    <pre id="cli-cmd"><code>{{ cli_command }}</code></pre>
+    <button
+      onclick="navigator.clipboard.writeText(document.getElementById('cli-cmd').textContent).then(function(){this.textContent='Copied!'}.bind(this))"
+      class="outline"
+    >
+      Copy
+    </button>
+  </div>
+
+  <p><strong>MCP JSON config:</strong></p>
   <div class="token-box">
     <pre id="mcp-config"><code>{{ mcp_json }}</code></pre>
     <button

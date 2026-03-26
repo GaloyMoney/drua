@@ -92,17 +92,23 @@ pub struct CreateAgentForm {
     name: String,
 }
 
-fn build_mcp_json(mcp_endpoint: &str, token: &str) -> String {
-    serde_json::json!({
-        "galoy-agents": {
-            "type": "http",
-            "url": mcp_endpoint,
-            "headers": {
-                "Authorization": format!("Bearer {token}")
-            }
+fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
+    let server_config = serde_json::json!({
+        "type": "http",
+        "url": mcp_endpoint,
+        "headers": {
+            "Authorization": format!("Bearer {token}")
         }
+    });
+    let mcp_json = serde_json::json!({
+        "galoy-agents": &server_config
     })
-    .to_string()
+    .to_string();
+    let cli_command = format!(
+        "claude mcp add-json --scope user galoy-agents '{}'",
+        server_config
+    );
+    (mcp_json, cli_command)
 }
 
 #[instrument(name = "web.create_agent", skip_all)]
@@ -125,10 +131,11 @@ async fn create_agent(
         .await
     {
         Ok(_agent) => {
-            let mcp_json = build_mcp_json(&state.mcp_endpoint, &raw_token);
+            let (mcp_json, cli_command) = build_mcp_config(&state.mcp_endpoint, &raw_token);
             AgentCreatedTemplate {
                 agent_name: form.name,
                 mcp_json,
+                cli_command,
             }
             .into_response()
         }

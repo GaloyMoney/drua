@@ -28,6 +28,7 @@ pub struct DashboardTemplate {
 pub struct AgentCreatedTemplate {
     pub agent_name: String,
     pub mcp_json: String,
+    pub cli_command: String,
 }
 
 #[derive(Template, WebTemplate)]
