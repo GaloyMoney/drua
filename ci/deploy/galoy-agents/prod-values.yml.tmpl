@@ -15,7 +15,7 @@ galoyAgents:
     host: dashboard.agents.galoy.io
     ingressClassName: nginx
     annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
+      cert-manager.io/cluster-issuer: letsencrypt-issuer
     tls:
       - hosts:
           - dashboard.agents.galoy.io
