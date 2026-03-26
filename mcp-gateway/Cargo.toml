@@ -6,6 +6,7 @@ edition.workspace = true
 [lib]
 
 [dependencies]
+concourse-client = { workspace = true }
 galoy-agents-domain = { path = "../domain" }
 style-agent-server = { workspace = true }
 anyhow = { workspace = true }
