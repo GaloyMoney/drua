@@ -12,18 +12,18 @@ llm_context_examples = 10
 
 [[repos]]
 name = "cala"
-url = "/Users/jcarter/projects/galoymoney/cala"
+url = "https://github.com/GaloyMoney/cala.git"
 exclude_dirs = ["cala-cel-interpreter", "cala-cel-parser"]
 
 [[repos]]
 name = "lana-bank"
-url = "/Users/jcarter/projects/galoymoney/lana-bank"
+url = "https://github.com/GaloyMoney/lana-bank.git"
 exclude_dirs = ["dev"]
 
 [[repos]]
 name = "job"
-url = "/Users/jcarter/projects/galoymoney/job"
+url = "https://github.com/GaloyMoney/job.git"
 
 [[repos]]
 name = "obix"
-url = "/Users/jcarter/projects/galoymoney/obix"
+url = "https://github.com/GaloyMoney/obix.git"
