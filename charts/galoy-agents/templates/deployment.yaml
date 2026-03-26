@@ -60,7 +60,7 @@ spec:
             set -e
             if [ -n "$GCS_CREDS" ]; then
               echo "$GCS_CREDS" > /tmp/gcs-key.json
-              export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-key.json
+              gcloud auth activate-service-account --key-file=/tmp/gcs-key.json
             fi
             {{- if .Values.galoyAgents.styleAgent.modelHash }}
             echo "Downloading model {{ .Values.galoyAgents.styleAgent.modelHash }}..."
