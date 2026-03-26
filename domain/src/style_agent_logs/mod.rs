@@ -1,7 +1,7 @@
 pub mod error;
 
-use style_agent_server::request_log::{LabelCount, QueryCount, RequestLogEntry, StatsResponse};
-use style_agent_server::{LoggerError, RequestLogRow, RequestLogger};
+use style_agent_server::request_log::RequestLogEntry;
+use style_agent_server::{LoggerError, RequestLogger};
 use tracing::instrument;
 
 pub use error::StyleAgentLogsError;
@@ -228,101 +228,5 @@ impl RequestLogger for StyleAgentLogs {
         .await?;
 
         Ok(())
-    }
-
-    #[instrument(name = "domain.style_agent_logs.query_stats", skip_all)]
-    async fn query_stats(&self, low_score_threshold: f64) -> Result<StatsResponse, LoggerError> {
-        let row: (i64, i64, i64, i64, i64, i64, f64) = sqlx::query_as(
-            r#"SELECT
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 day'),
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days'),
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days'),
-                COUNT(*) FILTER (WHERE num_results = 0 AND created_at > NOW() - INTERVAL '30 days'),
-                COUNT(*) FILTER (WHERE top_score IS NOT NULL AND top_score < $1 AND created_at > NOW() - INTERVAL '30 days'),
-                COUNT(*) FILTER (WHERE error IS NOT NULL AND created_at > NOW() - INTERVAL '30 days'),
-                COALESCE(AVG(latency_ms::double precision) FILTER (WHERE created_at > NOW() - INTERVAL '30 days'), 0)
-            FROM style_agent_request_log"#,
-        )
-        .bind(low_score_threshold)
-        .fetch_one(&self.pool)
-        .await?;
-
-        let (cnt_24h, cnt_7d, cnt_30d, empty_cnt, low_score_cnt, error_cnt, avg_latency) = row;
-        let total_30d = cnt_30d.max(1) as f64;
-
-        let top_queries: Vec<(String, i64)> = sqlx::query_as(
-            r#"SELECT query, COUNT(*) AS cnt
-            FROM style_agent_request_log
-            WHERE created_at > NOW() - INTERVAL '30 days'
-            GROUP BY query
-            ORDER BY cnt DESC
-            LIMIT 20"#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let top_labels: Vec<(String, i64)> = sqlx::query_as(
-            r#"SELECT label_filter, COUNT(*) AS cnt
-            FROM style_agent_request_log
-            WHERE created_at > NOW() - INTERVAL '30 days' AND label_filter IS NOT NULL
-            GROUP BY label_filter
-            ORDER BY cnt DESC
-            LIMIT 20"#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(StatsResponse {
-            total_requests_24h: cnt_24h,
-            total_requests_7d: cnt_7d,
-            total_requests_30d: cnt_30d,
-            empty_result_rate: empty_cnt as f64 / total_30d,
-            low_score_rate: low_score_cnt as f64 / total_30d,
-            low_score_threshold,
-            error_rate: error_cnt as f64 / total_30d,
-            avg_latency_ms: avg_latency,
-            top_queries: top_queries
-                .into_iter()
-                .map(|(query, count)| QueryCount { query, count })
-                .collect(),
-            top_labels: top_labels
-                .into_iter()
-                .map(|(label, count)| LabelCount { label, count })
-                .collect(),
-        })
-    }
-
-    #[instrument(name = "domain.style_agent_logs.recent_requests_log", skip_all)]
-    async fn recent_requests(&self, limit: i64) -> Result<Vec<RequestLogRow>, LoggerError> {
-        let rows: Vec<RawRequestRow> = sqlx::query_as(
-            r#"SELECT
-                id, tool_name, query, num_results, top_score, latency_ms,
-                label_filter, language_filter, repo_filter, error,
-                created_at
-            FROM style_agent_request_log
-            ORDER BY created_at DESC
-            LIMIT $1"#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| RequestLogRow {
-                id: r.0,
-                tool_name: r.1,
-                query: r.2,
-                num_results: r.3,
-                top_score: r.4,
-                latency_ms: r.5,
-                label_filter: r.6,
-                language_filter: r.7,
-                layer_filter: None,
-                repo_filter: r.8,
-                error: r.9,
-                created_at: r.10.format("%Y-%m-%d %H:%M:%S").to_string(),
-            })
-            .collect())
     }
 }

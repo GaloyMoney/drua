@@ -60,34 +60,6 @@ impl ServerHandler for StyleAgentServer {
     }
 }
 
-/// Default threshold below which a top_score is considered "low quality".
-const DEFAULT_LOW_SCORE_THRESHOLD: f64 = 0.3;
-
-/// Handler for `GET /stats` — returns aggregated request log analytics as JSON.
-async fn stats_handler(
-    axum::extract::State(engine): axum::extract::State<Arc<SearchEngine>>,
-) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-
-    match tokio::task::spawn_blocking(move || engine.query_stats(DEFAULT_LOW_SCORE_THRESHOLD)).await
-    {
-        Ok(Ok(stats)) => axum::Json(stats).into_response(),
-        Ok(Err(e)) => {
-            tracing::error!(error = %e, "Failed to query stats");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Stats error: {e}"),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Stats task panicked");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
-        }
-    }
-}
-
 /// Handler for `GET /health` — simple liveness check.
 async fn health_handler() -> &'static str {
     "ok"
@@ -108,8 +80,6 @@ pub fn router(search_engine: Arc<SearchEngine>) -> axum::Router {
         ..Default::default()
     };
 
-    let stats_engine = Arc::clone(&search_engine);
-
     let service = StreamableHttpService::new(
         move || Ok(StyleAgentServer::new(Arc::clone(&search_engine))),
         LocalSessionManager::default().into(),
@@ -118,8 +88,6 @@ pub fn router(search_engine: Arc<SearchEngine>) -> axum::Router {
 
     axum::Router::new()
         .route("/health", axum::routing::get(health_handler))
-        .route("/stats", axum::routing::get(stats_handler))
-        .with_state(stats_engine)
         .nest_service("/mcp", service)
 }
 
