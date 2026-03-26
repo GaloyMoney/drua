@@ -8,4 +8,4 @@ oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
 style_agent:
-  db_path: "./style-agent/data/style-agent.db"
+  db_path: "./data/style-agent.db"
