@@ -34,11 +34,15 @@ impl McpGateway {
     pub fn service(
         app: App,
         style_agent_config: &StyleAgentConfig,
-    ) -> anyhow::Result<StreamableHttpService<Self, LocalSessionManager>> {
+    ) -> anyhow::Result<(
+        StreamableHttpService<Self, LocalSessionManager>,
+        Option<StyleAgentEndpoints>,
+    )> {
         let logger = app.style_agent_logs().clone();
         let style_agent =
             style_agent_server::init_endpoints_with_logger(style_agent_config, logger)?;
-        Ok(Self::build_service(app, style_agent))
+        let svc = Self::build_service(app, style_agent.clone());
+        Ok((svc, style_agent))
     }
 
     fn build_service(

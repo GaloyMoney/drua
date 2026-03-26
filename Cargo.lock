@@ -1290,6 +1290,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "style-agent-server",
  "thiserror 2.0.18",
  "time",
  "tokio",

@@ -53,3 +53,22 @@ pub struct StyleAgentTemplate {
 pub struct StyleAgentRecentTemplate {
     pub rows: Vec<StyleAgentRequestRow>,
 }
+
+/// A single search result for the web UI.
+pub struct SearchResultView {
+    pub file_path: String,
+    pub repo: String,
+    pub score: String,
+    pub labels: String,
+    pub lines: String,
+    pub content: String,
+    pub language: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "style_agent_search_results.html")]
+pub struct StyleAgentSearchResultsTemplate {
+    pub query: String,
+    pub results: Vec<SearchResultView>,
+    pub error: Option<String>,
+}

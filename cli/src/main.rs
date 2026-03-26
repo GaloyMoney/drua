@@ -59,21 +59,22 @@ async fn main() -> anyhow::Result<()> {
     let app = galoy_agents_domain::App::new(&pool);
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
-    let app_state = galoy_agents_web::AppState::new(
-        app,
-        oauth_client,
-        config.server.mcp_endpoint.clone(),
-        auth_config.github_allowed_teams,
-    );
-
     let server_config = galoy_agents_web::server::ServerConfig {
         host: config.server.host.clone(),
         port: config.server.port,
         secure_cookies: config.server.secure_cookies,
     };
 
-    let mcp_service =
-        galoy_agents_mcp_gateway::McpGateway::service(app_state.app.clone(), &config.style_agent)?;
+    let (mcp_service, style_agent_endpoints) =
+        galoy_agents_mcp_gateway::McpGateway::service(app.clone(), &config.style_agent)?;
+
+    let app_state = galoy_agents_web::AppState::new(
+        app,
+        oauth_client,
+        config.server.mcp_endpoint.clone(),
+        auth_config.github_allowed_teams,
+        style_agent_endpoints,
+    );
 
     let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);
 
