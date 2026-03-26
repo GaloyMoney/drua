@@ -169,6 +169,49 @@
           in "${wrapped}/bin/run-bats";
         };
 
+        apps.prep-style-agent = {
+          type = "app";
+          program = let
+            prep = pkgs.writeShellScriptBin "prep-style-agent" ''
+              set -euo pipefail
+
+              export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
+
+              STYLE_AGENT_DIR="$(pwd)/style-agent"
+              ONNX_DIR="$STYLE_AGENT_DIR/models/onnx"
+              export STYLE_AGENT_CONFIG="$STYLE_AGENT_DIR/config.toml"
+
+              # --- Step 1: train model if missing ---
+              if [ ! -f "$ONNX_DIR/model.onnx" ]; then
+                echo "=== ONNX model not found — training from labels ==="
+                cd "$STYLE_AGENT_DIR"
+                ${pythonEnv}/bin/python3 scripts/train_setfit.py
+                ${pythonEnv}/bin/python3 scripts/export_onnx.py
+                cd - > /dev/null
+              else
+                echo "=== ONNX model found at $ONNX_DIR ==="
+              fi
+
+              # --- Step 2: bootstrap (clone/update repos + index) ---
+              echo ""
+              echo "=== Bootstrapping style-agent ==="
+              "${style-agent-unwrapped}/bin/style-agent" bootstrap
+
+              # --- Step 3: apply labels ---
+              echo ""
+              echo "=== Applying heuristic labels ==="
+              "${style-agent-unwrapped}/bin/style-agent" label
+
+              echo ""
+              echo "=== Replaying human-reviewed labels ==="
+              "${style-agent-unwrapped}/bin/style-agent" replay-labels
+
+              echo ""
+              echo "=== Done! Run 'make start' in style-agent/ to launch. ==="
+            '';
+          in "${prep}/bin/prep-style-agent";
+        };
+
         packages.docker-image = pkgs.dockerTools.buildLayeredImage {
           name = "galoy-agents";
           tag = "latest";
