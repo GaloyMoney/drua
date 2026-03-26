@@ -32,10 +32,4 @@ galoyAgents:
     otelExporterOtlpEndpoint: "http://opentelemetry-collector.otel.svc.cluster.local:4317"
 
 postgresql:
-  image:
-    repository: bitnamilegacy/postgresql
-    tag: 14.5.0-debian-11-r35
-  auth:
-    existingSecret: galoy-agents
-    secretKeys:
-      userPasswordKey: "pg-user-pw"
+  enabled: false

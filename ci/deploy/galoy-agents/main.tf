@@ -6,11 +6,22 @@ locals {
   cluster_location = "us-east1-b"
   gcp_project      = "galoy-agents"
   namespace        = "galoy-agents"
+  vpc_name         = "galoy-agents-vpc"
+  region           = "us-east1"
 }
 
-resource "random_password" "postgresql" {
-  length  = 20
-  special = false
+module "postgresql" {
+  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp?ref=main"
+
+  gcp_project    = local.gcp_project
+  vpc_name       = local.vpc_name
+  instance_name  = "galoy-agents"
+  region         = local.region
+  databases      = ["galoy-agents"]
+  destroyable    = true
+  highly_available = false
+  tier           = "db-f1-micro"
+  replication    = false
 }
 
 resource "kubernetes_namespace" "galoy_agents" {
@@ -26,8 +37,7 @@ resource "kubernetes_secret" "galoy_agents" {
   }
 
   data = {
-    "pg-user-pw"           = random_password.postgresql.result
-    "pg-con"               = "postgres://galoy-agents:${random_password.postgresql.result}@galoy-agents-postgresql:5432/galoy-agents"
+    "pg-con"               = module.postgresql.creds["galoy-agents"].conn
     "github-client-secret" = var.github_client_secret
   }
 
