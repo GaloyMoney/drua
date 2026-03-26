@@ -224,7 +224,6 @@ jobs:
     - get: job-repo
     - get: obix-repo
     - get: style-agent-model
-      passed: [train-classifier]
   - task: build-index
     tags: [galoy-agents]
     config:
