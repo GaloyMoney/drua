@@ -153,7 +153,10 @@ async fn stream_build_events(
     build_id: i64,
     buffer: Arc<RwLock<BuildLogBuffer>>,
 ) {
-    let mut resp = match client.open_build_events(build_id).await {
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    let resp = match client.open_build_events(build_id).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(%build_id, error = %e, "Failed to open build events stream");
@@ -164,22 +167,31 @@ async fn stream_build_events(
         }
     };
 
+    let mut stream = resp.bytes_stream();
     let mut parser = SseParser::new();
 
     loop {
-        match resp.chunk().await {
-            Ok(Some(bytes)) => {
+        match tokio::time::timeout(Duration::from_secs(30), stream.next()).await {
+            Ok(Some(Ok(bytes))) => {
                 let text = String::from_utf8_lossy(&bytes);
                 let events = parser.feed(&text);
                 let mut buf = buffer.write().await;
                 for envelope in events {
                     process_envelope(&envelope, &mut buf);
                 }
+                if buf.is_complete {
+                    break;
+                }
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!(%build_id, error = %e, "Error reading build events stream");
+                let mut buf = buffer.write().await;
+                buf.is_complete = true;
+                break;
             }
             Ok(None) => {
                 // Stream ended
                 let mut buf = buffer.write().await;
-                // Process any remaining buffered data
                 let events = parser.flush();
                 for envelope in events {
                     process_envelope(&envelope, &mut buf);
@@ -187,9 +199,13 @@ async fn stream_build_events(
                 buf.is_complete = true;
                 break;
             }
-            Err(e) => {
-                tracing::warn!(%build_id, error = %e, "Error reading build events stream");
+            Err(_) => {
+                // Timeout — mark complete with what we have
                 let mut buf = buffer.write().await;
+                let events = parser.flush();
+                for envelope in events {
+                    process_envelope(&envelope, &mut buf);
+                }
                 buf.is_complete = true;
                 break;
             }
@@ -218,6 +234,9 @@ fn process_envelope(envelope: &BuildEventEnvelope, buf: &mut BuildLogBuffer) {
                     buf.build_status = s.to_string();
                 }
             }
+        }
+        "finish-task" | "end" => {
+            buf.is_complete = true;
         }
         _ => {}
     }
