@@ -294,7 +294,7 @@ fn extract_get_steps(plan: &[serde_json::Value], out: &mut Vec<serde_json::Value
     for step in plan {
         if let Some(get) = step.get("get") {
             let mut input = serde_json::json!({
-                "resource": step.get("resource").or(Some(get)).unwrap(),
+                "resource": step.get("resource").unwrap_or(get),
             });
             if let Some(trigger) = step.get("trigger") {
                 input["trigger"] = trigger.clone();

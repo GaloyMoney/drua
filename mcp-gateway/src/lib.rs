@@ -125,7 +125,7 @@ struct ListBuildsForJobParams {
     /// The job name
     job: String,
     /// Max number of recent builds to return (default: 10)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lax_number::deserialize_opt_usize")]
     limit: Option<usize>,
 }
 
@@ -156,6 +156,25 @@ mod lax_number {
             _ => Err(D::Error::custom("expected a number or string")),
         }
     }
+
+    pub fn deserialize_opt_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        match value {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => n
+                .as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .map(Some)
+                .ok_or_else(|| D::Error::custom("invalid usize")),
+            Some(serde_json::Value::String(s)) => {
+                s.parse::<usize>().map(Some).map_err(D::Error::custom)
+            }
+            _ => Err(D::Error::custom("expected a number, string, or null")),
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -164,7 +183,7 @@ struct GetBuildLogsParams {
     #[serde(deserialize_with = "lax_number::deserialize_i64")]
     build_id: i64,
     /// Number of lines to return from the end of the log (default: 150)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lax_number::deserialize_opt_usize")]
     tail: Option<usize>,
 }
 
