@@ -126,30 +126,53 @@ impl ConcourseClient {
         &self.team
     }
 
-    /// `GET /api/v1/teams/{team}/pipelines` — list pipelines for the configured team.
+    /// `GET /api/v1/pipelines` — list all pipelines across all accessible teams.
+    #[tracing::instrument(name = "concourse_client.list_all_pipelines", skip_all)]
+    pub async fn list_all_pipelines(&self) -> Result<Vec<Pipeline>, ConcourseError> {
+        self.get("/pipelines").await
+    }
+
+    /// `GET /api/v1/teams/{team}/pipelines` — list pipelines for a specific team.
     #[tracing::instrument(name = "concourse_client.list_pipelines", skip_all)]
     pub async fn list_pipelines(&self) -> Result<Vec<Pipeline>, ConcourseError> {
         let team = &self.team;
         self.get(&format!("/teams/{team}/pipelines")).await
     }
 
+    /// Resolve the team that owns a pipeline by searching all accessible pipelines.
+    ///
+    /// Returns the team name, or falls back to the default team if not found.
+    #[tracing::instrument(name = "concourse_client.resolve_pipeline_team", skip_all)]
+    pub async fn resolve_pipeline_team(&self, pipeline: &str) -> Result<String, ConcourseError> {
+        let pipelines = self.list_all_pipelines().await?;
+        if let Some(p) = pipelines.iter().find(|p| p.name == pipeline) {
+            Ok(p.team_name.clone())
+        } else {
+            Ok(self.team.clone())
+        }
+    }
+
     /// `GET /api/v1/teams/{team}/pipelines/{pipeline}/jobs` — list jobs in a pipeline.
+    ///
+    /// Automatically resolves the team from the pipeline name.
     #[tracing::instrument(name = "concourse_client.list_jobs", skip_all)]
     pub async fn list_jobs(&self, pipeline: &str) -> Result<Vec<Job>, ConcourseError> {
-        let team = &self.team;
+        let team = self.resolve_pipeline_team(pipeline).await?;
         self.get(&format!("/teams/{team}/pipelines/{pipeline}/jobs"))
             .await
     }
 
     /// `GET /api/v1/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds` —
     /// list builds for a job (most recent first).
+    ///
+    /// Automatically resolves the team from the pipeline name.
     #[tracing::instrument(name = "concourse_client.list_job_builds", skip_all)]
     pub async fn list_job_builds(
         &self,
         pipeline: &str,
         job: &str,
     ) -> Result<Vec<Build>, ConcourseError> {
-        let team = &self.team;
+        let team = self.resolve_pipeline_team(pipeline).await?;
         self.get(&format!(
             "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds"
         ))
@@ -209,7 +232,7 @@ impl ConcourseClient {
     /// trigger a new build.
     #[tracing::instrument(name = "concourse_client.trigger_build", skip_all)]
     pub async fn trigger_build(&self, pipeline: &str, job: &str) -> Result<Build, ConcourseError> {
-        let team = &self.team;
+        let team = self.resolve_pipeline_team(pipeline).await?;
         self.post_empty(&format!(
             "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds"
         ))
