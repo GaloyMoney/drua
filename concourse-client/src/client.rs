@@ -187,12 +187,36 @@ impl ConcourseClient {
 
     /// `GET /api/v1/builds/{id}/events` — fetch build log output.
     ///
-    /// Reads the SSE event stream and extracts log lines from `"log"` events,
-    /// returning them as a single string. Best for finished builds.
+    /// Streams the SSE event stream and extracts log lines from `"log"` events.
+    /// Stops when an `"end"` event is received or after a 30-second read timeout.
     #[tracing::instrument(name = "concourse_client.get_build_logs", skip_all)]
     pub async fn get_build_logs(&self, build_id: i64) -> Result<String, ConcourseError> {
+        use futures_util::StreamExt;
+        use std::time::Duration;
+
         let resp = self.open_build_events(build_id).await?;
-        let body = resp.text().await?;
+        let mut stream = resp.bytes_stream();
+        let mut body = String::new();
+
+        // Read chunks with a per-chunk timeout; SSE streams don't close naturally
+        loop {
+            match tokio::time::timeout(Duration::from_secs(30), stream.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    body.push_str(&String::from_utf8_lossy(&chunk));
+                    // Stop early if we see the end event
+                    if body.contains("\"event\":\"end\"") {
+                        break;
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    tracing::warn!(error = %e, "Error reading build event stream");
+                    break;
+                }
+                Ok(None) => break, // Stream ended
+                Err(_) => break,   // Timeout — return what we have
+            }
+        }
+
         let mut logs = String::new();
         extract_logs_from_sse(&body, &mut logs);
         Ok(logs)
