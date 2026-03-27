@@ -1,0 +1,24 @@
+<tr id="sandbox-{{ sb.name }}">
+  <td>{{ sb.name }}</td>
+  <td>{{ sb.sandbox_name }}</td>
+  <td>
+    <span class="sandbox-phase {% if sb.phase == "Ready" %}phase-ready{% else if sb.phase == "Provisioning" %}phase-provisioning{% else %}phase-pending{% endif %}">
+      {{ sb.phase }}
+    </span>
+  </td>
+  <td class="sandbox-actions">
+    <button class="secondary outline"
+      hx-get="/sandboxes/{{ sb.name }}/status"
+      hx-target="#sandbox-{{ sb.name }}"
+      hx-swap="outerHTML">
+      Refresh
+    </button>
+    <button class="contrast outline"
+      hx-post="/sandboxes/{{ sb.name }}/delete"
+      hx-target="#sandbox-{{ sb.name }}"
+      hx-swap="outerHTML"
+      hx-confirm="Delete sandbox '{{ sb.name }}'?">
+      Delete
+    </button>
+  </td>
+</tr>

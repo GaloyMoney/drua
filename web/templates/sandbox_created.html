@@ -1,0 +1,6 @@
+<article>
+  <p>Sandbox <strong>{{ name }}</strong> created. It will be provisioned from the warm pool.</p>
+</article>
+<script>
+  htmx.ajax('GET', '/sandboxes/list', {target: '#sandbox-list', swap: 'innerHTML'});
+</script>

@@ -73,3 +73,33 @@ pub struct StyleAgentSearchResultsTemplate {
     pub results: Vec<SearchResultView>,
     pub error: Option<String>,
 }
+
+pub struct SandboxView {
+    pub name: String,
+    pub sandbox_name: String,
+    pub phase: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "sandboxes.html")]
+pub struct SandboxesTemplate {
+    pub enabled: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "sandbox_list.html")]
+pub struct SandboxListTemplate {
+    pub sandboxes: Vec<SandboxView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "sandbox_row.html")]
+pub struct SandboxRowTemplate {
+    pub sb: SandboxView,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "sandbox_created.html")]
+pub struct SandboxCreatedTemplate {
+    pub name: String,
+}

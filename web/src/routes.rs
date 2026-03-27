@@ -33,6 +33,11 @@ pub fn router() -> Router<AppState> {
         .route("/style-agent/recent", get(style_agent_recent))
         .route("/style-agent/least-useful", get(style_agent_least_useful))
         .route("/style-agent/search", get(style_agent_search))
+        .route("/sandboxes", get(sandboxes_page))
+        .route("/sandboxes/list", get(sandbox_list))
+        .route("/sandboxes/create", post(sandbox_create))
+        .route("/sandboxes/{name}/delete", post(sandbox_delete))
+        .route("/sandboxes/{name}/status", get(sandbox_status))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -306,5 +311,123 @@ async fn style_agent_search(
             error: Some(e.to_string()),
         }
         .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sandboxes
+// ---------------------------------------------------------------------------
+
+fn summary_to_view(s: &sandbox_client::SandboxSummary) -> SandboxView {
+    SandboxView {
+        name: s.name.clone(),
+        sandbox_name: s.sandbox_name.clone().unwrap_or_default(),
+        phase: s.phase.clone(),
+    }
+}
+
+#[instrument(name = "web.sandboxes_page", skip_all)]
+async fn sandboxes_page(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    SandboxesTemplate {
+        enabled: state.sandbox.is_some(),
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.sandbox_list", skip_all)]
+async fn sandbox_list(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    let client = match state.sandbox.as_ref() {
+        Some(c) => c,
+        None => return SandboxListTemplate { sandboxes: vec![] }.into_response(),
+    };
+    match client.list_claims().await {
+        Ok(summaries) => SandboxListTemplate {
+            sandboxes: summaries.iter().map(summary_to_view).collect(),
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list sandboxes");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateSandboxForm {
+    name: String,
+}
+
+#[instrument(name = "web.sandbox_create", skip_all)]
+async fn sandbox_create(
+    State(state): State<AppState>,
+    session: Session,
+    Form(form): Form<CreateSandboxForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    let client = match state.sandbox.as_ref() {
+        Some(c) => c,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    match client.create_claim(&form.name).await {
+        Ok(_) => SandboxCreatedTemplate { name: form.name }.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create sandbox");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.sandbox_delete", skip_all)]
+async fn sandbox_delete(
+    State(state): State<AppState>,
+    session: Session,
+    Path(name): Path<String>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    let client = match state.sandbox.as_ref() {
+        Some(c) => c,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    match client.delete_claim(&name).await {
+        Ok(_) => "".into_response(), // Row disappears via hx-swap="outerHTML"
+        Err(e) => {
+            tracing::error!(error = %e, name = %name, "Failed to delete sandbox");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.sandbox_status", skip_all)]
+async fn sandbox_status(
+    State(state): State<AppState>,
+    session: Session,
+    Path(name): Path<String>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    let client = match state.sandbox.as_ref() {
+        Some(c) => c,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    match client.get_claim(&name).await {
+        Ok(summary) => SandboxRowTemplate {
+            sb: summary_to_view(&summary),
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, name = %name, "Failed to get sandbox status");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
