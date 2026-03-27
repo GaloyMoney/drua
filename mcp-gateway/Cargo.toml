@@ -8,6 +8,7 @@ edition.workspace = true
 [dependencies]
 concourse-client = { workspace = true }
 galoy-agents-core = { path = "../core" }
+sandbox-client = { workspace = true }
 style-agent-server = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }

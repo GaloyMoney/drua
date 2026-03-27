@@ -1,0 +1,16 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.warmPool.enabled }}
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: {{ .Values.sandbox.templateName }}-pool
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  templateRef:
+    name: {{ .Values.sandbox.templateName }}
+  minReady: {{ .Values.sandbox.warmPool.minReady }}
+  maxSize: {{ .Values.sandbox.warmPool.maxSize }}
+{{- end }}

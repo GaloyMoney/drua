@@ -32,6 +32,9 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      {{- if .Values.sandbox.enabled }}
+      serviceAccountName: {{ template "galoyAgents.fullname" . }}-sandbox
+      {{- end }}
       initContainers:
       - name: wait-for-postgresql
         image: postgres

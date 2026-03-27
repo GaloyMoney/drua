@@ -1,0 +1,41 @@
+{{- if .Values.sandbox.enabled }}
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: {{ .Values.sandbox.templateName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  podTemplate:
+    spec:
+      runtimeClassName: {{ .Values.sandbox.runtimeClassName }}
+      tolerations:
+      - key: {{ .Values.sandbox.nodePool.taintKey }}
+        operator: Equal
+        value: {{ .Values.sandbox.nodePool.taintValue }}
+        effect: NoSchedule
+      nodeSelector:
+        {{- toYaml .Values.sandbox.nodeSelector | nindent 8 }}
+      {{- if not .Values.sandbox.automountServiceAccountToken }}
+      automountServiceAccountToken: false
+      {{- end }}
+      containers:
+      - name: sandbox
+        image: {{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}
+        command: ["sleep", "infinity"]
+        resources:
+          {{- toYaml .Values.sandbox.resources | nindent 10 }}
+        env:
+        {{- range .Values.sandbox.env }}
+        - name: {{ .name }}
+          value: {{ .value | quote }}
+        {{- end }}
+      dnsConfig:
+        nameservers:
+        - "8.8.8.8"
+        - "1.1.1.1"
+  networkPolicyManagement: {{ .Values.sandbox.networkPolicyManagement }}
+{{- end }}
