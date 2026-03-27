@@ -35,7 +35,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-
     let allowed_teams: Vec<String> = cli
         .github_allowed_teams
         .split(',')
@@ -71,7 +70,6 @@ async fn main() -> anyhow::Result<()> {
             &config.style_agent,
             logger,
         )?;
-
     let concourse_endpoints =
         galoy_agents_mcp_gateway::ConcourseEndpoints::try_new(&config.concourse)?;
     let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(
