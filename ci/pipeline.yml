@@ -96,39 +96,6 @@ jobs:
       image: image/image.tar
     get_params:
       skip_download: true
-  - task: commit-edge-digest
-    config:
-      platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
-      inputs:
-      - name: repo
-      - name: edge-image
-      outputs:
-      - name: repo-updated
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
-      run:
-        path: sh
-        args:
-          - -exc
-          - |
-            set -euo pipefail
-            cachix use $CACHIX_CACHE_NAME
-
-            DIGEST=$(cat edge-image/digest)
-
-            cp -a repo/. repo-updated/
-            cd repo-updated
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#commit-hash -- "$(pwd)" \
-                charts/galoy-agents/values.yaml \
-                "galoyAgents.image.digest" \
-                "$DIGEST"
-  - put: repo-chart-values
-    params:
-      repository: repo-updated
-      rebase: true
 
 - name: deploy-to-prod
   serial: true
