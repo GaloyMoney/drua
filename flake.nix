@@ -255,6 +255,7 @@
             pkgs.kubernetes-helm
             pkgs.minikube
             pkgs.kubectl
+            pkgs.vendir
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             fly
             pkgs.libiconv

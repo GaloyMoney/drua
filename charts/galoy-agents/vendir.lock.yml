@@ -1,0 +1,9 @@
+apiVersion: vendir.k14s.io/v1alpha1
+directories:
+- contents:
+  - githubRelease:
+      tag: v0.2.1
+      url: https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/296913038
+    path: .
+  path: vendor/agent-sandbox
+kind: LockConfig

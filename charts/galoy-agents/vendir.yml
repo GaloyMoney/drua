@@ -1,0 +1,13 @@
+apiVersion: vendir.k14s.io/v1alpha1
+kind: Config
+directories:
+  - path: vendor/agent-sandbox
+    contents:
+      - path: .
+        githubRelease:
+          slug: kubernetes-sigs/agent-sandbox
+          tag: v0.2.1
+          assetNames:
+            - manifest.yaml
+            - extensions.yaml
+          disableAutoChecksumValidation: true
