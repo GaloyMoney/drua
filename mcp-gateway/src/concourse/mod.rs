@@ -145,8 +145,12 @@ impl ConcourseEndpoints {
         )]))
     }
 
-    /// Get build output/logs as plain text.
-    pub async fn get_build_logs(&self, build_id: i64) -> Result<CallToolResult, ErrorData> {
+    /// Get build output/logs as plain text, returning the last `tail` lines.
+    pub async fn get_build_logs(
+        &self,
+        build_id: i64,
+        tail: usize,
+    ) -> Result<CallToolResult, ErrorData> {
         let logs = self
             .client
             .get_build_logs(build_id)
@@ -159,7 +163,18 @@ impl ConcourseEndpoints {
             )]));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(logs)]))
+        let lines: Vec<&str> = logs.lines().collect();
+        let output = if lines.len() > tail {
+            let skipped = lines.len() - tail;
+            format!(
+                "... ({skipped} lines omitted, showing last {tail})\n{}",
+                lines[lines.len() - tail..].join("\n")
+            )
+        } else {
+            logs
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Trigger a new build for a job.

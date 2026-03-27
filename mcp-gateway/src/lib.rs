@@ -139,6 +139,9 @@ struct GetBuildLogsParams {
     /// The numeric build ID
     #[serde(deserialize_with = "lax_number::deserialize_i64")]
     build_id: i64,
+    /// Number of lines to return from the end of the log (default: 150)
+    #[serde(default)]
+    tail: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -232,7 +235,7 @@ impl McpGateway {
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
         self.require_concourse()?
-            .get_build_logs(params.build_id)
+            .get_build_logs(params.build_id, params.tail.unwrap_or(150))
             .await
     }
 
