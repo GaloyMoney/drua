@@ -11,7 +11,12 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::walker;
 
-const EMBED_BATCH_SIZE: usize = 32;
+/// Number of chunks to accumulate before embedding + flushing to SQLite.
+/// Each batch becomes a single ONNX forward pass (dynamic-quantization
+/// model requires `batch_size = None`). Smaller values reduce peak memory
+/// at the cost of throughput; 8 keeps the attention activation footprint
+/// manageable in memory-constrained CI workers.
+const EMBED_BATCH_SIZE: usize = 8;
 
 /// Index a single repository from a local path.
 ///

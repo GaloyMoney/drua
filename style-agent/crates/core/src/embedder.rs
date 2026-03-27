@@ -7,12 +7,6 @@ const SEARCH_DOCUMENT_PREFIX: &str = "search_document: ";
 /// nomic-embed-text task prefix for search queries.
 const SEARCH_QUERY_PREFIX: &str = "search_query: ";
 
-/// Maximum texts per ONNX forward pass. Smaller values reduce peak memory
-/// (attention activations scale with batch_size × seq_len²) at the cost of
-/// throughput. The default fastembed batch size (256) can OOM in CI workers
-/// when processing long code chunks.
-const ONNX_BATCH_SIZE: usize = 8;
-
 /// nomic-embed-text has 8192 token context. Code tokenizes at ~2-3 chars/token.
 /// 6000 chars ≈ 2000-3000 tokens — safe margin under the 8192 limit.
 const MAX_CHARS: usize = 6000;
@@ -79,8 +73,9 @@ impl Embedder {
 
     /// Embed a batch of documents for indexing (prepends `search_document:` prefix to each).
     ///
-    /// Uses a small ONNX batch size to bound peak memory from transformer
-    /// attention activations (`batch × seq_len²`).
+    /// NomicEmbedTextV15Q uses dynamic quantization which requires all items
+    /// in a single forward pass (`batch_size = None`).  The caller controls
+    /// peak memory by sending small batches.
     pub async fn embed_document_batch(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         let prefixed: Vec<String> = texts
             .into_iter()
@@ -89,7 +84,7 @@ impl Embedder {
         let model = self.model.clone();
         tokio::task::spawn_blocking(move || {
             let mut model = model.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-            model.embed(prefixed, Some(ONNX_BATCH_SIZE))
+            model.embed(prefixed, None)
         })
         .await?
     }
