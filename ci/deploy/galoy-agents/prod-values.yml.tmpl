@@ -37,5 +37,15 @@ galoyAgents:
     serviceName: galoy-agents
     otelExporterOtlpEndpoint: "http://opentelemetry-collector.otel.svc.cluster.local:4317"
 
+sandbox:
+  enabled: true
+  installController: true
+  templateName: agent-sandbox
+  runtimeClassName: gvisor
+  warmPool:
+    enabled: true
+    minReady: 2
+    maxSize: 5
+
 postgresql:
   enabled: false

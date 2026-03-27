@@ -49,6 +49,42 @@ resource "kubernetes_secret" "galoy_agents" {
   depends_on = [kubernetes_namespace.galoy_agents]
 }
 
+resource "google_container_node_pool" "gvisor" {
+  provider = google-beta
+  project  = local.gcp_project
+  cluster  = local.cluster_name
+  location = local.cluster_location
+
+  name       = "sandbox-gvisor"
+  node_count = 0
+
+  autoscaling {
+    min_node_count = 0
+    max_node_count = 3
+  }
+
+  node_config {
+    machine_type = "e2-standard-2"
+
+    sandbox_config {
+      sandbox_type = "gvisor"
+    }
+
+    labels = {
+      "sandbox.gke.io/runtime" = "gvisor"
+    }
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform",
+    ]
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+}
+
 resource "helm_release" "galoy_agents" {
   name      = "galoy-agents"
   chart     = "${path.module}/chart"
@@ -63,7 +99,10 @@ resource "helm_release" "galoy_agents" {
   dependency_update = true
   timeout           = 900 # 15 minutes
 
-  depends_on = [kubernetes_secret.galoy_agents]
+  depends_on = [
+    kubernetes_secret.galoy_agents,
+    google_container_node_pool.gvisor,
+  ]
 }
 
 data "google_container_cluster" "primary" {
