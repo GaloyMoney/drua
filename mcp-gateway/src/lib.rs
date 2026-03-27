@@ -1,5 +1,4 @@
 mod concourse;
-mod sandbox;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
@@ -15,7 +14,6 @@ use galoy_agents_core::App;
 use style_agent_server::SearchCodeParams;
 
 pub use concourse::{ConcourseConfig, ConcourseEndpoints};
-pub use sandbox::{SandboxConfig, SandboxEndpoints};
 pub use style_agent_server::{self, StyleAgentConfig, StyleAgentEndpoints};
 
 #[derive(Clone)]
@@ -24,7 +22,6 @@ pub struct McpGateway {
     app: App,
     style_agent: Option<StyleAgentEndpoints>,
     concourse: Option<ConcourseEndpoints>,
-    sandbox: Option<SandboxEndpoints>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -33,13 +30,11 @@ impl McpGateway {
         app: App,
         style_agent: Option<StyleAgentEndpoints>,
         concourse: Option<ConcourseEndpoints>,
-        sandbox: Option<SandboxEndpoints>,
     ) -> Self {
         Self {
             app,
             style_agent,
             concourse,
-            sandbox,
             tool_router: Self::tool_router(),
         }
     }
@@ -49,16 +44,14 @@ impl McpGateway {
         app: App,
         style_agent: Option<StyleAgentEndpoints>,
         concourse: Option<ConcourseEndpoints>,
-        sandbox: Option<SandboxEndpoints>,
     ) -> StreamableHttpService<Self, LocalSessionManager> {
-        Self::build_service(app, style_agent, concourse, sandbox)
+        Self::build_service(app, style_agent, concourse)
     }
 
     fn build_service(
         app: App,
         style_agent: Option<StyleAgentEndpoints>,
         concourse: Option<ConcourseEndpoints>,
-        sandbox: Option<SandboxEndpoints>,
     ) -> StreamableHttpService<Self, LocalSessionManager> {
         let config = StreamableHttpServerConfig {
             stateful_mode: false,
@@ -71,7 +64,6 @@ impl McpGateway {
                     app.clone(),
                     style_agent.clone(),
                     concourse.clone(),
-                    sandbox.clone(),
                 ))
             },
             LocalSessionManager::default().into(),
@@ -95,16 +87,6 @@ impl McpGateway {
             ErrorData::new(
                 ErrorCode::INTERNAL_ERROR,
                 "Concourse integration is disabled",
-                None::<serde_json::Value>,
-            )
-        })
-    }
-
-    fn require_sandbox(&self) -> Result<&SandboxEndpoints, ErrorData> {
-        self.sandbox.as_ref().ok_or_else(|| {
-            ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                "Agent Sandbox integration is disabled",
                 None::<serde_json::Value>,
             )
         })
@@ -211,24 +193,6 @@ struct TriggerBuildParams {
     pipeline: String,
     /// The job name to trigger
     job: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct CreateSandboxParams {
-    /// A unique name for the sandbox claim
-    name: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct DeleteSandboxParams {
-    /// Name of the sandbox claim to delete
-    name: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct GetSandboxParams {
-    /// Name of the sandbox claim to inspect
-    name: String,
 }
 
 #[tool_router]
@@ -376,57 +340,6 @@ impl McpGateway {
         self.require_concourse()?
             .get_build_resources(params.build_id)
             .await
-    }
-
-    /// Create an isolated sandbox environment from the warm pool.
-    #[tool(
-        description = "Create a new isolated sandbox environment. Claims a pre-warmed sandbox pod from the pool, providing an isolated container with shell access, git, and basic tools."
-    )]
-    async fn create_sandbox(
-        &self,
-        Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<CreateSandboxParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        self.require_sandbox()?.create_sandbox(&params.name).await
-    }
-
-    /// Delete a sandbox environment.
-    #[tool(
-        description = "Delete an existing sandbox environment by removing its claim. The sandbox pod and any ephemeral data will be cleaned up."
-    )]
-    async fn delete_sandbox(
-        &self,
-        Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<DeleteSandboxParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        self.require_sandbox()?.delete_sandbox(&params.name).await
-    }
-
-    /// List all active sandbox environments.
-    #[tool(
-        description = "List all active sandbox environments. Returns each sandbox's name, phase (Pending/Provisioning/Ready), and readiness status."
-    )]
-    async fn list_sandboxes(
-        &self,
-        Extension(parts): Extension<http::request::Parts>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        self.require_sandbox()?.list_sandboxes().await
-    }
-
-    /// Get the status of a specific sandbox.
-    #[tool(
-        description = "Get detailed status of a specific sandbox environment by its claim name. Returns the sandbox name, phase, and readiness."
-    )]
-    async fn get_sandbox(
-        &self,
-        Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<GetSandboxParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        self.require_sandbox()?.get_sandbox(&params.name).await
     }
 }
 

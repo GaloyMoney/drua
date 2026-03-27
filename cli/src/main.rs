@@ -72,14 +72,19 @@ async fn main() -> anyhow::Result<()> {
         )?;
     let concourse_endpoints =
         galoy_agents_mcp_gateway::ConcourseEndpoints::try_new(&config.concourse)?;
-    let sandbox_endpoints =
-        galoy_agents_mcp_gateway::SandboxEndpoints::try_new(&config.sandbox).await?;
     let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(
         app.clone(),
         style_agent_endpoints.clone(),
         concourse_endpoints,
-        sandbox_endpoints,
     );
+
+    let sandbox_client = sandbox_client::SandboxClient::try_from_env(
+        config.sandbox.namespace.clone(),
+        config.sandbox.template_name.clone(),
+    )
+    .await
+    .ok()
+    .filter(|_| config.sandbox.enabled);
 
     let app_state = galoy_agents_web::AppState::new(
         app,
@@ -87,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
         style_agent_endpoints,
+        sandbox_client,
     );
 
     let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);

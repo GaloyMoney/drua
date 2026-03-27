@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use galoy_agents_mcp_gateway::{ConcourseConfig, SandboxConfig, StyleAgentConfig};
+use galoy_agents_mcp_gateway::{ConcourseConfig, StyleAgentConfig};
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -20,6 +20,22 @@ pub struct Config {
     pub concourse: ConcourseConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Enable Agent Sandbox integration.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Kubernetes namespace where sandboxes are managed.
+    #[serde(default)]
+    pub namespace: String,
+
+    /// Name of the SandboxTemplate to use when creating claims.
+    #[serde(default)]
+    pub template_name: String,
 }
 
 #[derive(Clone, Deserialize)]
