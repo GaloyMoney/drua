@@ -15,8 +15,11 @@ const EMBED_BATCH_SIZE: usize = 32;
 
 /// Index a single repository from a local path.
 ///
-/// After chunking and embedding, each chunk is classified using the ONNX
-/// classifier (if available) with heuristic fallback.
+/// Files are consumed one at a time so their content is freed after chunking.
+/// Chunks stream through a fixed-size batch buffer: when the buffer fills,
+/// the batch is embedded, upserted, and labeled before continuing.  This
+/// bounds peak memory to roughly one file + one batch instead of the entire
+/// corpus.
 #[allow(clippy::too_many_arguments)]
 pub async fn index_repo(
     repo_path: &Path,
@@ -37,16 +40,26 @@ pub async fn index_repo(
     );
 
     let files = walker::walk_repo(repo_path, subpaths, exclude_dirs)?;
-    tracing::info!(file_count = files.len(), "Discovered source files");
+    let file_count = files.len();
+    tracing::info!(file_count, "Discovered source files");
 
     if files.is_empty() {
         println!("  No source files found in {}", repo_path.display());
         return Ok(0);
     }
 
-    // Chunk all files, dispatching by language
-    let mut all_chunks: Vec<ChunkData> = Vec::new();
-    for file in &files {
+    // Delete existing chunks for this repo (for clean re-indexing)
+    store.delete_repo(repo_name)?;
+
+    // Stream chunks through a fixed-size batch buffer to bound memory.
+    // `files` is consumed via `into_iter()` so each file's content is freed
+    // after its chunks have been extracted.
+    let mut batch_buf: Vec<ChunkData> = Vec::with_capacity(EMBED_BATCH_SIZE);
+    let mut total_chunks = 0usize;
+    let mut ml_count = 0usize;
+    let mut heuristic_count = 0usize;
+
+    for file in files {
         let chunks = match file.language.as_str() {
             "rust" => chunk_file(&file.content),
             "bats" | "bash" => chunk_bats_file(&file.content),
@@ -54,7 +67,7 @@ pub async fn index_repo(
         };
 
         for chunk in chunks {
-            all_chunks.push(ChunkData {
+            batch_buf.push(ChunkData {
                 content: chunk.content,
                 chunk_type: chunk.chunk_type,
                 entity_name: chunk.entity_name,
@@ -65,99 +78,119 @@ pub async fn index_repo(
                 module_path: file.module_path.clone(),
                 language: file.language.clone(),
             });
+
+            if batch_buf.len() >= EMBED_BATCH_SIZE {
+                let flushed = flush_batch(
+                    &mut batch_buf,
+                    store,
+                    embedder,
+                    classifier,
+                    confidence_threshold,
+                    &mut ml_count,
+                    &mut heuristic_count,
+                )
+                .await?;
+                total_chunks += flushed;
+                tracing::info!(progress = total_chunks, "Embedded batch");
+            }
         }
+        // `file` (including its content String) is dropped here
     }
 
-    let total_chunks = all_chunks.len();
-    tracing::info!(
-        chunk_count = total_chunks,
-        file_count = files.len(),
-        "Chunked files"
-    );
+    // Flush remaining partial batch
+    if !batch_buf.is_empty() {
+        let flushed = flush_batch(
+            &mut batch_buf,
+            store,
+            embedder,
+            classifier,
+            confidence_threshold,
+            &mut ml_count,
+            &mut heuristic_count,
+        )
+        .await?;
+        total_chunks += flushed;
+    }
 
     if total_chunks == 0 {
         println!("  No code chunks extracted from {}", repo_path.display());
         return Ok(0);
     }
 
-    // Delete existing chunks for this repo (for clean re-indexing)
-    store.delete_repo(repo_name)?;
-
-    // Embed, upsert, and label in streaming batches to bound memory usage.
-    // Each batch builds embed texts on-the-fly and labels immediately,
-    // avoiding accumulation of the full corpus in memory.
-    let mut ml_count = 0usize;
-    let mut heuristic_count = 0usize;
-
-    for batch_start in (0..total_chunks).step_by(EMBED_BATCH_SIZE) {
-        let batch_end = (batch_start + EMBED_BATCH_SIZE).min(total_chunks);
-        let batch = &all_chunks[batch_start..batch_end];
-
-        // Build embed texts on-the-fly for this batch only
-        let text_batch: Vec<String> = batch
-            .iter()
-            .map(|c| build_embed_text(&c.content, &c.file_path, c.entity_name.as_deref()))
-            .collect();
-
-        let embeddings = embedder.embed_document_batch(text_batch).await?;
-
-        let indexed: Vec<IndexedChunk> = batch
-            .iter()
-            .zip(embeddings)
-            .map(|(data, embedding)| IndexedChunk {
-                id: Uuid::new_v4().to_string(),
-                embedding,
-                content: data.content.clone(),
-                file_path: data.file_path.clone(),
-                repo: data.repo.clone(),
-                chunk_type: data.chunk_type.clone(),
-                entity_name: data.entity_name.clone(),
-                module_path: data.module_path.clone(),
-                language: data.language.clone(),
-                line_start: data.line_start,
-                line_end: data.line_end,
-            })
-            .collect();
-
-        // Classify and label this batch immediately
-        let label_updates: Vec<_> = batch
-            .iter()
-            .zip(indexed.iter())
-            .map(|(chunk, ic)| {
-                let label_data = LabelChunkData {
-                    content: chunk.content.clone(),
-                    file_path: chunk.file_path.clone(),
-                    chunk_type: chunk.chunk_type.clone(),
-                    entity_name: chunk.entity_name.clone().unwrap_or_default(),
-                };
-                let (cls, source) =
-                    classify_with_fallback(classifier, &label_data, confidence_threshold);
-                match source.as_str() {
-                    "ml" => ml_count += 1,
-                    _ => heuristic_count += 1,
-                }
-                (ic.id.clone(), cls, source)
-            })
-            .collect();
-
-        store.upsert_chunks(indexed)?;
-        store.set_labels(&label_updates)?;
-        tracing::info!(progress = batch_end, total = total_chunks, "Embedded");
-    }
-
-    // Drop chunks eagerly now that indexing is done
-    drop(all_chunks);
-
     let source_info = if classifier.is_some() {
         format!(" (ml: {ml_count}, heuristic: {heuristic_count})")
     } else {
         String::new()
     };
-    println!(
-        "  Indexed {total_chunks} chunks from {} files in {repo_name}{source_info}",
-        files.len()
-    );
+    println!("  Indexed {total_chunks} chunks from {file_count} files in {repo_name}{source_info}");
     Ok(total_chunks)
+}
+
+/// Embed, upsert, and label a batch of chunks, then clear the buffer.
+///
+/// Returns the number of chunks processed.
+#[allow(clippy::too_many_arguments)]
+async fn flush_batch(
+    batch: &mut Vec<ChunkData>,
+    store: &VectorStore,
+    embedder: &Embedder,
+    classifier: &mut Option<Classifier>,
+    confidence_threshold: f32,
+    ml_count: &mut usize,
+    heuristic_count: &mut usize,
+) -> anyhow::Result<usize> {
+    let count = batch.len();
+
+    let text_batch: Vec<String> = batch
+        .iter()
+        .map(|c| build_embed_text(&c.content, &c.file_path, c.entity_name.as_deref()))
+        .collect();
+
+    let embeddings = embedder.embed_document_batch(text_batch).await?;
+
+    let indexed: Vec<IndexedChunk> = batch
+        .iter()
+        .zip(embeddings)
+        .map(|(data, embedding)| IndexedChunk {
+            id: Uuid::new_v4().to_string(),
+            embedding,
+            content: data.content.clone(),
+            file_path: data.file_path.clone(),
+            repo: data.repo.clone(),
+            chunk_type: data.chunk_type.clone(),
+            entity_name: data.entity_name.clone(),
+            module_path: data.module_path.clone(),
+            language: data.language.clone(),
+            line_start: data.line_start,
+            line_end: data.line_end,
+        })
+        .collect();
+
+    let label_updates: Vec<_> = batch
+        .iter()
+        .zip(indexed.iter())
+        .map(|(chunk, ic)| {
+            let label_data = LabelChunkData {
+                content: chunk.content.clone(),
+                file_path: chunk.file_path.clone(),
+                chunk_type: chunk.chunk_type.clone(),
+                entity_name: chunk.entity_name.clone().unwrap_or_default(),
+            };
+            let (cls, source) =
+                classify_with_fallback(classifier, &label_data, confidence_threshold);
+            match source.as_str() {
+                "ml" => *ml_count += 1,
+                _ => *heuristic_count += 1,
+            }
+            (ic.id.clone(), cls, source)
+        })
+        .collect();
+
+    store.upsert_chunks(indexed)?;
+    store.set_labels(&label_updates)?;
+
+    batch.clear();
+    Ok(count)
 }
 
 /// Attempt to load the ONNX classifier from the configured model directory.
