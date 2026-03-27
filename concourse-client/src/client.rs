@@ -171,10 +171,15 @@ impl ConcourseClient {
         &self,
         pipeline: &str,
         job: &str,
+        limit: Option<usize>,
     ) -> Result<Vec<Build>, ConcourseError> {
         let team = self.resolve_pipeline_team(pipeline).await?;
+        let query = match limit {
+            Some(n) => format!("?limit={n}"),
+            None => String::new(),
+        };
         self.get(&format!(
-            "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds"
+            "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds{query}"
         ))
         .await
     }
@@ -183,6 +188,26 @@ impl ConcourseClient {
     #[tracing::instrument(name = "concourse_client.get_build", skip_all)]
     pub async fn get_build(&self, build_id: i64) -> Result<Build, ConcourseError> {
         self.get(&format!("/builds/{build_id}")).await
+    }
+
+    /// `GET /api/v1/teams/{team}/pipelines/{pipeline}/config` — get pipeline configuration.
+    #[tracing::instrument(name = "concourse_client.get_pipeline_config", skip_all)]
+    pub async fn get_pipeline_config(
+        &self,
+        pipeline: &str,
+    ) -> Result<PipelineConfigResponse, ConcourseError> {
+        let team = self.resolve_pipeline_team(pipeline).await?;
+        self.get(&format!("/teams/{team}/pipelines/{pipeline}/config"))
+            .await
+    }
+
+    /// `GET /api/v1/builds/{id}/resources` — get resource inputs/outputs for a build.
+    #[tracing::instrument(name = "concourse_client.get_build_resources", skip_all)]
+    pub async fn get_build_resources(
+        &self,
+        build_id: i64,
+    ) -> Result<BuildResources, ConcourseError> {
+        self.get(&format!("/builds/{build_id}/resources")).await
     }
 
     /// `GET /api/v1/builds/{id}/events` — fetch build log output.

@@ -98,6 +98,56 @@ pub struct Build {
     pub created_by: Option<String>,
 }
 
+/// Pipeline configuration wrapper.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PipelineConfigResponse {
+    pub config: PipelineConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    #[serde(default)]
+    pub jobs: Vec<PipelineJobConfig>,
+    #[serde(default)]
+    pub resources: Vec<PipelineResourceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineJobConfig {
+    pub name: String,
+    #[serde(default)]
+    pub plan: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineResourceConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    #[serde(default)]
+    pub source: serde_json::Value,
+}
+
+/// Build resource inputs/outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildResources {
+    #[serde(default)]
+    pub inputs: Vec<BuildResourceInput>,
+    #[serde(default)]
+    pub outputs: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildResourceInput {
+    pub name: String,
+    #[serde(default)]
+    pub version: serde_json::Value,
+    #[serde(default)]
+    pub pipeline_id: u64,
+    #[serde(default)]
+    pub first_occurrence: bool,
+}
+
 /// SSE build event envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildEventEnvelope {

@@ -120,7 +120,7 @@ impl ConcourseEndpoints {
     ) -> Result<CallToolResult, ErrorData> {
         let builds = self
             .client
-            .list_job_builds(pipeline, job)
+            .list_job_builds(pipeline, job, Some(1))
             .await
             .map_err(concourse_err)?;
 
@@ -201,6 +201,117 @@ impl ConcourseEndpoints {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
+    }
+
+    /// Get pipeline config as a job dependency graph.
+    pub async fn get_pipeline_config(&self, pipeline: &str) -> Result<CallToolResult, ErrorData> {
+        let config = self
+            .client
+            .get_pipeline_config(pipeline)
+            .await
+            .map_err(concourse_err)?;
+
+        // Build a job graph from the config
+        let jobs: Vec<serde_json::Value> = config
+            .config
+            .jobs
+            .iter()
+            .map(|j| {
+                // Extract get steps with passed/trigger from the plan
+                let mut inputs = Vec::new();
+                extract_get_steps(&j.plan, &mut inputs);
+                serde_json::json!({
+                    "name": j.name,
+                    "inputs": inputs,
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&jobs).unwrap_or_default(),
+        )]))
+    }
+
+    /// List recent builds for a job.
+    pub async fn list_builds_for_job(
+        &self,
+        pipeline: &str,
+        job: &str,
+        limit: usize,
+    ) -> Result<CallToolResult, ErrorData> {
+        let builds = self
+            .client
+            .list_job_builds(pipeline, job, Some(limit))
+            .await
+            .map_err(concourse_err)?;
+
+        let summary: Vec<serde_json::Value> = builds
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "build_id": b.id,
+                    "name": b.name,
+                    "status": b.status,
+                    "start_time": b.start_time,
+                    "end_time": b.end_time,
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get resource versions that were inputs to a build.
+    pub async fn get_build_resources(&self, build_id: i64) -> Result<CallToolResult, ErrorData> {
+        let resources = self
+            .client
+            .get_build_resources(build_id)
+            .await
+            .map_err(concourse_err)?;
+
+        let inputs: Vec<serde_json::Value> = resources
+            .inputs
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "resource": i.name,
+                    "version": i.version,
+                    "first_occurrence": i.first_occurrence,
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&inputs).unwrap_or_default(),
+        )]))
+    }
+}
+
+/// Extract get steps (resource inputs) from a Concourse job plan.
+fn extract_get_steps(plan: &[serde_json::Value], out: &mut Vec<serde_json::Value>) {
+    for step in plan {
+        if let Some(get) = step.get("get") {
+            let mut input = serde_json::json!({
+                "resource": step.get("resource").or(Some(get)).unwrap(),
+            });
+            if let Some(trigger) = step.get("trigger") {
+                input["trigger"] = trigger.clone();
+            }
+            if let Some(passed) = step.get("passed") {
+                input["passed"] = passed.clone();
+            }
+            out.push(input);
+        }
+        // Recurse into aggregate/in_parallel/do steps
+        for key in &["aggregate", "in_parallel", "do"] {
+            if let Some(nested) = step.get(key).and_then(|v| v.get("steps").or(Some(v))) {
+                if let Some(arr) = nested.as_array() {
+                    extract_get_steps(arr, out);
+                }
+            }
+        }
     }
 }
 

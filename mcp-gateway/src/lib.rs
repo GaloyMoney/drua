@@ -112,6 +112,30 @@ struct GetBuildStatusParams {
     job: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetPipelineConfigParams {
+    /// The pipeline name
+    pipeline: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListBuildsForJobParams {
+    /// The pipeline name
+    pipeline: String,
+    /// The job name
+    job: String,
+    /// Max number of recent builds to return (default: 10)
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetBuildResourcesParams {
+    /// The numeric build ID
+    #[serde(deserialize_with = "lax_number::deserialize_i64")]
+    build_id: i64,
+}
+
 /// Deserialize a number from either a JSON number or a string.
 ///
 /// MCP clients may serialize integer parameters as JSON strings.
@@ -251,6 +275,51 @@ impl McpGateway {
         Self::require_auth(&parts)?;
         self.require_concourse()?
             .trigger_build(&params.pipeline, &params.job)
+            .await
+    }
+
+    /// Get pipeline configuration as a job dependency graph.
+    #[tool(
+        description = "Get the job dependency graph for a Concourse pipeline. Returns each job's resource inputs with trigger and passed constraints, enabling critical path analysis from source to production."
+    )]
+    async fn get_pipeline_config(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<GetPipelineConfigParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .get_pipeline_config(&params.pipeline)
+            .await
+    }
+
+    /// List recent builds for a specific job.
+    #[tool(
+        description = "List recent builds for a job in a Concourse pipeline. Returns an array of builds (build_id, status, timestamps) ordered most recent first."
+    )]
+    async fn list_builds_for_job(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<ListBuildsForJobParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .list_builds_for_job(&params.pipeline, &params.job, params.limit.unwrap_or(10))
+            .await
+    }
+
+    /// Get resource versions that were inputs to a build.
+    #[tool(
+        description = "Get the resource versions (e.g. git commit SHA) that were inputs to a Concourse build. Use this to correlate a commit to the builds it triggered."
+    )]
+    async fn get_build_resources(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<GetBuildResourcesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .get_build_resources(params.build_id)
             .await
     }
 }
