@@ -53,6 +53,9 @@ galoyAgents:
     initImage: google/cloud-sdk:slim
 sandbox:
   enabled: false
+  ## Install the Agent Sandbox CRDs + controller from vendored upstream manifests.
+  ## Set to false if the controller is already installed (e.g. via Terraform).
+  installController: true
   templateName: agent-sandbox
   runtimeClassName: gvisor
   automountServiceAccountToken: false
