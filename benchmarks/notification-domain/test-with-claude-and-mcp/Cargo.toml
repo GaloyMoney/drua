@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "notification"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+derive_builder = "0.20"
+es-entity = { version = "0.10", features = ["graphql"] }
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8", features = ["postgres"] }
+thiserror = "2"
+tracing = "0.1"

@@ -1,0 +1,26 @@
+## Task
+Build a Notification domain crate from scratch as a proper DDD domain module.
+
+### Requirements
+Build a Notification domain crate with:
+1. Entity definition (Notification struct)
+2. Event enum (NotificationEvent)
+3. Event-sourced hydration (rebuild entity state from events)
+4. Repository
+5. Service (business logic layer)
+6. Error type
+7. Strongly-typed ID
+8. Module structure (separate files per concern)
+
+The Notification should support:
+- Creating a notification (with title, body, recipient)
+- Marking as read
+- Marking as dismissed
+
+### Constraints
+- Write idiomatic Rust
+- Use thiserror for errors
+- Use serde for serialization
+- Put each concern in its own file
+- Write the code in the current directory
+- Just build it — make reasonable assumptions, do not ask questions
