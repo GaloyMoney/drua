@@ -132,7 +132,6 @@ mod lax_number {
             _ => Err(D::Error::custom("expected a number or string")),
         }
     }
-
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

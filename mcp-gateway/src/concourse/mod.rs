@@ -146,10 +146,7 @@ impl ConcourseEndpoints {
     }
 
     /// Get build output/logs as plain text.
-    pub async fn get_build_logs(
-        &self,
-        build_id: i64,
-    ) -> Result<CallToolResult, ErrorData> {
+    pub async fn get_build_logs(&self, build_id: i64) -> Result<CallToolResult, ErrorData> {
         let logs = self
             .client
             .get_build_logs(build_id)
