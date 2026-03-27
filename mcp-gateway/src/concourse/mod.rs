@@ -56,7 +56,11 @@ impl ConcourseEndpoints {
 
     /// List all pipelines across all accessible teams.
     pub async fn list_pipelines(&self) -> Result<CallToolResult, ErrorData> {
-        let pipelines = self.client.list_all_pipelines().await.map_err(concourse_err)?;
+        let pipelines = self
+            .client
+            .list_all_pipelines()
+            .await
+            .map_err(concourse_err)?;
 
         let summary: Vec<serde_json::Value> = pipelines
             .iter()
