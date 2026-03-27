@@ -4,6 +4,7 @@ pub mod classifier;
 pub mod config;
 pub mod embedder;
 pub mod error;
+pub mod js_chunker;
 pub mod label_store;
 pub mod labeler;
 pub mod request_log;

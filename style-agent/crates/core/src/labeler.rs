@@ -38,8 +38,9 @@ pub struct ChunkClassification {
     pub uses: Vec<String>,
 }
 
-/// All 20 primary labels in the taxonomy.
+/// All primary labels in the taxonomy.
 pub const KNOWN_PRIMARY_LABELS: &[&str] = &[
+    // Backend (Rust)
     "entity",
     "entity_command",
     "entity_query",
@@ -60,6 +61,17 @@ pub const KNOWN_PRIMARY_LABELS: &[&str] = &[
     "type_conversion",
     "test",
     "config",
+    // Frontend (JS/TS)
+    "component",
+    "page",
+    "layout",
+    "hook",
+    "graphql_query",
+    "graphql_mutation",
+    "ui_primitive",
+    "store",
+    "route_handler",
+    "style_variant",
 ];
 
 /// The 4 layer values.
@@ -77,6 +89,7 @@ pub const KNOWN_USES: &[&str] = &[
 /// Priority order: most specific first. When multiple checkers fire,
 /// the first match in this list wins.
 const PRIORITY_ORDER: &[&str] = &[
+    // Backend
     "entity_hydration",
     "entity_command",
     "entity_query",
@@ -88,6 +101,14 @@ const PRIORITY_ORDER: &[&str] = &[
     "job",
     "type_conversion",
     "authorization",
+    // Frontend labels that should beat generic "api"
+    "hook",
+    "graphql_mutation",
+    "graphql_query",
+    "page",
+    "layout",
+    "route_handler",
+    // Back to backend
     "api",
     "service_method",
     "service",
@@ -97,10 +118,16 @@ const PRIORITY_ORDER: &[&str] = &[
     "test",
     "domain_primitives",
     "value_object",
+    // Remaining frontend
+    "store",
+    "style_variant",
+    "ui_primitive",
+    "component",
 ];
 
 /// All primary-label checker functions.
 const PRIMARY_CHECKERS: &[fn(&ChunkData) -> Option<LabeledRole>] = &[
+    // Backend
     check_entity,
     check_entity_event,
     check_error,
@@ -121,6 +148,17 @@ const PRIMARY_CHECKERS: &[fn(&ChunkData) -> Option<LabeledRole>] = &[
     check_api_handler,
     check_config,
     check_type_conversion,
+    // Frontend
+    check_component,
+    check_page,
+    check_layout,
+    check_hook,
+    check_graphql_query,
+    check_graphql_mutation,
+    check_ui_primitive,
+    check_store,
+    check_route_handler,
+    check_style_variant,
 ];
 
 /// Standard trait impls that are always boilerplate — never labeled.
@@ -225,12 +263,19 @@ fn detect_layer(c: &ChunkData) -> Option<String> {
     {
         return None;
     }
+    // JS/TS test files
+    if is_js_ts_file(&c.file_path)
+        && (c.file_path.contains(".test.")
+            || c.file_path.contains(".spec.")
+            || c.file_path.contains("/__tests__/"))
+    {
+        return None;
+    }
 
     // Interface layer
     if c.file_path.contains("graphql/") || c.file_path.contains("server/") {
         return Some("interface".to_string());
     }
-
     // Infrastructure layer
     if c.file_path.ends_with("repo.rs")
         || c.file_path.contains("publisher.rs")
@@ -241,9 +286,31 @@ fn detect_layer(c: &ChunkData) -> Option<String> {
     {
         return Some("infrastructure".to_string());
     }
+    // JS/TS infrastructure: API routes, store/state management (check before interface)
+    if is_js_ts_file(&c.file_path)
+        && (c.file_path.contains("/api/")
+            || c.file_path.contains("/store/")
+            || c.file_path.contains("/stores/"))
+    {
+        return Some("infrastructure".to_string());
+    }
+
+    // JS/TS interface layer (pages, components, layouts)
+    if is_js_ts_file(&c.file_path)
+        && (c.file_path.contains("/pages/")
+            || c.file_path.contains("/app/")
+            || c.file_path.contains("/components/")
+            || c.file_path.contains("/layouts/"))
+    {
+        return Some("interface".to_string());
+    }
 
     // Application layer
     if c.file_path.ends_with("mod.rs") || c.file_path.ends_with("lib.rs") {
+        return Some("application".to_string());
+    }
+    // JS/TS application: hooks (business logic)
+    if is_js_ts_file(&c.file_path) && c.file_path.contains("/hooks/") {
         return Some("application".to_string());
     }
 
@@ -631,6 +698,22 @@ fn check_test(c: &ChunkData) -> Option<LabeledRole> {
     if c.content.contains("#[cfg(test)]") {
         signals.push("attr:cfg_test".to_string());
     }
+    // JS/TS test patterns
+    if is_js_ts_file(&c.file_path) {
+        if c.file_path.contains(".test.") || c.file_path.contains(".spec.") {
+            signals.push("file_path:test/spec".to_string());
+        }
+        if c.file_path.contains("/__tests__/") {
+            signals.push("file_path:__tests__/".to_string());
+        }
+        if (c.content.contains("describe(")
+            || c.content.contains("it(")
+            || c.content.contains("test("))
+            && (c.content.contains("expect(") || c.content.contains("assert"))
+        {
+            signals.push("content:jest/vitest_pattern".to_string());
+        }
+    }
 
     some_if("test", 0.95, signals)
 }
@@ -772,6 +855,343 @@ fn check_type_conversion(c: &ChunkData) -> Option<LabeledRole> {
     }
 
     some_if("type_conversion", 0.80, signals)
+}
+
+// ---------- frontend (JS/TS) checkers ----------
+
+/// React/Vue/Svelte component — function or arrow returning JSX, or in components/ dir.
+fn check_component(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    // File in a components/ directory
+    if c.file_path.contains("/components/") || c.file_path.contains("/Components/") {
+        signals.push("file_path:components/".to_string());
+    }
+
+    // PascalCase function/arrow that returns JSX
+    let is_pascal = c
+        .entity_name
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_uppercase());
+    let is_fn = c.chunk_type == "function_declaration" || c.chunk_type == "arrow_function";
+    if is_fn && is_pascal && has_jsx_return(&c.content) {
+        signals.push("pascal_case_fn+jsx_return".to_string());
+    }
+
+    // forwardRef pattern
+    if c.content.contains("forwardRef") {
+        signals.push("call:forwardRef".to_string());
+    }
+
+    some_if("component", 0.85, signals)
+}
+
+/// Page component — in pages/ or app/ directory.
+fn check_page(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    if c.file_path.contains("/pages/") || c.file_path.contains("/Pages/") {
+        signals.push("file_path:pages/".to_string());
+    }
+    // Next.js app directory page files
+    if c.file_path.contains("/app/")
+        && path_ends_with_any(
+            &c.file_path,
+            &["page.tsx", "page.jsx", "page.ts", "page.js"],
+        )
+    {
+        signals.push("file_path:app/page".to_string());
+    }
+    // Default export in pages dir (common Next.js pattern)
+    if signals.is_empty()
+        && c.chunk_type == "export_statement"
+        && c.content.contains("default")
+        && c.file_path.contains("/pages/")
+    {
+        signals.push("file_path:pages/+default_export".to_string());
+    }
+
+    some_if("page", 0.90, signals)
+}
+
+/// Layout component — in layouts/ or named layout.
+fn check_layout(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    if c.file_path.contains("/layouts/") || c.file_path.contains("/Layouts/") {
+        signals.push("file_path:layouts/".to_string());
+    }
+    if path_ends_with_any(
+        &c.file_path,
+        &["layout.tsx", "layout.jsx", "layout.ts", "layout.js"],
+    ) {
+        signals.push("file_path:layout.*".to_string());
+    }
+    let name_lower = c.entity_name.to_lowercase();
+    if name_lower.ends_with("layout") || name_lower.starts_with("layout") {
+        signals.push("entity_name:*layout*".to_string());
+    }
+
+    some_if("layout", 0.85, signals)
+}
+
+/// React hook — function/arrow starting with `use`.
+fn check_hook(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    let is_fn = c.chunk_type == "function_declaration" || c.chunk_type == "arrow_function";
+    if is_fn && c.entity_name.starts_with("use") && c.entity_name.len() > 3 {
+        // Ensure the character after "use" is uppercase (useAuth, useQuery, etc.)
+        let after_use = &c.entity_name[3..];
+        if after_use.starts_with(|ch: char| ch.is_uppercase()) {
+            signals.push("entity_name:use*".to_string());
+        }
+    }
+
+    if c.file_path.contains("/hooks/") || c.file_path.contains("/Hooks/") {
+        signals.push("file_path:hooks/".to_string());
+    }
+
+    some_if("hook", 0.95, signals)
+}
+
+/// GraphQL query — gql tagged template or .graphql file with query.
+fn check_graphql_query(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    let has_gql_tag = c.content.contains("gql`") || c.content.contains("graphql`");
+    let is_query = c.content.contains("query ") || c.content.contains("query(");
+
+    if has_gql_tag && is_query && !c.content.contains("mutation ") {
+        signals.push("gql_tagged_template+query".to_string());
+    }
+    if c.content.contains("useQuery(")
+        || c.content.contains("useLazyQuery(")
+        || c.content.contains("useSuspenseQuery(")
+    {
+        signals.push("call:useQuery".to_string());
+    }
+    if has_gql_tag
+        && (c.entity_name.starts_with("GET_")
+            || c.entity_name.starts_with("FETCH_")
+            || c.entity_name.starts_with("LIST_")
+            || c.entity_name.ends_with("_QUERY")
+            || c.entity_name.ends_with("Query"))
+    {
+        signals.push("entity_name:query_pattern+gql".to_string());
+    }
+
+    some_if("graphql_query", 0.90, signals)
+}
+
+/// GraphQL mutation — gql tagged template with mutation keyword.
+fn check_graphql_mutation(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    let has_gql_tag = c.content.contains("gql`") || c.content.contains("graphql`");
+
+    if has_gql_tag && c.content.contains("mutation ") {
+        signals.push("gql_tagged_template+mutation".to_string());
+    }
+    if c.content.contains("useMutation(") {
+        signals.push("call:useMutation".to_string());
+    }
+    if (c.entity_name.starts_with("CREATE_")
+        || c.entity_name.starts_with("UPDATE_")
+        || c.entity_name.starts_with("DELETE_")
+        || c.entity_name.ends_with("_MUTATION")
+        || c.entity_name.ends_with("Mutation"))
+        && has_gql_tag
+    {
+        signals.push("entity_name:mutation_pattern+gql".to_string());
+    }
+
+    some_if("graphql_mutation", 0.90, signals)
+}
+
+/// UI primitive — small reusable component in a ui/ or primitives/ directory.
+fn check_ui_primitive(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    // Require the file to be in a ui/ or primitives/ directory
+    if !c.file_path.contains("/ui/") && !c.file_path.contains("/primitives/") {
+        return None;
+    }
+    let mut signals = Vec::new();
+    signals.push("file_path:ui/|primitives/".to_string());
+
+    // Boost confidence if name matches common UI primitive names
+    let name_lower = c.entity_name.to_lowercase();
+    let ui_names = [
+        "button",
+        "input",
+        "select",
+        "checkbox",
+        "radio",
+        "toggle",
+        "switch",
+        "modal",
+        "dialog",
+        "tooltip",
+        "popover",
+        "dropdown",
+        "badge",
+        "avatar",
+        "spinner",
+        "skeleton",
+        "divider",
+        "separator",
+        "icon",
+        "label",
+        "textarea",
+    ];
+    if ui_names.iter().any(|n| name_lower == *n) {
+        signals.push("entity_name:ui_primitive".to_string());
+    }
+
+    some_if("ui_primitive", 0.80, signals)
+}
+
+/// State store — Redux, Zustand, MobX, or similar state management.
+fn check_store(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    if c.file_path.contains("/store/") || c.file_path.contains("/stores/") {
+        signals.push("file_path:store/".to_string());
+    }
+    if c.content.contains("createSlice(") || c.content.contains("createStore(") {
+        signals.push("call:createSlice/createStore".to_string());
+    }
+    if c.content.contains("zustand") || c.content.contains("create(") && c.content.contains("set(")
+    {
+        signals.push("pattern:zustand".to_string());
+    }
+    if c.content.contains("configureStore(") || c.content.contains("combineReducers(") {
+        signals.push("call:redux_configure".to_string());
+    }
+    if c.entity_name.ends_with("Store")
+        || c.entity_name.ends_with("Slice")
+        || c.entity_name.ends_with("Reducer")
+    {
+        signals.push("entity_name:*Store/*Slice/*Reducer".to_string());
+    }
+
+    some_if("store", 0.85, signals)
+}
+
+/// Route handler — Express/Next.js API route handler.
+fn check_route_handler(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    // Next.js API routes
+    if c.file_path.contains("/api/")
+        && path_ends_with_any(
+            &c.file_path,
+            &["route.ts", "route.js", "route.tsx", "route.jsx"],
+        )
+    {
+        signals.push("file_path:api/route".to_string());
+    }
+    // Express-style route handlers
+    if c.content.contains("app.get(")
+        || c.content.contains("app.post(")
+        || c.content.contains("app.put(")
+        || c.content.contains("app.delete(")
+        || c.content.contains("router.get(")
+        || c.content.contains("router.post(")
+        || c.content.contains("router.put(")
+        || c.content.contains("router.delete(")
+    {
+        signals.push("call:express_route".to_string());
+    }
+    // Next.js API route exports
+    if c.file_path.contains("/api/")
+        && (c.entity_name == "GET"
+            || c.entity_name == "POST"
+            || c.entity_name == "PUT"
+            || c.entity_name == "DELETE"
+            || c.entity_name == "PATCH")
+    {
+        signals.push("export:http_method_handler".to_string());
+    }
+
+    some_if("route_handler", 0.85, signals)
+}
+
+/// Style variant — styled-components, CSS-in-JS, or cva/class-variance-authority.
+fn check_style_variant(c: &ChunkData) -> Option<LabeledRole> {
+    if !is_js_ts_file(&c.file_path) {
+        return None;
+    }
+    let mut signals = Vec::new();
+
+    if c.content.contains("styled.") || c.content.contains("styled(") {
+        signals.push("call:styled".to_string());
+    }
+    if c.content.contains("cva(") || c.content.contains("class-variance-authority") {
+        signals.push("call:cva".to_string());
+    }
+    if c.content.contains("css`") || c.content.contains("css({") {
+        signals.push("css_in_js".to_string());
+    }
+    let name_lower = c.entity_name.to_lowercase();
+    if name_lower.ends_with("variants") || name_lower.ends_with("styles") {
+        signals.push("entity_name:*variants/*styles".to_string());
+    }
+
+    some_if("style_variant", 0.80, signals)
+}
+
+// ---------- frontend helpers ----------
+
+/// Check if the file path is a JS/TS file.
+fn is_js_ts_file(path: &str) -> bool {
+    path.ends_with(".js")
+        || path.ends_with(".jsx")
+        || path.ends_with(".ts")
+        || path.ends_with(".tsx")
+        || path.ends_with(".mjs")
+        || path.ends_with(".cjs")
+}
+
+/// Check if content contains JSX return patterns.
+fn has_jsx_return(content: &str) -> bool {
+    // JSX return: `return (<div`, `return <div`, or template with < in return
+    content.contains("return (") && content.contains('<')
+        || content.contains("return <")
+        || content.contains("=> (") && content.contains('<')
+        || content.contains("=> <")
+}
+
+/// Check if a file path ends with any of the given suffixes.
+fn path_ends_with_any(path: &str, suffixes: &[&str]) -> bool {
+    suffixes.iter().any(|s| path.ends_with(s))
 }
 
 // ---------- helpers ----------
@@ -1734,5 +2154,343 @@ mod tests {
         );
         let roles = label_chunk(&c);
         assert!(roles.is_empty());
+    }
+
+    // ---- frontend: component ----
+
+    #[test]
+    fn component_by_path() {
+        let c = chunk_with(
+            "export function Button() { return <button>Click</button>; }",
+            "src/components/Button.tsx",
+            "function_declaration",
+            "Button",
+        );
+        assert_eq!(primary(&c), Some("component".to_string()));
+    }
+
+    #[test]
+    fn component_by_jsx_return() {
+        let c = chunk_with(
+            "export function Card({ title }) { return <div>{title}</div>; }",
+            "src/shared/Card.tsx",
+            "function_declaration",
+            "Card",
+        );
+        assert_eq!(primary(&c), Some("component".to_string()));
+    }
+
+    #[test]
+    fn component_forward_ref() {
+        let c = chunk_with(
+            "export const Input = forwardRef((props, ref) => { return <input ref={ref} />; });",
+            "src/components/Input.tsx",
+            "arrow_function",
+            "Input",
+        );
+        assert_eq!(primary(&c), Some("component".to_string()));
+    }
+
+    // ---- frontend: page ----
+
+    #[test]
+    fn page_by_pages_dir() {
+        let c = chunk_with(
+            "export default function Home() { return <div>Home</div>; }",
+            "src/pages/index.tsx",
+            "function_declaration",
+            "Home",
+        );
+        assert_eq!(primary(&c), Some("page".to_string()));
+    }
+
+    #[test]
+    fn page_by_app_dir() {
+        let c = chunk_with(
+            "export default function Page() { return <main>Content</main>; }",
+            "src/app/dashboard/page.tsx",
+            "function_declaration",
+            "Page",
+        );
+        assert_eq!(primary(&c), Some("page".to_string()));
+    }
+
+    // ---- frontend: layout ----
+
+    #[test]
+    fn layout_by_dir() {
+        let c = chunk_with(
+            "export function MainLayout({ children }) { return <div>{children}</div>; }",
+            "src/layouts/MainLayout.tsx",
+            "function_declaration",
+            "MainLayout",
+        );
+        assert_eq!(primary(&c), Some("layout".to_string()));
+    }
+
+    #[test]
+    fn layout_by_filename() {
+        let c = chunk_with(
+            "export default function RootLayout({ children }) { return <html>{children}</html>; }",
+            "src/app/layout.tsx",
+            "function_declaration",
+            "RootLayout",
+        );
+        assert_eq!(primary(&c), Some("layout".to_string()));
+    }
+
+    // ---- frontend: hook ----
+
+    #[test]
+    fn hook_by_name() {
+        let c = chunk_with(
+            "export function useAuth() { const [user, setUser] = useState(null); return { user }; }",
+            "src/hooks/useAuth.ts",
+            "function_declaration",
+            "useAuth",
+        );
+        assert_eq!(primary(&c), Some("hook".to_string()));
+    }
+
+    #[test]
+    fn hook_arrow_function() {
+        let c = chunk_with(
+            "export const useCounter = () => { const [c, set] = useState(0); return c; };",
+            "src/hooks/useCounter.ts",
+            "arrow_function",
+            "useCounter",
+        );
+        assert_eq!(primary(&c), Some("hook".to_string()));
+    }
+
+    #[test]
+    fn hook_not_use_lowercase() {
+        // "user" starts with "use" but 4th char is lowercase — not a hook
+        let c = chunk_with(
+            "export function user() { return {}; }",
+            "src/lib/user.ts",
+            "function_declaration",
+            "user",
+        );
+        assert_ne!(primary(&c), Some("hook".to_string()));
+    }
+
+    // ---- frontend: graphql_query ----
+
+    #[test]
+    fn graphql_query_by_gql_tag() {
+        let c = chunk_with(
+            "export const GET_USER = gql`\n  query GetUser($id: ID!) {\n    user(id: $id) { id name }\n  }\n`;",
+            "src/graphql/queries.ts",
+            "lexical_declaration",
+            "GET_USER",
+        );
+        assert_eq!(primary(&c), Some("graphql_query".to_string()));
+    }
+
+    #[test]
+    fn graphql_query_by_usequery() {
+        let c = chunk_with(
+            "export function useUserData(id) { return useQuery(GET_USER, { variables: { id } }); }",
+            "src/hooks/useUserData.ts",
+            "function_declaration",
+            "useUserData",
+        );
+        // hook takes priority over graphql_query in priority order
+        assert_eq!(primary(&c), Some("hook".to_string()));
+    }
+
+    // ---- frontend: graphql_mutation ----
+
+    #[test]
+    fn graphql_mutation_by_gql_tag() {
+        let c = chunk_with(
+            "export const CREATE_USER = gql`\n  mutation CreateUser($input: CreateUserInput!) {\n    createUser(input: $input) { id }\n  }\n`;",
+            "src/graphql/mutations.ts",
+            "lexical_declaration",
+            "CREATE_USER",
+        );
+        assert_eq!(primary(&c), Some("graphql_mutation".to_string()));
+    }
+
+    #[test]
+    fn graphql_mutation_by_usemutation() {
+        let c = chunk_with(
+            "export const useCreateUser = () => { const [create] = useMutation(CREATE_USER); return create; };",
+            "src/hooks/useCreateUser.ts",
+            "arrow_function",
+            "useCreateUser",
+        );
+        // hook wins by priority
+        assert_eq!(primary(&c), Some("hook".to_string()));
+    }
+
+    // ---- frontend: ui_primitive ----
+
+    #[test]
+    fn ui_primitive_by_dir() {
+        let c = chunk_with(
+            "export function Badge({ text }) { return <span className='badge'>{text}</span>; }",
+            "src/ui/Badge.tsx",
+            "function_declaration",
+            "Badge",
+        );
+        assert_eq!(primary(&c), Some("ui_primitive".to_string()));
+    }
+
+    // ---- frontend: store ----
+
+    #[test]
+    fn store_by_create_slice() {
+        let c = chunk_with(
+            "export const userSlice = createSlice({ name: 'user', initialState: {} });",
+            "src/store/userSlice.ts",
+            "lexical_declaration",
+            "userSlice",
+        );
+        assert_eq!(primary(&c), Some("store".to_string()));
+    }
+
+    #[test]
+    fn store_by_entity_name() {
+        let c = chunk_with(
+            "export const authStore = create((set) => ({ user: null }));",
+            "src/stores/auth.ts",
+            "lexical_declaration",
+            "authStore",
+        );
+        assert_eq!(primary(&c), Some("store".to_string()));
+    }
+
+    // ---- frontend: route_handler ----
+
+    #[test]
+    fn route_handler_nextjs_api() {
+        let c = chunk_with(
+            "export async function GET(request) { return Response.json({ ok: true }); }",
+            "src/app/api/users/route.ts",
+            "function_declaration",
+            "GET",
+        );
+        assert_eq!(primary(&c), Some("route_handler".to_string()));
+    }
+
+    #[test]
+    fn route_handler_express() {
+        let c = chunk_with(
+            "router.get('/users', async (req, res) => { res.json([]); });",
+            "src/routes/users.ts",
+            "arrow_function",
+            "getUsers",
+        );
+        assert_eq!(primary(&c), Some("route_handler".to_string()));
+    }
+
+    // ---- frontend: style_variant ----
+
+    #[test]
+    fn style_variant_styled_components() {
+        let c = chunk_with(
+            "export const StyledButton = styled.button`\n  background: blue;\n  color: white;\n`;",
+            "src/components/Button.styles.ts",
+            "lexical_declaration",
+            "StyledButton",
+        );
+        assert_eq!(primary(&c), Some("style_variant".to_string()));
+    }
+
+    #[test]
+    fn style_variant_cva() {
+        let c = chunk_with(
+            "export const buttonVariants = cva('base-class', { variants: { size: { sm: 'px-2' } } });",
+            "src/components/button.variants.ts",
+            "lexical_declaration",
+            "buttonVariants",
+        );
+        assert_eq!(primary(&c), Some("style_variant".to_string()));
+    }
+
+    // ---- frontend: test detection ----
+
+    #[test]
+    fn js_test_by_spec_file() {
+        let c = chunk_with(
+            "describe('Button', () => { it('renders', () => { expect(true).toBe(true); }); });",
+            "src/components/Button.spec.tsx",
+            "arrow_function",
+            "ButtonSpec",
+        );
+        assert_eq!(primary(&c), Some("test".to_string()));
+    }
+
+    #[test]
+    fn js_test_by_test_file() {
+        let c = chunk_with(
+            "test('adds numbers', () => { expect(add(1, 2)).toBe(3); });",
+            "src/utils/math.test.ts",
+            "arrow_function",
+            "addsNumbers",
+        );
+        assert_eq!(primary(&c), Some("test".to_string()));
+    }
+
+    // ---- frontend: layer detection ----
+
+    #[test]
+    fn js_interface_layer_components() {
+        let c = chunk_with(
+            "export function Button() { return <button/>; }",
+            "src/components/Button.tsx",
+            "function_declaration",
+            "Button",
+        );
+        assert_eq!(layer(&c), Some("interface".to_string()));
+    }
+
+    #[test]
+    fn js_infrastructure_layer_api() {
+        let c = chunk_with(
+            "export async function GET() { return Response.json({}); }",
+            "src/app/api/users/route.ts",
+            "function_declaration",
+            "GET",
+        );
+        assert_eq!(layer(&c), Some("infrastructure".to_string()));
+    }
+
+    #[test]
+    fn js_application_layer_hooks() {
+        let c = chunk_with(
+            "export function useAuth() { return {}; }",
+            "src/hooks/useAuth.ts",
+            "function_declaration",
+            "useAuth",
+        );
+        assert_eq!(layer(&c), Some("application".to_string()));
+    }
+
+    #[test]
+    fn js_test_no_layer() {
+        let c = chunk_with(
+            "describe('test', () => { it('works', () => { expect(1).toBe(1); }); });",
+            "src/components/Button.test.tsx",
+            "arrow_function",
+            "test",
+        );
+        assert_eq!(layer(&c), None);
+    }
+
+    // ---- frontend: non-JS files don't match ----
+
+    #[test]
+    fn rust_file_not_component() {
+        let c = chunk_with(
+            "pub fn Button() -> Html { html! { <button/> } }",
+            "src/components/button.rs",
+            "function_item",
+            "Button",
+        );
+        // Rust file should not match component checker
+        assert_ne!(primary(&c), Some("component".to_string()));
     }
 }

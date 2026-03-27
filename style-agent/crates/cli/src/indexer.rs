@@ -4,6 +4,7 @@ use style_agent_core::bats_chunker::chunk_bats_file;
 use style_agent_core::chunker::chunk_file;
 use style_agent_core::classifier::Classifier;
 use style_agent_core::embedder::Embedder;
+use style_agent_core::js_chunker::{chunk_js_file, JsDialect};
 use style_agent_core::labeler::{classify_chunk, ChunkClassification, ChunkData as LabelChunkData};
 use style_agent_core::store::{IndexedChunk, VectorStore};
 use uuid::Uuid;
@@ -50,7 +51,18 @@ pub async fn index_repo(
         let chunks = match file.language.as_str() {
             "rust" => chunk_file(&file.content),
             "bats" | "bash" => chunk_bats_file(&file.content),
+            "javascript" => chunk_js_file(&file.content, JsDialect::JavaScript),
+            "jsx" => chunk_js_file(&file.content, JsDialect::Jsx),
+            "typescript" => chunk_js_file(&file.content, JsDialect::TypeScript),
+            "tsx" => chunk_js_file(&file.content, JsDialect::Tsx),
             _ => continue,
+        };
+
+        // Normalize language for storage: jsx→javascript, tsx→typescript
+        let stored_language = match file.language.as_str() {
+            "jsx" => "javascript".to_string(),
+            "tsx" => "typescript".to_string(),
+            other => other.to_string(),
         };
 
         for chunk in chunks {
@@ -63,7 +75,7 @@ pub async fn index_repo(
                 file_path: file.path.clone(),
                 repo: repo_name.to_string(),
                 module_path: file.module_path.clone(),
-                language: file.language.clone(),
+                language: stored_language.clone(),
             });
         }
     }

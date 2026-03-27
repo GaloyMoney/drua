@@ -12,6 +12,8 @@ sqlite-vec = { workspace = true }
 zerocopy = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-typescript = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 tokio = { workspace = true }

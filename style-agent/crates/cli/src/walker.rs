@@ -2,8 +2,25 @@ use std::fs;
 use std::path::Path;
 
 /// Supported file extensions and their language identifiers.
-const SUPPORTED_EXTENSIONS: &[(&str, &str)] =
-    &[(".rs", "rust"), (".bats", "bats"), (".bash", "bash")];
+const SUPPORTED_EXTENSIONS: &[(&str, &str)] = &[
+    (".rs", "rust"),
+    (".bats", "bats"),
+    (".bash", "bash"),
+    (".ts", "typescript"),
+    (".tsx", "tsx"),
+    (".js", "javascript"),
+    (".jsx", "jsx"),
+];
+
+/// Directories always excluded for JS/TS projects.
+const JS_EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    "coverage",
+    "__generated__",
+];
 
 /// A source file discovered in a repository.
 pub struct RepoFile {
@@ -84,6 +101,10 @@ fn walk_dir(
             }
             // Skip user-configured exclude dirs
             if exclude_dirs.iter().any(|d| d == name.as_ref()) {
+                continue;
+            }
+            // Skip well-known JS/TS artifact directories
+            if JS_EXCLUDED_DIRS.contains(&name.as_ref()) {
                 continue;
             }
             walk_dir(base, &path, exclude_dirs, files)?;
