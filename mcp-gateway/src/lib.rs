@@ -133,24 +133,6 @@ mod lax_number {
         }
     }
 
-    pub fn deserialize_opt_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-        match value {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::Number(n)) => n
-                .as_u64()
-                .and_then(|v| usize::try_from(v).ok())
-                .map(Some)
-                .ok_or_else(|| D::Error::custom("invalid usize")),
-            Some(serde_json::Value::String(s)) => {
-                s.parse::<usize>().map(Some).map_err(D::Error::custom)
-            }
-            _ => Err(D::Error::custom("expected a number, string, or null")),
-        }
-    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -158,15 +140,6 @@ struct GetBuildLogsParams {
     /// The numeric build ID
     #[serde(deserialize_with = "lax_number::deserialize_i64")]
     build_id: i64,
-    /// Starting line offset for paginated reads (enables live tailing mode).
-    /// When omitted, returns all logs at once (best for finished builds).
-    /// Use 0 for the first poll, then use `next_offset` from the response.
-    #[serde(default, deserialize_with = "lax_number::deserialize_opt_usize")]
-    offset: Option<usize>,
-    /// Maximum number of lines to return per request (default: 200).
-    /// Only used when `offset` is provided.
-    #[serde(default, deserialize_with = "lax_number::deserialize_opt_usize")]
-    limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -251,7 +224,7 @@ impl McpGateway {
 
     /// Get build output/logs from Concourse.
     #[tool(
-        description = "Get build output/logs for a Concourse build by its numeric build ID.\n\nTwo modes:\n- **All-at-once** (offset omitted): returns complete log output as plain text. Best for finished builds.\n- **Live tailing** (offset provided): returns paginated lines with next_offset for polling. Use offset=0 for the first call, then pass next_offset from the response. Response includes is_complete and build_status fields.\n\nExample polling loop: call with offset=0, then keep calling with next_offset until is_complete is true."
+        description = "Get build output/logs for a Concourse build by its numeric build ID. Returns the complete log output as plain text."
     )]
     async fn get_build_logs(
         &self,
@@ -260,7 +233,7 @@ impl McpGateway {
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
         self.require_concourse()?
-            .get_build_logs(params.build_id, params.offset, params.limit)
+            .get_build_logs(params.build_id)
             .await
     }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rmcp::model::{CallToolResult, Content, ErrorCode, ErrorData};
 
-use concourse_client::{BuildLogStore, ConcourseClient};
+use concourse_client::ConcourseClient;
 
 pub use config::ConcourseConfig;
 
@@ -12,7 +12,6 @@ pub use config::ConcourseConfig;
 #[derive(Clone)]
 pub struct ConcourseEndpoints {
     client: Arc<ConcourseClient>,
-    log_store: Arc<BuildLogStore>,
 }
 
 impl ConcourseEndpoints {
@@ -50,7 +49,6 @@ impl ConcourseEndpoints {
 
         Ok(Some(Self {
             client: Arc::new(client),
-            log_store: Arc::new(BuildLogStore::new()),
         }))
     }
 
@@ -147,47 +145,24 @@ impl ConcourseEndpoints {
         )]))
     }
 
-    /// Get build output/logs with optional offset-based pagination.
-    ///
-    /// - **No offset**: returns all logs at once (backward-compatible, best for finished builds)
-    /// - **With offset**: uses buffered SSE streaming for live build tailing
+    /// Get build output/logs as plain text.
     pub async fn get_build_logs(
         &self,
         build_id: i64,
-        offset: Option<usize>,
-        limit: Option<usize>,
     ) -> Result<CallToolResult, ErrorData> {
-        match offset {
-            None => {
-                // Backward-compatible: fetch all logs at once
-                let logs = self
-                    .client
-                    .get_build_logs(build_id)
-                    .await
-                    .map_err(concourse_err)?;
+        let logs = self
+            .client
+            .get_build_logs(build_id)
+            .await
+            .map_err(concourse_err)?;
 
-                if logs.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "No log output available for this build.",
-                    )]));
-                }
-
-                Ok(CallToolResult::success(vec![Content::text(logs)]))
-            }
-            Some(offset) => {
-                // Buffered streaming approach
-                let limit = limit.unwrap_or(200);
-                let resp = self
-                    .log_store
-                    .read_logs(build_id, &self.client, offset, limit)
-                    .await
-                    .map_err(concourse_err)?;
-
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&resp).unwrap_or_default(),
-                )]))
-            }
+        if logs.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No log output available for this build.",
+            )]));
         }
+
+        Ok(CallToolResult::success(vec![Content::text(logs)]))
     }
 
     /// Trigger a new build for a job.
