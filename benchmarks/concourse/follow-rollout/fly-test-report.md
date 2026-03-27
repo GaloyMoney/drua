@@ -4,17 +4,17 @@
 - **Pipeline**: galoy-agents-bin
 
 ### Token Usage
-- **Input tokens** (tool responses you read): ~13,000
-- **Output tokens** (your tool calls + reasoning + report): ~4,500
+- **Input tokens** (tool responses you read): ~12,000
+- **Output tokens** (your tool calls + reasoning + report): ~3,500
 
 ### Top 5 Token Sinks
 | # | Operation | Tokens (est.) | Direction (in/out) |
 |---|-----------|---------------|-------------------|
-| 1 | System prompt & CLAUDE.md instructions | ~5,000 | in |
-| 2 | ToolSearch calls (3x) returning full JSON schemas for tools I never used | ~3,000 | in |
-| 3 | Polling cycles — 5 rounds of `fly builds` with 30s sleeps | ~2,500 in / ~1,000 out |
-| 4 | Initial `fly builds --count 20` history dump | ~1,500 | in |
-| 5 | Pipeline dependency extraction (`get-pipeline --json \| jq`) | ~500 in / ~500 out |
+| 1 | `fly get-pipeline` (full YAML config) | ~4,500 | in |
+| 2 | Initial 4x `fly builds` calls (5 builds each, all jobs) | ~2,000 | in |
+| 3 | System prompts & reminders (repeated each turn) | ~1,500 | in |
+| 4 | 5x polling `fly builds` calls (30s sleep cycles) | ~1,200 | in |
+| 5 | Pipeline analysis & final rollout report generation | ~1,000 | out |
 
 ### What burned tokens unnecessarily?
-The three ToolSearch calls were pure waste — I was hunting for a Concourse MCP tool that doesn't exist, when `fly` was already on the PATH and a single `which fly` would have sufficed. That's ~3,000 input tokens of tool schemas I never called. The failed `python3` pipeline-parsing attempt also wasted ~500 output tokens before falling back to `jq`.
+The full `fly get-pipeline` dump was the single biggest waste — I needed only the job dependency graph (`passed:` fields) but ingested the entire pipeline YAML including resource definitions, task scripts, and resource types (~4,500 tokens for ~500 tokens of useful info). The polling loops were efficient since each returned only 1-2 lines, and the 30s interval matched job durations well, avoiding excessive polls. The initial `-c 5` on all four jobs was slightly wasteful — 2-3 recent builds would have sufficed to establish context.
