@@ -121,22 +121,32 @@ impl ConcourseClient {
 
     // ----- public API -------------------------------------------------------
 
-    /// Return the configured team name.
-    pub fn team(&self) -> &str {
+    /// Return the configured default team name.
+    pub fn default_team(&self) -> &str {
         &self.team
     }
 
-    /// `GET /api/v1/teams/{team}/pipelines` — list pipelines for the configured team.
+    /// `GET /api/v1/teams` — list all teams the authenticated user can see.
+    #[tracing::instrument(name = "concourse_client.list_teams", skip_all)]
+    pub async fn list_teams(&self) -> Result<Vec<Team>, ConcourseError> {
+        self.get("/teams").await
+    }
+
+    /// `GET /api/v1/pipelines` — list pipelines across all teams.
     #[tracing::instrument(name = "concourse_client.list_pipelines", skip_all)]
     pub async fn list_pipelines(&self) -> Result<Vec<Pipeline>, ConcourseError> {
-        let team = &self.team;
+        self.get("/pipelines").await
+    }
+
+    /// `GET /api/v1/teams/{team}/pipelines` — list pipelines for a specific team.
+    #[tracing::instrument(name = "concourse_client.list_team_pipelines", skip_all)]
+    pub async fn list_team_pipelines(&self, team: &str) -> Result<Vec<Pipeline>, ConcourseError> {
         self.get(&format!("/teams/{team}/pipelines")).await
     }
 
     /// `GET /api/v1/teams/{team}/pipelines/{pipeline}/jobs` — list jobs in a pipeline.
     #[tracing::instrument(name = "concourse_client.list_jobs", skip_all)]
-    pub async fn list_jobs(&self, pipeline: &str) -> Result<Vec<Job>, ConcourseError> {
-        let team = &self.team;
+    pub async fn list_jobs(&self, team: &str, pipeline: &str) -> Result<Vec<Job>, ConcourseError> {
         self.get(&format!("/teams/{team}/pipelines/{pipeline}/jobs"))
             .await
     }
@@ -146,10 +156,10 @@ impl ConcourseClient {
     #[tracing::instrument(name = "concourse_client.list_job_builds", skip_all)]
     pub async fn list_job_builds(
         &self,
+        team: &str,
         pipeline: &str,
         job: &str,
     ) -> Result<Vec<Build>, ConcourseError> {
-        let team = &self.team;
         self.get(&format!(
             "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds"
         ))
@@ -206,10 +216,14 @@ impl ConcourseClient {
     }
 
     /// `POST /api/v1/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds` —
-    /// trigger a new build.
+    /// trigger a new build for a job.
     #[tracing::instrument(name = "concourse_client.trigger_build", skip_all)]
-    pub async fn trigger_build(&self, pipeline: &str, job: &str) -> Result<Build, ConcourseError> {
-        let team = &self.team;
+    pub async fn trigger_build(
+        &self,
+        team: &str,
+        pipeline: &str,
+        job: &str,
+    ) -> Result<Build, ConcourseError> {
         self.post_empty(&format!(
             "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds"
         ))

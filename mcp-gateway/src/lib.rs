@@ -108,9 +108,17 @@ struct HelloParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListPipelinesParams {
+    /// Optional team name to scope results. When omitted, lists pipelines across all teams.
+    team: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ListJobsParams {
     /// The pipeline name to list jobs for
     pipeline: String,
+    /// Optional team name. Falls back to the configured default team if omitted.
+    team: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -119,6 +127,8 @@ struct GetBuildStatusParams {
     pipeline: String,
     /// The job name
     job: String,
+    /// Optional team name. Falls back to the configured default team if omitted.
+    team: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -135,11 +145,13 @@ struct GetBuildLogsParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct TriggerBuildParams {
+struct TriggerJobParams {
     /// The pipeline name
     pipeline: String,
     /// The job name to trigger
     job: String,
+    /// Optional team name. Falls back to the configured default team if omitted.
+    team: Option<String>,
 }
 
 #[tool_router]
@@ -174,21 +186,36 @@ impl McpGateway {
         }
     }
 
-    /// List all pipelines for the configured Concourse team.
+    /// List all Concourse teams.
     #[tool(
-        description = "List all pipelines for the configured Concourse CI team. Returns pipeline names, paused/archived status."
+        description = "List all Concourse CI teams the authenticated user has access to. Returns team IDs and names."
     )]
-    async fn list_pipelines(
+    async fn list_teams(
         &self,
         Extension(parts): Extension<http::request::Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
-        self.require_concourse()?.list_pipelines().await
+        self.require_concourse()?.list_teams().await
+    }
+
+    /// List Concourse pipelines.
+    #[tool(
+        description = "List Concourse CI pipelines. By default lists pipelines across all teams. Pass `team` to scope to a specific team. Returns pipeline names, paused/archived status, and team."
+    )]
+    async fn list_pipelines(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(params): Parameters<ListPipelinesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Self::require_auth(&parts)?;
+        self.require_concourse()?
+            .list_pipelines(params.team.as_deref())
+            .await
     }
 
     /// List jobs in a Concourse pipeline.
     #[tool(
-        description = "List jobs in a Concourse pipeline. Returns job names, paused state, and last build status."
+        description = "List jobs in a Concourse pipeline. Returns job names, paused state, and last build status. Uses the configured default team unless `team` is specified."
     )]
     async fn list_jobs(
         &self,
@@ -196,12 +223,14 @@ impl McpGateway {
         Parameters(params): Parameters<ListJobsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
-        self.require_concourse()?.list_jobs(&params.pipeline).await
+        self.require_concourse()?
+            .list_jobs(&params.pipeline, params.team.as_deref())
+            .await
     }
 
     /// Get the latest build status for a Concourse job.
     #[tool(
-        description = "Get the latest build status for a specific job in a Concourse pipeline. Returns build ID, status, and timestamps."
+        description = "Get the latest build status for a specific job in a Concourse pipeline. Returns build ID, status, and timestamps. Uses the configured default team unless `team` is specified."
     )]
     async fn get_build_status(
         &self,
@@ -210,7 +239,7 @@ impl McpGateway {
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
         self.require_concourse()?
-            .get_build_status(&params.pipeline, &params.job)
+            .get_build_status(&params.pipeline, &params.job, params.team.as_deref())
             .await
     }
 
@@ -231,16 +260,16 @@ impl McpGateway {
 
     /// Trigger a new build for a Concourse job.
     #[tool(
-        description = "Trigger a new build for a job in a Concourse pipeline. Returns the new build ID and status."
+        description = "Trigger a new build for a job in a Concourse pipeline. Takes pipeline and job name, returns the new build ID, status, and URL. Uses the configured default team unless `team` is specified."
     )]
-    async fn trigger_build(
+    async fn trigger_job(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<TriggerBuildParams>,
+        Parameters(params): Parameters<TriggerJobParams>,
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
         self.require_concourse()?
-            .trigger_build(&params.pipeline, &params.job)
+            .trigger_job(&params.pipeline, &params.job, params.team.as_deref())
             .await
     }
 }

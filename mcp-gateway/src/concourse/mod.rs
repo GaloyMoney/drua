@@ -13,6 +13,7 @@ pub use config::ConcourseConfig;
 pub struct ConcourseEndpoints {
     client: Arc<ConcourseClient>,
     log_store: Arc<BuildLogStore>,
+    default_team: String,
 }
 
 impl ConcourseEndpoints {
@@ -51,12 +52,47 @@ impl ConcourseEndpoints {
         Ok(Some(Self {
             client: Arc::new(client),
             log_store: Arc::new(BuildLogStore::new()),
+            default_team: config.team.clone(),
         }))
     }
 
-    /// List all pipelines for the configured team.
-    pub async fn list_pipelines(&self) -> Result<CallToolResult, ErrorData> {
-        let pipelines = self.client.list_pipelines().await.map_err(concourse_err)?;
+    /// Resolve team: use the provided value or fall back to the configured default.
+    fn resolve_team<'a>(&'a self, team: Option<&'a str>) -> &'a str {
+        match team {
+            Some(t) if !t.is_empty() => t,
+            _ => &self.default_team,
+        }
+    }
+
+    /// List all teams the authenticated user can see.
+    pub async fn list_teams(&self) -> Result<CallToolResult, ErrorData> {
+        let teams = self.client.list_teams().await.map_err(concourse_err)?;
+
+        let summary: Vec<serde_json::Value> = teams
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "name": t.name,
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        )]))
+    }
+
+    /// List pipelines, optionally scoped to a team.
+    pub async fn list_pipelines(&self, team: Option<&str>) -> Result<CallToolResult, ErrorData> {
+        let pipelines = match team {
+            Some(t) if !t.is_empty() => self
+                .client
+                .list_team_pipelines(t)
+                .await
+                .map_err(concourse_err)?,
+            _ => self.client.list_pipelines().await.map_err(concourse_err)?,
+        };
 
         let summary: Vec<serde_json::Value> = pipelines
             .iter()
@@ -77,10 +113,15 @@ impl ConcourseEndpoints {
     }
 
     /// List jobs in a pipeline.
-    pub async fn list_jobs(&self, pipeline: &str) -> Result<CallToolResult, ErrorData> {
+    pub async fn list_jobs(
+        &self,
+        pipeline: &str,
+        team: Option<&str>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let team = self.resolve_team(team);
         let jobs = self
             .client
-            .list_jobs(pipeline)
+            .list_jobs(team, pipeline)
             .await
             .map_err(concourse_err)?;
 
@@ -91,6 +132,7 @@ impl ConcourseEndpoints {
                     "name": j.name,
                     "paused": j.paused,
                     "pipeline": j.pipeline_name,
+                    "team": j.team_name,
                 });
                 if let Some(b) = &j.finished_build {
                     obj["last_status"] = serde_json::json!(b.status);
@@ -115,10 +157,12 @@ impl ConcourseEndpoints {
         &self,
         pipeline: &str,
         job: &str,
+        team: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
+        let team = self.resolve_team(team);
         let builds = self
             .client
-            .list_job_builds(pipeline, job)
+            .list_job_builds(team, pipeline, job)
             .await
             .map_err(concourse_err)?;
 
@@ -134,6 +178,7 @@ impl ConcourseEndpoints {
             "status": latest.status,
             "pipeline": latest.pipeline_name,
             "job": latest.job_name,
+            "team": latest.team_name,
             "start_time": latest.start_time,
             "end_time": latest.end_time,
         });
@@ -187,14 +232,16 @@ impl ConcourseEndpoints {
     }
 
     /// Trigger a new build for a job.
-    pub async fn trigger_build(
+    pub async fn trigger_job(
         &self,
         pipeline: &str,
         job: &str,
+        team: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
+        let team = self.resolve_team(team);
         let build = self
             .client
-            .trigger_build(pipeline, job)
+            .trigger_build(team, pipeline, job)
             .await
             .map_err(concourse_err)?;
 
@@ -204,6 +251,7 @@ impl ConcourseEndpoints {
             "status": build.status,
             "pipeline": build.pipeline_name,
             "job": build.job_name,
+            "team": build.team_name,
             "api_url": build.api_url,
         });
 

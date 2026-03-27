@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 /// Pipeline instance variables (opaque).
 pub type InstanceVars = HashMap<String, serde_json::Value>;
 
+/// Team authorization config — `provider -> { role -> [principals] }`.
+pub type TeamAuth = HashMap<String, HashMap<String, Vec<String>>>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Team {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub auth: Option<TeamAuth>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pipeline {
     pub id: u64,
