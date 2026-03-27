@@ -224,7 +224,7 @@ impl McpGateway {
 
     /// Get build output/logs from Concourse.
     #[tool(
-        description = "Get build output/logs for a Concourse build by its numeric build ID. Returns the complete log output as plain text."
+        description = "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished."
     )]
     async fn get_build_logs(
         &self,
