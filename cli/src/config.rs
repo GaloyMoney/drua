@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use galoy_agents_mcp_gateway::{ConcourseConfig, StyleAgentConfig};
+use galoy_agents_mcp_gateway::{ConcourseConfig, SandboxConfig, StyleAgentConfig};
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -18,6 +18,8 @@ pub struct Config {
     pub style_agent: StyleAgentConfig,
     #[serde(default)]
     pub concourse: ConcourseConfig,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 #[derive(Clone, Deserialize)]

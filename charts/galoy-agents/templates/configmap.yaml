@@ -25,3 +25,7 @@ data:
       enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
       url: {{ .Values.galoyAgents.config.concourse.url | quote }}
       team: {{ .Values.galoyAgents.config.concourse.team | quote }}
+    sandbox:
+      enabled: {{ .Values.sandbox.enabled }}
+      namespace: {{ .Release.Namespace | quote }}
+      template_name: {{ .Values.sandbox.templateName | quote }}

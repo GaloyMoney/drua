@@ -51,6 +51,32 @@ galoyAgents:
     gcsBucket: galoy-agents-models
     gcsCreds: ""
     initImage: google/cloud-sdk:slim
+sandbox:
+  enabled: false
+  templateName: agent-sandbox
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  networkPolicyManagement: Managed
+  image:
+    repository: ubuntu
+    tag: "24.04"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  nodePool:
+    taintKey: sandbox.gke.io/runtime
+    taintValue: gvisor
+  nodeSelector:
+    sandbox.gke.io/runtime: gvisor
+  env: []
+  warmPool:
+    enabled: true
+    minReady: 2
+    maxSize: 5
 postgresql:
   enabled: true
   image:

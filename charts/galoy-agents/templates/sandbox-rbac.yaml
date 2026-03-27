@@ -1,0 +1,52 @@
+{{- if .Values.sandbox.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-sandbox
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-sandbox-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+rules:
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims/status"]
+  verbs: ["get"]
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes/status"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-sandbox-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ template "galoyAgents.fullname" . }}-sandbox-manager
+subjects:
+- kind: ServiceAccount
+  name: {{ template "galoyAgents.fullname" . }}-sandbox
+  namespace: {{ .Release.Namespace }}
+{{- end }}

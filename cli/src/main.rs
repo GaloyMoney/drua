@@ -72,10 +72,13 @@ async fn main() -> anyhow::Result<()> {
         )?;
     let concourse_endpoints =
         galoy_agents_mcp_gateway::ConcourseEndpoints::try_new(&config.concourse)?;
+    let sandbox_endpoints =
+        galoy_agents_mcp_gateway::SandboxEndpoints::try_new(&config.sandbox).await?;
     let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(
         app.clone(),
         style_agent_endpoints.clone(),
         concourse_endpoints,
+        sandbox_endpoints,
     );
 
     let app_state = galoy_agents_web::AppState::new(
