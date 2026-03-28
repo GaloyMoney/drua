@@ -273,6 +273,7 @@ async fn cmd_exec(base: &str, token: &str, name: &str, cmd: &str) -> anyhow::Res
     });
 
     let mut exit_code: Option<u8> = None;
+    let mut stdin_closed = false;
 
     loop {
         tokio::select! {
@@ -304,8 +305,8 @@ async fn cmd_exec(base: &str, token: &str, name: &str, cmd: &str) -> anyhow::Res
                     _ => {}
                 }
             }
-            // Local stdin → server
-            bytes = stdin_rx.recv() => {
+            // Local stdin → server (skip if stdin already closed)
+            bytes = stdin_rx.recv(), if !stdin_closed => {
                 match bytes {
                     Some(data) => {
                         let mut frame = Vec::with_capacity(1 + data.len());
@@ -315,7 +316,10 @@ async fn cmd_exec(base: &str, token: &str, name: &str, cmd: &str) -> anyhow::Res
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        // Stdin EOF — stop reading stdin but keep receiving from server
+                        stdin_closed = true;
+                    }
                 }
             }
         }
