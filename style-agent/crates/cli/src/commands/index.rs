@@ -22,21 +22,17 @@ pub async fn run(
     let store = VectorStore::new(&db_path)?;
     store.ensure_collection()?;
 
-    let mut classifier = indexer::try_load_classifier(config);
-
     let path = Path::new(repo_path);
     println!("Indexing {name} from {}...", path.display());
-    let chunks = indexer::index_repo(
-        path,
-        name,
-        None,
-        &[],
+    let chunks = indexer::index_repo(path, name, None, &[], &store, &embedder).await?;
+
+    // Classify after embedding
+    let mut classifier = indexer::try_load_classifier(config);
+    indexer::classify_all_chunks(
         &store,
-        &embedder,
         &mut classifier,
         config.services.classifier_confidence_threshold,
-    )
-    .await?;
+    )?;
 
     println!("Done: {chunks} chunks indexed for {name}");
     Ok(())

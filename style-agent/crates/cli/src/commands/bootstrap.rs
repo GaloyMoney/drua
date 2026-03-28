@@ -30,15 +30,12 @@ pub async fn run(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // 3. Index all repos (with auto-labeling via ML classifier + heuristic fallback)
+    // 3. Index all repos (embed + store)
     println!("\n=== Indexing repos ===");
     let embedder = Embedder::new()?;
     let db_path = config.db_path();
     let store = VectorStore::new(&db_path)?;
     store.ensure_collection()?;
-
-    let mut classifier = indexer::try_load_classifier(config);
-    let threshold = config.services.classifier_confidence_threshold;
 
     let mut total_chunks = 0usize;
     for repo in &config.repos {
@@ -51,12 +48,18 @@ pub async fn run(config: &Config) -> anyhow::Result<()> {
             &repo.exclude_dirs,
             &store,
             &embedder,
-            &mut classifier,
-            threshold,
         )
         .await?;
         total_chunks += chunks;
     }
+
+    // 4. Classify all chunks (ML + heuristic fallback)
+    let mut classifier = indexer::try_load_classifier(config);
+    indexer::classify_all_chunks(
+        &store,
+        &mut classifier,
+        config.services.classifier_confidence_threshold,
+    )?;
 
     println!("\n=== Bootstrap complete ===");
     println!(

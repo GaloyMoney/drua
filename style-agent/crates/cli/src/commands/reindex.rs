@@ -22,9 +22,6 @@ pub async fn run(config: &Config, repo_name: Option<&str>) -> anyhow::Result<()>
     let store = VectorStore::new(&db_path)?;
     store.ensure_collection()?;
 
-    let mut classifier = indexer::try_load_classifier(config);
-    let threshold = config.services.classifier_confidence_threshold;
-
     let repos_to_index = match repo_name {
         Some(name) => {
             let repo = config
@@ -53,12 +50,18 @@ pub async fn run(config: &Config, repo_name: Option<&str>) -> anyhow::Result<()>
             &repo.exclude_dirs,
             &store,
             &embedder,
-            &mut classifier,
-            threshold,
         )
         .await?;
         total_chunks += chunks;
     }
+
+    // Classify after embedding
+    let mut classifier = indexer::try_load_classifier(config);
+    indexer::classify_all_chunks(
+        &store,
+        &mut classifier,
+        config.services.classifier_confidence_threshold,
+    )?;
 
     println!(
         "\nReindexed {} repo(s), {total_chunks} total chunks",

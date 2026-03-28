@@ -18,14 +18,17 @@ use crate::walker;
 /// manageable in memory-constrained CI workers.
 const EMBED_BATCH_SIZE: usize = 8;
 
-/// Index a single repository from a local path.
+/// Index a single repository from a local path (embed + store only).
 ///
 /// Files are consumed one at a time so their content is freed after chunking.
 /// Chunks stream through a fixed-size batch buffer: when the buffer fills,
-/// the batch is embedded, upserted, and labeled before continuing.  This
+/// the batch is embedded and upserted to SQLite before continuing.  This
 /// bounds peak memory to roughly one file + one batch instead of the entire
 /// corpus.
-#[allow(clippy::too_many_arguments)]
+///
+/// Classification is performed separately via [`classify_all_chunks`] so that
+/// the embedder can be dropped before loading the classifier ONNX model,
+/// keeping peak memory low enough for CI workers.
 pub async fn index_repo(
     repo_path: &Path,
     repo_name: &str,
@@ -33,8 +36,6 @@ pub async fn index_repo(
     exclude_dirs: &[String],
     store: &VectorStore,
     embedder: &Embedder,
-    classifier: &mut Option<Classifier>,
-    confidence_threshold: f32,
 ) -> anyhow::Result<usize> {
     tracing::info!(repo = %repo_name, path = %repo_path.display(), "Starting repository indexing");
 
@@ -61,8 +62,6 @@ pub async fn index_repo(
     // after its chunks have been extracted.
     let mut batch_buf: Vec<ChunkData> = Vec::with_capacity(EMBED_BATCH_SIZE);
     let mut total_chunks = 0usize;
-    let mut ml_count = 0usize;
-    let mut heuristic_count = 0usize;
 
     for file in files {
         let chunks = match file.language.as_str() {
@@ -85,16 +84,7 @@ pub async fn index_repo(
             });
 
             if batch_buf.len() >= EMBED_BATCH_SIZE {
-                let flushed = flush_batch(
-                    &mut batch_buf,
-                    store,
-                    embedder,
-                    classifier,
-                    confidence_threshold,
-                    &mut ml_count,
-                    &mut heuristic_count,
-                )
-                .await?;
+                let flushed = flush_batch(&mut batch_buf, store, embedder).await?;
                 total_chunks += flushed;
                 tracing::info!(progress = total_chunks, "Embedded batch");
             }
@@ -104,16 +94,7 @@ pub async fn index_repo(
 
     // Flush remaining partial batch
     if !batch_buf.is_empty() {
-        let flushed = flush_batch(
-            &mut batch_buf,
-            store,
-            embedder,
-            classifier,
-            confidence_threshold,
-            &mut ml_count,
-            &mut heuristic_count,
-        )
-        .await?;
+        let flushed = flush_batch(&mut batch_buf, store, embedder).await?;
         total_chunks += flushed;
     }
 
@@ -122,27 +103,67 @@ pub async fn index_repo(
         return Ok(0);
     }
 
-    let source_info = if classifier.is_some() {
-        format!(" (ml: {ml_count}, heuristic: {heuristic_count})")
-    } else {
-        String::new()
-    };
-    println!("  Indexed {total_chunks} chunks from {file_count} files in {repo_name}{source_info}");
+    println!("  Indexed {total_chunks} chunks from {file_count} files in {repo_name}");
     Ok(total_chunks)
 }
 
-/// Embed, upsert, and label a batch of chunks, then clear the buffer.
+/// Classify all stored chunks using ML (if available) + heuristic fallback.
+///
+/// Reads chunks from the database via `scroll_all()` so the embedder does
+/// not need to be alive. This is the second phase of the two-pass pipeline
+/// that avoids holding both ONNX models (embedder + classifier) in memory
+/// simultaneously.
+pub fn classify_all_chunks(
+    store: &VectorStore,
+    classifier: &mut Option<Classifier>,
+    confidence_threshold: f32,
+) -> anyhow::Result<(usize, usize)> {
+    let points = store.scroll_all()?;
+    let total = points.len();
+    tracing::info!(total, "Classifying stored chunks");
+
+    let mut ml_count = 0usize;
+    let mut heuristic_count = 0usize;
+
+    // Process in batches to avoid holding all label updates in memory
+    const CLASSIFY_BATCH: usize = 256;
+    let mut label_updates: Vec<(String, ChunkClassification, String)> =
+        Vec::with_capacity(CLASSIFY_BATCH);
+
+    for point in &points {
+        let (cls, source) = classify_with_fallback(classifier, &point.chunk, confidence_threshold);
+        match source.as_str() {
+            "ml" => ml_count += 1,
+            _ => heuristic_count += 1,
+        }
+        label_updates.push((point.point_id.clone(), cls, source));
+
+        if label_updates.len() >= CLASSIFY_BATCH {
+            store.set_labels(&label_updates)?;
+            label_updates.clear();
+        }
+    }
+
+    if !label_updates.is_empty() {
+        store.set_labels(&label_updates)?;
+    }
+
+    if classifier.is_some() {
+        println!("  Classified {total} chunks (ml: {ml_count}, heuristic: {heuristic_count})");
+    } else {
+        println!("  Classified {total} chunks (heuristic only)");
+    }
+
+    Ok((ml_count, heuristic_count))
+}
+
+/// Embed and upsert a batch of chunks, then clear the buffer.
 ///
 /// Returns the number of chunks processed.
-#[allow(clippy::too_many_arguments)]
 async fn flush_batch(
     batch: &mut Vec<ChunkData>,
     store: &VectorStore,
     embedder: &Embedder,
-    classifier: &mut Option<Classifier>,
-    confidence_threshold: f32,
-    ml_count: &mut usize,
-    heuristic_count: &mut usize,
 ) -> anyhow::Result<usize> {
     let count = batch.len();
 
@@ -171,28 +192,7 @@ async fn flush_batch(
         })
         .collect();
 
-    let label_updates: Vec<_> = batch
-        .iter()
-        .zip(indexed.iter())
-        .map(|(chunk, ic)| {
-            let label_data = LabelChunkData {
-                content: chunk.content.clone(),
-                file_path: chunk.file_path.clone(),
-                chunk_type: chunk.chunk_type.clone(),
-                entity_name: chunk.entity_name.clone().unwrap_or_default(),
-            };
-            let (cls, source) =
-                classify_with_fallback(classifier, &label_data, confidence_threshold);
-            match source.as_str() {
-                "ml" => *ml_count += 1,
-                _ => *heuristic_count += 1,
-            }
-            (ic.id.clone(), cls, source)
-        })
-        .collect();
-
     store.upsert_chunks(indexed)?;
-    store.set_labels(&label_updates)?;
 
     batch.clear();
     Ok(count)
