@@ -1,4 +1,5 @@
 variable "image_digest" {}
+variable "sandbox_base_image_digest" {}
 variable "github_client_secret" {}
 variable "concourse_username" {}
 variable "concourse_password" {}
@@ -115,7 +116,8 @@ resource "helm_release" "galoy_agents" {
 
   values = [
     templatefile("${path.module}/prod-values.yml.tmpl", {
-      image_digest = var.image_digest
+      image_digest              = var.image_digest
+      sandbox_base_image_digest = var.sandbox_base_image_digest
     })
   ]
 

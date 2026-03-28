@@ -111,6 +111,11 @@ jobs:
       passed: [build-edge-image]
       params:
         skip_download: true
+    - get: sandbox-base-edge-image
+      trigger: true
+      passed: [build-sandbox-base-image]
+      params:
+        skip_download: true
   - task: prepare-deployment
     config:
       platform: linux
@@ -119,6 +124,7 @@ jobs:
       - name: deploy-config
         path: repo
       - name: edge-image
+      - name: sandbox-base-edge-image
       outputs:
       - name: deployment
       params:
@@ -134,6 +140,7 @@ jobs:
             set -euo pipefail
 
             DIGEST=$(cat edge-image/digest)
+            SANDBOX_BASE_DIGEST=$(cat sandbox-base-edge-image/digest)
 
             cp -r repo/ci/deploy/galoy-agents deployment/tf
             cp -r repo/charts/galoy-agents deployment/tf/chart
@@ -141,6 +148,7 @@ jobs:
             set +x
             cat <<EOF > deployment/tf/terraform.tfvars
             image_digest = "${DIGEST}"
+            sandbox_base_image_digest = "${SANDBOX_BASE_DIGEST}"
             github_client_secret = "${GITHUB_CLIENT_SECRET}"
             concourse_username = "${CONCOURSE_USERNAME}"
             concourse_password = "${CONCOURSE_PASSWORD}"
