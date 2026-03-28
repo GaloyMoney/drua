@@ -10,6 +10,8 @@ galoy-agents-core = { path = "../core" }
 sandbox-client = { workspace = true }
 style-agent-server = { workspace = true }
 anyhow = "1"
+async-stream = "0.3"
+scopeguard = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 async-trait = "0.1"

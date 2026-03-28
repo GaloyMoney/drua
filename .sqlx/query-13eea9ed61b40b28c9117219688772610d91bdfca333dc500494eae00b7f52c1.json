@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tasks SET status = $2 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "13eea9ed61b40b28c9117219688772610d91bdfca333dc500494eae00b7f52c1"
+}

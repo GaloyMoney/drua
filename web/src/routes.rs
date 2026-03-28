@@ -453,12 +453,20 @@ mod ws_proto {
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
+        // Sandboxes
         .route("/api/v1/sandboxes", post(api_create_sandbox))
         .route("/api/v1/sandboxes", get(api_list_sandboxes))
         .route("/api/v1/sandboxes/_debug", get(api_debug_sandboxes))
         .route("/api/v1/sandboxes/{name}", get(api_get_sandbox))
         .route("/api/v1/sandboxes/{name}", delete(api_delete_sandbox))
         .route("/api/v1/sandboxes/{name}/exec", get(api_exec_sandbox))
+        // Tasks
+        .route("/api/v1/tasks", post(api_create_task))
+        .route("/api/v1/tasks", get(api_list_tasks))
+        .route("/api/v1/tasks/{id}", get(api_get_task))
+        .route("/api/v1/tasks/{id}", delete(api_cancel_task))
+        .route("/api/v1/tasks/{id}/stream", get(api_stream_task))
+        .route("/api/v1/tasks/{id}/callback", post(api_task_callback))
 }
 
 macro_rules! require_auth {
@@ -730,4 +738,272 @@ async fn exec_proxy(
     }
 
     tracing::info!(claim = %claim_name, "Exec proxy: session ended");
+}
+
+// ---------------------------------------------------------------------------
+// JSON API  (/api/v1/tasks)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct CreateTaskRequest {
+    description: String,
+    github_token: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TaskSummary {
+    id: String,
+    description: String,
+    status: String,
+    created_at: String,
+    sandbox_name: Option<String>,
+    git_branch: Option<String>,
+    pr_url: Option<String>,
+    error_message: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TaskDetail {
+    id: String,
+    description: String,
+    status: String,
+    created_at: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    sandbox_name: Option<String>,
+    git_branch: Option<String>,
+    pr_url: Option<String>,
+    error_message: Option<String>,
+    output: Vec<TaskOutputLine>,
+}
+
+#[derive(serde::Serialize)]
+struct TaskOutputLine {
+    line: String,
+    timestamp: String,
+}
+
+fn task_to_summary(task: &domain::task::Task) -> TaskSummary {
+    TaskSummary {
+        id: task.id.to_string(),
+        description: task.description.clone(),
+        status: task.status.to_string(),
+        created_at: task.created_at().to_rfc3339(),
+        sandbox_name: task.sandbox_name.clone(),
+        git_branch: task.git_branch.clone(),
+        pr_url: task.pr_url.clone(),
+        error_message: task.error_message.clone(),
+    }
+}
+
+fn task_to_detail(task: &domain::task::Task) -> TaskDetail {
+    TaskDetail {
+        id: task.id.to_string(),
+        description: task.description.clone(),
+        status: task.status.to_string(),
+        created_at: task.created_at().to_rfc3339(),
+        started_at: task.started_at.map(|t| t.to_rfc3339()),
+        completed_at: task.completed_at.map(|t| t.to_rfc3339()),
+        sandbox_name: task.sandbox_name.clone(),
+        git_branch: task.git_branch.clone(),
+        pr_url: task.pr_url.clone(),
+        error_message: task.error_message.clone(),
+        output: task
+            .output
+            .iter()
+            .map(|o| TaskOutputLine {
+                line: o.line.clone(),
+                timestamp: o.timestamp.to_rfc3339(),
+            })
+            .collect(),
+    }
+}
+
+#[instrument(name = "api.task.create", skip_all)]
+async fn api_create_task(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Json(body): Json<CreateTaskRequest>,
+) -> Response {
+    require_auth!(auth);
+
+    // Store github_token in memory for the runner to pick up
+    match state.app.tasks().create(&body.description).await {
+        Ok(task) => {
+            if let Some(token) = body.github_token {
+                state.set_task_github_token(task.id, token);
+            }
+            let summary = task_to_summary(&task);
+            (axum::http::StatusCode::CREATED, Json(summary)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to create task");
+            let body = serde_json::json!({ "error": e.to_string() });
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
+    }
+}
+
+#[instrument(name = "api.task.list", skip_all)]
+async fn api_list_tasks(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+) -> Response {
+    require_auth!(auth);
+    match state.app.tasks().list_all().await {
+        Ok(tasks) => {
+            let summaries: Vec<TaskSummary> = tasks.iter().map(task_to_summary).collect();
+            Json(summaries).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to list tasks");
+            let body = serde_json::json!({ "error": e.to_string() });
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
+    }
+}
+
+#[instrument(name = "api.task.get", skip_all, fields(%id))]
+async fn api_get_task(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    require_auth!(auth);
+    let task_id = domain::primitives::TaskId::from(id);
+    match state.app.tasks().find_by_id(task_id).await {
+        Ok(task) => Json(task_to_detail(&task)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to get task");
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
+#[instrument(name = "api.task.cancel", skip_all, fields(%id))]
+async fn api_cancel_task(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    require_auth!(auth);
+    let task_id = domain::primitives::TaskId::from(id);
+    match state.app.tasks().cancel(task_id).await {
+        Ok(task) => Json(task_to_summary(&task)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to cancel task");
+            let body = serde_json::json!({ "error": e.to_string() });
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
+    }
+}
+
+/// SSE endpoint for streaming task output in real time.
+#[instrument(name = "api.task.stream", skip_all, fields(%id))]
+async fn api_stream_task(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use std::time::Duration;
+
+    require_auth!(auth);
+    let task_id = domain::primitives::TaskId::from(id);
+
+    // Verify task exists
+    if state.app.tasks().find_by_id(task_id).await.is_err() {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+
+    let tasks = state.app.tasks().clone();
+    let stream = async_stream::stream! {
+        let mut last_offset = 0usize;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let task = match tasks.find_by_id(task_id).await {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+
+            // Send new output lines since last_offset
+            for line in &task.output[last_offset..] {
+                let data = serde_json::json!({
+                    "type": "output",
+                    "line": line.line,
+                    "timestamp": line.timestamp.to_rfc3339(),
+                });
+                yield Ok::<_, std::convert::Infallible>(Event::default().data(data.to_string()));
+            }
+            last_offset = task.output.len();
+
+            // Send terminal status and stop
+            match task.status {
+                domain::task::TaskStatus::Completed
+                | domain::task::TaskStatus::Failed
+                | domain::task::TaskStatus::Cancelled => {
+                    let data = serde_json::json!({
+                        "type": "status",
+                        "status": task.status.to_string(),
+                        "git_branch": task.git_branch,
+                        "pr_url": task.pr_url,
+                        "error_message": task.error_message,
+                    });
+                    yield Ok(Event::default().data(data.to_string()));
+                    break;
+                }
+                _ => {}
+            }
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Callback endpoint for the task runner to report output and completion.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TaskCallback {
+    Output {
+        line: String,
+    },
+    Completed {
+        git_branch: Option<String>,
+        pr_url: Option<String>,
+    },
+    Failed {
+        error_message: String,
+    },
+}
+
+#[instrument(name = "api.task.callback", skip_all, fields(%id))]
+async fn api_task_callback(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<TaskCallback>,
+) -> Response {
+    let task_id = domain::primitives::TaskId::from(id);
+    let result = match body {
+        TaskCallback::Output { line } => state.app.tasks().receive_output(task_id, line).await,
+        TaskCallback::Completed { git_branch, pr_url } => {
+            state
+                .app
+                .tasks()
+                .complete(task_id, git_branch, pr_url)
+                .await
+        }
+        TaskCallback::Failed { error_message } => {
+            state.app.tasks().fail(task_id, error_message).await
+        }
+    };
+    match result {
+        Ok(_) => axum::http::StatusCode::OK.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "API: task callback failed");
+            let body = serde_json::json!({ "error": e.to_string() });
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
+    }
 }

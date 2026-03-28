@@ -23,6 +23,10 @@ struct Cli {
     /// If empty, all GitHub users can log in.
     #[arg(long, env = "GITHUB_ALLOWED_TEAMS", default_value = "")]
     github_allowed_teams: String,
+
+    /// Anthropic API key for hosted task execution.
+    #[arg(long, env = "ANTHROPIC_API_KEY", default_value = "")]
+    anthropic_api_key: String,
 }
 
 #[tokio::main]
@@ -94,6 +98,32 @@ async fn main() -> anyhow::Result<()> {
         style_agent_endpoints,
         sandbox_client,
     );
+
+    // Spawn the task runner if sandbox is enabled
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    if let Some(sandbox) = app_state.sandbox.clone() {
+        let anthropic_key = if cli.anthropic_api_key.is_empty() {
+            None
+        } else {
+            Some(cli.anthropic_api_key.clone())
+        };
+        let callback_base_url = format!("http://localhost:{}", config.server.port,);
+        let runner_config = galoy_agents_web::task_runner::TaskRunnerConfig {
+            callback_base_url,
+            anthropic_api_key: anthropic_key,
+            ..Default::default()
+        };
+        let runner = galoy_agents_web::task_runner::TaskRunner::new(
+            app_state.app.tasks().clone(),
+            sandbox,
+            app_state.task_github_tokens.clone(),
+            runner_config,
+        );
+        tokio::spawn(runner.run(cancel_rx));
+        tracing::info!("Task runner spawned");
+    } else {
+        tracing::info!("Sandbox not enabled — task runner disabled");
+    }
 
     let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);
 
