@@ -234,6 +234,8 @@
           };
         };
 
+        packages.sandbox-base-image = import ./images/sandbox-base/default.nix { inherit pkgs; };
+
         devShells.training = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
           shellHook = ''

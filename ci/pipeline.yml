@@ -12,6 +12,9 @@ groups:
   - deploy-to-prod
   - train-classifier
   - build-style-index
+- name: sandbox-base
+  jobs:
+  - build-sandbox-base-image
 
 jobs:
 - name: check-code
@@ -282,6 +285,39 @@ jobs:
       repository: repo-updated
       rebase: true
 
+- name: build-sandbox-base-image
+  serial: true
+  plan:
+  - get: repo-sandbox-image
+    trigger: true
+  - task: build-image
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo-sandbox-image
+        path: repo
+      outputs:
+      - name: image
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#sandbox-base-image
+            gunzip -c result > ../image/image.tar
+  - put: sandbox-base-edge-image
+    params:
+      image: image/image.tar
+    get_params:
+      skip_download: true
+
 resource_types:
 - name: terraform
   type: registry-image
@@ -317,6 +353,15 @@ resources:
     - charts/galoy-agents/values.yaml
     - style-agent/labels/*
   webhook_token: ((webhook.secret))
+
+- name: repo-sandbox-image
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+    paths:
+    - images/sandbox-base/
 
 - name: repo-labels
   type: git
@@ -379,6 +424,14 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/" + data.values.folder_registry_image
+
+- name: sandbox-base-edge-image
+  type: registry-image
+  source:
+    tag: edge
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+    repository: #@ data.values.gar_registry + "/sandbox-base"
 
 - name: tf-galoy-agents-prod
   type: terraform

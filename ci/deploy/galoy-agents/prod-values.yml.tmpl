@@ -42,6 +42,9 @@ sandbox:
   installController: false
   templateName: agent-sandbox
   runtimeClassName: gvisor
+  image:
+    repository: us.gcr.io/galoyorg/sandbox-base
+    tag: edge
   warmPool:
     enabled: true
     minReady: 2

@@ -24,7 +24,11 @@ spec:
       {{- end }}
       containers:
       - name: sandbox
+        {{- if .Values.sandbox.image.digest }}
+        image: {{ .Values.sandbox.image.repository }}@{{ .Values.sandbox.image.digest }}
+        {{- else }}
         image: {{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}
+        {{- end }}
         command: ["sleep", "infinity"]
         resources:
           {{- toYaml .Values.sandbox.resources | nindent 10 }}
