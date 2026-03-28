@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Extension, Path, Query, State,
+        Path, Query, State,
     },
     response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
@@ -16,7 +16,6 @@ use galoy_agents_core as domain;
 
 use domain::agent::token::generate_token;
 use domain::agent::Agent;
-use domain::auth::AuthContext;
 use domain::primitives::{AgentId, UserId};
 
 use crate::templates::*;
@@ -460,14 +459,6 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/v1/sandboxes/{name}/exec", get(api_exec_sandbox))
 }
 
-macro_rules! require_auth {
-    ($auth:expr) => {
-        if matches!($auth, AuthContext::Anonymous) {
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
-    };
-}
-
 macro_rules! require_sandbox {
     ($state:expr) => {
         match $state.sandbox.as_ref() {
@@ -485,10 +476,8 @@ struct CreateSandboxRequest {
 #[instrument(name = "api.sandbox.create", skip_all)]
 async fn api_create_sandbox(
     State(state): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
     Json(body): Json<CreateSandboxRequest>,
 ) -> Response {
-    require_auth!(auth);
     let client = require_sandbox!(state);
     match client.create_claim(&body.name).await {
         Ok(_) => {
@@ -508,11 +497,7 @@ async fn api_create_sandbox(
 }
 
 #[instrument(name = "api.sandbox.list", skip_all)]
-async fn api_list_sandboxes(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
-) -> Response {
-    require_auth!(auth);
+async fn api_list_sandboxes(State(state): State<AppState>) -> Response {
     let client = require_sandbox!(state);
     match client.list_claims().await {
         Ok(summaries) => Json(summaries).into_response(),
@@ -524,12 +509,7 @@ async fn api_list_sandboxes(
 }
 
 #[instrument(name = "api.sandbox.get", skip_all, fields(%name))]
-async fn api_get_sandbox(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
-    Path(name): Path<String>,
-) -> Response {
-    require_auth!(auth);
+async fn api_get_sandbox(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let client = require_sandbox!(state);
     match client.get_claim(&name).await {
         Ok(summary) => Json(summary).into_response(),
@@ -544,12 +524,7 @@ async fn api_get_sandbox(
 }
 
 #[instrument(name = "api.sandbox.delete", skip_all, fields(%name))]
-async fn api_delete_sandbox(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
-    Path(name): Path<String>,
-) -> Response {
-    require_auth!(auth);
+async fn api_delete_sandbox(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let client = require_sandbox!(state);
     match client.delete_claim(&name).await {
         Ok(_) => axum::http::StatusCode::NO_CONTENT.into_response(),
@@ -568,12 +543,10 @@ struct ExecParams {
 #[instrument(name = "api.sandbox.exec", skip_all, fields(%name))]
 async fn api_exec_sandbox(
     State(state): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
     Path(name): Path<String>,
     Query(params): Query<ExecParams>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    require_auth!(auth);
     let client = require_sandbox!(state).clone();
 
     let cmd = params.cmd.unwrap_or_else(|| "sh".to_string());
