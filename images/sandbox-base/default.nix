@@ -50,9 +50,6 @@ pkgs.dockerTools.buildLayeredImage {
   fakeRootCommands = ''
     mkdir -p ./home/agent
     chown 1000:1000 ./home/agent
-    mkdir -p ./nix/var/nix/{db,daemon-socket,gc,profiles,temproots,userpool}
-    chmod -R 777 ./nix/var
-    chmod 1777 ./nix/store
     mkdir -p ./tmp
     chmod 1777 ./tmp
   '';
