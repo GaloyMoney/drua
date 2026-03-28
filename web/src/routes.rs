@@ -454,6 +454,7 @@ pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/sandboxes", post(api_create_sandbox))
         .route("/api/v1/sandboxes", get(api_list_sandboxes))
+        .route("/api/v1/sandboxes/_debug", get(api_debug_sandboxes))
         .route("/api/v1/sandboxes/{name}", get(api_get_sandbox))
         .route("/api/v1/sandboxes/{name}", delete(api_delete_sandbox))
         .route("/api/v1/sandboxes/{name}/exec", get(api_exec_sandbox))
@@ -466,6 +467,18 @@ macro_rules! require_sandbox {
             None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     };
+}
+
+#[instrument(name = "api.sandbox.debug", skip_all)]
+async fn api_debug_sandboxes(State(state): State<AppState>) -> Response {
+    let client = require_sandbox!(state);
+    match client.debug_status().await {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => {
+            let body = serde_json::json!({ "error": e.to_string() });
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

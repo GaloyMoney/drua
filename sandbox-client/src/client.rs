@@ -203,6 +203,113 @@ impl SandboxClient {
         Ok(attached)
     }
 
+    /// Gather diagnostic info about the sandbox infrastructure.
+    #[instrument(name = "sandbox_client.debug_status", skip_all)]
+    pub async fn debug_status(&self) -> Result<serde_json::Value, SandboxError> {
+        use k8s_openapi::api::core::v1::Event;
+
+        // List all sandbox claims
+        let claims: Api<SandboxClaim> = Api::namespaced(self.client.clone(), &self.namespace);
+        let claim_list = claims.list(&ListParams::default()).await?;
+        let claim_summaries: Vec<serde_json::Value> = claim_list
+            .items
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.metadata.name,
+                    "status": c.status,
+                    "spec": c.spec,
+                })
+            })
+            .collect();
+
+        // List all sandboxes
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        let sandbox_list = sandboxes.list(&ListParams::default()).await?;
+        let sandbox_summaries: Vec<serde_json::Value> = sandbox_list
+            .items
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.metadata.name,
+                    "status": s.status,
+                    "replicas": s.spec.replicas,
+                })
+            })
+            .collect();
+
+        // List warm pools
+        let pools: Api<SandboxWarmPool> = Api::namespaced(self.client.clone(), &self.namespace);
+        let pool_list = pools.list(&ListParams::default()).await?;
+        let pool_summaries: Vec<serde_json::Value> = pool_list
+            .items
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.metadata.name,
+                    "spec": p.spec,
+                    "status": p.status,
+                })
+            })
+            .collect();
+
+        // List sandbox templates
+        let templates: Api<SandboxTemplate> = Api::namespaced(self.client.clone(), &self.namespace);
+        let template_list = templates.list(&ListParams::default()).await?;
+        let template_names: Vec<Option<String>> = template_list
+            .items
+            .iter()
+            .map(|t| t.metadata.name.clone())
+            .collect();
+
+        // List pods in namespace
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let pod_list = pods.list(&ListParams::default()).await?;
+        let pod_summaries: Vec<serde_json::Value> = pod_list
+            .items
+            .iter()
+            .map(|p| {
+                let status = p.status.as_ref();
+                serde_json::json!({
+                    "name": p.metadata.name,
+                    "phase": status.and_then(|s| s.phase.clone()),
+                    "conditions": status.map(|s| &s.conditions),
+                    "container_statuses": status.map(|s| &s.container_statuses),
+                })
+            })
+            .collect();
+
+        // Recent events in namespace
+        let events: Api<Event> = Api::namespaced(self.client.clone(), &self.namespace);
+        let event_list = events.list(&ListParams::default()).await?;
+        let recent_events: Vec<serde_json::Value> = event_list
+            .items
+            .iter()
+            .rev()
+            .take(30)
+            .map(|e| {
+                serde_json::json!({
+                    "reason": e.reason,
+                    "message": e.message,
+                    "type": e.type_,
+                    "involved_object": e.involved_object.name,
+                    "last_timestamp": e.last_timestamp,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "namespace": self.namespace,
+            "template_name": self.template_name,
+            "claims": claim_summaries,
+            "sandboxes": sandbox_summaries,
+            "warm_pools": pool_summaries,
+            "templates": template_names,
+            "pods": pod_summaries,
+            "recent_events": recent_events,
+        }))
+    }
+
     fn summary_from_claim(claim: &SandboxClaim) -> SandboxSummary {
         let name = claim
             .metadata

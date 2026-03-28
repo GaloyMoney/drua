@@ -165,6 +165,7 @@ pub struct SandboxClaimSandboxRef {
     version = "v1alpha1",
     kind = "SandboxWarmPool",
     plural = "sandboxwarmpools",
+    status = "SandboxWarmPoolStatus",
     namespaced
 )]
 #[serde(rename_all = "camelCase")]
@@ -174,4 +175,16 @@ pub struct SandboxWarmPoolSpec {
 
     /// Number of pre-warmed sandbox replicas to maintain.
     pub replicas: i32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxWarmPoolStatus {
+    /// Total replicas managed by the warm pool.
+    #[serde(default)]
+    pub replicas: i32,
+
+    /// Number of replicas that are ready to serve.
+    #[serde(default)]
+    pub ready_replicas: i32,
 }
