@@ -26,6 +26,7 @@ pub struct SandboxSummary {
 }
 
 impl SandboxClient {
+    /// Create a new sandbox client for the given namespace and template.
     pub fn new(client: Client, namespace: String, template_name: String) -> Self {
         Self {
             client,
