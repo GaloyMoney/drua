@@ -10,6 +10,9 @@ metadata:
     release: "{{ .Release.Name }}"
 spec:
   podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/component: sandbox
     spec:
       runtimeClassName: {{ .Values.sandbox.runtimeClassName }}
       tolerations:
