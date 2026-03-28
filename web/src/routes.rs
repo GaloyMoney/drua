@@ -566,11 +566,30 @@ async fn exec_proxy(
 
     tracing::info!(claim = %claim_name, "Exec proxy: starting");
 
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Helper to send an error message back to the client over the WebSocket
+    macro_rules! ws_error {
+        ($sender:expr, $msg:expr) => {{
+            use futures::sink::SinkExt;
+            let err_msg = format!("exec proxy error: {}\r\n", $msg);
+            let mut frame = Vec::with_capacity(1 + err_msg.len());
+            frame.push(ws_proto::STDERR);
+            frame.extend_from_slice(err_msg.as_bytes());
+            let _ = $sender.send(Message::Binary(frame.into())).await;
+            let _ = $sender
+                .send(Message::Binary(vec![ws_proto::EXIT, 1].into()))
+                .await;
+            let _ = $sender.close().await;
+        }};
+    }
+
     // Start exec in the sandbox pod
     let mut process = match client.exec_in_sandbox(&claim_name, command).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "Exec proxy: failed to exec into sandbox");
+            ws_error!(ws_sender, e);
             return;
         }
     };
@@ -579,6 +598,7 @@ async fn exec_proxy(
         Some(s) => s,
         None => {
             tracing::error!("Exec proxy: no stdin stream");
+            ws_error!(ws_sender, "no stdin stream from pod");
             return;
         }
     };
@@ -587,11 +607,10 @@ async fn exec_proxy(
         Some(s) => s,
         None => {
             tracing::error!("Exec proxy: no stdout stream");
+            ws_error!(ws_sender, "no stdout stream from pod");
             return;
         }
     };
-
-    let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Pod stdout → WebSocket (0x02 prefix)
     let stdout_task = tokio::spawn(async move {
