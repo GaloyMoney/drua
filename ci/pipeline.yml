@@ -101,7 +101,8 @@ jobs:
   serial: true
   plan:
   - in_parallel:
-    - get: repo
+    - get: deploy-config
+      trigger: true
     - get: edge-image
       trigger: true
       passed: [build-edge-image]
@@ -112,7 +113,8 @@ jobs:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
       inputs:
-      - name: repo
+      - name: deploy-config
+        path: repo
       - name: edge-image
       outputs:
       - name: deployment
@@ -331,6 +333,16 @@ resources:
     uri: #@ data.values.git_uri
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
+
+- name: deploy-config
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+    paths:
+    - charts/galoy-agents/
+    - ci/deploy/
 
 - name: cala-repo
   type: git
