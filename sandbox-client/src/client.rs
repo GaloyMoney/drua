@@ -53,7 +53,7 @@ impl SandboxClient {
         let claim = SandboxClaim::new(
             claim_name,
             SandboxClaimSpec {
-                template_ref: TemplateRef {
+                sandbox_template_ref: TemplateRef {
                     name: self.template_name.clone(),
                 },
                 lifecycle: None,

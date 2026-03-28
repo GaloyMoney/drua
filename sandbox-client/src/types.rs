@@ -120,7 +120,7 @@ pub struct SandboxTemplateSpec {
 #[serde(rename_all = "camelCase")]
 pub struct SandboxClaimSpec {
     /// Reference to a SandboxTemplate.
-    pub template_ref: TemplateRef,
+    pub sandbox_template_ref: TemplateRef,
 
     /// Lifecycle configuration for the claimed sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,13 +162,8 @@ pub struct SandboxClaimStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SandboxWarmPoolSpec {
     /// Reference to a SandboxTemplate from which to pre-create sandboxes.
-    pub template_ref: TemplateRef,
+    pub sandbox_template_ref: TemplateRef,
 
-    /// Minimum number of ready pods to keep in the pool.
-    #[serde(default)]
-    pub min_ready: i32,
-
-    /// Maximum pool size.
-    #[serde(default)]
-    pub max_size: i32,
+    /// Number of pre-warmed sandbox replicas to maintain.
+    pub replicas: i32,
 }

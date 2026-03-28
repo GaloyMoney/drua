@@ -9,8 +9,7 @@ metadata:
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
 spec:
-  templateRef:
+  sandboxTemplateRef:
     name: {{ .Values.sandbox.templateName }}
-  minReady: {{ .Values.sandbox.warmPool.minReady }}
-  maxSize: {{ .Values.sandbox.warmPool.maxSize }}
+  replicas: {{ .Values.sandbox.warmPool.minReady }}
 {{- end }}
