@@ -222,22 +222,34 @@ async fn cmd_exec(base: &str, token: &str, name: &str, cmd: &str) -> anyhow::Res
         .await
         .context("WebSocket connection failed")?;
 
-    eprintln!("Connected. Press Ctrl-C to exit.\r");
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+
+    if is_tty {
+        eprintln!("Connected. Press Ctrl-C to exit.\r");
+    } else {
+        eprintln!("Connected (piped mode).");
+    }
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-    // Set terminal to raw mode
-    let _raw_guard = RawModeGuard::enable()?;
+    // Set terminal to raw mode (only for interactive TTY)
+    let _raw_guard = if is_tty {
+        Some(RawModeGuard::enable()?)
+    } else {
+        None
+    };
 
-    // Send initial terminal size
-    if let Ok((cols, rows)) = terminal::size() {
-        let mut frame = Vec::with_capacity(5);
-        frame.push(ws_proto::RESIZE);
-        frame.extend_from_slice(&cols.to_be_bytes());
-        frame.extend_from_slice(&rows.to_be_bytes());
-        let _ = ws_sender
-            .send(tungstenite::Message::Binary(frame.into()))
-            .await;
+    // Send initial terminal size (only for interactive TTY)
+    if is_tty {
+        if let Ok((cols, rows)) = terminal::size() {
+            let mut frame = Vec::with_capacity(5);
+            frame.push(ws_proto::RESIZE);
+            frame.extend_from_slice(&cols.to_be_bytes());
+            frame.extend_from_slice(&rows.to_be_bytes());
+            let _ = ws_sender
+                .send(tungstenite::Message::Binary(frame.into()))
+                .await;
+        }
     }
 
     // Stdin reader channel

@@ -141,9 +141,17 @@ pub struct SandboxClaimStatus {
     #[serde(default)]
     pub conditions: Vec<serde_json::Value>,
 
-    /// Name of the Sandbox created by this claim.
+    /// Reference to the Sandbox created by this claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox_name: Option<String>,
+    pub sandbox: Option<SandboxClaimSandboxRef>,
+}
+
+/// Nested object in SandboxClaim status that references the bound Sandbox.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SandboxClaimSandboxRef {
+    /// Name of the Sandbox (CRD uses uppercase "Name").
+    #[serde(rename = "Name")]
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------

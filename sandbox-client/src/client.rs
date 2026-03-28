@@ -210,7 +210,7 @@ impl SandboxClient {
             .clone()
             .unwrap_or_else(|| "<unknown>".into());
         let status = claim.status.as_ref();
-        let sandbox_name = status.and_then(|s| s.sandbox_name.clone());
+        let sandbox_name = status.and_then(|s| s.sandbox.as_ref().map(|r| r.name.clone()));
         let ready = status
             .map(|s| {
                 s.conditions.iter().any(|c| {
