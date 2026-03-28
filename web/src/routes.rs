@@ -548,8 +548,10 @@ async fn api_delete_sandbox(State(state): State<AppState>, Path(name): Path<Stri
     }
 }
 
+/// Query parameters for the exec WebSocket endpoint.
 #[derive(Deserialize)]
 struct ExecParams {
+    /// Shell command to execute (defaults to "sh").
     cmd: Option<String>,
 }
 
