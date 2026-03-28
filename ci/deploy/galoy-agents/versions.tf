@@ -24,5 +24,9 @@ terraform {
       source  = "cyrilgdn/postgresql"
       version = "1.24.0"
     }
+    kubectl = {
+      source  = "alekc/kubectl"
+      version = "~> 2.0"
+    }
   }
 }

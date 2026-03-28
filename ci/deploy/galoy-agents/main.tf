@@ -81,6 +81,33 @@ resource "google_container_node_pool" "gvisor" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Agent Sandbox controller + CRDs
+# Installed separately so the CRDs are registered before Helm tries to
+# create SandboxTemplate / SandboxWarmPool custom resources.
+# ---------------------------------------------------------------------------
+data "kubectl_file_documents" "sandbox_controller" {
+  content = file("${path.module}/chart/vendor/agent-sandbox/manifest.yaml")
+}
+
+resource "kubectl_manifest" "sandbox_controller" {
+  for_each  = data.kubectl_file_documents.sandbox_controller.manifests
+  yaml_body = each.value
+
+  depends_on = [google_container_node_pool.gvisor]
+}
+
+data "kubectl_file_documents" "sandbox_extensions" {
+  content = file("${path.module}/chart/vendor/agent-sandbox/extensions.yaml")
+}
+
+resource "kubectl_manifest" "sandbox_extensions" {
+  for_each  = data.kubectl_file_documents.sandbox_extensions.manifests
+  yaml_body = each.value
+
+  depends_on = [google_container_node_pool.gvisor]
+}
+
 resource "helm_release" "galoy_agents" {
   name      = "galoy-agents"
   chart     = "${path.module}/chart"
@@ -98,6 +125,8 @@ resource "helm_release" "galoy_agents" {
   depends_on = [
     kubernetes_secret.galoy_agents,
     google_container_node_pool.gvisor,
+    kubectl_manifest.sandbox_controller,
+    kubectl_manifest.sandbox_extensions,
   ]
 }
 
@@ -115,6 +144,13 @@ provider "kubernetes" {
   host                   = "https://${data.google_container_cluster.primary.private_cluster_config.0.private_endpoint}"
   token                  = data.google_client_config.default.access_token
   cluster_ca_certificate = base64decode(data.google_container_cluster.primary.master_auth.0.cluster_ca_certificate)
+}
+
+provider "kubectl" {
+  host                   = "https://${data.google_container_cluster.primary.private_cluster_config.0.private_endpoint}"
+  token                  = data.google_client_config.default.access_token
+  cluster_ca_certificate = base64decode(data.google_container_cluster.primary.master_auth.0.cluster_ca_certificate)
+  load_config_file       = false
 }
 
 provider "helm" {
