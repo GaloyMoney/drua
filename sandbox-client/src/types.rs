@@ -63,16 +63,20 @@ pub struct SandboxStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
 
-    /// Cluster-internal DNS name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Cluster-internal DNS name (CRD field: "serviceFQDN").
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "serviceFQDN"
+    )]
     pub service_fqdn: Option<String>,
 
     /// Current replica count.
     #[serde(default)]
     pub replicas: i32,
 
-    /// Label selector for pod discovery.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Label selector for pod discovery (CRD field: "selector").
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "selector")]
     pub label_selector: Option<String>,
 }
 
