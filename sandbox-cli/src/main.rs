@@ -3,8 +3,19 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crossterm::terminal;
-use sandbox_client::{SandboxClient, SandboxError};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures::{SinkExt, StreamExt};
+use tokio::io::AsyncWriteExt;
+use tokio_tungstenite::tungstenite;
+
+/// Wire protocol frame types — must match the server.
+mod ws_proto {
+    pub const STDIN: u8 = 0x01;
+    pub const STDOUT: u8 = 0x02;
+    #[allow(dead_code)]
+    pub const STDERR: u8 = 0x03;
+    pub const RESIZE: u8 = 0x04;
+    pub const EXIT: u8 = 0xFF;
+}
 
 #[derive(Parser)]
 #[command(name = "sandbox-cli", about = "Manage Agent Sandbox pods")]
@@ -18,18 +29,22 @@ struct Cli {
 
 #[derive(Parser, Clone)]
 struct GlobalArgs {
-    /// Kubernetes namespace for sandbox resources.
-    #[arg(long, env = "SANDBOX_NAMESPACE", default_value = "galoy-agents")]
-    namespace: String,
+    /// Base URL of the galoy-agents server.
+    #[arg(
+        long,
+        env = "GALOY_AGENTS_URL",
+        default_value = "https://dashboard.agents.galoy.io"
+    )]
+    server_url: String,
 
-    /// Name of the SandboxTemplate to use.
-    #[arg(long, env = "SANDBOX_TEMPLATE", default_value = "agent-sandbox")]
-    template: String,
+    /// Bearer token for authentication.
+    #[arg(long, env = "GALOY_AGENTS_TOKEN")]
+    token: String,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a sandbox claim and wait for it to be ready.
+    /// Create a sandbox claim and optionally wait for it to be ready.
     Create {
         /// Name for the sandbox claim.
         name: String,
@@ -59,7 +74,7 @@ enum Command {
         name: String,
     },
 
-    /// List all sandbox claims in the namespace.
+    /// List all sandbox claims.
     List,
 }
 
@@ -73,33 +88,56 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let client = SandboxClient::try_from_env(cli.global.namespace, cli.global.template)
-        .await
-        .context("Failed to create Kubernetes client")?;
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    let base = cli.global.server_url.trim_end_matches('/').to_string();
+    let token = cli.global.token.clone();
 
     match cli.command {
         Command::Create {
             name,
             no_wait,
             timeout,
-        } => cmd_create(&client, &name, no_wait, timeout).await,
-        Command::Exec { name, cmd } => cmd_exec(&client, &name, &cmd).await,
-        Command::Delete { name } => cmd_delete(&client, &name).await,
-        Command::List => cmd_list(&client).await,
+        } => cmd_create(&http, &base, &token, &name, no_wait, timeout).await,
+        Command::Exec { name, cmd } => cmd_exec(&base, &token, &name, &cmd).await,
+        Command::Delete { name } => cmd_delete(&http, &base, &token, &name).await,
+        Command::List => cmd_list(&http, &base, &token).await,
     }
 }
 
+#[derive(serde::Deserialize, Debug)]
+struct SandboxSummary {
+    name: String,
+    sandbox_name: Option<String>,
+    phase: String,
+    ready: bool,
+}
+
 async fn cmd_create(
-    client: &SandboxClient,
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
     name: &str,
     no_wait: bool,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     eprintln!("Creating sandbox claim '{name}' ...");
-    client
-        .create_claim(name)
+
+    let resp = http
+        .post(format!("{base}/api/v1/sandboxes"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
         .await
-        .context("Failed to create sandbox claim")?;
+        .context("Failed to reach server")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Create failed: HTTP {}", resp.status());
+    }
 
     if no_wait {
         eprintln!("Claim created (not waiting for readiness).");
@@ -107,98 +145,163 @@ async fn cmd_create(
     }
 
     eprintln!("Waiting up to {timeout_secs}s for sandbox to become ready ...");
-    match client
-        .wait_until_ready(name, Duration::from_secs(timeout_secs))
-        .await
-    {
-        Ok(summary) => {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    loop {
+        let summary = get_sandbox(http, base, token, name).await?;
+        if summary.ready {
             eprintln!(
                 "Sandbox ready: pod={}",
                 summary.sandbox_name.as_deref().unwrap_or("?")
             );
+            return Ok(());
         }
-        Err(SandboxError::Timeout(_)) => {
+
+        if tokio::time::Instant::now() >= deadline {
             eprintln!("Timed out after {timeout_secs}s — sandbox not yet ready.");
             eprintln!("Use `sandbox-cli list` to check status later.");
             std::process::exit(1);
         }
-        Err(e) => return Err(e.into()),
-    }
 
-    Ok(())
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
-async fn cmd_exec(client: &SandboxClient, name: &str, cmd: &str) -> anyhow::Result<()> {
-    let command: Vec<String> = cmd.split_whitespace().map(String::from).collect();
-
-    eprintln!("Attaching to sandbox '{name}' (command: {cmd}) ...");
-
-    let mut process = client
-        .exec_in_sandbox(name, command)
+async fn get_sandbox(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    name: &str,
+) -> anyhow::Result<SandboxSummary> {
+    let resp = http
+        .get(format!("{base}/api/v1/sandboxes/{name}"))
+        .bearer_auth(token)
+        .send()
         .await
-        .context("Failed to exec into sandbox")?;
+        .context("Failed to reach server")?;
 
-    // Take ownership of the streams before enabling raw mode
-    let mut remote_stdin = process.stdin().unwrap();
-    let mut remote_stdout = process.stdout().unwrap();
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("Sandbox '{name}' not found");
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("Get sandbox failed: HTTP {}", resp.status());
+    }
 
-    // Set terminal to raw mode for interactive use
+    resp.json::<SandboxSummary>()
+        .await
+        .context("Failed to parse sandbox response")
+}
+
+async fn cmd_exec(base: &str, token: &str, name: &str, cmd: &str) -> anyhow::Result<()> {
+    eprintln!("Connecting to sandbox '{name}' (command: {cmd}) ...");
+
+    // Build WebSocket URL
+    let ws_base = base
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+    let ws_url = format!("{ws_base}/api/v1/sandboxes/{name}/exec?cmd={cmd}");
+
+    let url = url::Url::parse(&ws_url).context("Invalid WebSocket URL")?;
+
+    // Build request with Authorization header
+    let request = tungstenite::http::Request::builder()
+        .uri(ws_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Host", url.host_str().unwrap_or("localhost"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .context("Failed to build WebSocket request")?;
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .context("WebSocket connection failed")?;
+
+    eprintln!("Connected. Press Ctrl-C to exit.\r");
+
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+    // Set terminal to raw mode
     let _raw_guard = RawModeGuard::enable()?;
 
-    // Channel for stdin bytes from the blocking reader
-    let (stdin_tx, mut stdin_rx) =
-        tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(64);
+    // Send initial terminal size
+    if let Ok((cols, rows)) = terminal::size() {
+        let mut frame = Vec::with_capacity(5);
+        frame.push(ws_proto::RESIZE);
+        frame.extend_from_slice(&cols.to_be_bytes());
+        frame.extend_from_slice(&rows.to_be_bytes());
+        let _ = ws_sender
+            .send(tungstenite::Message::Binary(frame.into()))
+            .await;
+    }
 
+    // Stdin reader channel
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let stdin = std::io::stdin();
         let mut handle = stdin.lock();
         let mut buf = [0u8; 1024];
-
         loop {
             match handle.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if stdin_tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
                         break;
                     }
                 }
-                Err(e) => {
-                    let _ = stdin_tx.blocking_send(Err(e));
-                    break;
-                }
+                Err(_) => break,
             }
         }
     });
 
-    let mut stdout_buf = [0u8; 4096];
+    let mut exit_code: Option<u8> = None;
 
     loop {
         tokio::select! {
-            // Remote stdout → local stdout
-            result = remote_stdout.read(&mut stdout_buf) => {
-                match result {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let mut stdout = tokio::io::stdout();
-                        stdout.write_all(&stdout_buf[..n]).await?;
-                        stdout.flush().await?;
+            // Server → local stdout
+            msg = ws_receiver.next() => {
+                match msg {
+                    Some(Ok(tungstenite::Message::Binary(data))) => {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        match data[0] {
+                            ws_proto::STDOUT | ws_proto::STDERR => {
+                                let mut stdout = tokio::io::stdout();
+                                let _ = stdout.write_all(&data[1..]).await;
+                                let _ = stdout.flush().await;
+                            }
+                            ws_proto::EXIT => {
+                                exit_code = data.get(1).copied();
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("\r\nStream error: {e}");
+                    Some(Ok(tungstenite::Message::Close(_))) | None => break,
+                    Some(Err(e)) => {
+                        eprintln!("\r\nConnection error: {e}");
                         break;
                     }
+                    _ => {}
                 }
             }
-            // Local stdin → remote stdin
-            chunk = stdin_rx.recv() => {
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        remote_stdin.write_all(&bytes).await?;
-                    }
-                    Some(Err(e)) => {
-                        eprintln!("\r\nStdin error: {e}");
-                        break;
+            // Local stdin → server
+            bytes = stdin_rx.recv() => {
+                match bytes {
+                    Some(data) => {
+                        let mut frame = Vec::with_capacity(1 + data.len());
+                        frame.push(ws_proto::STDIN);
+                        frame.extend_from_slice(&data);
+                        if ws_sender.send(tungstenite::Message::Binary(frame.into())).await.is_err() {
+                            break;
+                        }
                     }
                     None => break,
                 }
@@ -206,35 +309,56 @@ async fn cmd_exec(client: &SandboxClient, name: &str, cmd: &str) -> anyhow::Resu
         }
     }
 
-    // Drop the raw mode guard to restore the terminal
     drop(_raw_guard);
 
-    process.join().await?;
+    if let Some(code) = exit_code {
+        if code != 0 {
+            std::process::exit(code as i32);
+        }
+    }
 
     Ok(())
 }
 
-async fn cmd_delete(client: &SandboxClient, name: &str) -> anyhow::Result<()> {
+async fn cmd_delete(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    name: &str,
+) -> anyhow::Result<()> {
     eprintln!("Deleting sandbox claim '{name}' ...");
-    client
-        .delete_claim(name)
+
+    let resp = http
+        .delete(format!("{base}/api/v1/sandboxes/{name}"))
+        .bearer_auth(token)
+        .send()
         .await
-        .context("Failed to delete sandbox claim")?;
+        .context("Failed to reach server")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Delete failed: HTTP {}", resp.status());
+    }
+
     eprintln!("Deleted.");
     Ok(())
 }
 
-async fn cmd_list(client: &SandboxClient) -> anyhow::Result<()> {
-    let claims = client
-        .list_claims()
+async fn cmd_list(http: &reqwest::Client, base: &str, token: &str) -> anyhow::Result<()> {
+    let resp = http
+        .get(format!("{base}/api/v1/sandboxes"))
+        .bearer_auth(token)
+        .send()
         .await
-        .context("Failed to list sandbox claims")?;
+        .context("Failed to reach server")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("List failed: HTTP {}", resp.status());
+    }
+
+    let claims: Vec<SandboxSummary> = resp.json().await.context("Failed to parse sandbox list")?;
 
     if claims.is_empty() {
-        eprintln!(
-            "No sandbox claims found in namespace '{}'.",
-            client.namespace()
-        );
+        eprintln!("No sandbox claims found.");
         return Ok(());
     }
 

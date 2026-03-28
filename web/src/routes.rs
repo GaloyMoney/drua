@@ -1,10 +1,14 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Extension, Path, Query, State,
+    },
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
-    Form, Router,
+    routing::{delete, get, post},
+    Form, Json, Router,
 };
 use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -12,6 +16,7 @@ use galoy_agents_core as domain;
 
 use domain::agent::token::generate_token;
 use domain::agent::Agent;
+use domain::auth::AuthContext;
 use domain::primitives::{AgentId, UserId};
 
 use crate::templates::*;
@@ -430,4 +435,260 @@ async fn sandbox_status(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// JSON API  (/api/v1/sandboxes)
+// ---------------------------------------------------------------------------
+
+/// Wire protocol frame types for WebSocket exec proxy.
+mod ws_proto {
+    pub const STDIN: u8 = 0x01;
+    pub const STDOUT: u8 = 0x02;
+    #[allow(dead_code)]
+    pub const STDERR: u8 = 0x03;
+    pub const RESIZE: u8 = 0x04;
+    pub const EXIT: u8 = 0xFF;
+}
+
+pub fn api_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/sandboxes", post(api_create_sandbox))
+        .route("/api/v1/sandboxes", get(api_list_sandboxes))
+        .route("/api/v1/sandboxes/{name}", get(api_get_sandbox))
+        .route("/api/v1/sandboxes/{name}", delete(api_delete_sandbox))
+        .route("/api/v1/sandboxes/{name}/exec", get(api_exec_sandbox))
+}
+
+macro_rules! require_auth {
+    ($auth:expr) => {
+        if matches!($auth, AuthContext::Anonymous) {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+}
+
+macro_rules! require_sandbox {
+    ($state:expr) => {
+        match $state.sandbox.as_ref() {
+            Some(c) => c,
+            None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    };
+}
+
+#[derive(serde::Deserialize)]
+struct CreateSandboxRequest {
+    name: String,
+}
+
+#[instrument(name = "api.sandbox.create", skip_all)]
+async fn api_create_sandbox(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<CreateSandboxRequest>,
+) -> Response {
+    require_auth!(auth);
+    let client = require_sandbox!(state);
+    match client.create_claim(&body.name).await {
+        Ok(_) => {
+            let summary = sandbox_client::SandboxSummary {
+                name: body.name,
+                sandbox_name: None,
+                phase: "Pending".to_string(),
+                ready: false,
+            };
+            (axum::http::StatusCode::CREATED, Json(summary)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to create sandbox");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "api.sandbox.list", skip_all)]
+async fn api_list_sandboxes(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Response {
+    require_auth!(auth);
+    let client = require_sandbox!(state);
+    match client.list_claims().await {
+        Ok(summaries) => Json(summaries).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to list sandboxes");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "api.sandbox.get", skip_all, fields(%name))]
+async fn api_get_sandbox(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(name): Path<String>,
+) -> Response {
+    require_auth!(auth);
+    let client = require_sandbox!(state);
+    match client.get_claim(&name).await {
+        Ok(summary) => Json(summary).into_response(),
+        Err(sandbox_client::SandboxError::NotFound(_)) => {
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to get sandbox");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "api.sandbox.delete", skip_all, fields(%name))]
+async fn api_delete_sandbox(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(name): Path<String>,
+) -> Response {
+    require_auth!(auth);
+    let client = require_sandbox!(state);
+    match client.delete_claim(&name).await {
+        Ok(_) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "API: failed to delete sandbox");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ExecParams {
+    cmd: Option<String>,
+}
+
+#[instrument(name = "api.sandbox.exec", skip_all, fields(%name))]
+async fn api_exec_sandbox(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(name): Path<String>,
+    Query(params): Query<ExecParams>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    require_auth!(auth);
+    let client = require_sandbox!(state).clone();
+
+    let cmd = params.cmd.unwrap_or_else(|| "sh".to_string());
+    let command: Vec<String> = cmd.split_whitespace().map(String::from).collect();
+
+    ws.on_upgrade(move |socket| exec_proxy(socket, client, name, command))
+}
+
+/// Bridge a WebSocket connection to a kube-rs exec session.
+async fn exec_proxy(
+    socket: WebSocket,
+    client: std::sync::Arc<sandbox_client::SandboxClient>,
+    claim_name: String,
+    command: Vec<String>,
+) {
+    use futures::stream::StreamExt;
+
+    tracing::info!(claim = %claim_name, "Exec proxy: starting");
+
+    // Start exec in the sandbox pod
+    let mut process = match client.exec_in_sandbox(&claim_name, command).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "Exec proxy: failed to exec into sandbox");
+            return;
+        }
+    };
+
+    let mut pod_stdin = match process.stdin() {
+        Some(s) => s,
+        None => {
+            tracing::error!("Exec proxy: no stdin stream");
+            return;
+        }
+    };
+
+    let mut pod_stdout = match process.stdout() {
+        Some(s) => s,
+        None => {
+            tracing::error!("Exec proxy: no stdout stream");
+            return;
+        }
+    };
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Pod stdout → WebSocket (0x02 prefix)
+    let stdout_task = tokio::spawn(async move {
+        use futures::sink::SinkExt;
+        let mut buf = [0u8; 4096];
+        loop {
+            match pod_stdout.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut frame = Vec::with_capacity(1 + n);
+                    frame.push(ws_proto::STDOUT);
+                    frame.extend_from_slice(&buf[..n]);
+                    if ws_sender.send(Message::Binary(frame.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Exec proxy: pod stdout error");
+                    // Send exit frame
+                    let exit_frame = vec![ws_proto::EXIT, 1];
+                    let _ = ws_sender.send(Message::Binary(exit_frame.into())).await;
+                    break;
+                }
+            }
+        }
+        // Send exit frame on clean close
+        let _ = ws_sender
+            .send(Message::Binary(vec![ws_proto::EXIT, 0].into()))
+            .await;
+        let _ = ws_sender.close().await;
+    });
+
+    // WebSocket → Pod stdin (strip 0x01 prefix)
+    let stdin_task = tokio::spawn(async move {
+        while let Some(msg) = ws_receiver.next().await {
+            match msg {
+                Ok(Message::Binary(data)) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    match data[0] {
+                        ws_proto::STDIN => {
+                            if pod_stdin.write_all(&data[1..]).await.is_err() {
+                                break;
+                            }
+                        }
+                        ws_proto::RESIZE => {
+                            // Resize: 0x04 + cols(u16be) + rows(u16be)
+                            // kube-rs AttachedProcess doesn't expose resize,
+                            // so we log and skip for now.
+                            if data.len() >= 5 {
+                                let cols = u16::from_be_bytes([data[1], data[2]]);
+                                let rows = u16::from_be_bytes([data[3], data[4]]);
+                                tracing::debug!(cols, rows, "Exec proxy: resize requested");
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    // Wait for either task to finish, then abort the other
+    tokio::select! {
+        _ = stdout_task => {}
+        _ = stdin_task => {}
+    }
+
+    tracing::info!(claim = %claim_name, "Exec proxy: session ended");
 }

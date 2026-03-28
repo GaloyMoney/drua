@@ -72,6 +72,10 @@ rand = "0.8"
 # Async streams
 futures = "0.3"
 
+# WebSocket client
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+
 # Errors
 anyhow = "1"
 thiserror = "2"

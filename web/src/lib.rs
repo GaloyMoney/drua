@@ -46,7 +46,9 @@ impl AppState {
     }
 }
 
-/// Build the web router with page routes and auth routes.
+/// Build the web router with page routes, auth routes, and API routes.
 pub fn router() -> Router<AppState> {
-    routes::router().merge(auth::auth_router())
+    routes::router()
+        .merge(auth::auth_router())
+        .merge(routes::api_router())
 }
