@@ -46,6 +46,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.gnused
     pkgs.gnugrep
     pkgs.openssh
+    pkgs.gh
   ];
   fakeRootCommands = ''
     mkdir -p ./home/agent
