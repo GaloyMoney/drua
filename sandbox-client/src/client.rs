@@ -31,6 +31,11 @@ impl SandboxClient {
         }
     }
 
+    /// The namespace this client manages sandboxes in.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     /// Build a client from in-cluster or kubeconfig environment.
     pub async fn try_from_env(
         namespace: String,
