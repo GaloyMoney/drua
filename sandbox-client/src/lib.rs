@@ -9,4 +9,5 @@ mod types;
 
 pub use client::{SandboxClient, SandboxSummary};
 pub use error::SandboxError;
+pub use kube::api::AttachedProcess;
 pub use types::*;

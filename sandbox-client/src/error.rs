@@ -9,6 +9,15 @@ pub enum SandboxError {
     #[error("Sandbox not found: {0}")]
     NotFound(String),
 
+    #[error("Sandbox not ready: {0}")]
+    NotReady(String),
+
+    #[error("No running pod found for sandbox: {0}")]
+    NoPod(String),
+
     #[error("Sandbox client not configured")]
     NotConfigured,
+
+    #[error("Timed out waiting for sandbox: {0}")]
+    Timeout(String),
 }

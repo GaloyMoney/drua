@@ -5,6 +5,7 @@ members = [
   "core",
   "mcp-gateway",
   "sandbox-client",
+  "sandbox-cli",
   "web",
   "style-agent/crates/core",
   "style-agent/crates/server",
@@ -68,12 +69,15 @@ sha2 = "0.10"
 # Randomization
 rand = "0.8"
 
+# Async streams
+futures = "0.3"
+
 # Errors
 anyhow = "1"
 thiserror = "2"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # TUI
 ratatui = "0.29"
