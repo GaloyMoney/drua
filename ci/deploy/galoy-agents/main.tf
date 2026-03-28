@@ -70,10 +70,6 @@ resource "google_container_node_pool" "gvisor" {
       sandbox_type = "gvisor"
     }
 
-    labels = {
-      "sandbox.gke.io/runtime" = "gvisor"
-    }
-
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]
