@@ -7,6 +7,12 @@
     </span>
   </td>
   <td class="sandbox-actions">
+    {% if sb.phase == "Ready" %}
+    <a role="button" class="outline"
+      href="/sandboxes/{{ sb.name }}/terminal">
+      Terminal
+    </a>
+    {% endif %}
     <button class="secondary outline"
       hx-get="/sandboxes/{{ sb.name }}/status"
       hx-target="#sandbox-{{ sb.name }}"
