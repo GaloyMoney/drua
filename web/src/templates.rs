@@ -1,7 +1,7 @@
 use askama::Template;
 use askama_web::WebTemplate;
 
-use galoy_agents_core::style_agent_logs::{DashboardStats, StyleAgentRequestRow};
+use galoy_agents_core::code_assistant_logs::{CodeAssistantRequestRow, DashboardStats};
 
 pub struct AgentView {
     pub id: String,
@@ -44,15 +44,15 @@ pub struct AgentListTemplate {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "style_agent.html")]
-pub struct StyleAgentTemplate {
+#[template(path = "code_assistant.html")]
+pub struct CodeAssistantTemplate {
     pub stats: DashboardStats,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "style_agent_recent.html")]
-pub struct StyleAgentRecentTemplate {
-    pub rows: Vec<StyleAgentRequestRow>,
+#[template(path = "code_assistant_recent.html")]
+pub struct CodeAssistantRecentTemplate {
+    pub rows: Vec<CodeAssistantRequestRow>,
 }
 
 /// A single search result for the web UI.
@@ -67,8 +67,8 @@ pub struct SearchResultView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "style_agent_search_results.html")]
-pub struct StyleAgentSearchResultsTemplate {
+#[template(path = "code_assistant_search_results.html")]
+pub struct CodeAssistantSearchResultsTemplate {
     pub query: String,
     pub results: Vec<SearchResultView>,
     pub error: Option<String>,

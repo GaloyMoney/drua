@@ -32,8 +32,8 @@ galoyAgents:
       githubClientId: ""
       githubRedirectUri: ""
       githubAllowedTeams: []
-    styleAgent:
-      dbPath: "/data/style-agent/style-agent.db"
+    codeAssistant:
+      dbPath: "/data/code-assistant/code-assistant.db"
     concourse:
       enabled: false
       url: ""
@@ -45,7 +45,7 @@ galoyAgents:
     concourseUsername: ""
     concoursePassword: ""
     annotations:
-  styleAgent:
+  codeAssistant:
     indexHash: "825ef7dd2d3b0ae5c61a97f4eb92d09e11c222d452e339d5614edc59c27bfd84"
     embedderHash: ""
     gcsBucket: galoy-agents-models

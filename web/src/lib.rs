@@ -12,8 +12,8 @@ use galoy_agents_core as domain;
 use domain::App;
 
 use auth::config::OAuthClient;
+use code_assistant_server::CodeAssistantEndpoints;
 use sandbox_client::SandboxClient;
-use style_agent_server::StyleAgentEndpoints;
 
 /// Unified application state shared by all routes and middleware.
 #[derive(Clone)]
@@ -22,7 +22,7 @@ pub struct AppState {
     pub oauth_client: OAuthClient,
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
-    pub style_agent: Option<StyleAgentEndpoints>,
+    pub code_assistant: Option<CodeAssistantEndpoints>,
     pub sandbox: Option<Arc<SandboxClient>>,
 }
 
@@ -32,7 +32,7 @@ impl AppState {
         oauth_client: OAuthClient,
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
-        style_agent: Option<StyleAgentEndpoints>,
+        code_assistant: Option<CodeAssistantEndpoints>,
         sandbox: Option<SandboxClient>,
     ) -> Self {
         Self {
@@ -40,7 +40,7 @@ impl AppState {
             oauth_client,
             mcp_endpoint,
             github_allowed_teams,
-            style_agent,
+            code_assistant,
             sandbox: sandbox.map(Arc::new),
         }
     }

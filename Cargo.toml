@@ -7,9 +7,9 @@ members = [
   "sandbox-client",
   "sandbox-cli",
   "web",
-  "style-agent/crates/core",
-  "style-agent/crates/server",
-  "style-agent/crates/cli",
+  "code-assistant/crates/core",
+  "code-assistant/crates/server",
+  "code-assistant/crates/cli",
 ]
 resolver = "2"
 
@@ -24,8 +24,8 @@ name = "galoy-agents"
 # Internal crates
 concourse-client = { path = "concourse-client" }
 sandbox-client = { path = "sandbox-client" }
-style-agent-core = { path = "style-agent/crates/core" }
-style-agent-server = { path = "style-agent/crates/server" }
+code-assistant-core = { path = "code-assistant/crates/core" }
+code-assistant-server = { path = "code-assistant/crates/server" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "macros"] }

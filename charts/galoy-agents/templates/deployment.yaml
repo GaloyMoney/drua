@@ -53,9 +53,9 @@ spec:
             secretKeyRef:
               name: {{ template "galoyAgents.fullname" . }}
               key: "pg-con"
-      {{- if .Values.galoyAgents.styleAgent.indexHash }}
-      - name: init-style-agent
-        image: {{ .Values.galoyAgents.styleAgent.initImage }}
+      {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+      - name: init-code-assistant
+        image: {{ .Values.galoyAgents.codeAssistant.initImage }}
         command:
           - "sh"
           - "-c"
@@ -65,20 +65,20 @@ spec:
               printf '%s' "$GCS_CREDS" > /tmp/gcs-key.json
               gcloud auth activate-service-account --key-file=/tmp/gcs-key.json
             fi
-            echo "Downloading index {{ .Values.galoyAgents.styleAgent.indexHash }}..."
+            echo "Downloading index {{ .Values.galoyAgents.codeAssistant.indexHash }}..."
             gsutil cp \
-              "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/index/{{ .Values.galoyAgents.styleAgent.indexHash }}.tar.gz" \
-              /tmp/style-agent-index.tar.gz
+              "gs://{{ .Values.galoyAgents.codeAssistant.gcsBucket }}/index/{{ .Values.galoyAgents.codeAssistant.indexHash }}.tar.gz" \
+              /tmp/code-assistant-index.tar.gz
             mkdir -p /data
-            tar -xzf /tmp/style-agent-index.tar.gz -C /data
-            {{- if .Values.galoyAgents.styleAgent.embedderHash }}
-            echo "Downloading embedder {{ .Values.galoyAgents.styleAgent.embedderHash }}..."
+            tar -xzf /tmp/code-assistant-index.tar.gz -C /data
+            {{- if .Values.galoyAgents.codeAssistant.embedderHash }}
+            echo "Downloading embedder {{ .Values.galoyAgents.codeAssistant.embedderHash }}..."
             gsutil cp \
-              "gs://{{ .Values.galoyAgents.styleAgent.gcsBucket }}/embedder/{{ .Values.galoyAgents.styleAgent.embedderHash }}.tar.gz" \
+              "gs://{{ .Values.galoyAgents.codeAssistant.gcsBucket }}/embedder/{{ .Values.galoyAgents.codeAssistant.embedderHash }}.tar.gz" \
               /tmp/embedder.tar.gz
             tar -xzf /tmp/embedder.tar.gz -C /data
             {{- end }}
-            echo "Style-agent data loaded"
+            echo "Code assistant data loaded"
         env:
         - name: GCS_CREDS
           valueFrom:
@@ -87,7 +87,7 @@ spec:
               key: "gcs-creds"
               optional: true
         volumeMounts:
-        - name: style-agent-data
+        - name: code-assistant-data
           mountPath: /data
       {{- end }}
       containers:
@@ -102,9 +102,9 @@ spec:
           mountPath: "/config/galoy-agents.yml"
           subPath: "galoy-agents.yml"
           readOnly: true
-        {{- if .Values.galoyAgents.styleAgent.indexHash }}
-        - name: style-agent-data
-          mountPath: /data/style-agent
+        {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+        - name: code-assistant-data
+          mountPath: /data/code-assistant
         {{- end }}
         env:
         - name: GALOY_AGENTS_CONFIG
@@ -138,9 +138,9 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName
-        {{- if .Values.galoyAgents.styleAgent.indexHash }}
+        {{- if .Values.galoyAgents.codeAssistant.indexHash }}
         - name: FASTEMBED_CACHE_DIR
-          value: /data/style-agent/.fastembed_cache
+          value: /data/code-assistant/.fastembed_cache
         {{- end }}
         resources:
         {{- toYaml .Values.galoyAgents.resources | nindent 10 }}
@@ -148,7 +148,7 @@ spec:
       - name: config
         configMap:
           name: {{ template "galoyAgents.fullname" . }}-config
-      {{- if .Values.galoyAgents.styleAgent.indexHash }}
-      - name: style-agent-data
+      {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+      - name: code-assistant-data
         emptyDir: {}
       {{- end }}

@@ -15,7 +15,7 @@
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = nixpkgs.legacyPackages.${system};
-      style-agent = parent.packages.${system}.style-agent;
+      code-assistant = parent.packages.${system}.code-assistant;
 
       pythonEnv = pkgs.python3.withPackages (ps:
         with ps; [
@@ -43,7 +43,7 @@
 
         export PATH="${pkgs.lib.makeBinPath [ pythonEnv pkgs.coreutils ]}:$PATH"
 
-        cd style-agent
+        cd code-assistant
 
         echo "=== Training SetFit classifier ==="
         python3 scripts/train_setfit.py
@@ -57,18 +57,18 @@
         echo "Model hash: $HASH"
       '';
 
-      packages.build-style-index = pkgs.writeShellScriptBin "build-style-index" ''
+      packages.build-code-assistant-index = pkgs.writeShellScriptBin "build-code-assistant-index" ''
         set -euo pipefail
 
-        REPOS_DIR="''${1:?Usage: build-style-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
-        OUTPUT_DIR="''${2:?Usage: build-style-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
-        EMBEDDER_DIR="''${3:?Usage: build-style-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
+        REPOS_DIR="''${1:?Usage: build-code-assistant-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
+        OUTPUT_DIR="''${2:?Usage: build-code-assistant-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
+        EMBEDDER_DIR="''${3:?Usage: build-code-assistant-index <repos-dir> <index-output-dir> <embedder-output-dir> [model-dir]}"
         MODEL_DIR="''${4:-}"
 
-        export STYLE_AGENT_CONFIG="$(pwd)/ci/config.style-agent.toml"
-        export PATH="${pkgs.lib.makeBinPath [ style-agent ]}:$PATH"
+        export CODE_ASSISTANT_CONFIG="$(pwd)/ci/config.code-assistant.toml"
+        export PATH="${pkgs.lib.makeBinPath [ code-assistant ]}:$PATH"
 
-        cd style-agent
+        cd code-assistant
 
         # If a model directory was provided, extract it
         if [ -n "$MODEL_DIR" ] && [ -d "$MODEL_DIR" ]; then
@@ -80,11 +80,11 @@
           fi
         fi
 
-        style-agent build-index --repos-dir "$REPOS_DIR"
+        code-assistant build-index --repos-dir "$REPOS_DIR"
 
         mkdir -p "$OUTPUT_DIR"
-        HASH=$(sha256sum ./data/style-agent.db | cut -d' ' -f1)
-        tar -czf "$OUTPUT_DIR/$HASH.tar.gz" -C ./data style-agent.db
+        HASH=$(sha256sum ./data/code-assistant.db | cut -d' ' -f1)
+        tar -czf "$OUTPUT_DIR/$HASH.tar.gz" -C ./data code-assistant.db
         echo "Index hash: $HASH"
 
         # Package fastembed model cache for init container

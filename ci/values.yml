@@ -19,7 +19,7 @@ job_git_uri: git@github.com:GaloyMoney/job.git
 obix_git_uri: git@github.com:GaloyMoney/obix.git
 
 gcs_creds_json: ((galoy-agents-gcp-creds.creds_json))
-style_agent_gcs_bucket: galoy-agents-models
+code_assistant_gcs_bucket: galoy-agents-models
 
 deploy_gcp_creds_json: ((galoy-agents-gcp-creds.creds_json))
 deploy_tf_state_bucket: galoy-agents-tf-state

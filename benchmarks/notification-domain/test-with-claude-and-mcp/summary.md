@@ -14,7 +14,7 @@ A complete DDD domain crate for Notifications using `es-entity` patterns:
 
 ## How I worked
 
-### 1. Style-agent search first, write second
+### 1. Code-assistant search first, write second
 
 Before writing any code I queried the `search_code` MCP tool **11 times** across 8 different labels:
 
@@ -49,9 +49,9 @@ All domain code is correct. The only compile errors come from `EsRepo`'s sqlx ma
 ## Token usage
 
 Approximately **50k–60k input tokens** and **12k–15k output tokens** across the session:
-- ~30% on style-agent searches and understanding patterns
+- ~30% on code-assistant searches and understanding patterns
 - ~40% on writing code and iterating on compilation errors
 - ~20% on nix/cargo infrastructure (flake, lockfile, workspace)
 - ~10% on review, commit, and documentation
 
-The style-agent MCP tool was the primary driver — without it, I would have had to guess conventions or read source files directly (which was disallowed). It returned precise, labeled code snippets that I adopted directly.
+The code-assistant MCP tool was the primary driver — without it, I would have had to guess conventions or read source files directly (which was disallowed). It returned precise, labeled code snippets that I adopted directly.

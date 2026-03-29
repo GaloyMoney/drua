@@ -64,17 +64,17 @@ async fn main() -> anyhow::Result<()> {
         secure_cookies: config.server.secure_cookies,
     };
 
-    let logger = app.style_agent_logs().clone();
-    let style_agent_endpoints =
-        galoy_agents_mcp_gateway::style_agent_server::init_endpoints_with_logger(
-            &config.style_agent,
+    let logger = app.code_assistant_logs().clone();
+    let code_assistant_endpoints =
+        galoy_agents_mcp_gateway::code_assistant_server::init_endpoints_with_logger(
+            &config.code_assistant,
             logger,
         )?;
     let concourse_endpoints =
         galoy_agents_mcp_gateway::ConcourseEndpoints::try_new(&config.concourse)?;
     let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(
         app.clone(),
-        style_agent_endpoints.clone(),
+        code_assistant_endpoints.clone(),
         concourse_endpoints,
     );
 
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         oauth_client,
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
-        style_agent_endpoints,
+        code_assistant_endpoints,
         sandbox_client,
     );
 

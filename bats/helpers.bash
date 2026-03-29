@@ -25,7 +25,7 @@ start_server() {
   export GITHUB_CLIENT_ID="test-client-id"
   export GITHUB_CLIENT_SECRET="test-client-secret"
   export GALOY_AGENTS_CONFIG="$REPO_ROOT/galoy-agents.yml"
-  export STYLE_AGENT_DB_PATH=""  # disable style-agent in tests
+  export CODE_ASSISTANT_DB_PATH=""  # disable code assistant in tests
 
   $GALOY_AGENTS_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
