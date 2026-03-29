@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::{Pod, PodSecurityContext, VolumeMount};
+use k8s_openapi::api::core::v1::{
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod,
+    PodSecurityContext, Volume, VolumeMount, VolumeResourceRequirements,
+};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
 use kube::Client;
 use tracing::instrument;
@@ -238,19 +242,85 @@ impl SandboxClient {
             .map_err(SandboxError::Kube)
     }
 
+    /// Ensure a standalone PVC exists for the given sandbox name.
+    /// Creates the PVC if it doesn't exist; no-ops if it already does.
+    #[instrument(name = "sandbox_client.ensure_pvc", skip_all, fields(%name))]
+    async fn ensure_pvc(
+        &self,
+        name: &str,
+        persistence: &PersistenceConfig,
+    ) -> Result<String, SandboxError> {
+        let pvc_name = format!("workspace-{name}");
+        let pvcs: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+
+        match pvcs.get(&pvc_name).await {
+            Ok(_) => {
+                tracing::info!(pvc = %pvc_name, "PVC already exists, reusing");
+            }
+            Err(kube::Error::Api(resp)) if resp.code == 404 => {
+                let mut labels = BTreeMap::new();
+                labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
+                labels.insert("sandbox-name".to_string(), name.to_string());
+
+                let pvc = PersistentVolumeClaim {
+                    metadata: kube::api::ObjectMeta {
+                        name: Some(pvc_name.clone()),
+                        namespace: Some(self.namespace.clone()),
+                        labels: Some(labels),
+                        ..Default::default()
+                    },
+                    spec: Some(PersistentVolumeClaimSpec {
+                        access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                        storage_class_name: Some(persistence.storage_class.clone()),
+                        resources: Some(VolumeResourceRequirements {
+                            requests: Some(BTreeMap::from([(
+                                "storage".to_string(),
+                                Quantity(persistence.size.clone()),
+                            )])),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+
+                pvcs.create(&PostParams::default(), &pvc).await?;
+                tracing::info!(pvc = %pvc_name, "PVC created");
+            }
+            Err(e) => return Err(SandboxError::Kube(e)),
+        }
+
+        Ok(pvc_name)
+    }
+
     /// Create a Sandbox directly with optional persistent storage.
     ///
-    /// Reads the SandboxTemplate for the pod spec, adds volumeClaimTemplates
-    /// when persistence is configured. PVCs follow StatefulSet semantics —
-    /// they survive sandbox deletion and are reused on recreation.
+    /// When persistence is configured, creates a standalone PVC (if it doesn't
+    /// already exist) and mounts it into the pod. The PVC lifecycle is
+    /// independent of the Sandbox — it survives sandbox deletion and is
+    /// reused on recreation with the same name.
     #[instrument(name = "sandbox_client.create_sandbox", skip_all, fields(%name))]
     pub async fn create_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
         let template = self.read_template().await?;
         let mut pod_template = template.spec.pod_template;
-        let mut volume_claim_templates = Vec::new();
 
         if let Some(ref persistence) = self.persistence {
+            let pvc_name = self.ensure_pvc(name, persistence).await?;
+
             if let Some(ref mut spec) = pod_template.spec {
+                // Add PVC as a volume
+                let mut volumes = spec.volumes.take().unwrap_or_default();
+                volumes.push(Volume {
+                    name: "workspace".to_string(),
+                    persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                        claim_name: pvc_name,
+                        read_only: Some(false),
+                    }),
+                    ..Default::default()
+                });
+                spec.volumes = Some(volumes);
+
                 // Add volumeMount to the first container
                 if let Some(container) = spec.containers.first_mut() {
                     let mut mounts = container.volume_mounts.take().unwrap_or_default();
@@ -270,19 +340,6 @@ impl SandboxClient {
                     sc.fs_group = Some(1000);
                 }
             }
-
-            volume_claim_templates.push(serde_json::json!({
-                "metadata": { "name": "workspace" },
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "storageClassName": &persistence.storage_class,
-                    "resources": {
-                        "requests": {
-                            "storage": &persistence.size
-                        }
-                    }
-                }
-            }));
         }
 
         let mut labels = BTreeMap::new();
@@ -292,7 +349,7 @@ impl SandboxClient {
             name,
             SandboxSpec {
                 pod_template,
-                volume_claim_templates,
+                volume_claim_templates: Vec::new(),
                 lifecycle: None,
                 replicas: 1,
             },
