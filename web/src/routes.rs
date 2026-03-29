@@ -524,16 +524,8 @@ async fn api_create_sandbox(
 ) -> Response {
     require_auth!(auth);
     let client = require_sandbox!(state);
-    match client.create_claim(&body.name).await {
-        Ok(_) => {
-            let summary = sandbox_client::SandboxSummary {
-                name: body.name,
-                sandbox_name: None,
-                phase: "Pending".to_string(),
-                ready: false,
-            };
-            (axum::http::StatusCode::CREATED, Json(summary)).into_response()
-        }
+    match client.create_sandbox(&body.name).await {
+        Ok(summary) => (axum::http::StatusCode::CREATED, Json(summary)).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "API: failed to create sandbox");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -548,7 +540,7 @@ async fn api_list_sandboxes(
 ) -> Response {
     require_auth!(auth);
     let client = require_sandbox!(state);
-    match client.list_claims().await {
+    match client.list_sandboxes().await {
         Ok(summaries) => Json(summaries).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "API: failed to list sandboxes");
@@ -565,7 +557,7 @@ async fn api_get_sandbox(
 ) -> Response {
     require_auth!(auth);
     let client = require_sandbox!(state);
-    match client.get_claim(&name).await {
+    match client.get_sandbox(&name).await {
         Ok(summary) => Json(summary).into_response(),
         Err(sandbox_client::SandboxError::NotFound(_)) => {
             axum::http::StatusCode::NOT_FOUND.into_response()
@@ -585,7 +577,7 @@ async fn api_delete_sandbox(
 ) -> Response {
     require_auth!(auth);
     let client = require_sandbox!(state);
-    match client.delete_claim(&name).await {
+    match client.delete_sandbox(&name).await {
         Ok(_) => axum::http::StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             tracing::error!(error = %e, "API: failed to delete sandbox");
@@ -622,12 +614,12 @@ async fn api_exec_sandbox(
 async fn exec_proxy(
     socket: WebSocket,
     client: std::sync::Arc<sandbox_client::SandboxClient>,
-    claim_name: String,
+    sandbox_name: String,
     command: Vec<String>,
 ) {
     use futures::stream::StreamExt;
 
-    tracing::info!(claim = %claim_name, "Exec proxy: starting");
+    tracing::info!(sandbox = %sandbox_name, "Exec proxy: starting");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
@@ -648,7 +640,7 @@ async fn exec_proxy(
     }
 
     // Start exec in the sandbox pod
-    let mut process = match client.exec_in_sandbox(&claim_name, command).await {
+    let mut process = match client.exec_sandbox(&sandbox_name, command).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "Exec proxy: failed to exec into sandbox");
@@ -745,5 +737,5 @@ async fn exec_proxy(
         _ = stdin_task => {}
     }
 
-    tracing::info!(claim = %claim_name, "Exec proxy: session ended");
+    tracing::info!(sandbox = %sandbox_name, "Exec proxy: session ended");
 }

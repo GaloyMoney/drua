@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, VolumeMount};
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
 use kube::Client;
 use tracing::instrument;
@@ -8,12 +9,24 @@ use tracing::instrument;
 use crate::error::SandboxError;
 use crate::types::*;
 
+const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+const MANAGED_BY_VALUE: &str = "galoy-agents";
+
+/// Configuration for persistent storage on sandbox pods.
+#[derive(Clone, Debug)]
+pub struct PersistenceConfig {
+    pub size: String,
+    pub storage_class: String,
+    pub mount_path: String,
+}
+
 /// High-level client for managing Agent Sandbox resources.
 #[derive(Clone)]
 pub struct SandboxClient {
     client: Client,
     namespace: String,
     template_name: String,
+    persistence: Option<PersistenceConfig>,
 }
 
 /// Summary of a sandbox for API consumers.
@@ -32,7 +45,14 @@ impl SandboxClient {
             client,
             namespace,
             template_name,
+            persistence: None,
         }
+    }
+
+    /// Enable persistent storage for directly-created sandboxes.
+    pub fn with_persistence(mut self, config: PersistenceConfig) -> Self {
+        self.persistence = Some(config);
+        self
     }
 
     /// The namespace this client manages sandboxes in.
@@ -202,6 +222,229 @@ impl SandboxClient {
         );
 
         Ok(attached)
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct Sandbox management (bypasses SandboxClaim / warm pool)
+    // -----------------------------------------------------------------------
+
+    /// Read the SandboxTemplate to get the pod template.
+    #[instrument(name = "sandbox_client.read_template", skip_all)]
+    async fn read_template(&self) -> Result<SandboxTemplate, SandboxError> {
+        let templates: Api<SandboxTemplate> = Api::namespaced(self.client.clone(), &self.namespace);
+        templates
+            .get(&self.template_name)
+            .await
+            .map_err(SandboxError::Kube)
+    }
+
+    /// Create a Sandbox directly with optional persistent storage.
+    ///
+    /// Reads the SandboxTemplate for the pod spec, adds volumeClaimTemplates
+    /// when persistence is configured. PVCs follow StatefulSet semantics —
+    /// they survive sandbox deletion and are reused on recreation.
+    #[instrument(name = "sandbox_client.create_sandbox", skip_all, fields(%name))]
+    pub async fn create_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
+        let template = self.read_template().await?;
+        let mut pod_template = template.spec.pod_template;
+        let mut volume_claim_templates = Vec::new();
+
+        if let Some(ref persistence) = self.persistence {
+            // Add volumeMount to the first container
+            if let Some(ref mut spec) = pod_template.spec {
+                if let Some(container) = spec.containers.first_mut() {
+                    let mut mounts = container.volume_mounts.take().unwrap_or_default();
+                    mounts.push(VolumeMount {
+                        name: "workspace".to_string(),
+                        mount_path: persistence.mount_path.clone(),
+                        ..Default::default()
+                    });
+                    container.volume_mounts = Some(mounts);
+                }
+            }
+
+            volume_claim_templates.push(serde_json::json!({
+                "metadata": { "name": "workspace" },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "storageClassName": &persistence.storage_class,
+                    "resources": {
+                        "requests": {
+                            "storage": &persistence.size
+                        }
+                    }
+                }
+            }));
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
+
+        let mut sandbox = Sandbox::new(
+            name,
+            SandboxSpec {
+                pod_template,
+                volume_claim_templates,
+                lifecycle: None,
+                replicas: 1,
+            },
+        );
+        sandbox.metadata.labels = Some(labels);
+
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        sandboxes.create(&PostParams::default(), &sandbox).await?;
+
+        tracing::info!(sandbox = %name, "Sandbox created directly");
+        Ok(SandboxSummary {
+            name: name.to_string(),
+            sandbox_name: Some(name.to_string()),
+            phase: "Provisioning".to_string(),
+            ready: false,
+        })
+    }
+
+    /// Delete a directly-created Sandbox. The PVC is retained for recreation.
+    #[instrument(name = "sandbox_client.delete_sandbox", skip_all, fields(%name))]
+    pub async fn delete_sandbox(&self, name: &str) -> Result<(), SandboxError> {
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        sandboxes.delete(name, &DeleteParams::default()).await?;
+        tracing::info!(sandbox = %name, "Sandbox deleted");
+        Ok(())
+    }
+
+    /// List sandboxes created by this client (filtered by managed-by label).
+    #[instrument(name = "sandbox_client.list_sandboxes", skip_all)]
+    pub async fn list_sandboxes(&self) -> Result<Vec<SandboxSummary>, SandboxError> {
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        let lp = ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
+        let list = sandboxes.list(&lp).await?;
+        Ok(list.items.iter().map(Self::summary_from_sandbox).collect())
+    }
+
+    /// Get a single Sandbox by name.
+    #[instrument(name = "sandbox_client.get_sandbox", skip_all, fields(%name))]
+    pub async fn get_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        let sandbox = sandboxes.get(name).await.map_err(|e| match &e {
+            kube::Error::Api(resp) if resp.code == 404 => SandboxError::NotFound(name.to_string()),
+            _ => SandboxError::Kube(e),
+        })?;
+        Ok(Self::summary_from_sandbox(&sandbox))
+    }
+
+    /// Poll a Sandbox until it becomes ready or the timeout expires.
+    #[instrument(name = "sandbox_client.wait_sandbox_ready", skip_all, fields(%name))]
+    pub async fn wait_sandbox_ready(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<SandboxSummary, SandboxError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let summary = self.get_sandbox(name).await?;
+            if summary.ready {
+                return Ok(summary);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SandboxError::Timeout(name.to_string()));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    /// Resolve the running pod for a Sandbox by reading its label selector.
+    #[instrument(name = "sandbox_client.resolve_sandbox_pod", skip_all, fields(%sandbox_name))]
+    pub async fn resolve_sandbox_pod(&self, sandbox_name: &str) -> Result<String, SandboxError> {
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
+            kube::Error::Api(resp) if resp.code == 404 => {
+                SandboxError::NotFound(sandbox_name.to_string())
+            }
+            _ => SandboxError::Kube(e),
+        })?;
+
+        let label_selector = sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.label_selector.clone())
+            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))?;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let pod_list = pods
+            .list(&ListParams::default().labels(&label_selector))
+            .await?;
+
+        pod_list
+            .items
+            .iter()
+            .find(|pod| {
+                pod.status
+                    .as_ref()
+                    .and_then(|s| s.phase.as_deref())
+                    .map(|p| p == "Running")
+                    .unwrap_or(false)
+            })
+            .and_then(|pod| pod.metadata.name.clone())
+            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))
+    }
+
+    /// Exec into a directly-created Sandbox pod.
+    #[instrument(name = "sandbox_client.exec_sandbox", skip_all, fields(%sandbox_name))]
+    pub async fn exec_sandbox(
+        &self,
+        sandbox_name: &str,
+        command: Vec<String>,
+    ) -> Result<AttachedProcess, SandboxError> {
+        let pod_name = self.resolve_sandbox_pod(sandbox_name).await?;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let attached = pods
+            .exec(&pod_name, &command, &AttachParams::interactive_tty())
+            .await?;
+
+        tracing::info!(
+            sandbox = %sandbox_name,
+            pod = %pod_name,
+            "Exec session started (direct)"
+        );
+        Ok(attached)
+    }
+
+    fn summary_from_sandbox(sandbox: &Sandbox) -> SandboxSummary {
+        let name = sandbox
+            .metadata
+            .name
+            .clone()
+            .unwrap_or_else(|| "<unknown>".into());
+        let ready = sandbox
+            .status
+            .as_ref()
+            .map(|s| {
+                s.conditions.iter().any(|c| {
+                    c.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "Ready")
+                        .unwrap_or(false)
+                        && c.get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == "True")
+                            .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        let phase = if ready {
+            "Ready".to_string()
+        } else {
+            "Provisioning".to_string()
+        };
+
+        SandboxSummary {
+            name: name.clone(),
+            sandbox_name: Some(name),
+            phase,
+            ready,
+        }
     }
 
     /// Gather diagnostic info about the sandbox infrastructure.

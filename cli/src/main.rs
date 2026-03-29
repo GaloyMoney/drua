@@ -84,7 +84,18 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .ok()
-    .filter(|_| config.sandbox.enabled);
+    .filter(|_| config.sandbox.enabled)
+    .map(|client| {
+        if let Some(ref p) = config.sandbox.persistence {
+            client.with_persistence(sandbox_client::PersistenceConfig {
+                size: p.size.clone(),
+                storage_class: p.storage_class.clone(),
+                mount_path: p.mount_path.clone(),
+            })
+        } else {
+            client
+        }
+    });
 
     let app_state = galoy_agents_web::AppState::new(
         app,

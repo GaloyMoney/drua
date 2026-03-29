@@ -77,6 +77,11 @@ sandbox:
   nodeSelector:
     sandbox.gke.io/runtime: gvisor
   env: []
+  persistence:
+    enabled: false
+    mountPath: /workspace
+    size: 10Gi
+    storageClassName: pd-balanced
   warmPool:
     enabled: true
     minReady: 2

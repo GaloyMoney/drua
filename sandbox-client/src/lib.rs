@@ -7,7 +7,7 @@ mod client;
 mod error;
 mod types;
 
-pub use client::{SandboxClient, SandboxSummary};
+pub use client::{PersistenceConfig, SandboxClient, SandboxSummary};
 pub use error::SandboxError;
 pub use kube::api::AttachedProcess;
 pub use types::*;

@@ -36,6 +36,21 @@ pub struct SandboxConfig {
     /// Name of the SandboxTemplate to use when creating claims.
     #[serde(default)]
     pub template_name: String,
+
+    /// Persistent storage configuration for sandbox workspaces.
+    #[serde(default)]
+    pub persistence: Option<SandboxPersistenceConfig>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxPersistenceConfig {
+    /// PVC size (e.g., "10Gi").
+    pub size: String,
+    /// StorageClass name (e.g., "pd-balanced").
+    pub storage_class: String,
+    /// Mount path inside the container (e.g., "/workspace").
+    pub mount_path: String,
 }
 
 #[derive(Clone, Deserialize)]

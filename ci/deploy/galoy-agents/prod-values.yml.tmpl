@@ -46,6 +46,11 @@ sandbox:
     repository: us.gcr.io/galoyorg/sandbox-base
     digest: "${sandbox_base_image_digest}"
     tag: ""
+  persistence:
+    enabled: true
+    mountPath: /workspace
+    size: 10Gi
+    storageClassName: pd-balanced
   warmPool:
     enabled: true
     minReady: 2
