@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::{Pod, VolumeMount};
+use k8s_openapi::api::core::v1::{Pod, PodSecurityContext, VolumeMount};
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
 use kube::Client;
 use tracing::instrument;
@@ -250,8 +250,8 @@ impl SandboxClient {
         let mut volume_claim_templates = Vec::new();
 
         if let Some(ref persistence) = self.persistence {
-            // Add volumeMount to the first container
             if let Some(ref mut spec) = pod_template.spec {
+                // Add volumeMount to the first container
                 if let Some(container) = spec.containers.first_mut() {
                     let mut mounts = container.volume_mounts.take().unwrap_or_default();
                     mounts.push(VolumeMount {
@@ -260,6 +260,14 @@ impl SandboxClient {
                         ..Default::default()
                     });
                     container.volume_mounts = Some(mounts);
+                }
+
+                // Set fsGroup so the mounted PVC is writable by the sandbox user
+                let sc = spec
+                    .security_context
+                    .get_or_insert_with(PodSecurityContext::default);
+                if sc.fs_group.is_none() {
+                    sc.fs_group = Some(1000);
                 }
             }
 
