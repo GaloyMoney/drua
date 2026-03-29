@@ -34,10 +34,13 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/agents", get(agent_list))
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}/revoke", post(revoke_agent))
-        .route("/style-agent", get(style_agent_dashboard))
-        .route("/style-agent/recent", get(style_agent_recent))
-        .route("/style-agent/least-useful", get(style_agent_least_useful))
-        .route("/style-agent/search", get(style_agent_search))
+        .route("/code-assistant", get(code_assistant_dashboard))
+        .route("/code-assistant/recent", get(code_assistant_recent))
+        .route(
+            "/code-assistant/least-useful",
+            get(code_assistant_least_useful),
+        )
+        .route("/code-assistant/search", get(code_assistant_search))
         .route("/sandboxes", get(sandboxes_page))
         .route("/sandboxes/list", get(sandbox_list))
         .route("/sandboxes/create", post(sandbox_create))
@@ -195,30 +198,30 @@ async fn agent_list(State(state): State<AppState>, session: Session) -> Response
     .into_response()
 }
 
-#[instrument(name = "web.style_agent_dashboard", skip_all)]
-async fn style_agent_dashboard(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.code_assistant_dashboard", skip_all)]
+async fn code_assistant_dashboard(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return Redirect::to("/").into_response();
     }
 
-    let stats = match state.app.style_agent_logs().dashboard_stats().await {
+    let stats = match state.app.code_assistant_logs().dashboard_stats().await {
         Ok(stats) => stats,
         Err(e) => {
-            tracing::error!(error = %e, "Failed to load style-agent stats");
+            tracing::error!(error = %e, "Failed to load code assistant stats");
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    StyleAgentTemplate { stats }.into_response()
+    CodeAssistantTemplate { stats }.into_response()
 }
 
-#[instrument(name = "web.style_agent_recent", skip_all)]
-async fn style_agent_recent(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.code_assistant_recent", skip_all)]
+async fn code_assistant_recent(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state.app.style_agent_logs().recent_requests(10).await {
+    let rows = match state.app.code_assistant_logs().recent_requests(10).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load recent requests");
@@ -226,16 +229,16 @@ async fn style_agent_recent(State(state): State<AppState>, session: Session) -> 
         }
     };
 
-    StyleAgentRecentTemplate { rows }.into_response()
+    CodeAssistantRecentTemplate { rows }.into_response()
 }
 
-#[instrument(name = "web.style_agent_least_useful", skip_all)]
-async fn style_agent_least_useful(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.code_assistant_least_useful", skip_all)]
+async fn code_assistant_least_useful(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state.app.style_agent_logs().least_useful(10).await {
+    let rows = match state.app.code_assistant_logs().least_useful(10).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load least useful requests");
@@ -243,7 +246,7 @@ async fn style_agent_least_useful(State(state): State<AppState>, session: Sessio
         }
     };
 
-    StyleAgentRecentTemplate { rows }.into_response()
+    CodeAssistantRecentTemplate { rows }.into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,8 +255,8 @@ pub struct SearchParams {
     label: Option<String>,
 }
 
-#[instrument(name = "web.style_agent_search", skip_all)]
-async fn style_agent_search(
+#[instrument(name = "web.code_assistant_search", skip_all)]
+async fn code_assistant_search(
     State(state): State<AppState>,
     session: Session,
     Query(params): Query<SearchParams>,
@@ -264,7 +267,7 @@ async fn style_agent_search(
 
     let query = params.q.unwrap_or_default();
     if query.is_empty() {
-        return StyleAgentSearchResultsTemplate {
+        return CodeAssistantSearchResultsTemplate {
             query,
             results: vec![],
             error: None,
@@ -272,13 +275,13 @@ async fn style_agent_search(
         .into_response();
     }
 
-    let endpoints = match state.style_agent.as_ref() {
+    let endpoints = match state.code_assistant.as_ref() {
         Some(ep) => ep,
         None => {
-            return StyleAgentSearchResultsTemplate {
+            return CodeAssistantSearchResultsTemplate {
                 query,
                 results: vec![],
-                error: Some("Style-agent is not configured".to_string()),
+                error: Some("Code assistant is not configured".to_string()),
             }
             .into_response();
         }
@@ -304,14 +307,14 @@ async fn style_agent_search(
                     },
                 })
                 .collect();
-            StyleAgentSearchResultsTemplate {
+            CodeAssistantSearchResultsTemplate {
                 query,
                 results,
                 error: None,
             }
             .into_response()
         }
-        Err(e) => StyleAgentSearchResultsTemplate {
+        Err(e) => CodeAssistantSearchResultsTemplate {
             query,
             results: vec![],
             error: Some(e.to_string()),

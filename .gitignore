@@ -10,9 +10,9 @@ result
 *.tfstate.*
 *.tfvars
 .terraform.lock.hcl
-style-agent/labels/audit-suspects.jsonl
+code-assistant/labels/audit-suspects.jsonl
 data/
 .fastembed_cache/
-style-agent/models/
+code-assistant/models/
 .playwright-mcp/
 test-sandbox.sh

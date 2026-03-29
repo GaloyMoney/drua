@@ -37,12 +37,12 @@
 - `#[instrument(name = "crate_name.module.method", skip_all)]` on all public methods
 - Use `tracing::` macros, never `println!` (except tests)
 
-## Style Agent MCP
-When writing Rust code in any repo, use the style-agent MCP tool if available:
+## Code Assistant MCP
+When writing Rust code in any repo, use the code assistant MCP tool if available:
 - `search_code` — semantic search over indexed codebases (use code-as-query to find matching patterns, then adopt the style from the found examples)
 - **Always pass a `label` filter** for precise results. Available labels: `entity`, `entity_event`, `entity_command`, `entity_hydration`, `error`, `service`, `repository`, `domain_primitives`, `graphql_endpoint`, `builder_pattern`, `configuration`, `test`
 - Use code snippets as queries (not natural language) for best similarity scores
-The style-agent runs on `http://127.0.0.1:9222/mcp`. Always prefer calling this tool over guessing conventions.
+The code assistant runs on `http://127.0.0.1:9222/mcp`. Always prefer calling this tool over guessing conventions.
 
 ## Local Crate Paths
 When you need docs or source for these crates, read from disk — do NOT fetch from docs.rs or crates.io:

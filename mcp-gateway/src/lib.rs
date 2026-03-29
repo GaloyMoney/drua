@@ -9,18 +9,18 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
+use code_assistant_server::SearchCodeParams;
 use galoy_agents_core::auth::AuthContext;
 use galoy_agents_core::App;
-use style_agent_server::SearchCodeParams;
 
+pub use code_assistant_server::{self, CodeAssistantConfig, CodeAssistantEndpoints};
 pub use concourse::{ConcourseConfig, ConcourseEndpoints};
-pub use style_agent_server::{self, StyleAgentConfig, StyleAgentEndpoints};
 
 #[derive(Clone)]
 pub struct McpGateway {
     #[allow(dead_code)]
     app: App,
-    style_agent: Option<StyleAgentEndpoints>,
+    code_assistant: Option<CodeAssistantEndpoints>,
     concourse: Option<ConcourseEndpoints>,
     tool_router: ToolRouter<Self>,
 }
@@ -28,12 +28,12 @@ pub struct McpGateway {
 impl McpGateway {
     fn new(
         app: App,
-        style_agent: Option<StyleAgentEndpoints>,
+        code_assistant: Option<CodeAssistantEndpoints>,
         concourse: Option<ConcourseEndpoints>,
     ) -> Self {
         Self {
             app,
-            style_agent,
+            code_assistant,
             concourse,
             tool_router: Self::tool_router(),
         }
@@ -42,15 +42,15 @@ impl McpGateway {
     /// Build the MCP service from pre-constructed endpoints.
     pub fn service(
         app: App,
-        style_agent: Option<StyleAgentEndpoints>,
+        code_assistant: Option<CodeAssistantEndpoints>,
         concourse: Option<ConcourseEndpoints>,
     ) -> StreamableHttpService<Self, LocalSessionManager> {
-        Self::build_service(app, style_agent, concourse)
+        Self::build_service(app, code_assistant, concourse)
     }
 
     fn build_service(
         app: App,
-        style_agent: Option<StyleAgentEndpoints>,
+        code_assistant: Option<CodeAssistantEndpoints>,
         concourse: Option<ConcourseEndpoints>,
     ) -> StreamableHttpService<Self, LocalSessionManager> {
         let config = StreamableHttpServerConfig {
@@ -62,7 +62,7 @@ impl McpGateway {
             move || {
                 Ok(McpGateway::new(
                     app.clone(),
-                    style_agent.clone(),
+                    code_assistant.clone(),
                     concourse.clone(),
                 ))
             },
@@ -217,11 +217,11 @@ impl McpGateway {
         Parameters(params): Parameters<SearchCodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_auth(&parts)?;
-        match self.style_agent.as_ref() {
+        match self.code_assistant.as_ref() {
             Some(agent) => agent.search_code(params).await,
             None => Err(ErrorData::new(
                 ErrorCode::INTERNAL_ERROR,
-                "Style-agent is disabled (no db_path configured)",
+                "Code assistant is disabled (no db_path configured)",
                 None::<serde_json::Value>,
             )),
         }

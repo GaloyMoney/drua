@@ -6,7 +6,7 @@ edition.workspace = true
 [lib]
 
 [dependencies]
-style-agent-server = { workspace = true }
+code-assistant-server = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
 base64 = "0.22"

@@ -11,7 +11,7 @@ groups:
   - build-edge-image
   - deploy-to-prod
   - train-classifier
-  - build-style-index
+  - build-code-assistant-index
 - name: sandbox-base
   jobs:
   - build-sandbox-base-image
@@ -192,11 +192,11 @@ jobs:
 
             cd repo
             cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#train-classifier -- "$(pwd)/../model"
-  - put: style-agent-model
+  - put: code-assistant-model
     params:
       file: model/*.tar.gz
 
-- name: build-style-index
+- name: build-code-assistant-index
   serial: true
   plan:
   - in_parallel:
@@ -207,7 +207,7 @@ jobs:
     - get: lana-repo
     - get: job-repo
     - get: obix-repo
-    - get: style-agent-model
+    - get: code-assistant-model
       trigger: true
       passed: [train-classifier]
   - task: build-index
@@ -221,7 +221,7 @@ jobs:
       - name: lana-repo
       - name: job-repo
       - name: obix-repo
-      - name: style-agent-model
+      - name: code-assistant-model
       outputs:
       - name: index
       - name: embedder
@@ -245,11 +245,11 @@ jobs:
 
             cd repo
             cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#build-style-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../embedder" "$(pwd)/../style-agent-model"
-  - put: style-agent-index
+              nix run ./ci#build-code-assistant-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../embedder" "$(pwd)/../code-assistant-model"
+  - put: code-assistant-index
     params:
       file: index/*.tar.gz
-  - put: style-agent-embedder
+  - put: code-assistant-embedder
     params:
       file: embedder/*.tar.gz
   - task: commit-index-hash
@@ -281,12 +281,12 @@ jobs:
             cachix watch-exec $CACHIX_CACHE_NAME -- \
               nix run ./ci#commit-hash -- "$(pwd)" \
                 charts/galoy-agents/values.yaml \
-                "galoyAgents.styleAgent.indexHash" \
+                "galoyAgents.codeAssistant.indexHash" \
                 "$INDEX_HASH"
             cachix watch-exec $CACHIX_CACHE_NAME -- \
               nix run ./ci#commit-hash -- "$(pwd)" \
                 charts/galoy-agents/values.yaml \
-                "galoyAgents.styleAgent.embedderHash" \
+                "galoyAgents.codeAssistant.embedderHash" \
                 "$EMBEDDER_HASH"
   - put: repo-chart-values
     params:
@@ -359,7 +359,7 @@ resources:
     - ci/repipe
     - ci/fragments.lib.yml
     - charts/galoy-agents/values.yaml
-    - style-agent/labels/*
+    - code-assistant/labels/*
   webhook_token: ((webhook.secret))
 
 - name: repo-sandbox-image
@@ -378,7 +378,7 @@ resources:
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
     paths:
-    - style-agent/labels/
+    - code-assistant/labels/
 
 - name: repo-chart-values
   type: git
@@ -452,24 +452,24 @@ resources:
     env:
       GOOGLE_CREDENTIALS: #@ data.values.deploy_gcp_creds_json
 
-- name: style-agent-index
+- name: code-assistant-index
   type: gcs-resource
   source:
-    bucket: #@ data.values.style_agent_gcs_bucket
+    bucket: #@ data.values.code_assistant_gcs_bucket
     json_key: #@ data.values.gcs_creds_json
     regexp: index/(.*).tar.gz
 
-- name: style-agent-model
+- name: code-assistant-model
   type: gcs-resource
   source:
-    bucket: #@ data.values.style_agent_gcs_bucket
+    bucket: #@ data.values.code_assistant_gcs_bucket
     json_key: #@ data.values.gcs_creds_json
     regexp: model/(.*).tar.gz
 
-- name: style-agent-embedder
+- name: code-assistant-embedder
   type: gcs-resource
   source:
-    bucket: #@ data.values.style_agent_gcs_bucket
+    bucket: #@ data.values.code_assistant_gcs_bucket
     json_key: #@ data.values.gcs_creds_json
     regexp: embedder/(.*).tar.gz
 

@@ -1,19 +1,19 @@
-# Style Agent A/B Test: Benchmark Report
+# Code Assistant A/B Test: Benchmark Report
 
 ## Overview
 
-This is an A/B test of a **coding style agent** — an MCP tool (`search_code`) that indexes real codebases and returns semantically-matched code snippets when queried. The hypothesis: giving an LLM access to real examples of a codebase's conventions produces more idiomatic code than prose instructions alone.
+This is an A/B test of a **code assistant** — an MCP tool (`search_code`) that indexes real codebases and returns semantically-matched code snippets when queried. The hypothesis: giving an LLM access to real examples of a codebase's conventions produces more idiomatic code than prose instructions alone.
 
 The same task (build a Notification domain crate from scratch) was given to 4 separate Claude Code sessions, each with a different level of style guidance. The implementations were compared for adherence to the team's DDD/event-sourcing conventions.
 
 ## Conditions
 
-| # | Directory | CLAUDE.md | Style Agent MCP | Notes |
+| # | Directory | CLAUDE.md | Code Assistant MCP | Notes |
 |---|-----------|-----------|-----------------|-------|
 | 1 | `test-no-hints/` | ❌ | ❌ | **Control** — no style guidance at all; pure LLM defaults |
 | 2 | `test-with-claude-md/` | ✅ | ❌ | Prose conventions only — the CLAUDE.md file describes DDD patterns in bullet-point form |
 | 3 | `test-with-mcp/` | ❌ | ✅ | MCP tool only — `search_code` with real codebase examples |
-| 4 | `test-with-claude-and-mcp/` | ✅ | ✅ | Both CLAUDE.md AND the style agent MCP tool |
+| 4 | `test-with-claude-and-mcp/` | ✅ | ✅ | Both CLAUDE.md AND the code assistant MCP tool |
 
 The CLAUDE.md used is included at `./CLAUDE.md` in this repository. It contains ~50 lines of prose covering event sourcing patterns, strongly-typed IDs, service naming, error handling, builder patterns, idempotency, and tracing.
 
@@ -189,7 +189,7 @@ The no-hints condition was cheapest but produced the least idiomatic code. The M
 
 ## Conclusion
 
-**The style agent provides measurable value, but only as a complement to explicit prose conventions — not as a replacement.**
+**The code assistant provides measurable value, but only as a complement to explicit prose conventions — not as a replacement.**
 
 The ranking from most to least idiomatic:
 
@@ -203,4 +203,4 @@ The ranking from most to least idiomatic:
 
 **Key insight**: Prose rules provide the "what" (invariants, naming conventions, anti-patterns to avoid). MCP examples provide the "how" (exact syntax, derive attributes, trait signatures, import paths). Neither alone is sufficient for high-fidelity style conformance. The combination produces code that an experienced team member would recognize as idiomatic to the codebase.
 
-**Recommendation**: Keep both CLAUDE.md and the style agent MCP tool. The ~20-30k extra tokens from MCP searches are well worth the precision gain. The control condition (no-hints) confirms that without guidance, the LLM defaults to its training priors — which are "good Rust" but not "your team's Rust."
+**Recommendation**: Keep both CLAUDE.md and the code assistant MCP tool. The ~20-30k extra tokens from MCP searches are well worth the precision gain. The control condition (no-hints) confirms that without guidance, the LLM defaults to its training priors — which are "good Rust" but not "your team's Rust."
