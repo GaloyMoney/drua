@@ -1,4 +1,4 @@
-{{- if and .Values.sandbox.enabled .Values.sandbox.namespace }}
+{{- if and .Values.sandbox.enabled .Values.sandbox.namespace .Values.sandbox.createNamespace }}
 {{- if ne .Values.sandbox.namespace .Release.Namespace }}
 apiVersion: v1
 kind: Namespace

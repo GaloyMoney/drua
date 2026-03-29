@@ -59,6 +59,9 @@ sandbox:
   ## Namespace where the sandbox controller runs.
   ## Defaults to "agent-sandbox-system" if empty.
   controllerNamespace: ""
+  ## Whether the Helm chart should create the sandbox namespace.
+  ## Set to false when the namespace is managed externally (e.g. Terraform).
+  createNamespace: true
   ## Install the Agent Sandbox CRDs + controller from vendored upstream manifests.
   ## Set to false if the controller is already installed (e.g. via Terraform).
   installController: true
