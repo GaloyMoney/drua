@@ -15,3 +15,26 @@ If release name contain chart name it will be used as a full name.
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Sandbox namespace: use .Values.sandbox.namespace if set, otherwise .Release.Namespace
+*/}}
+{{- define "galoyAgents.sandboxNamespace" -}}
+{{- if .Values.sandbox.namespace -}}
+{{- .Values.sandbox.namespace -}}
+{{- else -}}
+{{- .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Sandbox controller namespace: use .Values.sandbox.controllerNamespace if set,
+otherwise "agent-sandbox-system" (upstream default).
+*/}}
+{{- define "galoyAgents.controllerNamespace" -}}
+{{- if .Values.sandbox.controllerNamespace -}}
+{{- .Values.sandbox.controllerNamespace -}}
+{{- else -}}
+agent-sandbox-system
+{{- end -}}
+{{- end -}}

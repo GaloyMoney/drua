@@ -5,12 +5,14 @@ variable "concourse_username" {}
 variable "concourse_password" {}
 
 locals {
-  cluster_name     = "galoy-agents-cluster"
-  cluster_location = "us-east1-b"
-  gcp_project      = "galoy-agents"
-  namespace        = "galoy-agents"
-  vpc_name         = "galoy-agents-vpc"
-  region           = "us-east1"
+  cluster_name         = "galoy-agents-cluster"
+  cluster_location     = "us-east1-b"
+  gcp_project          = "galoy-agents"
+  namespace            = "galoy-agents"
+  sandbox_namespace    = "galoy-agents-sandboxes"
+  controller_namespace = "galoy-agents-sandbox-controller"
+  vpc_name             = "galoy-agents-vpc"
+  region               = "us-east1"
 }
 
 module "postgresql" {
@@ -30,6 +32,18 @@ module "postgresql" {
 resource "kubernetes_namespace" "galoy_agents" {
   metadata {
     name = local.namespace
+  }
+}
+
+resource "kubernetes_namespace" "sandbox" {
+  metadata {
+    name = local.sandbox_namespace
+  }
+}
+
+resource "kubernetes_namespace" "sandbox_controller" {
+  metadata {
+    name = local.controller_namespace
   }
 }
 
@@ -88,25 +102,39 @@ resource "google_container_node_pool" "gvisor" {
 # create SandboxTemplate / SandboxWarmPool custom resources.
 # ---------------------------------------------------------------------------
 data "kubectl_file_documents" "sandbox_controller" {
-  content = file("${path.module}/chart/vendor/agent-sandbox/manifest.yaml")
+  content = replace(
+    file("${path.module}/chart/vendor/agent-sandbox/manifest.yaml"),
+    "agent-sandbox-system",
+    local.controller_namespace
+  )
 }
 
 resource "kubectl_manifest" "sandbox_controller" {
   for_each  = data.kubectl_file_documents.sandbox_controller.manifests
   yaml_body = each.value
 
-  depends_on = [google_container_node_pool.gvisor]
+  depends_on = [
+    google_container_node_pool.gvisor,
+    kubernetes_namespace.sandbox_controller,
+  ]
 }
 
 data "kubectl_file_documents" "sandbox_extensions" {
-  content = file("${path.module}/chart/vendor/agent-sandbox/extensions.yaml")
+  content = replace(
+    file("${path.module}/chart/vendor/agent-sandbox/extensions.yaml"),
+    "agent-sandbox-system",
+    local.controller_namespace
+  )
 }
 
 resource "kubectl_manifest" "sandbox_extensions" {
   for_each  = data.kubectl_file_documents.sandbox_extensions.manifests
   yaml_body = each.value
 
-  depends_on = [google_container_node_pool.gvisor]
+  depends_on = [
+    google_container_node_pool.gvisor,
+    kubernetes_namespace.sandbox_controller,
+  ]
 }
 
 resource "helm_release" "galoy_agents" {
@@ -126,6 +154,7 @@ resource "helm_release" "galoy_agents" {
 
   depends_on = [
     kubernetes_secret.galoy_agents,
+    kubernetes_namespace.sandbox,
     google_container_node_pool.gvisor,
     kubectl_manifest.sandbox_controller,
     kubectl_manifest.sandbox_extensions,

@@ -53,6 +53,12 @@ galoyAgents:
     initImage: google/cloud-sdk:slim
 sandbox:
   enabled: false
+  ## Namespace where sandbox CRs and pods are created.
+  ## Defaults to Release.Namespace if empty.
+  namespace: ""
+  ## Namespace where the sandbox controller runs.
+  ## Defaults to "agent-sandbox-system" if empty.
+  controllerNamespace: ""
   ## Install the Agent Sandbox CRDs + controller from vendored upstream manifests.
   ## Set to false if the controller is already installed (e.g. via Terraform).
   installController: true

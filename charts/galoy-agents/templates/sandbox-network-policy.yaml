@@ -4,7 +4,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ template "galoyAgents.fullname" . }}-sandbox-isolation
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
   labels:
     app: {{ template "galoyAgents.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
@@ -19,7 +19,10 @@ spec:
   # Ingress: only allow from galoy-agents server (exec proxy)
   ingress:
   - from:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      podSelector:
         matchLabels:
           app: {{ template "galoyAgents.fullname" . }}
           release: {{ .Release.Name }}
@@ -42,7 +45,10 @@ spec:
     - protocol: TCP
       port: {{ .Values.galoyAgents.server.service.port }}
     to:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      podSelector:
         matchLabels:
           app: {{ template "galoyAgents.fullname" . }}
           release: {{ .Release.Name }}

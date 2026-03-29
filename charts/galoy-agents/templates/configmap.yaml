@@ -27,7 +27,7 @@ data:
       team: {{ .Values.galoyAgents.config.concourse.team | quote }}
     sandbox:
       enabled: {{ .Values.sandbox.enabled }}
-      namespace: {{ .Release.Namespace | quote }}
+      namespace: {{ include "galoyAgents.sandboxNamespace" . | quote }}
       template_name: {{ .Values.sandbox.templateName | quote }}
     {{- if .Values.sandbox.persistence.enabled }}
       persistence:

@@ -3,7 +3,7 @@ apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: {{ .Values.sandbox.templateName }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
   labels:
     app: {{ template "galoyAgents.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"

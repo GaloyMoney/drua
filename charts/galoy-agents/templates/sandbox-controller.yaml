@@ -1,4 +1,5 @@
 {{- if and .Values.sandbox.enabled .Values.sandbox.installController }}
-{{ .Files.Get "vendor/agent-sandbox/manifest.yaml" }}
-{{ .Files.Get "vendor/agent-sandbox/extensions.yaml" }}
+{{ .Files.Get "vendor/agent-sandbox/manifest.yaml" | replace "agent-sandbox-system" (include "galoyAgents.controllerNamespace" .) }}
+---
+{{ .Files.Get "vendor/agent-sandbox/extensions.yaml" | replace "agent-sandbox-system" (include "galoyAgents.controllerNamespace" .) }}
 {{- end }}

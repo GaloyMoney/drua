@@ -1,0 +1,12 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.namespace }}
+{{- if ne .Values.sandbox.namespace .Release.Namespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.sandbox.namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+{{- end }}
+{{- end }}
