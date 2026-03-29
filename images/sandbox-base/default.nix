@@ -22,6 +22,10 @@ let
     experimental-features = nix-command flakes
     sandbox = false
     filter-syscalls = false
+    extra-substituters = https://galoy-agents.cachix.org
+    extra-trusted-public-keys = galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
+    connect-timeout = 5
+    fallback = true
   '';
 in
 pkgs.dockerTools.buildLayeredImage {

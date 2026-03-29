@@ -86,6 +86,10 @@ sandbox:
   nodeSelector:
     sandbox.gke.io/runtime: gvisor
   env: []
+  ## Example: Override or supplement nix cache config at runtime
+  # env:
+  # - name: NIX_CONFIG
+  #   value: "extra-substituters = https://galoy-agents.cachix.org\nextra-trusted-public-keys = galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY="
   persistence:
     enabled: false
     mountPath: /workspace
