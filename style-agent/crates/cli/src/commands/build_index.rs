@@ -10,8 +10,13 @@ use crate::indexer;
 
 /// Build the search index from pre-cloned repos on disk (for CI).
 ///
-/// Scans `repos_dir` for subdirectories, indexes each one, then replays
-/// human labels from `labels.jsonl`.
+/// Uses a two-phase pipeline so the embedder and classifier ONNX models
+/// are never loaded at the same time, keeping peak memory low enough for
+/// memory-constrained CI workers.
+///
+/// - Phase 1 — embed all repos (only embedder loaded), then drop it.
+/// - Phase 2 — classify all stored chunks (only classifier loaded).
+/// - Phase 3 — replay human labels from `labels.jsonl`.
 pub async fn run(config: &Config, repos_dir_arg: &str) -> anyhow::Result<()> {
     let repos_dir = Path::new(repos_dir_arg);
     anyhow::ensure!(
@@ -37,45 +42,56 @@ pub async fn run(config: &Config, repos_dir_arg: &str) -> anyhow::Result<()> {
         repos_dir.display()
     );
 
-    // Initialize indexing resources
-    let embedder = Embedder::new()?;
     let db_path = config.db_path();
     let store = VectorStore::new(&db_path)?;
     store.ensure_collection()?;
 
-    let mut classifier = indexer::try_load_classifier(config);
-    let threshold = config.services.classifier_confidence_threshold;
-
-    // Index each repo
+    // ── Phase 1: embed + store (only embedder ONNX model in memory) ──
+    println!("\n=== Phase 1: Embedding ===");
     let mut total_chunks = 0usize;
-    for entry in &repo_dirs {
-        let repo_name = entry.file_name().to_string_lossy().to_string();
-        let repo_path = entry.path();
+    {
+        let embedder = Embedder::new()?;
+        let mut no_classifier = None;
 
-        // Look up per-repo config for exclude_dirs / paths
-        let repo_config = config.repos.iter().find(|r| r.name == repo_name);
+        for entry in &repo_dirs {
+            let repo_name = entry.file_name().to_string_lossy().to_string();
+            let repo_path = entry.path();
 
-        let (subpaths, exclude_dirs): (Option<&[String]>, &[String]) = match repo_config {
-            Some(rc) => (rc.paths.as_deref(), &rc.exclude_dirs),
-            None => (None, &[]),
-        };
+            // Look up per-repo config for exclude_dirs / paths
+            let repo_config = config.repos.iter().find(|r| r.name == repo_name);
 
-        println!("Indexing {repo_name}...");
-        let chunks = indexer::index_repo(
-            &repo_path,
-            &repo_name,
-            subpaths,
-            exclude_dirs,
-            &store,
-            &embedder,
-            &mut classifier,
-            threshold,
-        )
-        .await?;
-        total_chunks += chunks;
+            let (subpaths, exclude_dirs): (Option<&[String]>, &[String]) = match repo_config {
+                Some(rc) => (rc.paths.as_deref(), &rc.exclude_dirs),
+                None => (None, &[]),
+            };
+
+            println!("Indexing {repo_name}...");
+            let chunks = indexer::index_repo(
+                &repo_path,
+                &repo_name,
+                subpaths,
+                exclude_dirs,
+                &store,
+                &embedder,
+                &mut no_classifier,
+                config.services.classifier_confidence_threshold,
+            )
+            .await?;
+            total_chunks += chunks;
+        }
+        // `embedder` (and its ONNX session) is dropped here
     }
 
-    // Replay human labels
+    // ── Phase 2: classify from DB (only classifier ONNX model in memory) ──
+    println!("\n=== Phase 2: Classification ===");
+    {
+        let mut classifier = indexer::try_load_classifier(config);
+        let threshold = config.services.classifier_confidence_threshold;
+        indexer::classify_all_chunks(&store, &mut classifier, threshold)?;
+        // `classifier` (and its ONNX session) is dropped here
+    }
+
+    // ── Phase 3: replay human labels ──
     let labels_path = config.labels_dir().join("labels.jsonl");
     if labels_path.exists() {
         println!("\nReplaying human labels from {}...", labels_path.display());

@@ -270,6 +270,53 @@ pub(crate) fn classify_with_fallback(
     (cls, source)
 }
 
+/// Classify all chunks already stored in the database.
+///
+/// Used by the two-phase CI pipeline: after all chunks have been embedded and
+/// stored (Phase 1), this function loads them back from SQLite and runs
+/// classification (Phase 2). This allows the embedder ONNX model to be dropped
+/// before the classifier is loaded, halving peak memory.
+pub fn classify_all_chunks(
+    store: &VectorStore,
+    classifier: &mut Option<Classifier>,
+    confidence_threshold: f32,
+) -> anyhow::Result<()> {
+    let points = store.scroll_all()?;
+    let total = points.len();
+
+    if total == 0 {
+        println!("  No chunks to classify.");
+        return Ok(());
+    }
+
+    println!("  Classifying {total} chunks...");
+    let mut ml_count = 0usize;
+    let mut heuristic_count = 0usize;
+
+    let label_updates: Vec<_> = points
+        .iter()
+        .map(|pt| {
+            let (cls, source) = classify_with_fallback(classifier, &pt.chunk, confidence_threshold);
+            match source.as_str() {
+                "ml" => ml_count += 1,
+                _ => heuristic_count += 1,
+            }
+            (pt.point_id.clone(), cls, source)
+        })
+        .collect();
+
+    store.set_labels(&label_updates)?;
+
+    let source_info = if classifier.is_some() {
+        format!(" (ml: {ml_count}, heuristic: {heuristic_count})")
+    } else {
+        format!(" (heuristic: {heuristic_count})")
+    };
+    println!("  Classified {total} chunks{source_info}");
+
+    Ok(())
+}
+
 /// Intermediate struct holding chunk data before embedding.
 struct ChunkData {
     content: String,
