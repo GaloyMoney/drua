@@ -43,6 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/sandboxes/create", post(sandbox_create))
         .route("/sandboxes/{name}/delete", post(sandbox_delete))
         .route("/sandboxes/{name}/status", get(sandbox_status))
+        .route("/sandboxes/{name}/terminal", get(sandbox_terminal))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -435,6 +436,21 @@ async fn sandbox_status(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+#[instrument(name = "web.sandbox_terminal", skip_all)]
+async fn sandbox_terminal(
+    State(state): State<AppState>,
+    session: Session,
+    Path(name): Path<String>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    if state.sandbox.is_none() {
+        return Redirect::to("/sandboxes").into_response();
+    }
+    SandboxTerminalTemplate { name }.into_response()
 }
 
 // ---------------------------------------------------------------------------
