@@ -376,7 +376,12 @@ async fn sandbox_list(State(state): State<AppState>, session: Session) -> Respon
         Some(c) => c,
         None => return SandboxListTemplate { sandboxes: vec![] }.into_response(),
     };
-    match client.list_claims().await {
+    let result = if client.has_persistence() {
+        client.list_sandboxes().await
+    } else {
+        client.list_claims().await
+    };
+    match result {
         Ok(summaries) => SandboxListTemplate {
             sandboxes: summaries.iter().map(summary_to_view).collect(),
         }
@@ -406,7 +411,19 @@ async fn sandbox_create(
         Some(c) => c,
         None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    match client.create_claim(&form.name).await {
+    let result = if client.has_persistence() {
+        client.create_sandbox(&form.name).await
+    } else {
+        client.create_claim(&form.name).await.map(|c| {
+            sandbox_client::SandboxSummary {
+                name: form.name.clone(),
+                sandbox_name: c.status.and_then(|s| s.sandbox.map(|r| r.name)),
+                phase: "Provisioning".to_string(),
+                ready: false,
+            }
+        })
+    };
+    match result {
         Ok(_) => SandboxCreatedTemplate { name: form.name }.into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to create sandbox");
@@ -428,7 +445,12 @@ async fn sandbox_delete(
         Some(c) => c,
         None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    match client.delete_claim(&name).await {
+    let result = if client.has_persistence() {
+        client.delete_sandbox(&name).await
+    } else {
+        client.delete_claim(&name).await
+    };
+    match result {
         Ok(_) => "".into_response(), // Row disappears via hx-swap="outerHTML"
         Err(e) => {
             tracing::error!(error = %e, name = %name, "Failed to delete sandbox");
@@ -450,7 +472,12 @@ async fn sandbox_status(
         Some(c) => c,
         None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    match client.get_claim(&name).await {
+    let result = if client.has_persistence() {
+        client.get_sandbox(&name).await
+    } else {
+        client.get_claim(&name).await
+    };
+    match result {
         Ok(summary) => SandboxRowTemplate {
             sb: summary_to_view(&summary),
         }

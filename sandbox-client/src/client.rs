@@ -59,6 +59,11 @@ impl SandboxClient {
         self
     }
 
+    /// Whether persistent storage is configured for sandboxes.
+    pub fn has_persistence(&self) -> bool {
+        self.persistence.is_some()
+    }
+
     /// The namespace this client manages sandboxes in.
     pub fn namespace(&self) -> &str {
         &self.namespace
@@ -153,6 +158,7 @@ impl SandboxClient {
     /// Resolve the running pod name for a sandbox claim.
     ///
     /// Follows the chain: claim → sandbox_name → Sandbox CR label_selector → Pod list.
+    /// Resolve the pod name for a claim-based sandbox.
     #[instrument(name = "sandbox_client.resolve_pod_name", skip_all, fields(%claim_name))]
     pub async fn resolve_pod_name(&self, claim_name: &str) -> Result<String, SandboxError> {
         let summary = self.get_claim(claim_name).await?;
@@ -164,11 +170,19 @@ impl SandboxClient {
             .sandbox_name
             .ok_or_else(|| SandboxError::NoPod(claim_name.to_string()))?;
 
-        // Get the Sandbox CR to find the label selector
+        self.resolve_pod_for_sandbox(&sandbox_name).await
+    }
+
+    /// Resolve the pod name for a directly-created sandbox.
+    #[instrument(name = "sandbox_client.resolve_pod_for_sandbox", skip_all, fields(%sandbox_name))]
+    pub async fn resolve_pod_for_sandbox(
+        &self,
+        sandbox_name: &str,
+    ) -> Result<String, SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
-        let sandbox = sandboxes.get(&sandbox_name).await.map_err(|e| match &e {
+        let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
             kube::Error::Api(resp) if resp.code == 404 => {
-                SandboxError::NotFound(sandbox_name.clone())
+                SandboxError::NotFound(sandbox_name.to_string())
             }
             _ => SandboxError::Kube(e),
         })?;
@@ -177,15 +191,13 @@ impl SandboxClient {
             .status
             .as_ref()
             .and_then(|s| s.label_selector.clone())
-            .ok_or_else(|| SandboxError::NoPod(claim_name.to_string()))?;
+            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))?;
 
-        // Find pods matching the label selector
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let pod_list = pods
             .list(&ListParams::default().labels(&label_selector))
             .await?;
 
-        // Return the first running pod
         let pod_name = pod_list
             .items
             .iter()
@@ -197,22 +209,23 @@ impl SandboxClient {
                     .unwrap_or(false)
             })
             .and_then(|pod| pod.metadata.name.clone())
-            .ok_or_else(|| SandboxError::NoPod(claim_name.to_string()))?;
+            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))?;
 
         Ok(pod_name)
     }
 
     /// Exec into the sandbox pod associated with a claim.
-    ///
-    /// Returns an `AttachedProcess` with stdin/stdout/stderr streams for
-    /// interactive terminal use.
     #[instrument(name = "sandbox_client.exec_in_sandbox", skip_all, fields(%claim_name))]
     pub async fn exec_in_sandbox(
         &self,
         claim_name: &str,
         command: Vec<String>,
     ) -> Result<AttachedProcess, SandboxError> {
-        let pod_name = self.resolve_pod_name(claim_name).await?;
+        let pod_name = if self.has_persistence() {
+            self.resolve_pod_for_sandbox(claim_name).await?
+        } else {
+            self.resolve_pod_name(claim_name).await?
+        };
 
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let attached = pods
