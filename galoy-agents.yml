@@ -23,7 +23,7 @@ toolsets:
       url: https://api.githubcopilot.com/mcp/readonly
       tool_prefix: github
       category: source-control
-      category_description: "GitHub repositories, pull requests, issues, and actions"
+      category_description: "GitHub repositories, pull requests, issues, and code search"
       allowed_tools:
         - get_file_contents
         - get_commit
@@ -37,8 +37,3 @@ toolsets:
         - issue_read
         - list_issues
         - search_issues
-        - actions_get
-        - actions_list
-        - get_job_logs
-        - list_code_scanning_alerts
-        - list_dependabot_alerts

@@ -26,7 +26,7 @@ galoyAgents:
         url: https://api.githubcopilot.com/mcp/readonly
         toolPrefix: github
         category: source-control
-        categoryDescription: "GitHub repositories, pull requests, issues, and actions"
+        categoryDescription: "GitHub repositories, pull requests, issues, and code search"
         allowedTools:
           - get_file_contents
           - get_commit
@@ -40,11 +40,6 @@ galoyAgents:
           - issue_read
           - list_issues
           - search_issues
-          - actions_get
-          - actions_list
-          - get_job_logs
-          - list_code_scanning_alerts
-          - list_dependabot_alerts
   ingress:
     enabled: true
     host: dashboard.agents.galoy.io
