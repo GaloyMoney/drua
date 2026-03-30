@@ -1,8 +1,9 @@
 pub mod error;
 
-use code_assistant_server::request_log::RequestLogEntry;
-use code_assistant_server::{LoggerError, RequestLogger};
+use code_assistant_core::request_log::RequestLogEntry;
 use tracing::instrument;
+
+use super::request_logger::{LoggerError, RequestLogger};
 
 pub use error::CodeAssistantLogsError;
 
@@ -82,7 +83,7 @@ fn score_class(score: Option<f64>) -> String {
 fn row_to_view(r: RawRequestRow) -> CodeAssistantRequestRow {
     let top_score_fmt =
         r.4.map(|s| format!("{s:.3}"))
-            .unwrap_or_else(|| "—".to_string());
+            .unwrap_or_else(|| "\u{2014}".to_string());
     let has_error = r.9.is_some();
     let sc = score_class(r.4);
     let results_json =

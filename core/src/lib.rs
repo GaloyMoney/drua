@@ -1,6 +1,6 @@
 pub mod agent;
 pub mod auth;
-pub mod code_assistant_logs;
+pub mod code_assistant;
 mod config;
 pub mod primitives;
 pub mod toolset;
@@ -11,8 +11,7 @@ pub use config::*;
 use std::sync::Arc;
 
 use agent::Agents;
-use code_assistant_logs::CodeAssistantLogs;
-use code_assistant_server::CodeAssistantEndpoints;
+use code_assistant::CodeAssistant;
 use toolset::{ToolSets, ToolSetsError};
 use user::Users;
 
@@ -20,26 +19,24 @@ use user::Users;
 pub struct App {
     users: Users,
     agents: Agents,
-    code_assistant_logs: Arc<CodeAssistantLogs>,
-    code_assistant: Option<CodeAssistantEndpoints>,
+    code_assistant: Option<CodeAssistant>,
     toolsets: Arc<ToolSets>,
 }
 
 impl App {
     pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
-        let code_assistant_logs = Arc::new(CodeAssistantLogs::new(pool));
-        let code_assistant = code_assistant_server::init_endpoints_with_logger(
-            &code_assistant_server::CodeAssistantConfig {
+        let code_assistant = code_assistant::init(
+            pool,
+            &code_assistant::CodeAssistantConfig {
                 db_path: config.toolsets.code_assistant.db_path.clone(),
             },
-            code_assistant_logs.clone(),
         )
         .map_err(|e| AppError::CodeAssistant(e.to_string()))?;
-        let toolsets = ToolSets::init(config.toolsets, code_assistant_logs.clone()).await?;
+        let toolsets =
+            ToolSets::init(config.toolsets, code_assistant.clone().map(Arc::new)).await?;
         Ok(Self {
             users: Users::new(pool),
             agents: Agents::new(pool),
-            code_assistant_logs,
             code_assistant,
             toolsets: Arc::new(toolsets),
         })
@@ -53,11 +50,7 @@ impl App {
         &self.agents
     }
 
-    pub fn code_assistant_logs(&self) -> &Arc<CodeAssistantLogs> {
-        &self.code_assistant_logs
-    }
-
-    pub fn code_assistant(&self) -> Option<&CodeAssistantEndpoints> {
+    pub fn code_assistant(&self) -> Option<&CodeAssistant> {
         self.code_assistant.as_ref()
     }
 

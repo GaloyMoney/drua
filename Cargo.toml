@@ -8,7 +8,6 @@ members = [
   "sandbox-cli",
   "web",
   "code-assistant/crates/core",
-  "code-assistant/crates/server",
   "code-assistant/crates/cli",
 ]
 resolver = "2"
@@ -25,7 +24,6 @@ name = "galoy-agents"
 concourse-client = { path = "lib/concourse-client" }
 sandbox-client = { path = "sandbox-client" }
 code-assistant-core = { path = "code-assistant/crates/core" }
-code-assistant-server = { path = "code-assistant/crates/server" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }

@@ -19,9 +19,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Start the HTTP MCP server
-    Up,
-
     /// Clone repos, start services, pull model, index everything
     Bootstrap,
 
@@ -113,7 +110,6 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load_config()?;
 
     match cli.command {
-        Command::Up => commands::up::run(&config).await,
         Command::Bootstrap => commands::bootstrap::run(&config).await,
         Command::BuildIndex { repos_dir } => commands::build_index::run(&config, &repos_dir).await,
         Command::Reindex { repo_name } => {

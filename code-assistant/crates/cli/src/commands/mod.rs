@@ -12,4 +12,3 @@ pub mod replay_labels;
 pub mod review;
 pub mod status;
 pub mod telegram_review;
-pub mod up;

@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
-use code_assistant_server::CodeAssistantEndpoints;
-use rmcp::model::{CallToolResult, JsonObject, Tool};
+use crate::code_assistant::{CodeAssistant, SearchCodeParams};
+use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
 use super::{ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct CodeAssistantToolSet {
-    endpoints: Arc<CodeAssistantEndpoints>,
+    service: Arc<CodeAssistant>,
     tools: Vec<ToolSetEntry>,
 }
 
 impl CodeAssistantToolSet {
-    pub fn new(endpoints: CodeAssistantEndpoints) -> Self {
+    pub fn new(service: Arc<CodeAssistant>) -> Self {
         let mut tool = Tool::default();
         tool.name = "search_code".to_string().into();
         tool.description = Some("Search indexed codebases for code patterns matching a query.\n\nUsage tips:\n- Pass a code snippet as the query (e.g. the pattern you are about to write) — code-as-query gives much better results than natural language\n- Always pass a `label` filter for precise results\n- Adopt the style, naming, and structure from the returned examples — don't guess conventions, search first\n\nAvailable labels: entity, entity_event, entity_command, entity_query, entity_hydration, error, service, service_method, repository, domain_primitives, value_object, type_conversion, config, test, api, job, event_handler, authorization, published_event, new_entity, none (unlabeled chunks)\n\nAvailable filters: query (required), limit, repo, language, label".to_string().into());
@@ -50,10 +50,7 @@ impl CodeAssistantToolSet {
             description: tool,
         }];
 
-        Self {
-            endpoints: Arc::new(endpoints),
-            tools,
-        }
+        Self { service, tools }
     }
 }
 
@@ -82,15 +79,16 @@ impl ToolSet for CodeAssistantToolSet {
     ) -> Result<CallToolResult, ToolSetsError> {
         match tool_name {
             "search_code" => {
-                let params: code_assistant_server::SearchCodeParams =
-                    serde_json::from_value(serde_json::Value::Object(
-                        arguments.unwrap_or_default(),
-                    ))
-                    .map_err(|e| ToolSetsError::MissingArgument(e.to_string()))?;
-                self.endpoints
-                    .search_code(params)
+                let params: SearchCodeParams = serde_json::from_value(serde_json::Value::Object(
+                    arguments.unwrap_or_default(),
+                ))
+                .map_err(|e| ToolSetsError::MissingArgument(e.to_string()))?;
+                let text = self
+                    .service
+                    .search(params)
                     .await
-                    .map_err(|e| ToolSetsError::CodeAssistant(e.message.to_string()))
+                    .map_err(|e| ToolSetsError::CodeAssistant(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(text)]))
             }
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }

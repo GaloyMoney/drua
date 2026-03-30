@@ -23,9 +23,7 @@ async fn init_toolsets() {
             allowed_tools: None,
         }],
     };
-    let logger: std::sync::Arc<dyn code_assistant_server::RequestLogger> =
-        std::sync::Arc::new(code_assistant_server::NoopRequestLogger);
-    let toolsets = ToolSets::init(config, logger).await.unwrap();
+    let toolsets = ToolSets::init(config, None).await.unwrap();
     let catalog = toolsets.catalog();
 
     // search_tools

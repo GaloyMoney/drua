@@ -204,7 +204,14 @@ async fn code_assistant_dashboard(State(state): State<AppState>, session: Sessio
         return Redirect::to("/").into_response();
     }
 
-    let stats = match state.app.code_assistant_logs().dashboard_stats().await {
+    let stats = match state
+        .app
+        .code_assistant()
+        .unwrap()
+        .logs()
+        .dashboard_stats()
+        .await
+    {
         Ok(stats) => stats,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load code assistant stats");
@@ -221,7 +228,14 @@ async fn code_assistant_recent(State(state): State<AppState>, session: Session) 
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state.app.code_assistant_logs().recent_requests(10).await {
+    let rows = match state
+        .app
+        .code_assistant()
+        .unwrap()
+        .logs()
+        .recent_requests(10)
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load recent requests");
@@ -238,7 +252,14 @@ async fn code_assistant_least_useful(State(state): State<AppState>, session: Ses
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state.app.code_assistant_logs().least_useful(10).await {
+    let rows = match state
+        .app
+        .code_assistant()
+        .unwrap()
+        .logs()
+        .least_useful(10)
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load least useful requests");

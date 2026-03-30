@@ -582,7 +582,6 @@ dependencies = [
  "anyhow",
  "clap",
  "code-assistant-core",
- "code-assistant-server",
  "crossterm",
  "dirs",
  "ratatui",
@@ -621,23 +620,6 @@ dependencies = [
  "tree-sitter-rust",
  "uuid",
  "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "code-assistant-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "code-assistant-core",
- "rmcp",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1519,7 +1501,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "code-assistant-server",
+ "code-assistant-core",
  "concourse-client",
  "derive_builder",
  "es-entity",
@@ -1541,9 +1523,7 @@ dependencies = [
 name = "galoy-agents-mcp-gateway"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "axum",
- "code-assistant-server",
  "galoy-agents-core",
  "http",
  "rmcp",
@@ -1563,7 +1543,6 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
- "code-assistant-server",
  "futures",
  "galoy-agents-core",
  "oauth2",

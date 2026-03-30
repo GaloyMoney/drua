@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use code_assistant_core::CoreConfig;
 use serde::Deserialize;
 
 const DEFAULT_BIND: &str = "127.0.0.1:9222";
@@ -173,22 +172,6 @@ impl Config {
                 .join("models")
                 .join("onnx"),
         }
-    }
-
-    /// Build the core config with resolved paths for storage and models.
-    pub fn core_config(&self) -> CoreConfig {
-        CoreConfig {
-            db_path: self.db_path(),
-            model_dir: self.model_dir(),
-        }
-    }
-
-    /// Bind address, overridden by `CODE_ASSISTANT_PORT` env var.
-    pub fn bind_addr(&self) -> String {
-        if let Ok(port) = std::env::var("CODE_ASSISTANT_PORT") {
-            return format!("127.0.0.1:{port}");
-        }
-        self.server.bind.clone()
     }
 }
 

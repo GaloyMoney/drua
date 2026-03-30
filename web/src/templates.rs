@@ -1,7 +1,7 @@
 use askama::Template;
 use askama_web::WebTemplate;
 
-use galoy_agents_core::code_assistant_logs::{CodeAssistantRequestRow, DashboardStats};
+use galoy_agents_core::code_assistant::logs::{CodeAssistantRequestRow, DashboardStats};
 
 pub struct AgentView {
     pub id: String,
