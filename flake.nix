@@ -247,6 +247,7 @@
           buildInputs = [
             rustToolchain
             pkgs.bats
+            pkgs.bacon
             pkgs.cargo-nextest
             pkgs.sqlx-cli
             pkgs.postgresql
