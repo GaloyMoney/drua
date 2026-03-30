@@ -18,6 +18,12 @@ pub struct McpUpstreamConfig {
     pub category: Option<String>,
     #[serde(default)]
     pub category_description: Option<String>,
+    /// Optional prefix for tool names (defaults to `name` if unset).
+    #[serde(default)]
+    pub tool_prefix: Option<String>,
+    /// Optional whitelist of tool names to expose from this upstream.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

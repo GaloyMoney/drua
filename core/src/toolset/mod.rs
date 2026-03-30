@@ -61,7 +61,7 @@ impl Catalog {
                     .map(|d| first_sentence(d))
                     .unwrap_or_default();
                 entries.push(CatalogEntry {
-                    prefixed_name: format!("{}_{}", set.name(), desc.name),
+                    prefixed_name: format!("{}_{}", set.prefix(), desc.name),
                     upstream_name: set.name().to_string(),
                     tool_name: desc.name.to_string(),
                     category: set.category().map(String::from),
@@ -108,7 +108,7 @@ impl Catalog {
 
     fn find_set<'a>(&'a self, prefixed_name: &'a str) -> Option<(&'a dyn ToolSet, &'a str)> {
         for set in &self.sets {
-            let prefix = format!("{}_", set.name());
+            let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
                 if set.tools().iter().any(|t| t.name == tool_name) {
                     return Some((set.as_ref(), tool_name));
@@ -142,7 +142,12 @@ impl ToolSets {
         for upstream in &config.mcp_upstreams {
             match UpstreamToolSet::init(upstream).await {
                 Ok(ts) => {
-                    tracing::info!(name = %upstream.name, "MCP upstream toolset initialized");
+                    tracing::info!(
+                        name = %upstream.name,
+                        prefix = ts.prefix(),
+                        tools = ts.tools().len(),
+                        "MCP upstream toolset initialized"
+                    );
                     sets.push(Box::new(ts));
                 }
                 Err(e) => {

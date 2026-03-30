@@ -14,6 +14,7 @@ use super::{McpUpstreamConfig, ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct UpstreamToolSet {
     name: String,
+    tool_prefix: String,
     category: Option<String>,
     category_description: Option<String>,
     tools: Vec<ToolSetEntry>,
@@ -38,18 +39,30 @@ impl UpstreamToolSet {
 
         let client = ().serve(worker).await.map_err(Box::new)?;
 
-        let tools = client
+        let allowed = upstream.allowed_tools.as_ref();
+        let tools: Vec<ToolSetEntry> = client
             .list_all_tools()
             .await?
             .into_iter()
+            .filter(|t| {
+                allowed
+                    .map(|list| list.iter().any(|a| a == t.name.as_ref()))
+                    .unwrap_or(true)
+            })
             .map(|description| ToolSetEntry {
                 name: description.name.to_string(),
                 description,
             })
             .collect();
 
+        let tool_prefix = upstream
+            .tool_prefix
+            .clone()
+            .unwrap_or_else(|| upstream.name.clone());
+
         Ok(UpstreamToolSet {
             name: upstream.name.clone(),
+            tool_prefix,
             category: upstream.category.clone(),
             category_description: upstream.category_description.clone(),
             tools,
@@ -66,6 +79,10 @@ impl UpstreamToolSet {
 impl ToolSet for UpstreamToolSet {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn prefix(&self) -> &str {
+        &self.tool_prefix
     }
 
     fn category(&self) -> Option<&str> {

@@ -43,6 +43,27 @@ galoyAgents:
     #   url: https://mcp.honeycomb.io/mcp
     #   category: observability
     #   categoryDescription: "Distributed traces, SLOs, and query analysis"
+    # - name: github
+    #   url: https://api.githubcopilot.com/mcp/
+    #   toolPrefix: github
+    #   category: source-control
+    #   categoryDescription: "GitHub repositories, pull requests, issues, and actions"
+    #   allowedTools:
+    #     - get_file_contents
+    #     - list_commits
+    #     - get_commit
+    #     - get_pull_request
+    #     - list_pull_requests
+    #     - get_pull_request_diff
+    #     - get_pull_request_reviews
+    #     - get_pull_request_comments
+    #     - get_issue
+    #     - list_issues
+    #     - search_code
+    #     - search_issues
+    #     - search_repositories
+    #     - list_workflow_runs
+    #     - get_workflow_run_logs
   secrets:
     create: true
     pgCon: ""
