@@ -71,6 +71,10 @@ spec:
               /tmp/code-assistant-index.tar.gz
             mkdir -p /data
             tar -xzf /tmp/code-assistant-index.tar.gz -C /data
+            # Handle legacy tars that contain style-agent.db
+            if [ -f /data/style-agent.db ] && [ ! -f /data/code-assistant.db ]; then
+              mv /data/style-agent.db /data/code-assistant.db
+            fi
             {{- if .Values.galoyAgents.codeAssistant.embedderHash }}
             echo "Downloading embedder {{ .Values.galoyAgents.codeAssistant.embedderHash }}..."
             gsutil cp \
