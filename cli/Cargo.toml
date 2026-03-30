@@ -15,6 +15,7 @@ sandbox-client = { workspace = true }
 anyhow = "1"
 axum = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
