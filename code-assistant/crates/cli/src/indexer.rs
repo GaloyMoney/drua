@@ -272,12 +272,19 @@ pub(crate) fn classify_with_fallback(
     (cls, source)
 }
 
+/// Number of chunks to classify and flush to the DB at a time.
+/// Keeps the label-update vector and ONNX runtime working set bounded.
+const CLASSIFY_BATCH_SIZE: usize = 500;
+
 /// Classify all chunks already stored in the database.
 ///
 /// Used by the two-phase CI pipeline: after all chunks have been embedded and
 /// stored (Phase 1), this function loads them back from SQLite and runs
 /// classification (Phase 2). This allows the embedder ONNX model to be dropped
 /// before the classifier is loaded, halving peak memory.
+///
+/// Chunks are processed in batches of [`CLASSIFY_BATCH_SIZE`] and flushed to
+/// the DB after each batch so memory does not grow unbounded.
 pub fn classify_all_chunks(
     store: &VectorStore,
     classifier: &mut Option<Classifier>,
@@ -294,20 +301,26 @@ pub fn classify_all_chunks(
     println!("  Classifying {total} chunks...");
     let mut ml_count = 0usize;
     let mut heuristic_count = 0usize;
+    let mut classified = 0usize;
 
-    let label_updates: Vec<_> = points
-        .iter()
-        .map(|pt| {
-            let (cls, source) = classify_with_fallback(classifier, &pt.chunk, confidence_threshold);
-            match source.as_str() {
-                "ml" => ml_count += 1,
-                _ => heuristic_count += 1,
-            }
-            (pt.point_id.clone(), cls, source)
-        })
-        .collect();
+    for batch in points.chunks(CLASSIFY_BATCH_SIZE) {
+        let label_updates: Vec<_> = batch
+            .iter()
+            .map(|pt| {
+                let (cls, source) =
+                    classify_with_fallback(classifier, &pt.chunk, confidence_threshold);
+                match source.as_str() {
+                    "ml" => ml_count += 1,
+                    _ => heuristic_count += 1,
+                }
+                (pt.point_id.clone(), cls, source)
+            })
+            .collect();
 
-    store.set_labels(&label_updates)?;
+        store.set_labels(&label_updates)?;
+        classified += batch.len();
+        tracing::info!(progress = classified, total, "Classified batch");
+    }
 
     let source_info = if classifier.is_some() {
         format!(" (ml: {ml_count}, heuristic: {heuristic_count})")
