@@ -2,10 +2,10 @@ use galoy_agents_core::toolset::*;
 
 #[tokio::test]
 async fn init_toolsets() {
-    let api_key = match std::env::var("HONEYCOMB_API_KEY") {
-        Ok(key) => key,
+    let auth_header = match std::env::var("HONEYCOMB_AUTH_HEADER") {
+        Ok(val) => val,
         Err(_) => {
-            eprintln!("HONEYCOMB_API_KEY not set, skipping");
+            eprintln!("HONEYCOMB_AUTH_HEADER not set, skipping");
             return;
         }
     };
@@ -14,7 +14,7 @@ async fn init_toolsets() {
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),
-            auth_header: format!("Bearer {api_key}"),
+            auth_header: auth_header,
             category: Some("observability".to_string()),
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
         }],

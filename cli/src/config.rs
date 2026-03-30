@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use galoy_agents_core::toolset::ToolSetsConfig;
 use galoy_agents_mcp_gateway::{CodeAssistantConfig, ConcourseConfig};
 use galoy_agents_web::auth::config::AuthConfig;
 
@@ -20,6 +21,8 @@ pub struct Config {
     pub concourse: ConcourseConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    #[serde(default)]
+    pub toolsets: ToolSetsConfig,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -144,6 +147,14 @@ impl Config {
         }
         if let Ok(val) = std::env::var("CONCOURSE_PASSWORD") {
             config.concourse.password = val;
+        }
+
+        // Upstream MCP auth headers from env: {NAME}_AUTH_HEADER
+        for upstream in &mut config.toolsets.mcp_upstreams {
+            let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
+            if let Ok(val) = std::env::var(&env_key) {
+                upstream.auth_header = val;
+            }
         }
 
         Ok(config)

@@ -9,6 +9,7 @@ pub struct ToolSetsConfig {
 pub struct McpUpstreamConfig {
     pub name: String,
     pub url: String,
+    #[serde(skip)]
     pub auth_header: String,
     #[serde(default)]
     pub category: Option<String>,
