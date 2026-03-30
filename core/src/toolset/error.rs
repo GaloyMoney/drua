@@ -14,4 +14,6 @@ pub enum ToolSetsError {
     MissingArgument(String),
     #[error("ToolSetsError - Concourse: {0}")]
     Concourse(#[from] concourse_client::ConcourseError),
+    #[error("ToolSetsError - CodeAssistant: {0}")]
+    CodeAssistant(String),
 }

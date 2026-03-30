@@ -7,38 +7,30 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
-use code_assistant_server::SearchCodeParams;
 use galoy_agents_core::auth::AuthContext;
 use galoy_agents_core::App;
-
-pub use code_assistant_server::{self, CodeAssistantConfig, CodeAssistantEndpoints};
 
 #[derive(Clone)]
 pub struct McpGateway {
     app: App,
-    code_assistant: Option<CodeAssistantEndpoints>,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpGateway {
-    fn new(app: App, code_assistant: Option<CodeAssistantEndpoints>) -> Self {
+    fn new(app: App) -> Self {
         Self {
             app,
-            code_assistant,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Build the MCP service from pre-constructed endpoints.
-    pub fn service(
-        app: App,
-        code_assistant: Option<CodeAssistantEndpoints>,
-    ) -> StreamableHttpService<Self, LocalSessionManager> {
+    /// Build the MCP service.
+    pub fn service(app: App) -> StreamableHttpService<Self, LocalSessionManager> {
         let mut config = StreamableHttpServerConfig::default();
         config.stateful_mode = false;
         config.json_response = true;
         StreamableHttpService::new(
-            move || Ok(McpGateway::new(app.clone(), code_assistant.clone())),
+            move || Ok(McpGateway::new(app.clone())),
             LocalSessionManager::default().into(),
             config,
         )
@@ -102,26 +94,6 @@ impl McpGateway {
     ) -> Result<String, ErrorData> {
         Self::require_auth(&parts)?;
         Ok(format!("Hello, {}!", params.name))
-    }
-
-    /// Search indexed code repositories for patterns and conventions.
-    #[tool(
-        description = "Search indexed codebases for code patterns matching a query.\n\nUsage tips:\n- Pass a code snippet as the query (e.g. the pattern you are about to write) — code-as-query gives much better results than natural language\n- Always pass a `label` filter for precise results\n- Adopt the style, naming, and structure from the returned examples — don't guess conventions, search first\n\nAvailable labels: entity, entity_event, entity_command, entity_query, entity_hydration, error, service, service_method, repository, domain_primitives, value_object, type_conversion, config, test, api, job, event_handler, authorization, published_event, new_entity, none (unlabeled chunks)\n\nAvailable filters: query (required), limit, repo, language, label"
-    )]
-    async fn search_code(
-        &self,
-        Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<SearchCodeParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        match self.code_assistant.as_ref() {
-            Some(agent) => agent.search_code(params).await,
-            None => Err(ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                "Code assistant is disabled (no db_path configured)",
-                None::<serde_json::Value>,
-            )),
-        }
     }
 
     /// Search for available tools across all upstream services.
