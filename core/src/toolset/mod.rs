@@ -140,7 +140,15 @@ impl ToolSets {
         let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            sets.push(Box::new(UpstreamToolSet::init(upstream).await?));
+            match UpstreamToolSet::init(upstream).await {
+                Ok(ts) => {
+                    tracing::info!(name = %upstream.name, "MCP upstream toolset initialized");
+                    sets.push(Box::new(ts));
+                }
+                Err(e) => {
+                    tracing::warn!(name = %upstream.name, error = %e, "Failed to initialize MCP upstream, skipping");
+                }
+            }
         }
 
         if config.concourse.enabled
