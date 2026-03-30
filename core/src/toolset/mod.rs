@@ -1,9 +1,13 @@
+pub mod concourse;
 mod config;
 mod error;
+mod traits;
 mod upstream;
 
 pub use config::*;
+pub use concourse::ConcourseToolSet;
 pub use error::*;
+pub use traits::*;
 pub use upstream::*;
 
 use rmcp::model::{CallToolResult, JsonObject, Tool};
@@ -18,18 +22,38 @@ pub struct CatalogEntry {
 }
 
 pub struct Catalog {
-    sets: Vec<UpstreamToolSet>,
+    sets: Vec<Box<dyn ToolSet>>,
 }
 
 impl Catalog {
-    pub fn sets(&self) -> &[UpstreamToolSet] {
-        &self.sets
+    pub fn instructions(&self) -> String {
+        let mut lines = vec![
+            "Tools from upstream services are available via progressive disclosure:".to_string(),
+            "1. search_tools — discover tools by keyword or category".to_string(),
+            "2. describe_tool — get full parameter schema before calling".to_string(),
+            "3. call_tool — execute with proper arguments".to_string(),
+            String::new(),
+            "Available toolsets:".to_string(),
+        ];
+        for set in &self.sets {
+            let cat = set.category().unwrap_or("uncategorized");
+            let desc = set.category_description().unwrap_or("");
+            let tool_count = set.tools().len();
+            lines.push(format!(
+                "  {} ({}, {} tools) — {}",
+                set.name(),
+                cat,
+                tool_count,
+                desc,
+            ));
+        }
+        lines.join("\n")
     }
 
     pub fn entries(&self) -> Vec<CatalogEntry> {
         let mut entries = Vec::new();
         for set in &self.sets {
-            for tool in &set.tools {
+            for tool in set.tools() {
                 let desc = &tool.description;
                 let brief = desc
                     .description
@@ -37,10 +61,10 @@ impl Catalog {
                     .map(|d| first_sentence(d))
                     .unwrap_or_default();
                 entries.push(CatalogEntry {
-                    prefixed_name: format!("{}_{}", set.name, desc.name),
-                    upstream_name: set.name.clone(),
+                    prefixed_name: format!("{}_{}", set.name(), desc.name),
+                    upstream_name: set.name().to_string(),
                     tool_name: desc.name.to_string(),
-                    category: set.category.clone(),
+                    category: set.category().map(String::from),
                     brief_description: brief,
                     full_tool: desc.clone(),
                 });
@@ -82,12 +106,12 @@ impl Catalog {
             .find(|e| e.prefixed_name == prefixed_name)
     }
 
-    fn find_set_and_tool<'a>(&'a self, prefixed_name: &'a str) -> Option<(&'a UpstreamToolSet, &'a str)> {
+    fn find_set<'a>(&'a self, prefixed_name: &'a str) -> Option<(&'a dyn ToolSet, &'a str)> {
         for set in &self.sets {
-            let prefix = format!("{}_", set.name);
+            let prefix = format!("{}_", set.name());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if set.tools.iter().any(|t| t.description.name == tool_name) {
-                    return Some((set, tool_name));
+                if set.tools().iter().any(|t| t.name == tool_name) {
+                    return Some((set.as_ref(), tool_name));
                 }
             }
         }
@@ -100,9 +124,9 @@ impl Catalog {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let (set, tool_name) = self
-            .find_set_and_tool(prefixed_name)
+            .find_set(prefixed_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
-        set.call_tool(tool_name, arguments).await
+        set.call(tool_name, arguments).await
     }
 }
 
@@ -113,15 +137,33 @@ pub struct ToolSets {
 impl ToolSets {
     #[tracing::instrument(name = "toolset.init", skip_all)]
     pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
-        let mut sets = Vec::new();
+        let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            sets.push(UpstreamToolSet::init(upstream).await?);
+            sets.push(Box::new(UpstreamToolSet::init(upstream).await?));
+        }
+
+        if config.concourse.enabled
+            && !config.concourse.url.is_empty()
+            && !config.concourse.username.is_empty()
+        {
+            let client = concourse_client::ConcourseClient::new(
+                &config.concourse.url,
+                config.concourse.team.clone(),
+                config.concourse.username.clone(),
+                config.concourse.password.clone(),
+            )?;
+            sets.push(Box::new(ConcourseToolSet::new(client)));
+            tracing::info!(url = %config.concourse.url, "Concourse toolset initialized");
         }
 
         Ok(Self {
             catalog: Catalog { sets },
         })
+    }
+
+    pub fn add_toolset(&mut self, toolset: Box<dyn ToolSet>) {
+        self.catalog.sets.push(toolset);
     }
 
     pub fn catalog(&self) -> &Catalog {

@@ -11,6 +11,7 @@ async fn init_toolsets() {
     };
 
     let config = ToolSetsConfig {
+        concourse: Default::default(),
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),

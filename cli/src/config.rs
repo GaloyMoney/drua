@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use galoy_agents_core::toolset::ToolSetsConfig;
-use galoy_agents_mcp_gateway::{CodeAssistantConfig, ConcourseConfig};
+use galoy_agents_mcp_gateway::CodeAssistantConfig;
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -17,8 +17,6 @@ pub struct Config {
     pub db: DbConfig,
     #[serde(default)]
     pub code_assistant: CodeAssistantConfig,
-    #[serde(default)]
-    pub concourse: ConcourseConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
@@ -141,12 +139,12 @@ impl Config {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }
 
-        // Concourse env overrides (credentials are never in the config file)
+        // Concourse toolset credentials from env
         if let Ok(val) = std::env::var("CONCOURSE_USERNAME") {
-            config.concourse.username = val;
+            config.toolsets.concourse.username = val;
         }
         if let Ok(val) = std::env::var("CONCOURSE_PASSWORD") {
-            config.concourse.password = val;
+            config.toolsets.concourse.password = val;
         }
 
         // Upstream MCP auth headers from env: {NAME}_AUTH_HEADER

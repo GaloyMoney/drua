@@ -75,11 +75,9 @@ pub fn router(search_engine: Arc<SearchEngine>) -> axum::Router {
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
-    let config = StreamableHttpServerConfig {
-        stateful_mode: false,
-        json_response: true,
-        ..Default::default()
-    };
+    let mut config = StreamableHttpServerConfig::default();
+    config.stateful_mode = false;
+    config.json_response = true;
 
     let service = StreamableHttpService::new(
         move || Ok(CodeAssistantServer::new(Arc::clone(&search_engine))),

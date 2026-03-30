@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use http::{HeaderName, HeaderValue};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResult, JsonObject, Tool},
+    model::{CallToolRequestParams, CallToolResult, JsonObject},
     service::RunningService,
     transport::streamable_http_client::{
         StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
@@ -10,19 +10,14 @@ use rmcp::{
     Peer, RoleClient, ServiceExt,
 };
 
-use super::{McpUpstreamConfig, ToolSetsError};
+use super::{McpUpstreamConfig, ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct UpstreamToolSet {
-    pub name: String,
-    pub url: String,
-    pub category: Option<String>,
-    pub category_description: Option<String>,
-    pub tools: Vec<UpstreamTool>,
+    name: String,
+    category: Option<String>,
+    category_description: Option<String>,
+    tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,
-}
-
-pub struct UpstreamTool {
-    pub description: Tool,
 }
 
 impl UpstreamToolSet {
@@ -47,12 +42,14 @@ impl UpstreamToolSet {
             .list_all_tools()
             .await?
             .into_iter()
-            .map(|description| UpstreamTool { description })
+            .map(|description| ToolSetEntry {
+                name: description.name.to_string(),
+                description,
+            })
             .collect();
 
         Ok(UpstreamToolSet {
             name: upstream.name.clone(),
-            url: upstream.url.clone(),
             category: upstream.category.clone(),
             category_description: upstream.category_description.clone(),
             tools,
@@ -60,16 +57,35 @@ impl UpstreamToolSet {
         })
     }
 
-    pub fn peer(&self) -> &Peer<RoleClient> {
+    fn peer(&self) -> &Peer<RoleClient> {
         self.client.peer()
     }
+}
 
-    pub async fn call_tool(
+#[async_trait::async_trait]
+impl ToolSet for UpstreamToolSet {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn category(&self) -> Option<&str> {
+        self.category.as_deref()
+    }
+
+    fn category_description(&self) -> Option<&str> {
+        self.category_description.as_deref()
+    }
+
+    fn tools(&self) -> &[ToolSetEntry] {
+        &self.tools
+    }
+
+    async fn call(
         &self,
-        name: &str,
+        tool_name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let mut params = CallToolRequestParams::new(name.to_string());
+        let mut params = CallToolRequestParams::new(tool_name.to_string());
         if let Some(args) = arguments {
             params = params.with_arguments(args);
         }

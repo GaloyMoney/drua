@@ -9,11 +9,11 @@ oauth:
   github_allowed_teams: []
 code_assistant:
   db_path: "./data/code-assistant.db"
-concourse:
-  enabled: true
-  url: https://ci.galoy.io
-  team: dev
 toolsets:
+  concourse:
+    enabled: true
+    url: https://ci.galoy.io
+    team: dev
   mcp_upstreams:
     - name: honeycomb
       url: https://mcp.honeycomb.io/mcp

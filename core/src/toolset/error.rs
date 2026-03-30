@@ -10,4 +10,8 @@ pub enum ToolSetsError {
     InvalidHeader(String),
     #[error("ToolSetsError - ToolNotFound: {0}")]
     ToolNotFound(String),
+    #[error("ToolSetsError - MissingArgument: {0}")]
+    MissingArgument(String),
+    #[error("ToolSetsError - Concourse: {0}")]
+    Concourse(#[from] concourse_client::ConcourseError),
 }
