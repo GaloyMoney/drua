@@ -73,12 +73,9 @@ async fn main() -> anyhow::Result<()> {
             &config.code_assistant,
             logger,
         )?;
-    let concourse_endpoints =
-        galoy_agents_mcp_gateway::ConcourseEndpoints::try_new(&config.concourse)?;
     let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(
         app.clone(),
         code_assistant_endpoints.clone(),
-        concourse_endpoints,
     );
 
     let sandbox_client = sandbox_client::SandboxClient::try_from_env(
