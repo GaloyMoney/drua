@@ -13,3 +13,9 @@ concourse:
   enabled: true
   url: https://ci.galoy.io
   team: dev
+toolsets:
+  mcp_upstreams:
+    - name: honeycomb
+      url: https://mcp.honeycomb.io/mcp
+      category: observability
+      category_description: "Distributed traces, SLOs, and query analysis"
