@@ -488,6 +488,37 @@ impl SandboxClient {
         Ok(attached)
     }
 
+    /// Exec into a Sandbox pod without TTY allocation.
+    ///
+    /// Unlike [`exec_sandbox`](Self::exec_sandbox), this uses raw stdin/stdout
+    /// without a pseudo-terminal.  Suitable for programmatic communication
+    /// (e.g. JSON-lines) where TTY escape codes would corrupt the data stream.
+    #[instrument(name = "sandbox_client.exec_sandbox_raw", skip_all, fields(%sandbox_name))]
+    pub async fn exec_sandbox_raw(
+        &self,
+        sandbox_name: &str,
+        command: Vec<String>,
+    ) -> Result<AttachedProcess, SandboxError> {
+        let pod_name = self.resolve_sandbox_pod(sandbox_name).await?;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let ap = AttachParams {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+            tty: false,
+            ..Default::default()
+        };
+        let attached = pods.exec(&pod_name, &command, &ap).await?;
+
+        tracing::info!(
+            sandbox = %sandbox_name,
+            pod = %pod_name,
+            "Raw exec session started (direct)"
+        );
+        Ok(attached)
+    }
+
     fn summary_from_sandbox(sandbox: &Sandbox) -> SandboxSummary {
         let name = sandbox
             .metadata

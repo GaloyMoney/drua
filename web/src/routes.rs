@@ -1,14 +1,20 @@
+use std::convert::Infallible;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    response::{IntoResponse, Redirect, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Redirect, Response,
+    },
     routing::{delete, get, post},
     Extension, Form, Json, Router,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_stream::wrappers::ReceiverStream;
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -800,6 +806,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/v1/sandboxes/{name}", get(api_get_sandbox))
         .route("/api/v1/sandboxes/{name}", delete(api_delete_sandbox))
         .route("/api/v1/sandboxes/{name}/exec", get(api_exec_sandbox))
+        .route(
+            "/api/v1/sandboxes/{name}/agent/message",
+            post(api_agent_message),
+        )
 }
 
 macro_rules! require_auth {
@@ -1063,4 +1073,134 @@ async fn exec_proxy(
     }
 
     tracing::info!(sandbox = %sandbox_name, "Exec proxy: session ended");
+}
+
+// ---------------------------------------------------------------------------
+// Agent harness – POST /api/v1/sandboxes/{name}/agent/message
+// ---------------------------------------------------------------------------
+
+/// Request body for the agent message endpoint.
+#[derive(Deserialize)]
+struct AgentMessageRequest {
+    prompt: String,
+    session_id: Option<String>,
+}
+
+/// Send a prompt to the Claude agent harness running inside a sandbox pod.
+///
+/// The harness is exec'd via the Kubernetes API (non-TTY). The prompt is
+/// written as a JSON-line to stdin; SDK events are streamed back as SSE.
+#[instrument(name = "api.sandbox.agent_message", skip_all, fields(%name))]
+async fn api_agent_message(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<AgentMessageRequest>,
+) -> Response {
+    require_auth!(auth);
+    let client = require_sandbox!(state).clone();
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    // Spawn the relay task that bridges pod stdout → SSE events.
+    tokio::spawn(async move {
+        if let Err(e) =
+            agent_message_relay(client, &name, &body.prompt, &body.session_id, tx.clone()).await
+        {
+            tracing::error!(error = %e, sandbox = %name, "Agent message relay failed");
+            let _ = tx
+                .send(Ok(Event::default().event("error").data(
+                    serde_json::json!({"type":"error","message": e.to_string()}).to_string(),
+                )))
+                .await;
+        }
+    });
+
+    let stream = ReceiverStream::new(rx);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Execute the agent harness inside the pod and relay stdout → SSE channel.
+async fn agent_message_relay(
+    client: std::sync::Arc<sandbox_client::SandboxClient>,
+    sandbox_name: &str,
+    prompt: &str,
+    session_id: &Option<String>,
+    tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Build the harness command.
+    let command = vec!["agent-harness".to_string()];
+
+    let mut process = client.exec_sandbox_raw(sandbox_name, command).await?;
+
+    // Write the prompt as a JSON-line to stdin.
+    let input_line = serde_json::json!({
+        "prompt": prompt,
+        "session_id": session_id,
+    });
+
+    let mut stdin = process
+        .stdin()
+        .ok_or("no stdin stream from agent harness")?;
+
+    let payload = format!("{}\n", input_line);
+    stdin.write_all(payload.as_bytes()).await?;
+    // Close stdin so the harness knows the message is complete.
+    drop(stdin);
+
+    // Read stdout line by line and emit SSE events.
+    let mut stdout = process
+        .stdout()
+        .ok_or("no stdout stream from agent harness")?;
+
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+
+    loop {
+        match stdout.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+
+                // Process complete lines from the buffer.
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=pos).collect();
+                    let line_str = String::from_utf8_lossy(&line).trim().to_string();
+                    if line_str.is_empty() {
+                        continue;
+                    }
+
+                    // Determine event type from the JSON if possible.
+                    let event_type = serde_json::from_str::<serde_json::Value>(&line_str)
+                        .ok()
+                        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+                        .unwrap_or_else(|| "message".to_string());
+
+                    let event = Event::default().event(&event_type).data(line_str);
+
+                    if tx.send(Ok(event)).await.is_err() {
+                        // Client disconnected.
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Agent harness stdout error");
+                break;
+            }
+        }
+    }
+
+    // Flush any remaining partial line in the buffer.
+    if !buf.is_empty() {
+        let line_str = String::from_utf8_lossy(&buf).trim().to_string();
+        if !line_str.is_empty() {
+            let event = Event::default().event("message").data(line_str);
+            let _ = tx.send(Ok(event)).await;
+        }
+    }
+
+    Ok(())
 }

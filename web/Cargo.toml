@@ -27,6 +27,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tower-service = "0.3"
 futures = { workspace = true }
 tokio = { version = "1", features = ["net", "io-util"] }
+tokio-stream = "0.1"
 tower-sessions = "0.15"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
