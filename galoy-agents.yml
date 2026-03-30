@@ -7,9 +7,9 @@ oauth:
   github_client_id: "Ov23li9ZTNnKjiTRwDcb"
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
-code_assistant:
-  db_path: "./data/code-assistant.db"
 toolsets:
+  code_assistant:
+    db_path: "./data/code-assistant.db"
   concourse:
     enabled: true
     url: https://ci.galoy.io

@@ -32,9 +32,9 @@ impl AppState {
         oauth_client: OAuthClient,
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
-        code_assistant: Option<CodeAssistantEndpoints>,
         sandbox: Option<SandboxClient>,
     ) -> Self {
+        let code_assistant = app.code_assistant().cloned();
         Self {
             app,
             oauth_client,

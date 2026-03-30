@@ -6,6 +6,14 @@ pub struct ToolSetsConfig {
     pub mcp_upstreams: Vec<McpUpstreamConfig>,
     #[serde(default)]
     pub concourse: ConcourseToolSetConfig,
+    #[serde(default)]
+    pub code_assistant: CodeAssistantToolSetConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CodeAssistantToolSetConfig {
+    #[serde(default)]
+    pub db_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

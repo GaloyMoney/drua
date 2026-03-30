@@ -1,9 +1,11 @@
+pub mod code_assistant;
 pub mod concourse;
 mod config;
 mod error;
 mod traits;
 mod upstream;
 
+pub use code_assistant::CodeAssistantToolSet;
 pub use concourse::ConcourseToolSet;
 pub use config::*;
 pub use error::*;
@@ -136,10 +138,17 @@ pub struct ToolSets {
 
 impl ToolSets {
     #[tracing::instrument(name = "toolset.init", skip_all)]
-    pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
+    pub async fn init(
+        config: ToolSetsConfig,
+        logger: std::sync::Arc<dyn code_assistant_server::RequestLogger>,
+    ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
+            if upstream.auth_header.is_empty() {
+                tracing::warn!(name = %upstream.name, "Skipping upstream — no auth header set");
+                continue;
+            }
             match UpstreamToolSet::init(upstream).await {
                 Ok(ts) => {
                     tracing::info!(name = %upstream.name, "MCP upstream toolset initialized");
@@ -163,6 +172,18 @@ impl ToolSets {
             )?;
             sets.push(Box::new(ConcourseToolSet::new(client)));
             tracing::info!(url = %config.concourse.url, "Concourse toolset initialized");
+        }
+
+        if let Some(endpoints) = code_assistant_server::init_endpoints_with_logger(
+            &code_assistant_server::CodeAssistantConfig {
+                db_path: config.code_assistant.db_path.clone(),
+            },
+            logger,
+        )
+        .map_err(|e| ToolSetsError::CodeAssistant(e.to_string()))?
+        {
+            sets.push(Box::new(CodeAssistantToolSet::new(endpoints)));
+            tracing::info!("Code assistant toolset initialized");
         }
 
         Ok(Self {

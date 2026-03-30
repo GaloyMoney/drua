@@ -12,6 +12,7 @@ async fn init_toolsets() {
 
     let config = ToolSetsConfig {
         concourse: Default::default(),
+        code_assistant: Default::default(),
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),
@@ -20,7 +21,9 @@ async fn init_toolsets() {
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
         }],
     };
-    let toolsets = ToolSets::init(config).await.unwrap();
+    let logger: std::sync::Arc<dyn code_assistant_server::RequestLogger> =
+        std::sync::Arc::new(code_assistant_server::NoopRequestLogger);
+    let toolsets = ToolSets::init(config, logger).await.unwrap();
     let catalog = toolsets.catalog();
 
     // search_tools

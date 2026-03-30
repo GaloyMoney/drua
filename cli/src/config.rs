@@ -3,7 +3,6 @@ use std::path::Path;
 use serde::Deserialize;
 
 use galoy_agents_core::toolset::ToolSetsConfig;
-use galoy_agents_mcp_gateway::CodeAssistantConfig;
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
@@ -15,8 +14,6 @@ pub struct Config {
     pub oauth: OAuthConfig,
     #[serde(default)]
     pub db: DbConfig,
-    #[serde(default)]
-    pub code_assistant: CodeAssistantConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]

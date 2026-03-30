@@ -7,8 +7,6 @@ edition.workspace = true
 
 [dependencies]
 galoy-agents-core = { path = "../core" }
-code-assistant-server = { workspace = true }
-anyhow = { workspace = true }
 axum = { workspace = true }
 http = "1"
 rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "macros"] }
