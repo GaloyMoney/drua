@@ -4,8 +4,8 @@ mod error;
 mod traits;
 mod upstream;
 
-pub use config::*;
 pub use concourse::ConcourseToolSet;
+pub use config::*;
 pub use error::*;
 pub use traits::*;
 pub use upstream::*;

@@ -165,7 +165,8 @@ impl ToolSet for ConcourseToolSet {
                             obj["last_status"] = serde_json::json!(b.status);
                         }
                         if let Some(b) = &j.next_build {
-                            obj["current_build"] = serde_json::json!({"id": b.id, "status": b.status});
+                            obj["current_build"] =
+                                serde_json::json!({"id": b.id, "status": b.status});
                         }
                         obj
                     })
@@ -196,10 +197,7 @@ impl ToolSet for ConcourseToolSet {
             }
             "get_build_logs" => {
                 let build_id = int_arg(&args, "build_id")?;
-                let tail = args
-                    .get("tail")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(150) as usize;
+                let tail = args.get("tail").and_then(|v| v.as_i64()).unwrap_or(150) as usize;
                 let logs = self.client.get_build_logs(build_id).await?;
                 if logs.is_empty() {
                     return Ok(CallToolResult::success(vec![Content::text(
@@ -251,10 +249,7 @@ impl ToolSet for ConcourseToolSet {
             "list_builds_for_job" => {
                 let pipeline = str_arg(&args, "pipeline")?;
                 let job = str_arg(&args, "job")?;
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(10) as usize;
+                let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(10) as usize;
                 let builds = self
                     .client
                     .list_job_builds(pipeline, job, Some(limit))
@@ -323,7 +318,10 @@ fn str_arg<'a>(args: &'a JsonObject, key: &str) -> Result<&'a str, ToolSetsError
 
 fn int_arg(args: &JsonObject, key: &str) -> Result<i64, ToolSetsError> {
     args.get(key)
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
 }
 

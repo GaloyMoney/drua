@@ -38,6 +38,11 @@ galoyAgents:
       enabled: false
       url: ""
       team: ""
+    mcpUpstreams: []
+    # - name: honeycomb
+    #   url: https://mcp.honeycomb.io/mcp
+    #   category: observability
+    #   categoryDescription: "Distributed traces, SLOs, and query analysis"
   secrets:
     create: true
     pgCon: ""

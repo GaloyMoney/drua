@@ -21,10 +21,24 @@ data:
     {{- end }}
     code_assistant:
       db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}
-    concourse:
-      enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
-      url: {{ .Values.galoyAgents.config.concourse.url | quote }}
-      team: {{ .Values.galoyAgents.config.concourse.team | quote }}
+    toolsets:
+      concourse:
+        enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
+        url: {{ .Values.galoyAgents.config.concourse.url | quote }}
+        team: {{ .Values.galoyAgents.config.concourse.team | quote }}
+      {{- if .Values.galoyAgents.config.mcpUpstreams }}
+      mcp_upstreams:
+      {{- range .Values.galoyAgents.config.mcpUpstreams }}
+        - name: {{ .name | quote }}
+          url: {{ .url | quote }}
+          {{- if .category }}
+          category: {{ .category | quote }}
+          {{- end }}
+          {{- if .categoryDescription }}
+          category_description: {{ .categoryDescription | quote }}
+          {{- end }}
+      {{- end }}
+      {{- end }}
     sandbox:
       enabled: {{ .Values.sandbox.enabled }}
       namespace: {{ include "galoyAgents.sandboxNamespace" . | quote }}

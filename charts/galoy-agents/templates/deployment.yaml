@@ -137,6 +137,14 @@ spec:
               name: {{ template "galoyAgents.fullname" . }}
               key: "concourse-password"
               optional: true
+        {{- range .Values.galoyAgents.config.mcpUpstreams }}
+        - name: {{ .name | upper }}_AUTH_HEADER
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" $ }}
+              key: {{ printf "%s-auth-header" .name | quote }}
+              optional: true
+        {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:

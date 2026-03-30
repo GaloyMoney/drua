@@ -191,8 +191,8 @@ impl McpGateway {
             .description
             .as_deref()
             .unwrap_or("No description available.");
-        let schema = serde_json::to_string_pretty(&tool.input_schema)
-            .unwrap_or_else(|_| "{}".to_string());
+        let schema =
+            serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
 
         let text = format!(
             "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\nUse call_tool(\"{}\", {{...}}) to execute.",

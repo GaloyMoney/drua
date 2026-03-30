@@ -3,6 +3,9 @@ variable "sandbox_base_image_digest" {}
 variable "github_client_secret" {}
 variable "concourse_username" {}
 variable "concourse_password" {}
+variable "honeycomb_api_key" {
+  default = ""
+}
 
 locals {
   cluster_name         = "galoy-agents-cluster"
@@ -59,6 +62,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "gcs-creds"            = file("${path.module}/gcs-creds.json")
     "concourse-username"   = var.concourse_username
     "concourse-password"   = var.concourse_password
+    "honeycomb-auth-header" = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
