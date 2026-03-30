@@ -15,7 +15,7 @@ async fn init_toolsets() {
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),
-            auth_header: auth_header,
+            auth_header,
             category: Some("observability".to_string()),
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
         }],

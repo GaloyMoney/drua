@@ -36,7 +36,7 @@ impl UpstreamToolSet {
 
         let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), transport_config);
 
-        let client = ().serve(worker).await?;
+        let client = ().serve(worker).await.map_err(Box::new)?;
 
         let tools = client
             .list_all_tools()
