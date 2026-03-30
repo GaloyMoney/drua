@@ -6,6 +6,7 @@ use galoy_agents_core::toolset::ToolSetsConfig;
 use galoy_agents_web::auth::config::AuthConfig;
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,

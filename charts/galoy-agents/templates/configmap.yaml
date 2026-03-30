@@ -19,9 +19,9 @@ data:
         - {{ . | quote }}
       {{- end }}
     {{- end }}
-    code_assistant:
-      db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}
     toolsets:
+      code_assistant:
+        db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}
       concourse:
         enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
         url: {{ .Values.galoyAgents.config.concourse.url | quote }}
