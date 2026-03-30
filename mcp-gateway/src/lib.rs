@@ -78,12 +78,14 @@ struct SearchToolsParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct DescribeToolParams {
     /// The tool name returned from search_tools (e.g., 'honeycomb_list_environments')
+    #[serde(alias = "name")]
     tool_name: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct CallToolParams {
     /// The prefixed tool name (e.g., 'honeycomb_list_environments')
+    #[serde(alias = "name")]
     tool_name: String,
     /// Tool arguments matching the schema from describe_tool
     #[serde(default)]
