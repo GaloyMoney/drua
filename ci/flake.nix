@@ -66,7 +66,7 @@
         MODEL_DIR="''${4:-}"
 
         export CODE_ASSISTANT_CONFIG="$(pwd)/ci/config.code-assistant.toml"
-        export PATH="${pkgs.lib.makeBinPath [ code-assistant ]}:$PATH"
+        export PATH="${pkgs.lib.makeBinPath [ code-assistant pkgs.coreutils pkgs.findutils pkgs.gnutar pkgs.gzip ]}:$PATH"
 
         cd code-assistant
 
