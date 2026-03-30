@@ -52,7 +52,7 @@ galoyAgents:
     annotations:
   codeAssistant:
     indexHash: "b4def06b9675f67957c7cdc792142feb99e990cd1c0ebadbe3a1c4efa3de658b"
-    embedderHash: ""
+    embedderHash: "cafb5f44fabcd69b20af172d93a06aed5adedf7618ea363c3015bb2676560730"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
     initImage: google/cloud-sdk:slim
