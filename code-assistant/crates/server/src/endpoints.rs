@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use code_assistant_core::request_log::RequestLogEntry;
 use code_assistant_core::search::SearchEngine;
-use code_assistant_core::store::SearchResult;
+use code_assistant_core::store::{SearchResult, KNOWN_PRIMARY_LABELS};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::schemars;
 
@@ -83,6 +83,21 @@ impl CodeAssistantEndpoints {
         &self,
         params: SearchCodeParams,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Validate label filter before querying
+        if let Some(ref label) = params.label {
+            if label != "none" && !KNOWN_PRIMARY_LABELS.contains(&label.as_str()) {
+                let valid: Vec<&str> = KNOWN_PRIMARY_LABELS
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once("none"))
+                    .collect();
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Invalid label filter '{label}'. Valid labels: {}",
+                    valid.join(", ")
+                ))]));
+            }
+        }
+
         let start = Instant::now();
         let limit = params.limit.unwrap_or(10);
         let repo_filter = params.repo.as_deref();

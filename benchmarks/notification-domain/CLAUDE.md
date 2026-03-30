@@ -40,7 +40,7 @@
 ## Code Assistant MCP
 When writing Rust code in any repo, use the code assistant MCP tool if available:
 - `search_code` — semantic search over indexed codebases (use code-as-query to find matching patterns, then adopt the style from the found examples)
-- **Always pass a `label` filter** for precise results. Available labels: `entity`, `entity_event`, `entity_command`, `entity_hydration`, `error`, `service`, `repository`, `domain_primitives`, `graphql_endpoint`, `builder_pattern`, `configuration`, `test`
+- **Always pass a `label` filter** for precise results. Available labels: `entity`, `entity_event`, `entity_command`, `entity_query`, `entity_hydration`, `error`, `service`, `service_method`, `repository`, `domain_primitives`, `value_object`, `type_conversion`, `config`, `test`, `api`, `job`, `event_handler`, `authorization`, `published_event`, `new_entity`, `none` (unlabeled chunks)
 - Use code snippets as queries (not natural language) for best similarity scores
 The code assistant runs on `http://127.0.0.1:9222/mcp`. Always prefer calling this tool over guessing conventions.
 
