@@ -98,6 +98,10 @@ resource "google_container_node_pool" "gvisor" {
     auto_repair  = true
     auto_upgrade = true
   }
+
+  lifecycle {
+    ignore_changes = [node_count]
+  }
 }
 
 # ---------------------------------------------------------------------------
