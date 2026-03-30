@@ -61,6 +61,11 @@ galoyAgents:
     #     - issue_read
     #     - list_issues
     #     - search_issues
+    # - name: lingo
+    #   url: https://mcp.lingo.dev/account
+    #   authHeaderName: x-api-key
+    #   category: localization
+    #   categoryDescription: "AI-powered localization engine management and translation"
   secrets:
     create: true
     pgCon: ""
