@@ -18,6 +18,8 @@ async fn init_toolsets() {
             auth_header,
             category: Some("observability".to_string()),
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
+            tool_prefix: None,
+            allowed_tools: None,
         }],
     };
     let toolsets = ToolSets::init(config).await.unwrap();

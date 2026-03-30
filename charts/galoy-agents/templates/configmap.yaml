@@ -37,6 +37,15 @@ data:
           {{- if .categoryDescription }}
           category_description: {{ .categoryDescription | quote }}
           {{- end }}
+          {{- if .toolPrefix }}
+          tool_prefix: {{ .toolPrefix | quote }}
+          {{- end }}
+          {{- if .allowedTools }}
+          allowed_tools:
+          {{- range .allowedTools }}
+            - {{ . | quote }}
+          {{- end }}
+          {{- end }}
       {{- end }}
       {{- end }}
     sandbox:

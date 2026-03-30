@@ -10,6 +10,10 @@ pub struct ToolSetEntry {
 #[async_trait::async_trait]
 pub trait ToolSet: Send + Sync {
     fn name(&self) -> &str;
+    /// Prefix used for tool names in the catalog.  Defaults to `name()`.
+    fn prefix(&self) -> &str {
+        self.name()
+    }
     fn category(&self) -> Option<&str>;
     fn category_description(&self) -> Option<&str>;
     fn tools(&self) -> &[ToolSetEntry];
