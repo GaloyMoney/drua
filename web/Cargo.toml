@@ -8,7 +8,6 @@ edition.workspace = true
 [dependencies]
 galoy-agents-core = { path = "../core" }
 sandbox-client = { workspace = true }
-code-assistant-server = { workspace = true }
 anyhow = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }

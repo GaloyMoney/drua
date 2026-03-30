@@ -12,6 +12,9 @@ pub use error::*;
 pub use traits::*;
 pub use upstream::*;
 
+use std::sync::Arc;
+
+use crate::code_assistant::CodeAssistant;
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 pub struct CatalogEntry {
@@ -140,7 +143,7 @@ impl ToolSets {
     #[tracing::instrument(name = "toolset.init", skip_all)]
     pub async fn init(
         config: ToolSetsConfig,
-        logger: std::sync::Arc<dyn code_assistant_server::RequestLogger>,
+        code_assistant: Option<Arc<CodeAssistant>>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
 
@@ -174,15 +177,8 @@ impl ToolSets {
             tracing::info!(url = %config.concourse.url, "Concourse toolset initialized");
         }
 
-        if let Some(endpoints) = code_assistant_server::init_endpoints_with_logger(
-            &code_assistant_server::CodeAssistantConfig {
-                db_path: config.code_assistant.db_path.clone(),
-            },
-            logger,
-        )
-        .map_err(|e| ToolSetsError::CodeAssistant(e.to_string()))?
-        {
-            sets.push(Box::new(CodeAssistantToolSet::new(endpoints)));
+        if let Some(ca) = code_assistant {
+            sets.push(Box::new(CodeAssistantToolSet::new(ca)));
             tracing::info!("Code assistant toolset initialized");
         }
 

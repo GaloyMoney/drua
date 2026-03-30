@@ -6,7 +6,7 @@ edition.workspace = true
 [lib]
 
 [dependencies]
-code-assistant-server = { workspace = true }
+code-assistant-core = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
 base64 = "0.22"
@@ -23,6 +23,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rmcp = { workspace = true }
 thiserror = "2.0"
+tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 

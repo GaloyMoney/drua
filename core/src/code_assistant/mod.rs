@@ -1,67 +1,101 @@
+mod config;
+mod error;
+pub mod logs;
+mod request_logger;
+
+pub use config::CodeAssistantConfig;
+pub use error::CodeAssistantError;
+pub(crate) use request_logger::RequestLogger;
+
+// Re-exports from code-assistant-core
+pub use code_assistant_core::request_log::RequestLogEntry;
+pub use code_assistant_core::search::SearchEngine;
+pub use code_assistant_core::store::{SearchResult, KNOWN_PRIMARY_LABELS};
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use code_assistant_core::request_log::RequestLogEntry;
-use code_assistant_core::search::SearchEngine;
-use code_assistant_core::store::{SearchResult, KNOWN_PRIMARY_LABELS};
-use rmcp::model::{CallToolResult, Content};
-use rmcp::schemars;
+use logs::CodeAssistantLogs;
 
-use crate::config::CodeAssistantConfig;
-use crate::request_logger::{NoopRequestLogger, RequestLogger};
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+/// Parameters for a code search query.
+#[derive(Debug, serde::Deserialize)]
 pub struct SearchCodeParams {
     /// The search query — use a code snippet for best results, not natural language
-    #[schemars(
-        description = "The search query. Pass a code snippet (e.g. the pattern you are about to write) for best results — code-as-query gives much better similarity matches than natural language"
-    )]
-    query: String,
-
+    pub query: String,
     /// Maximum number of results to return (default: 5)
-    #[schemars(description = "Maximum number of results to return (default: 5)")]
-    limit: Option<u64>,
-
+    pub limit: Option<u64>,
     /// Filter results to a specific repository
-    #[schemars(description = "Filter results to a specific repository name")]
-    repo: Option<String>,
-
+    pub repo: Option<String>,
     /// Filter results to a specific language (e.g. 'rust', 'bats', 'bash')
-    #[schemars(
-        description = "Filter results to a specific language (e.g. 'rust', 'bats', 'bash')"
-    )]
-    language: Option<String>,
-
+    pub language: Option<String>,
     /// Filter results to a specific primary label
-    #[schemars(
-        description = "Filter results to a specific primary label. Values: entity, entity_command, entity_query, entity_hydration, entity_event, published_event, new_entity, service_method, service, repository, error, authorization, value_object, domain_primitives, api, job, event_handler, type_conversion, test, config, none (unlabeled chunks)"
-    )]
-    label: Option<String>,
+    pub label: Option<String>,
 }
 
-/// Facade for code-assistant endpoints, to be held by the MCP gateway.
+/// Code assistant service — holds the search engine and logger.
 #[derive(Clone)]
-pub struct CodeAssistantEndpoints {
-    pub(crate) search_engine: Arc<SearchEngine>,
-    pub(crate) logger: Arc<dyn RequestLogger>,
+pub struct CodeAssistant {
+    search_engine: Arc<SearchEngine>,
+    logs: Arc<CodeAssistantLogs>,
 }
 
-impl std::fmt::Debug for CodeAssistantEndpoints {
+impl std::fmt::Debug for CodeAssistant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CodeAssistantEndpoints")
+        f.debug_struct("CodeAssistant")
             .field("search_engine", &self.search_engine)
             .finish_non_exhaustive()
     }
 }
 
-impl CodeAssistantEndpoints {
-    /// Create endpoints with a custom [`RequestLogger`] implementation.
-    pub fn with_logger(search_engine: Arc<SearchEngine>, logger: Arc<dyn RequestLogger>) -> Self {
-        Self {
-            search_engine,
-            logger,
-        }
+/// Initialise the code assistant from config.
+///
+/// Returns `Ok(None)` when `db_path` is empty (code assistant disabled).
+pub fn init(
+    pool: &sqlx::PgPool,
+    config: &CodeAssistantConfig,
+) -> Result<Option<CodeAssistant>, CodeAssistantError> {
+    use code_assistant_core::embedder::Embedder;
+    use code_assistant_core::store::VectorStore;
+
+    if config.db_path.is_empty() {
+        tracing::info!("Code assistant disabled (db_path is empty)");
+        return Ok(None);
+    }
+
+    let db = std::path::Path::new(&config.db_path);
+    if !db.exists() {
+        tracing::warn!(
+            db_path = %config.db_path,
+            "Code assistant database not found — run 'nix run .#prep-code-assistant' to bootstrap"
+        );
+        return Ok(None);
+    }
+
+    tracing::info!(db_path = %config.db_path, "Code assistant database found");
+
+    let store = VectorStore::new(db).map_err(|e| CodeAssistantError::Init(e.to_string()))?;
+    store
+        .ensure_collection()
+        .map_err(|e| CodeAssistantError::Init(e.to_string()))?;
+    store
+        .ensure_anti_pattern_tables()
+        .map_err(|e| CodeAssistantError::Init(e.to_string()))?;
+
+    let embedder = Embedder::new().map_err(|e| CodeAssistantError::Init(e.to_string()))?;
+    let search_engine = Arc::new(SearchEngine::new(embedder, store));
+    let logs = Arc::new(CodeAssistantLogs::new(pool));
+
+    tracing::info!("Code assistant search engine ready");
+    Ok(Some(CodeAssistant {
+        search_engine,
+        logs,
+    }))
+}
+
+impl CodeAssistant {
+    pub fn logs(&self) -> &Arc<CodeAssistantLogs> {
+        &self.logs
     }
 
     /// Run a search and return the raw results (for the web dashboard).
@@ -70,19 +104,17 @@ impl CodeAssistantEndpoints {
         query: &str,
         limit: u64,
         label: Option<&str>,
-    ) -> Result<Vec<SearchResult>, anyhow::Error> {
+    ) -> Result<Vec<SearchResult>, CodeAssistantError> {
         let results = self
             .search_engine
             .search(query, limit, None, None, label, None, None)
-            .await?;
+            .await
+            .map_err(|e| CodeAssistantError::Search(e.to_string()))?;
         Ok(results)
     }
 
-    /// Execute a `search_code` query.
-    pub async fn search_code(
-        &self,
-        params: SearchCodeParams,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Execute a `search_code` query, returning formatted text.
+    pub async fn search(&self, params: SearchCodeParams) -> Result<String, CodeAssistantError> {
         // Validate label filter before querying
         if let Some(ref label) = params.label {
             if label != "none" && !KNOWN_PRIMARY_LABELS.contains(&label.as_str()) {
@@ -91,10 +123,10 @@ impl CodeAssistantEndpoints {
                     .copied()
                     .chain(std::iter::once("none"))
                     .collect();
-                return Ok(CallToolResult::success(vec![Content::text(format!(
+                return Ok(format!(
                     "Invalid label filter '{label}'. Valid labels: {}",
                     valid.join(", ")
-                ))]));
+                ));
             }
         }
 
@@ -133,7 +165,7 @@ impl CodeAssistantEndpoints {
                 let results_json = build_results_json(&results);
 
                 fire_and_forget_log(
-                    &self.logger,
+                    &(self.logs.clone() as Arc<dyn RequestLogger>),
                     "search_code",
                     &params.query,
                     &filters,
@@ -145,17 +177,14 @@ impl CodeAssistantEndpoints {
                 );
 
                 if results.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "No matching code patterns found.",
-                    )]));
+                    return Ok("No matching code patterns found.".to_string());
                 }
 
-                let formatted = format_search_results(&results);
-                Ok(CallToolResult::success(vec![Content::text(formatted)]))
+                Ok(format_search_results(&results))
             }
             Err(e) => {
                 fire_and_forget_log(
-                    &self.logger,
+                    &(self.logs.clone() as Arc<dyn RequestLogger>),
                     "search_code",
                     &params.query,
                     &filters,
@@ -165,73 +194,10 @@ impl CodeAssistantEndpoints {
                     Some(&e.to_string()),
                     None,
                 );
-                Err(rmcp::ErrorData::internal_error(
-                    format!("Search failed: {e}"),
-                    None,
-                ))
+                Err(CodeAssistantError::Search(format!("Search failed: {e}")))
             }
         }
     }
-}
-
-/// Initialise the code-assistant endpoints from config (standalone SQLite logger).
-///
-/// Returns `Ok(None)` when `db_path` is empty — code assistant is disabled and
-/// the server starts normally without it.  Returns `Ok(Some(...))` on success.
-/// Returns `Err(...)` when `db_path` is set but initialisation fails — the
-/// caller should treat this as a hard error.
-pub fn init_endpoints(
-    config: &CodeAssistantConfig,
-) -> anyhow::Result<Option<CodeAssistantEndpoints>> {
-    let logger: Arc<dyn RequestLogger> = Arc::new(NoopRequestLogger);
-    init_endpoints_inner(config, logger)
-}
-
-/// Initialise endpoints with an external logger.
-///
-/// Returns `Ok(None)` when `db_path` is empty (code assistant disabled).
-pub fn init_endpoints_with_logger(
-    config: &CodeAssistantConfig,
-    logger: Arc<dyn RequestLogger>,
-) -> anyhow::Result<Option<CodeAssistantEndpoints>> {
-    init_endpoints_inner(config, logger)
-}
-
-fn init_endpoints_inner(
-    config: &CodeAssistantConfig,
-    logger: Arc<dyn RequestLogger>,
-) -> anyhow::Result<Option<CodeAssistantEndpoints>> {
-    use code_assistant_core::embedder::Embedder;
-    use code_assistant_core::store::VectorStore;
-
-    if config.db_path.is_empty() {
-        tracing::info!("Code assistant disabled (db_path is empty)");
-        return Ok(None);
-    }
-
-    let db = std::path::Path::new(&config.db_path);
-    if db.exists() {
-        tracing::info!(db_path = %config.db_path, "Code assistant database found");
-    } else {
-        tracing::warn!(
-            db_path = %config.db_path,
-            "Code assistant database not found — run 'nix run .#prep-code-assistant' to bootstrap"
-        );
-        return Ok(None);
-    }
-
-    let store = VectorStore::new(db)?;
-    store.ensure_collection()?;
-    store.ensure_anti_pattern_tables()?;
-
-    let embedder = Embedder::new()?;
-    let search_engine = Arc::new(SearchEngine::new(embedder, store));
-
-    tracing::info!("Code assistant search engine ready");
-    Ok(Some(CodeAssistantEndpoints {
-        search_engine,
-        logger,
-    }))
 }
 
 /// Generate an ISO 8601 UTC timestamp string.
@@ -254,7 +220,6 @@ fn iso8601_now() -> String {
 
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_date(days: u64) -> (u64, u64, u64) {
-    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     let z = days + 719468;
     let era = z / 146097;
     let doe = z - era * 146097;
@@ -268,7 +233,6 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-/// Build a compact JSON summary of returned search results for logging.
 fn build_results_json(results: &[SearchResult]) -> String {
     let summaries: Vec<serde_json::Value> = results
         .iter()
@@ -286,7 +250,6 @@ fn build_results_json(results: &[SearchResult]) -> String {
     serde_json::to_string(&summaries).unwrap_or_default()
 }
 
-/// Fire-and-forget: spawn an async task to INSERT the log entry.
 #[allow(clippy::too_many_arguments)]
 fn fire_and_forget_log(
     logger: &Arc<dyn RequestLogger>,
@@ -322,7 +285,6 @@ fn fire_and_forget_log(
 fn format_search_results(results: &[SearchResult]) -> String {
     let mut output = format!("Found {} matching code patterns:\n", results.len());
 
-    // Build label distribution summary
     let mut label_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for r in results {
         let label = r.labels.first().map(|s| s.as_str()).unwrap_or("unlabeled");
@@ -340,7 +302,7 @@ fn format_search_results(results: &[SearchResult]) -> String {
 
     for (i, result) in results.iter().enumerate() {
         output.push_str(&format!(
-            "### Result {} — `{}` ({})\n",
+            "### Result {} \u{2014} `{}` ({})\n",
             i + 1,
             result.file_path,
             result.repo,
