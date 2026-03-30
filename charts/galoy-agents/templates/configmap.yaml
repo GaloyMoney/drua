@@ -31,6 +31,9 @@ data:
       {{- range .Values.galoyAgents.config.mcpUpstreams }}
         - name: {{ .name | quote }}
           url: {{ .url | quote }}
+          {{- if .authHeaderName }}
+          auth_header_name: {{ .authHeaderName | quote }}
+          {{- end }}
           {{- if .category }}
           category: {{ .category | quote }}
           {{- end }}

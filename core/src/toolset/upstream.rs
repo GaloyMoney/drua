@@ -27,7 +27,8 @@ impl UpstreamToolSet {
     ) -> Result<UpstreamToolSet, ToolSetsError> {
         let mut headers = HashMap::new();
         headers.insert(
-            HeaderName::from_static("authorization"),
+            HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
+                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
             HeaderValue::from_str(&upstream.auth_header)
                 .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
         );

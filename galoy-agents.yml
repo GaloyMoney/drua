@@ -37,3 +37,8 @@ toolsets:
         - issue_read
         - list_issues
         - search_issues
+    - name: lingo
+      url: https://mcp.lingo.dev/account
+      auth_header_name: x-api-key
+      category: localization
+      category_description: "AI-powered localization engine management and translation"

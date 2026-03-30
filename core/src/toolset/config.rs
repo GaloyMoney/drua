@@ -22,6 +22,8 @@ pub struct McpUpstreamConfig {
     pub url: String,
     #[serde(skip)]
     pub auth_header: String,
+    #[serde(default = "default_auth_header_name")]
+    pub auth_header_name: String,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
@@ -32,6 +34,10 @@ pub struct McpUpstreamConfig {
     /// Optional whitelist of tool names to expose from this upstream.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+}
+
+fn default_auth_header_name() -> String {
+    "authorization".to_string()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
