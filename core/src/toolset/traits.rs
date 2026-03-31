@@ -14,8 +14,8 @@ pub trait ToolSet: Send + Sync {
     fn prefix(&self) -> &str {
         self.name()
     }
-    fn category(&self) -> Option<&str>;
-    fn category_description(&self) -> Option<&str>;
+    fn category(&self) -> &str;
+    fn category_description(&self) -> &str;
     fn tools(&self) -> &[ToolSetEntry];
     async fn call(
         &self,

@@ -120,7 +120,7 @@ impl McpGateway {
         let mut lines = Vec::new();
         let mut current_category: Option<&str> = None;
         for entry in &results {
-            let cat = entry.category.as_deref().unwrap_or("uncategorized");
+            let cat = entry.category.as_str();
             if current_category != Some(cat) {
                 if !lines.is_empty() {
                     lines.push(String::new());
@@ -174,7 +174,7 @@ impl McpGateway {
             "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\nUse call_tool(\"{}\", {{...}}) to execute.",
             entry.prefixed_name,
             entry.upstream_name,
-            entry.category.as_deref().unwrap_or("uncategorized"),
+            entry.category,
             description,
             schema,
             entry.prefixed_name,

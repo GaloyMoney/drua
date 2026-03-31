@@ -115,12 +115,12 @@ impl ToolSet for ConcourseToolSet {
         "concourse"
     }
 
-    fn category(&self) -> Option<&str> {
-        Some("ci")
+    fn category(&self) -> &str {
+        "ci"
     }
 
-    fn category_description(&self) -> Option<&str> {
-        Some("CI/CD pipelines, builds, and jobs")
+    fn category_description(&self) -> &str {
+        "CI/CD pipelines, builds, and jobs"
     }
 
     fn tools(&self) -> &[ToolSetEntry] {
