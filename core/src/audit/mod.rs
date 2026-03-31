@@ -7,11 +7,11 @@ pub use error::*;
 pub use primitives::*;
 
 #[derive(Clone)]
-pub struct AuditEntries {
+pub struct Audit {
     pool: sqlx::PgPool,
 }
 
-impl AuditEntries {
+impl Audit {
     pub fn new(pool: &sqlx::PgPool) -> Self {
         Self { pool: pool.clone() }
     }

@@ -14,7 +14,7 @@ pub use upstream::*;
 
 use std::sync::Arc;
 
-use crate::audit::{AuditEntries, InteractionOutcome};
+use crate::audit::{Audit, InteractionOutcome};
 use crate::auth::AuthContext;
 use crate::code_assistant::CodeAssistant;
 use rmcp::model::{CallToolResult, JsonObject, Tool};
@@ -32,13 +32,13 @@ pub struct CatalogEntry {
 /// request-scoped handle that records audit entries automatically.
 pub struct Catalog {
     sets: Arc<Vec<Box<dyn ToolSet>>>,
-    audit: Option<AuditEntries>,
+    audit: Option<Arc<Audit>>,
     auth: Option<AuthContext>,
 }
 
 impl Catalog {
     /// Create a request-scoped catalog that records audit entries under the
-    /// given [`AuthContext`]. Cheap — only clones an `Arc` and the pool handle.
+    /// given [`AuthContext`]. Cheap — only clones `Arc`s.
     pub fn with_auth(&self, auth: &AuthContext) -> Self {
         Self {
             sets: Arc::clone(&self.sets),
@@ -231,7 +231,7 @@ impl ToolSets {
     pub async fn init(
         config: ToolSetsConfig,
         code_assistant: Option<Arc<CodeAssistant>>,
-        audit: Option<AuditEntries>,
+        audit: Option<Arc<Audit>>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
 
@@ -282,12 +282,6 @@ impl ToolSets {
                 auth: None,
             },
         })
-    }
-
-    pub fn add_toolset(&mut self, toolset: Box<dyn ToolSet>) {
-        Arc::get_mut(&mut self.catalog.sets)
-            .expect("add_toolset called after catalog was shared")
-            .push(toolset);
     }
 
     pub fn catalog(&self) -> &Catalog {
