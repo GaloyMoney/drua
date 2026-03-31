@@ -1,0 +1,20 @@
+<article>
+  <header>
+    <h3>{{ memory.title }}</h3>
+    <small>
+      ID: <code>{{ memory.id }}</code>
+      {% if memory.pinned %} | <span class="badge badge-pinned">pinned</span>{% endif %}
+    </small>
+  </header>
+  {% if !memory.tags.is_empty() %}
+  <p>
+    {% for tag in memory.tags.split(", ") %}
+      {% if !tag.is_empty() %}<span class="badge badge-tag">{{ tag }}</span>{% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+  <div class="memory-content">{{ memory.content }}</div>
+  <footer>
+    <small>Created: {{ memory.created_at }}</small>
+  </footer>
+</article>

@@ -16,4 +16,6 @@ pub enum ToolSetsError {
     Concourse(#[from] concourse_client::ConcourseError),
     #[error("ToolSetsError - CodeAssistant: {0}")]
     CodeAssistant(String),
+    #[error("ToolSetsError - Memory: {0}")]
+    Memory(String),
 }

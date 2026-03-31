@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Memories — Galoy Agents{% endblock %}
+
+{% block nav_memories %}class="active"{% endblock %}
+
+{% block head %}
+<style>
+  .badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 1rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-pinned {
+    background: var(--pico-ins-color);
+    color: white;
+  }
+  .badge-tag {
+    background: var(--pico-muted-border-color);
+    color: var(--pico-color);
+    margin-right: 0.25rem;
+  }
+  .memory-content {
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    max-height: 300px;
+    overflow-y: auto;
+    background: var(--pico-code-background-color);
+    padding: 0.75rem;
+    border-radius: var(--pico-border-radius);
+  }
+  .score-info {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2>Memories</h2>
+
+{% if !enabled %}
+<p>Memory service is not enabled. Set <code>toolsets.memory.enabled: true</code> in configuration.</p>
+{% else %}
+
+<section>
+  <h3>Search Memories</h3>
+  <form hx-get="/memories/search" hx-target="#results-area" hx-swap="innerHTML"
+        hx-indicator="#search-spinner">
+    <div style="display: flex; gap: 1rem; align-items: end;">
+      <label style="flex: 1;">
+        Query
+        <input type="text" name="q" placeholder="Search memories..." required>
+      </label>
+      <button type="submit" style="width: auto; margin-bottom: 0;">Search</button>
+    </div>
+  </form>
+  <span id="search-spinner" class="htmx-indicator" aria-busy="true"></span>
+</section>
+
+<section>
+  <h3>Recent Memories</h3>
+  <div id="results-area"
+       hx-get="/memories/list" hx-trigger="load" hx-swap="innerHTML">
+    <p aria-busy="true">Loading...</p>
+  </div>
+</section>
+
+{% endif %}
+{% endblock %}

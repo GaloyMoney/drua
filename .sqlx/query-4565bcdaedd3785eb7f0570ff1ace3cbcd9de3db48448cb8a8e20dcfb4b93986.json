@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO memories (id, title, created_at) VALUES ($1, $2, COALESCE($3, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4565bcdaedd3785eb7f0570ff1ace3cbcd9de3db48448cb8a8e20dcfb4b93986"
+}
