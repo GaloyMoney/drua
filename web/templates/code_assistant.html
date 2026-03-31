@@ -67,6 +67,36 @@
   @media (max-width: 900px) {
     .two-col { grid-template-columns: 1fr; }
   }
+  .origin-bar {
+    display: flex;
+    height: 1.2rem;
+    border-radius: var(--pico-border-radius);
+    overflow: hidden;
+    margin: 0.5rem 0;
+  }
+  .origin-bar > div { transition: width 0.3s ease; }
+  .origin-human { background: #388e3c; }
+  .origin-model { background: #1976d2; }
+  .origin-heuristic { background: #f57c00; }
+  .origin-legend {
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+    margin-top: 0.25rem;
+  }
+  .origin-legend span::before {
+    content: '';
+    display: inline-block;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 2px;
+    margin-right: 0.3rem;
+    vertical-align: middle;
+  }
+  .origin-legend .lg-human::before { background: #388e3c; }
+  .origin-legend .lg-model::before { background: #1976d2; }
+  .origin-legend .lg-heuristic::before { background: #f57c00; }
 </style>
 {% endblock %}
 
@@ -129,6 +159,40 @@
     <div class="stat-value">{{ stats.low_score_rate_fmt }}</div>
   </div>
 </div>
+
+<section>
+  <h3>Label Origins</h3>
+  <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));">
+    <div class="stat-card">
+      <div class="stat-label">Human</div>
+      <div class="stat-value">{{ label_origins.human }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Model</div>
+      <div class="stat-value">{{ label_origins.model }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Heuristic</div>
+      <div class="stat-value">{{ label_origins.heuristic }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Labelled</div>
+      <div class="stat-value">{{ label_origins.total }}</div>
+    </div>
+  </div>
+  {% if label_origins.total > 0 %}
+  <div class="origin-bar">
+    <div class="origin-human" style="width: {{ label_origins.human * 100 / label_origins.total }}%;"></div>
+    <div class="origin-model" style="width: {{ label_origins.model * 100 / label_origins.total }}%;"></div>
+    <div class="origin-heuristic" style="width: {{ label_origins.heuristic * 100 / label_origins.total }}%;"></div>
+  </div>
+  <div class="origin-legend">
+    <span class="lg-human">Human ({{ label_origins.human * 100 / label_origins.total }}%)</span>
+    <span class="lg-model">Model ({{ label_origins.model * 100 / label_origins.total }}%)</span>
+    <span class="lg-heuristic">Heuristic ({{ label_origins.heuristic * 100 / label_origins.total }}%)</span>
+  </div>
+  {% endif %}
+</section>
 
 <div class="tab-bar">
   <button class="active"

@@ -1,6 +1,6 @@
 use crate::embedder::Embedder;
 use crate::request_log::{RequestLogEntry, StatsResponse};
-use crate::store::{AntiPatternResult, SearchResult, VectorStore};
+use crate::store::{AntiPatternResult, LabelOriginCounts, SearchResult, VectorStore};
 
 /// High-level search combining the embedder and vector store.
 #[derive(Debug)]
@@ -69,5 +69,10 @@ impl SearchEngine {
     /// Query aggregated stats from the request log.
     pub fn query_stats(&self, low_score_threshold: f64) -> anyhow::Result<StatsResponse> {
         self.store.query_stats(low_score_threshold)
+    }
+
+    /// Count labelled chunks grouped by their origin.
+    pub fn label_origin_counts(&self) -> anyhow::Result<LabelOriginCounts> {
+        self.store.label_origin_counts()
     }
 }
