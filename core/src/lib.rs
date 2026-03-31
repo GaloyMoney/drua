@@ -35,12 +35,17 @@ impl App {
             },
         )
         .map_err(|e| AppError::CodeAssistant(e.to_string()))?;
-        let toolsets =
-            ToolSets::init(config.toolsets, code_assistant.clone().map(Arc::new)).await?;
+        let audit = AuditEntries::new(pool);
+        let toolsets = ToolSets::init(
+            config.toolsets,
+            code_assistant.clone().map(Arc::new),
+            Some(audit.clone()),
+        )
+        .await?;
         Ok(Self {
             users: Users::new(pool),
             agents: Agents::new(pool),
-            audit: AuditEntries::new(pool),
+            audit,
             code_assistant,
             toolsets: Arc::new(toolsets),
         })

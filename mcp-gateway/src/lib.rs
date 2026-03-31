@@ -7,7 +7,6 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
-use galoy_agents_core::audit::InteractionOutcome;
 use galoy_agents_core::auth::AuthContext;
 use galoy_agents_core::App;
 
@@ -37,9 +36,9 @@ impl McpGateway {
         )
     }
 
-    fn require_auth(parts: &http::request::Parts) -> Result<(), ErrorData> {
+    fn require_auth(parts: &http::request::Parts) -> Result<&AuthContext, ErrorData> {
         match parts.extensions.get::<AuthContext>() {
-            Some(AuthContext::Agent(_, _)) => Ok(()),
+            Some(auth @ AuthContext::Agent(_, _)) => Ok(auth),
             _ => Err(ErrorData::new(
                 ErrorCode::INVALID_REQUEST,
                 "Authentication required: provide a valid Bearer token",
@@ -106,9 +105,11 @@ impl McpGateway {
         Extension(parts): Extension<http::request::Parts>,
         Parameters(params): Parameters<SearchToolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        let catalog = self.catalog();
-        let results = catalog.search(params.query.as_deref(), params.category.as_deref());
+        let auth = Self::require_auth(&parts)?;
+        let catalog = self.catalog().with_auth(auth);
+        let results = catalog
+            .search(params.query.as_deref(), params.category.as_deref())
+            .await;
 
         if results.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -147,10 +148,10 @@ impl McpGateway {
         Extension(parts): Extension<http::request::Parts>,
         Parameters(params): Parameters<DescribeToolParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        let catalog = self.catalog();
+        let auth = Self::require_auth(&parts)?;
+        let catalog = self.catalog().with_auth(auth);
 
-        let entry = catalog.describe(&params.tool_name).ok_or_else(|| {
+        let entry = catalog.describe(&params.tool_name).await.ok_or_else(|| {
             ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -191,50 +192,19 @@ impl McpGateway {
         Extension(parts): Extension<http::request::Parts>,
         Parameters(params): Parameters<CallToolParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        Self::require_auth(&parts)?;
-        let catalog = self.catalog();
+        let auth = Self::require_auth(&parts)?;
+        let catalog = self.catalog().with_auth(auth);
 
-        let start = std::time::Instant::now();
-        let result = catalog
-            .call(&params.tool_name, params.arguments.clone())
-            .await;
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        // Fire-and-forget audit recording
-        if let Some(auth) = parts.extensions.get::<AuthContext>() {
-            let outcome = match &result {
-                Ok(_) => InteractionOutcome::Success,
-                Err(e) => InteractionOutcome::Error {
-                    message: e.to_string(),
-                },
-            };
-            let args_value = params
-                .arguments
-                .as_ref()
-                .map(|a| serde_json::Value::Object(a.clone()));
-            if let Err(e) = self
-                .app
-                .audit()
-                .record_mcp_call(
-                    auth,
-                    &params.tool_name,
-                    args_value.as_ref(),
-                    outcome,
-                    Some(duration_ms),
+        catalog
+            .call(&params.tool_name, params.arguments)
+            .await
+            .map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    e.to_string(),
+                    None::<serde_json::Value>,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to record audit entry for MCP call");
-            }
-        }
-
-        result.map_err(|e| {
-            ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                e.to_string(),
-                None::<serde_json::Value>,
-            )
-        })
+            })
     }
 }
 
