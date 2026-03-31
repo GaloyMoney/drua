@@ -23,7 +23,7 @@ pub struct CatalogEntry {
     pub prefixed_name: String,
     pub upstream_name: String,
     pub tool_name: String,
-    pub category: Option<String>,
+    pub category: String,
     pub brief_description: String,
     pub full_tool: Tool,
 }
@@ -57,8 +57,8 @@ impl Catalog {
             "Available toolsets:".to_string(),
         ];
         for set in self.sets.iter() {
-            let cat = set.category().unwrap_or("uncategorized");
-            let desc = set.category_description().unwrap_or("");
+            let cat = set.category();
+            let desc = set.category_description();
             let tool_count = set.tools().len();
             lines.push(format!(
                 "  {} ({}, {} tools) — {}",
@@ -85,7 +85,7 @@ impl Catalog {
                     prefixed_name: format!("{}_{}", set.prefix(), desc.name),
                     upstream_name: set.name().to_string(),
                     tool_name: desc.name.to_string(),
-                    category: set.category().map(String::from),
+                    category: set.category().to_string(),
                     brief_description: brief,
                     full_tool: desc.clone(),
                 });
@@ -100,11 +100,8 @@ impl Catalog {
             .into_iter()
             .filter(|e| {
                 if let Some(cat) = category {
-                    if cat != "all" {
-                        match &e.category {
-                            Some(c) if c == cat => {}
-                            _ => return false,
-                        }
+                    if cat != "all" && e.category != cat {
+                        return false;
                     }
                 }
                 if let Some(q) = query {

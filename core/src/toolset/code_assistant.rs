@@ -60,12 +60,12 @@ impl ToolSet for CodeAssistantToolSet {
         "code_assistant"
     }
 
-    fn category(&self) -> Option<&str> {
-        Some("code-quality")
+    fn category(&self) -> &str {
+        "code-quality"
     }
 
-    fn category_description(&self) -> Option<&str> {
-        Some("Code search, style review, anti-pattern detection")
+    fn category_description(&self) -> &str {
+        "Code search, style review, anti-pattern detection"
     }
 
     fn tools(&self) -> &[ToolSetEntry] {

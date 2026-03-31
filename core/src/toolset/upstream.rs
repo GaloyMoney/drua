@@ -15,8 +15,8 @@ use super::{McpUpstreamConfig, ToolSet, ToolSetEntry, ToolSetsError};
 pub struct UpstreamToolSet {
     name: String,
     tool_prefix: String,
-    category: Option<String>,
-    category_description: Option<String>,
+    category: String,
+    category_description: String,
     tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,
 }
@@ -64,8 +64,8 @@ impl UpstreamToolSet {
         Ok(UpstreamToolSet {
             name: upstream.name.clone(),
             tool_prefix,
-            category: upstream.category.clone(),
-            category_description: upstream.category_description.clone(),
+            category: upstream.category.clone().unwrap_or_default(),
+            category_description: upstream.category_description.clone().unwrap_or_default(),
             tools,
             client,
         })
@@ -86,12 +86,12 @@ impl ToolSet for UpstreamToolSet {
         &self.tool_prefix
     }
 
-    fn category(&self) -> Option<&str> {
-        self.category.as_deref()
+    fn category(&self) -> &str {
+        &self.category
     }
 
-    fn category_description(&self) -> Option<&str> {
-        self.category_description.as_deref()
+    fn category_description(&self) -> &str {
+        &self.category_description
     }
 
     fn tools(&self) -> &[ToolSetEntry] {
