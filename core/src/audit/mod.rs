@@ -33,6 +33,7 @@ impl Audit {
             metadata,
             outcome,
             duration_ms,
+            None,
         )
         .await
     }
@@ -46,6 +47,7 @@ impl Audit {
         arguments: Option<&serde_json::Value>,
         outcome: InteractionOutcome,
         duration_ms: Option<u64>,
+        tokens_returned: Option<u64>,
     ) -> Result<AuditEntry, AuditError> {
         let metadata = serde_json::json!({
             "tool_name": tool_name,
@@ -58,6 +60,7 @@ impl Audit {
             metadata,
             outcome,
             duration_ms,
+            tokens_returned,
         )
         .await
     }
@@ -75,6 +78,7 @@ impl Audit {
                 metadata AS "metadata: serde_json::Value",
                 outcome,
                 duration_ms,
+                tokens_returned,
                 recorded_at
             FROM audit_entries
             ORDER BY id DESC
@@ -103,6 +107,7 @@ impl Audit {
                 metadata AS "metadata: serde_json::Value",
                 outcome,
                 duration_ms,
+                tokens_returned,
                 recorded_at
             FROM audit_entries
             WHERE subject = $1
@@ -124,16 +129,18 @@ impl Audit {
         metadata: serde_json::Value,
         outcome: InteractionOutcome,
         duration_ms: Option<u64>,
+        tokens_returned: Option<u64>,
     ) -> Result<AuditEntry, AuditError> {
         let sub = subject.to_string();
         let itype = interaction_type.to_string();
         let out = outcome.to_string();
         let dur = duration_ms.map(|ms| ms as i64);
+        let tokens = tokens_returned.map(|t| t as i64);
 
         let row = sqlx::query_as!(
             AuditEntry,
-            r#"INSERT INTO audit_entries (subject, interaction_type, action, metadata, outcome, duration_ms)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            r#"INSERT INTO audit_entries (subject, interaction_type, action, metadata, outcome, duration_ms, tokens_returned)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING
                 id AS "id: AuditEntryId",
                 subject,
@@ -142,6 +149,7 @@ impl Audit {
                 metadata AS "metadata: serde_json::Value",
                 outcome,
                 duration_ms,
+                tokens_returned,
                 recorded_at"#,
             sub,
             itype,
@@ -149,6 +157,7 @@ impl Audit {
             metadata,
             out,
             dur,
+            tokens,
         )
         .fetch_one(&self.pool)
         .await?;

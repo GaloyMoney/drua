@@ -123,6 +123,7 @@ impl Catalog {
             serde_json::json!({ "query": query, "category": category }),
             InteractionOutcome::Success,
             None,
+            None,
         )
         .await;
 
@@ -146,6 +147,7 @@ impl Catalog {
             "describe_tool",
             serde_json::json!({ "tool_name": prefixed_name }),
             outcome,
+            None,
             None,
         )
         .await;
@@ -178,11 +180,17 @@ impl Catalog {
         let result = set.call(tool_name, arguments.clone()).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let outcome = match &result {
-            Ok(_) => InteractionOutcome::Success,
-            Err(e) => InteractionOutcome::Error {
-                message: e.to_string(),
-            },
+        let (outcome, tokens_returned) = match &result {
+            Ok(call_result) => {
+                let tokens = estimate_tokens(call_result);
+                (InteractionOutcome::Success, Some(tokens))
+            }
+            Err(e) => (
+                InteractionOutcome::Error {
+                    message: e.to_string(),
+                },
+                None,
+            ),
         };
         let args_value = arguments.map(serde_json::Value::Object);
         self.record_audit(
@@ -193,6 +201,7 @@ impl Catalog {
             }),
             outcome,
             Some(duration_ms),
+            tokens_returned,
         )
         .await;
 
@@ -207,10 +216,18 @@ impl Catalog {
         metadata: serde_json::Value,
         outcome: InteractionOutcome,
         duration_ms: Option<u64>,
+        tokens_returned: Option<u64>,
     ) {
         if let (Some(audit), Some(auth)) = (&self.audit, &self.auth) {
             if let Err(e) = audit
-                .record_mcp_call(auth, tool_name, Some(&metadata), outcome, duration_ms)
+                .record_mcp_call(
+                    auth,
+                    tool_name,
+                    Some(&metadata),
+                    outcome,
+                    duration_ms,
+                    tokens_returned,
+                )
                 .await
             {
                 tracing::warn!(error = %e, "Failed to record audit entry");
@@ -284,6 +301,19 @@ impl ToolSets {
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
     }
+}
+
+/// Estimate token count from a CallToolResult's text content (~4 chars per token).
+fn estimate_tokens(result: &CallToolResult) -> u64 {
+    let total_chars: usize = result
+        .content
+        .iter()
+        .map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => t.text.len(),
+            _ => 0,
+        })
+        .sum();
+    (total_chars / 4).max(1) as u64
 }
 
 fn first_sentence(s: &str) -> String {

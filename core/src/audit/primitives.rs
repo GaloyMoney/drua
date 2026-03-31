@@ -95,5 +95,6 @@ pub struct AuditEntry {
     pub metadata: serde_json::Value,
     pub outcome: String,
     pub duration_ms: Option<i64>,
+    pub tokens_returned: Option<i64>,
     pub recorded_at: chrono::DateTime<chrono::Utc>,
 }

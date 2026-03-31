@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO audit_entries (subject, interaction_type, action, metadata, outcome, duration_ms)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            RETURNING\n                id AS \"id: AuditEntryId\",\n                subject,\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                duration_ms,\n                recorded_at",
+  "query": "INSERT INTO audit_entries (subject, interaction_type, action, metadata, outcome, duration_ms, tokens_returned)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING\n                id AS \"id: AuditEntryId\",\n                subject,\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                duration_ms,\n                tokens_returned,\n                recorded_at",
   "describe": {
     "columns": [
       {
@@ -40,6 +40,11 @@
       },
       {
         "ordinal": 7,
+        "name": "tokens_returned",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
         "name": "recorded_at",
         "type_info": "Timestamptz"
       }
@@ -51,6 +56,7 @@
         "Varchar",
         "Jsonb",
         "Varchar",
+        "Int8",
         "Int8"
       ]
     },
@@ -62,8 +68,9 @@
       false,
       false,
       true,
+      true,
       false
     ]
   },
-  "hash": "54823b77389599c85486a3bfeefc8921c26ebbf9a35bdd998346561c9f49ded1"
+  "hash": "85e2fc089e20e9872e554f5819d47e79563456f91329e7e5dfe2f3b261cd2488"
 }

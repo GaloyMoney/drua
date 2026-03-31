@@ -242,6 +242,7 @@ async fn audit_entries(
                     action: entry.action,
                     outcome: entry.outcome,
                     duration_ms: entry.duration_ms,
+                    tokens_returned: entry.tokens_returned,
                     metadata: entry.metadata,
                     recorded_at: entry.recorded_at,
                 });

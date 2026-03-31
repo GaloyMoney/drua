@@ -84,6 +84,7 @@ pub struct AuditEntryView {
     pub action: String,
     pub outcome: String,
     pub duration_ms: Option<i64>,
+    pub tokens_returned: Option<i64>,
     pub metadata: serde_json::Value,
     pub recorded_at: chrono::DateTime<chrono::Utc>,
 }
