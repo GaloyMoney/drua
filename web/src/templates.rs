@@ -1,6 +1,7 @@
 use askama::Template;
 use askama_web::WebTemplate;
 
+use galoy_agents_core::audit::AuditEntry;
 use galoy_agents_core::code_assistant::logs::{CodeAssistantRequestRow, DashboardStats};
 
 pub struct AgentView {
@@ -72,6 +73,16 @@ pub struct CodeAssistantSearchResultsTemplate {
     pub query: String,
     pub results: Vec<SearchResultView>,
     pub error: Option<String>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "audit.html")]
+pub struct AuditTemplate {}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "audit_entries.html")]
+pub struct AuditEntriesTemplate {
+    pub entries: Vec<AuditEntry>,
 }
 
 pub struct SandboxView {
