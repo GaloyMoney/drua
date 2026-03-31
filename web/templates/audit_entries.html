@@ -14,7 +14,7 @@
     <tbody>
       {% for entry in entries %}
       <tr>
-        <td class="query-text">{{ entry.display_subject }}</td>
+        <td class="subject-cell"><strong>{{ entry.subject.label }}</strong>{% match entry.subject.owner %}{% when Some with (owner) %}<br><span class="subject-owner">↳ {{ owner }}</span>{% when None %}{% endmatch %}</td>
         <td>{{ entry.interaction_type }}</td>
         <td>{{ entry.action }}</td>
         <td><span class="outcome-{{ entry.outcome }}">{{ entry.outcome }}</span></td>

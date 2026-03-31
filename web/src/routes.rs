@@ -235,9 +235,9 @@ async fn audit_entries(
         Ok(entries) => {
             let mut views = Vec::with_capacity(entries.len());
             for entry in entries {
-                let display_subject = resolve_subject(&state.app, &entry.subject).await;
+                let subject = resolve_subject(&state.app, &entry.subject).await;
                 views.push(AuditEntryView {
-                    display_subject,
+                    subject,
                     interaction_type: entry.interaction_type,
                     action: entry.action,
                     outcome: entry.outcome,
@@ -256,7 +256,7 @@ async fn audit_entries(
     }
 }
 
-async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> String {
+async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSubjectView {
     if let Some(agent_id_str) = subject.strip_prefix("agent::") {
         if let Ok(agent_id) = agent_id_str.parse::<uuid::Uuid>() {
             let agent_id = galoy_agents_core::primitives::AgentId::from(agent_id);
@@ -268,7 +268,10 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> String 
                     .ok()
                     .and_then(|u| u.name.clone())
                     .unwrap_or_else(|| "unknown".to_string());
-                return format!("{} on behalf of {}", agent.name, user_name);
+                return AuditSubjectView {
+                    label: agent.name,
+                    owner: Some(user_name),
+                };
             }
         }
     } else if let Some(user_id_str) = subject.strip_prefix("user::") {
@@ -276,14 +279,23 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> String 
             let user_id = galoy_agents_core::primitives::UserId::from(user_id);
             if let Ok(user) = app.users().find_by_id(user_id).await {
                 if let Some(name) = &user.name {
-                    return name.clone();
+                    return AuditSubjectView {
+                        label: name.clone(),
+                        owner: None,
+                    };
                 }
             }
         }
     } else if subject == "anonymous" {
-        return "anonymous".to_string();
+        return AuditSubjectView {
+            label: "anonymous".to_string(),
+            owner: None,
+        };
     }
-    subject.to_string()
+    AuditSubjectView {
+        label: subject.to_string(),
+        owner: None,
+    }
 }
 
 #[instrument(name = "web.code_assistant_dashboard", skip_all)]

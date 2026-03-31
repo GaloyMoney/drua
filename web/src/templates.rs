@@ -78,8 +78,13 @@ pub struct CodeAssistantSearchResultsTemplate {
 #[template(path = "audit.html")]
 pub struct AuditTemplate {}
 
+pub struct AuditSubjectView {
+    pub label: String,
+    pub owner: Option<String>,
+}
+
 pub struct AuditEntryView {
-    pub display_subject: String,
+    pub subject: AuditSubjectView,
     pub interaction_type: String,
     pub action: String,
     pub outcome: String,
