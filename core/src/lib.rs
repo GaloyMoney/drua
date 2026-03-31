@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod audit;
 pub mod auth;
 pub mod code_assistant;
 mod config;
@@ -11,6 +12,7 @@ pub use config::*;
 use std::sync::Arc;
 
 use agent::Agents;
+use audit::AuditEntries;
 use code_assistant::CodeAssistant;
 use toolset::{ToolSets, ToolSetsError};
 use user::Users;
@@ -19,6 +21,7 @@ use user::Users;
 pub struct App {
     users: Users,
     agents: Agents,
+    audit: AuditEntries,
     code_assistant: Option<CodeAssistant>,
     toolsets: Arc<ToolSets>,
 }
@@ -37,6 +40,7 @@ impl App {
         Ok(Self {
             users: Users::new(pool),
             agents: Agents::new(pool),
+            audit: AuditEntries::new(pool),
             code_assistant,
             toolsets: Arc::new(toolsets),
         })
@@ -48,6 +52,10 @@ impl App {
 
     pub fn agents(&self) -> &Agents {
         &self.agents
+    }
+
+    pub fn audit(&self) -> &AuditEntries {
+        &self.audit
     }
 
     pub fn code_assistant(&self) -> Option<&CodeAssistant> {

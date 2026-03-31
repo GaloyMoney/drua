@@ -7,6 +7,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
+use galoy_agents_core::audit::InteractionOutcome;
 use galoy_agents_core::auth::AuthContext;
 use galoy_agents_core::App;
 
@@ -193,16 +194,47 @@ impl McpGateway {
         Self::require_auth(&parts)?;
         let catalog = self.catalog();
 
-        catalog
-            .call(&params.tool_name, params.arguments)
-            .await
-            .map_err(|e| {
-                ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    e.to_string(),
-                    None::<serde_json::Value>,
+        let start = std::time::Instant::now();
+        let result = catalog
+            .call(&params.tool_name, params.arguments.clone())
+            .await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Fire-and-forget audit recording
+        if let Some(auth) = parts.extensions.get::<AuthContext>() {
+            let outcome = match &result {
+                Ok(_) => InteractionOutcome::Success,
+                Err(e) => InteractionOutcome::Error {
+                    message: e.to_string(),
+                },
+            };
+            let args_value = params
+                .arguments
+                .as_ref()
+                .map(|a| serde_json::Value::Object(a.clone()));
+            if let Err(e) = self
+                .app
+                .audit()
+                .record_mcp_call(
+                    auth,
+                    &params.tool_name,
+                    args_value.as_ref(),
+                    outcome,
+                    Some(duration_ms),
                 )
-            })
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to record audit entry for MCP call");
+            }
+        }
+
+        result.map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                e.to_string(),
+                None::<serde_json::Value>,
+            )
+        })
     }
 }
 
