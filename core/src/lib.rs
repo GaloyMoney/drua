@@ -12,7 +12,7 @@ pub use config::*;
 use std::sync::Arc;
 
 use agent::Agents;
-use audit::AuditEntries;
+use audit::Audit;
 use code_assistant::CodeAssistant;
 use toolset::{ToolSets, ToolSetsError};
 use user::Users;
@@ -21,7 +21,7 @@ use user::Users;
 pub struct App {
     users: Users,
     agents: Agents,
-    audit: AuditEntries,
+    audit: Arc<Audit>,
     code_assistant: Option<CodeAssistant>,
     toolsets: Arc<ToolSets>,
 }
@@ -35,11 +35,11 @@ impl App {
             },
         )
         .map_err(|e| AppError::CodeAssistant(e.to_string()))?;
-        let audit = AuditEntries::new(pool);
+        let audit = Arc::new(Audit::new(pool));
         let toolsets = ToolSets::init(
             config.toolsets,
             code_assistant.clone().map(Arc::new),
-            Some(audit.clone()),
+            Some(Arc::clone(&audit)),
         )
         .await?;
         Ok(Self {
@@ -59,7 +59,7 @@ impl App {
         &self.agents
     }
 
-    pub fn audit(&self) -> &AuditEntries {
+    pub fn audit(&self) -> &Audit {
         &self.audit
     }
 
