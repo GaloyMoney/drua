@@ -10,7 +10,7 @@ pub(crate) use request_logger::RequestLogger;
 // Re-exports from code-assistant-core
 pub use code_assistant_core::request_log::RequestLogEntry;
 pub use code_assistant_core::search::SearchEngine;
-pub use code_assistant_core::store::{SearchResult, KNOWN_PRIMARY_LABELS};
+pub use code_assistant_core::store::{LabelOriginCounts, SearchResult, KNOWN_PRIMARY_LABELS};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -96,6 +96,13 @@ pub fn init(
 impl CodeAssistant {
     pub fn logs(&self) -> &Arc<CodeAssistantLogs> {
         &self.logs
+    }
+
+    /// Count labelled chunks grouped by their origin (human / model / heuristic).
+    pub fn label_origin_counts(&self) -> Result<LabelOriginCounts, CodeAssistantError> {
+        self.search_engine
+            .label_origin_counts()
+            .map_err(|e| CodeAssistantError::Search(e.to_string()))
     }
 
     /// Run a search and return the raw results (for the web dashboard).

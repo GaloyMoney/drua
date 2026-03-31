@@ -2,6 +2,7 @@ use askama::Template;
 use askama_web::WebTemplate;
 
 use galoy_agents_core::code_assistant::logs::{CodeAssistantRequestRow, DashboardStats};
+use galoy_agents_core::code_assistant::LabelOriginCounts;
 
 pub struct AgentView {
     pub id: String,
@@ -47,6 +48,7 @@ pub struct AgentListTemplate {
 #[template(path = "code_assistant.html")]
 pub struct CodeAssistantTemplate {
     pub stats: DashboardStats,
+    pub label_origins: LabelOriginCounts,
 }
 
 #[derive(Template, WebTemplate)]

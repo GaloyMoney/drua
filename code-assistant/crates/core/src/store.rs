@@ -123,6 +123,15 @@ pub struct AntiPatternResult {
     pub similarity: f32,
 }
 
+/// Counts of labels grouped by origin (label_source).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LabelOriginCounts {
+    pub human: i64,
+    pub model: i64,
+    pub heuristic: i64,
+    pub total: i64,
+}
+
 /// Embedding cache entry stored alongside vector data.
 pub struct CachedEmbedding {
     pub vector: Vec<f32>,
@@ -638,6 +647,38 @@ impl VectorStore {
         let count: i64 =
             conn.query_row("SELECT COUNT(*) FROM chunk_metadata", [], |row| row.get(0))?;
         Ok(count as u64)
+    }
+
+    /// Count labelled chunks grouped by their origin (`label_source`).
+    pub fn label_origin_counts(&self) -> anyhow::Result<LabelOriginCounts> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(label_source, '') AS src, COUNT(*) AS cnt
+             FROM chunk_labels
+             WHERE labels IS NOT NULL AND labels != '[]' AND labels != ''
+             GROUP BY src",
+        )?;
+
+        let mut counts = LabelOriginCounts::default();
+        let rows = stmt.query_map([], |row| {
+            let source: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((source, count))
+        })?;
+
+        for row in rows {
+            let (source, count) = row?;
+            match source.as_str() {
+                "human" => counts.human = count,
+                "ml" | "model" => counts.model += count,
+                "heuristic" => counts.heuristic = count,
+                _ => {}
+            }
+            counts.total += count;
+        }
+
+        Ok(counts)
     }
 
     /// Ensure anti-pattern tables exist (for server startup without full ReviewMiner).

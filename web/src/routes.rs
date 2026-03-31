@@ -309,14 +309,9 @@ async fn code_assistant_dashboard(State(state): State<AppState>, session: Sessio
         return Redirect::to("/").into_response();
     }
 
-    let stats = match state
-        .app
-        .code_assistant()
-        .unwrap()
-        .logs()
-        .dashboard_stats()
-        .await
-    {
+    let ca = state.app.code_assistant().unwrap();
+
+    let stats = match ca.logs().dashboard_stats().await {
         Ok(stats) => stats,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load code assistant stats");
@@ -324,7 +319,19 @@ async fn code_assistant_dashboard(State(state): State<AppState>, session: Sessio
         }
     };
 
-    CodeAssistantTemplate { stats }.into_response()
+    let label_origins = match ca.label_origin_counts() {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load label origin counts");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    CodeAssistantTemplate {
+        stats,
+        label_origins,
+    }
+    .into_response()
 }
 
 #[instrument(name = "web.code_assistant_recent", skip_all)]
