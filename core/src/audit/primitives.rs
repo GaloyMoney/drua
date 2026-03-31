@@ -1,14 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+use crate::auth::AuthContext;
 use crate::primitives::*;
+
+/// Auto-incrementing audit entry identifier (BIGSERIAL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(transparent)]
+pub struct AuditEntryId(i64);
+
+impl std::fmt::Display for AuditEntryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// The type of service boundary interaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionType {
-    /// HTTP API call (web routes)
     ApiCall,
-    /// MCP gateway tool call
     McpCall,
 }
 
@@ -43,6 +53,19 @@ impl std::fmt::Display for AuditSubject {
     }
 }
 
+impl From<&AuthContext> for AuditSubject {
+    fn from(ctx: &AuthContext) -> Self {
+        match ctx {
+            AuthContext::User(user_id) => AuditSubject::User { user_id: *user_id },
+            AuthContext::Agent(agent_id, user_id) => AuditSubject::Agent {
+                agent_id: *agent_id,
+                user_id: *user_id,
+            },
+            AuthContext::Anonymous => AuditSubject::Anonymous,
+        }
+    }
+}
+
 /// Outcome of the interaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,4 +73,27 @@ pub enum InteractionOutcome {
     Success,
     Error { message: String },
     Unauthorized,
+}
+
+impl std::fmt::Display for InteractionOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InteractionOutcome::Success => write!(f, "success"),
+            InteractionOutcome::Error { .. } => write!(f, "error"),
+            InteractionOutcome::Unauthorized => write!(f, "unauthorized"),
+        }
+    }
+}
+
+/// A recorded audit entry.
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    pub id: AuditEntryId,
+    pub subject: String,
+    pub interaction_type: String,
+    pub action: String,
+    pub metadata: serde_json::Value,
+    pub outcome: String,
+    pub duration_ms: Option<i64>,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
 }

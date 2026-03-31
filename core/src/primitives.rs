@@ -1,1 +1,1 @@
-es_entity::entity_id! { UserId, AgentId, AuditEntryId }
+es_entity::entity_id! { UserId, AgentId }
