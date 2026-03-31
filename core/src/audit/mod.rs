@@ -121,6 +121,7 @@ impl Audit {
         Ok(rows)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert(
         &self,
         subject: AuditSubject,
