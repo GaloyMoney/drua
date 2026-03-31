@@ -266,7 +266,12 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
                     .find_by_id(agent.user_id)
                     .await
                     .ok()
-                    .and_then(|u| u.name.clone())
+                    .map(|u| {
+                        u.name
+                            .clone()
+                            .or_else(|| u.email.clone())
+                            .unwrap_or_else(|| u.github_id.clone())
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 return AuditSubjectView {
                     label: agent.name,
@@ -278,12 +283,15 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
         if let Ok(user_id) = user_id_str.parse::<uuid::Uuid>() {
             let user_id = galoy_agents_core::primitives::UserId::from(user_id);
             if let Ok(user) = app.users().find_by_id(user_id).await {
-                if let Some(name) = &user.name {
-                    return AuditSubjectView {
-                        label: name.clone(),
-                        owner: None,
-                    };
-                }
+                let label = user
+                    .name
+                    .clone()
+                    .or_else(|| user.email.clone())
+                    .unwrap_or_else(|| user.github_id.clone());
+                return AuditSubjectView {
+                    label,
+                    owner: None,
+                };
             }
         }
     } else if subject == "anonymous" {
