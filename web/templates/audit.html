@@ -15,29 +15,11 @@
   .outcome-success { color: #388e3c; font-weight: bold; }
   .outcome-error { color: #d32f2f; font-weight: bold; }
   .outcome-unauthorized { color: #f57c00; font-weight: bold; }
-  .filter-bar {
-    display: flex;
-    gap: 1rem;
-    align-items: end;
-    margin-bottom: 1.5rem;
-  }
-  .filter-bar label { margin-bottom: 0; }
 </style>
 {% endblock %}
 
 {% block content %}
 <h2>Audit Log</h2>
-
-<div class="filter-bar">
-  <form hx-get="/audit/entries" hx-target="#audit-entries" hx-swap="innerHTML"
-        style="display: flex; gap: 1rem; align-items: end; width: 100%;">
-    <label>
-      Subject
-      <input type="text" name="subject" placeholder="agent::... or user::..." value="">
-    </label>
-    <button type="submit" style="width: auto; margin-bottom: 0;">Filter</button>
-  </form>
-</div>
 
 <div id="audit-entries"
      hx-get="/audit/entries" hx-trigger="load" hx-swap="innerHTML">
