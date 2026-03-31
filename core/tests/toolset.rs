@@ -24,22 +24,22 @@ async fn init_toolsets() {
             allowed_tools: None,
         }],
     };
-    let toolsets = ToolSets::init(config, None).await.unwrap();
+    let toolsets = ToolSets::init(config, None, None).await.unwrap();
     let catalog = toolsets.catalog();
 
     // search_tools
-    let all_tools = catalog.search(None, None);
+    let all_tools = catalog.search(None, None).await;
     assert!(!all_tools.is_empty());
 
     // search with category filter
-    let obs_tools = catalog.search(None, Some("observability"));
+    let obs_tools = catalog.search(None, Some("observability")).await;
     assert!(!obs_tools.is_empty());
-    let no_tools = catalog.search(None, Some("banking"));
+    let no_tools = catalog.search(None, Some("banking")).await;
     assert!(no_tools.is_empty());
 
     // describe_tool
     let first = &all_tools[0];
-    let described = catalog.describe(&first.prefixed_name);
+    let described = catalog.describe(&first.prefixed_name).await;
     assert!(described.is_some());
 
     // call_tool round trip

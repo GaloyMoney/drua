@@ -14,6 +14,8 @@ pub use upstream::*;
 
 use std::sync::Arc;
 
+use crate::audit::{AuditEntries, InteractionOutcome};
+use crate::auth::AuthContext;
 use crate::code_assistant::CodeAssistant;
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
@@ -26,11 +28,25 @@ pub struct CatalogEntry {
     pub full_tool: Tool,
 }
 
+/// Shared catalog of tool sets. Use [`Catalog::with_auth`] to create a
+/// request-scoped handle that records audit entries automatically.
 pub struct Catalog {
-    sets: Vec<Box<dyn ToolSet>>,
+    sets: Arc<Vec<Box<dyn ToolSet>>>,
+    audit: Option<AuditEntries>,
+    auth: Option<AuthContext>,
 }
 
 impl Catalog {
+    /// Create a request-scoped catalog that records audit entries under the
+    /// given [`AuthContext`]. Cheap — only clones an `Arc` and the pool handle.
+    pub fn with_auth(&self, auth: &AuthContext) -> Self {
+        Self {
+            sets: Arc::clone(&self.sets),
+            audit: self.audit.clone(),
+            auth: Some(auth.clone()),
+        }
+    }
+
     pub fn instructions(&self) -> String {
         let mut lines = vec![
             "Tools from upstream services are available via progressive disclosure:".to_string(),
@@ -40,7 +56,7 @@ impl Catalog {
             String::new(),
             "Available toolsets:".to_string(),
         ];
-        for set in &self.sets {
+        for set in self.sets.iter() {
             let cat = set.category().unwrap_or("uncategorized");
             let desc = set.category_description().unwrap_or("");
             let tool_count = set.tools().len();
@@ -57,7 +73,7 @@ impl Catalog {
 
     pub fn entries(&self) -> Vec<CatalogEntry> {
         let mut entries = Vec::new();
-        for set in &self.sets {
+        for set in self.sets.iter() {
             for tool in set.tools() {
                 let desc = &tool.description;
                 let brief = desc
@@ -78,8 +94,9 @@ impl Catalog {
         entries
     }
 
-    pub fn search(&self, query: Option<&str>, category: Option<&str>) -> Vec<CatalogEntry> {
-        self.entries()
+    pub async fn search(&self, query: Option<&str>, category: Option<&str>) -> Vec<CatalogEntry> {
+        let results: Vec<CatalogEntry> = self
+            .entries()
             .into_iter()
             .filter(|e| {
                 if let Some(cat) = category {
@@ -102,17 +119,45 @@ impl Catalog {
                 }
                 true
             })
-            .collect()
+            .collect();
+
+        self.record_audit(
+            "search_tools",
+            serde_json::json!({ "query": query, "category": category }),
+            InteractionOutcome::Success,
+            None,
+        )
+        .await;
+
+        results
     }
 
-    pub fn describe(&self, prefixed_name: &str) -> Option<CatalogEntry> {
-        self.entries()
+    pub async fn describe(&self, prefixed_name: &str) -> Option<CatalogEntry> {
+        let result = self
+            .entries()
             .into_iter()
-            .find(|e| e.prefixed_name == prefixed_name)
+            .find(|e| e.prefixed_name == prefixed_name);
+
+        let outcome = if result.is_some() {
+            InteractionOutcome::Success
+        } else {
+            InteractionOutcome::Error {
+                message: format!("tool not found: {prefixed_name}"),
+            }
+        };
+        self.record_audit(
+            "describe_tool",
+            serde_json::json!({ "tool_name": prefixed_name }),
+            outcome,
+            None,
+        )
+        .await;
+
+        result
     }
 
     fn find_set<'a>(&'a self, prefixed_name: &'a str) -> Option<(&'a dyn ToolSet, &'a str)> {
-        for set in &self.sets {
+        for set in self.sets.iter() {
             let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
                 if set.tools().iter().any(|t| t.name == tool_name) {
@@ -131,7 +176,49 @@ impl Catalog {
         let (set, tool_name) = self
             .find_set(prefixed_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
-        set.call(tool_name, arguments).await
+
+        let start = std::time::Instant::now();
+        let result = set.call(tool_name, arguments.clone()).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let outcome = match &result {
+            Ok(_) => InteractionOutcome::Success,
+            Err(e) => InteractionOutcome::Error {
+                message: e.to_string(),
+            },
+        };
+        let args_value = arguments.map(serde_json::Value::Object);
+        self.record_audit(
+            prefixed_name,
+            serde_json::json!({
+                "tool_name": prefixed_name,
+                "arguments": args_value,
+            }),
+            outcome,
+            Some(duration_ms),
+        )
+        .await;
+
+        result
+    }
+
+    /// Fire-and-forget audit recording. Only records if both audit service
+    /// and auth context are available (i.e. this is a request-scoped catalog).
+    async fn record_audit(
+        &self,
+        tool_name: &str,
+        metadata: serde_json::Value,
+        outcome: InteractionOutcome,
+        duration_ms: Option<u64>,
+    ) {
+        if let (Some(audit), Some(auth)) = (&self.audit, &self.auth) {
+            if let Err(e) = audit
+                .record_mcp_call(auth, tool_name, Some(&metadata), outcome, duration_ms)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to record audit entry");
+            }
+        }
     }
 }
 
@@ -144,6 +231,7 @@ impl ToolSets {
     pub async fn init(
         config: ToolSetsConfig,
         code_assistant: Option<Arc<CodeAssistant>>,
+        audit: Option<AuditEntries>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
 
@@ -188,12 +276,18 @@ impl ToolSets {
         }
 
         Ok(Self {
-            catalog: Catalog { sets },
+            catalog: Catalog {
+                sets: Arc::new(sets),
+                audit,
+                auth: None,
+            },
         })
     }
 
     pub fn add_toolset(&mut self, toolset: Box<dyn ToolSet>) {
-        self.catalog.sets.push(toolset);
+        Arc::get_mut(&mut self.catalog.sets)
+            .expect("add_toolset called after catalog was shared")
+            .push(toolset);
     }
 
     pub fn catalog(&self) -> &Catalog {
