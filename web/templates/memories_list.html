@@ -1,0 +1,41 @@
+{% if memories.is_empty() %}
+<p>No memories stored yet.</p>
+{% else %}
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Title</th>
+        <th>Tags</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in memories %}
+      <tr>
+        <td><code>{{ m.short_id }}</code></td>
+        <td>
+          {{ m.title }}
+          {% if m.pinned %}<span class="badge badge-pinned">pinned</span>{% endif %}
+        </td>
+        <td>
+          {% for tag in m.tags.split(", ") %}
+            {% if !tag.is_empty() %}<span class="badge badge-tag">{{ tag }}</span>{% endif %}
+          {% endfor %}
+        </td>
+        <td>{{ m.created_at }}</td>
+      </tr>
+      <tr>
+        <td colspan="4" style="padding: 0;">
+          <details>
+            <summary>Show content</summary>
+            <div class="memory-content">{{ m.content }}</div>
+          </details>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</figure>
+{% endif %}

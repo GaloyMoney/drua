@@ -101,6 +101,57 @@ pub struct AuditEntriesTemplate {
     pub entries: Vec<AuditEntryView>,
 }
 
+// ── Memories ─────────────────────────────────────────────────────────
+
+#[derive(Template, WebTemplate)]
+#[template(path = "memories.html")]
+pub struct MemoriesTemplate {
+    pub enabled: bool,
+}
+
+pub struct MemoryView {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub content: String,
+    pub tags: String,
+    pub created_at: String,
+    pub pinned: bool,
+}
+
+pub struct MemorySearchResultView {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub content: String,
+    pub tags: String,
+    pub score: String,
+    pub decay_factor: String,
+    pub pinned: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "memories_list.html")]
+pub struct MemoriesListTemplate {
+    pub memories: Vec<MemoryView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "memories_search_results.html")]
+pub struct MemoriesSearchResultsTemplate {
+    pub query: String,
+    pub results: Vec<MemorySearchResultView>,
+    pub error: Option<String>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "memories_detail.html")]
+pub struct MemoryDetailTemplate {
+    pub memory: MemoryView,
+}
+
+// ── Sandboxes ────────────────────────────────────────────────────────
+
 pub struct SandboxView {
     pub name: String,
     pub sandbox_name: String,

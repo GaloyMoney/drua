@@ -18,4 +18,6 @@ pub enum ToolSetsError {
     InvalidArgument(String),
     #[error("ToolSetsError - CodeAssistant: {0}")]
     CodeAssistant(String),
+    #[error("ToolSetsError - Memory: {0}")]
+    Memory(String),
 }

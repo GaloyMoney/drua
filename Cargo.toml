@@ -31,6 +31,9 @@ rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-
 # HTTP server
 axum = "0.8"
 
+# Vector store (PostgreSQL pgvector)
+pgvector = { version = "0.4", features = ["sqlx"] }
+
 # Vector store (SQLite + sqlite-vec)
 rusqlite = { version = "0.32", features = ["bundled"] }
 sqlite-vec = "0.1"

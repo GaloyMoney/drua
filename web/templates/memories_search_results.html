@@ -1,0 +1,26 @@
+{% if let Some(err) = error %}
+<p style="color: var(--pico-del-color);">{{ err }}</p>
+{% endif %}
+
+{% if results.is_empty() && error.is_none() && !query.is_empty() %}
+<p>No memories found matching "{{ query }}".</p>
+{% endif %}
+
+{% for r in results %}
+<details open>
+  <summary>
+    <strong>{{ r.title }}</strong>
+    <span class="score-info">
+      — score: {{ r.score }} | decay: {{ r.decay_factor }}
+      {% if r.pinned %} | <span class="badge badge-pinned">pinned</span>{% endif %}
+    </span>
+  </summary>
+  <div style="padding: 0.5rem 0;">
+    <small>
+      <a href="/memories/{{ r.id }}"><code>{{ r.short_id }}</code></a>
+      {% if !r.tags.is_empty() %} | Tags: {{ r.tags }}{% endif %}
+    </small>
+    <div class="memory-content" style="margin-top: 0.5rem;">{{ r.content }}</div>
+  </div>
+</details>
+{% endfor %}

@@ -2,6 +2,7 @@ pub mod code_assistant;
 pub mod concourse;
 mod config;
 mod error;
+pub mod memory;
 mod traits;
 mod upstream;
 
@@ -9,6 +10,7 @@ pub use code_assistant::CodeAssistantToolSet;
 pub use concourse::ConcourseToolSet;
 pub use config::*;
 pub use error::*;
+pub use memory::MemoryToolSet;
 pub use traits::*;
 pub use upstream::*;
 
@@ -17,6 +19,7 @@ use std::sync::Arc;
 use crate::audit::{Audit, InteractionOutcome};
 use crate::auth::AuthContext;
 use crate::code_assistant::CodeAssistant;
+use crate::memory::Memories;
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 pub struct CatalogEntry {
@@ -258,6 +261,7 @@ impl ToolSets {
     pub async fn init(
         config: ToolSetsConfig,
         code_assistant: Option<Arc<CodeAssistant>>,
+        memory: Option<Arc<Memories>>,
         audit: Option<Arc<Audit>>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
@@ -300,6 +304,11 @@ impl ToolSets {
         if let Some(ca) = code_assistant {
             sets.push(Box::new(CodeAssistantToolSet::new(ca)));
             tracing::info!("Code assistant toolset initialized");
+        }
+
+        if let Some(mem) = memory {
+            sets.push(Box::new(MemoryToolSet::new(mem)));
+            tracing::info!("Memory toolset initialized");
         }
 
         Ok(Self {

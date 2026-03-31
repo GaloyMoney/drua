@@ -51,11 +51,12 @@ impl std::fmt::Debug for CodeAssistant {
 /// Initialise the code assistant from config.
 ///
 /// Returns `Ok(None)` when `db_path` is empty (code assistant disabled).
+/// Accepts a shared embedder to avoid loading the ONNX model twice.
 pub fn init(
     pool: &sqlx::PgPool,
     config: &CodeAssistantConfig,
+    embedder: std::sync::Arc<code_assistant_core::embedder::Embedder>,
 ) -> Result<Option<CodeAssistant>, CodeAssistantError> {
-    use code_assistant_core::embedder::Embedder;
     use code_assistant_core::store::VectorStore;
 
     if config.db_path.is_empty() {
@@ -82,8 +83,7 @@ pub fn init(
         .ensure_anti_pattern_tables()
         .map_err(|e| CodeAssistantError::Init(e.to_string()))?;
 
-    let embedder = Embedder::new().map_err(|e| CodeAssistantError::Init(e.to_string()))?;
-    let search_engine = Arc::new(SearchEngine::new(embedder, store));
+    let search_engine = Arc::new(SearchEngine::new((*embedder).clone(), store));
     let logs = Arc::new(CodeAssistantLogs::new(pool));
 
     tracing::info!("Code assistant search engine ready");

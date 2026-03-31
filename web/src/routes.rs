@@ -43,6 +43,10 @@ pub fn router() -> Router<AppState> {
             get(code_assistant_least_useful),
         )
         .route("/code-assistant/search", get(code_assistant_search))
+        .route("/memories", get(memories_page))
+        .route("/memories/list", get(memories_list))
+        .route("/memories/search", get(memories_search))
+        .route("/memories/{id}", get(memories_detail))
         .route("/sandboxes", get(sandboxes_page))
         .route("/sandboxes/list", get(sandbox_list))
         .route("/sandboxes/create", post(sandbox_create))
@@ -452,6 +456,164 @@ async fn code_assistant_search(
             error: Some(e.to_string()),
         }
         .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memories
+// ---------------------------------------------------------------------------
+
+fn memory_to_view(m: &domain::memory::Memory) -> MemoryView {
+    let id_str = m.id.to_string();
+    MemoryView {
+        id: id_str.clone(),
+        short_id: id_str[..8.min(id_str.len())].to_string(),
+        title: m.title.clone(),
+        content: m.content.clone(),
+        tags: if m.tags.is_empty() {
+            String::new()
+        } else {
+            m.tags.join(", ")
+        },
+        created_at: m.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+        pinned: m.pinned,
+    }
+}
+
+#[instrument(name = "web.memories_page", skip_all)]
+async fn memories_page(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    MemoriesTemplate {
+        enabled: state.app.memory().is_some(),
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.memories_list", skip_all)]
+async fn memories_list(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let svc = match state.app.memory() {
+        Some(svc) => svc,
+        None => return MemoriesListTemplate { memories: vec![] }.into_response(),
+    };
+
+    match svc.list(50).await {
+        Ok(memories) => MemoriesListTemplate {
+            memories: memories.iter().map(memory_to_view).collect(),
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list memories");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoriesSearchParams {
+    q: Option<String>,
+}
+
+#[instrument(name = "web.memories_search", skip_all)]
+async fn memories_search(
+    State(state): State<AppState>,
+    session: Session,
+    Query(params): Query<MemoriesSearchParams>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return MemoriesSearchResultsTemplate {
+            query,
+            results: vec![],
+            error: None,
+        }
+        .into_response();
+    }
+
+    let svc = match state.app.memory() {
+        Some(svc) => svc,
+        None => {
+            return MemoriesSearchResultsTemplate {
+                query,
+                results: vec![],
+                error: Some("Memory service is not enabled".to_string()),
+            }
+            .into_response();
+        }
+    };
+
+    match svc.search(&query, 20).await {
+        Ok(results) => {
+            let views = results
+                .iter()
+                .map(|r| {
+                    let id_str = r.id.to_string();
+                    MemorySearchResultView {
+                        id: id_str.clone(),
+                        short_id: id_str[..8.min(id_str.len())].to_string(),
+                        title: r.title.clone(),
+                        content: r.content.clone(),
+                        tags: if r.tags.is_empty() {
+                            String::new()
+                        } else {
+                            r.tags.join(", ")
+                        },
+                        score: format!("{:.3}", r.score),
+                        decay_factor: format!("{:.0}%", r.decay_factor * 100.0),
+                        pinned: r.pinned,
+                    }
+                })
+                .collect();
+            MemoriesSearchResultsTemplate {
+                query,
+                results: views,
+                error: None,
+            }
+            .into_response()
+        }
+        Err(e) => MemoriesSearchResultsTemplate {
+            query,
+            results: vec![],
+            error: Some(e.to_string()),
+        }
+        .into_response(),
+    }
+}
+
+#[instrument(name = "web.memories_detail", skip_all)]
+async fn memories_detail(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<String>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let svc = match state.app.memory() {
+        Some(svc) => svc,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+
+    match svc.find_by_id_prefix(&id).await {
+        Ok(Some(m)) => MemoryDetailTemplate {
+            memory: memory_to_view(&m),
+        }
+        .into_response(),
+        Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to find memory by prefix");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
