@@ -1,41 +1,19 @@
-mod entity;
 pub mod error;
 pub mod primitives;
-pub(crate) mod repo;
 
 use tracing::instrument;
 
-pub use entity::AuditEntry;
-use entity::*;
 pub use error::*;
 pub use primitives::*;
-use repo::*;
-
-use crate::auth::AuthContext;
-
-impl From<&AuthContext> for AuditSubject {
-    fn from(ctx: &AuthContext) -> Self {
-        match ctx {
-            AuthContext::User(user_id) => AuditSubject::User { user_id: *user_id },
-            AuthContext::Agent(agent_id, user_id) => AuditSubject::Agent {
-                agent_id: *agent_id,
-                user_id: *user_id,
-            },
-            AuthContext::Anonymous => AuditSubject::Anonymous,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct AuditEntries {
-    repo: AuditEntryRepo,
+    pool: sqlx::PgPool,
 }
 
 impl AuditEntries {
     pub fn new(pool: &sqlx::PgPool) -> Self {
-        Self {
-            repo: AuditEntryRepo::new(pool),
-        }
+        Self { pool: pool.clone() }
     }
 
     /// Record an API interaction.
@@ -48,18 +26,15 @@ impl AuditEntries {
         outcome: InteractionOutcome,
         duration_ms: Option<u64>,
     ) -> Result<AuditEntry, AuditError> {
-        let mut builder = NewAuditEntry::builder();
-        builder
-            .subject(subject.into())
-            .interaction_type(InteractionType::ApiCall)
-            .action(action)
-            .metadata(metadata)
-            .outcome(outcome);
-        if let Some(ms) = duration_ms {
-            builder.duration_ms(ms);
-        }
-        let new_entry = builder.build().expect("all required fields set");
-        Ok(self.repo.create(new_entry).await?)
+        self.insert(
+            subject.into(),
+            InteractionType::ApiCall,
+            action.into(),
+            metadata,
+            outcome,
+            duration_ms,
+        )
+        .await
     }
 
     /// Record an MCP tool call interaction.
@@ -72,42 +47,111 @@ impl AuditEntries {
         outcome: InteractionOutcome,
         duration_ms: Option<u64>,
     ) -> Result<AuditEntry, AuditError> {
-        let mut builder = NewAuditEntry::builder();
-        builder
-            .subject(subject.into())
-            .interaction_type(InteractionType::McpCall)
-            .action(tool_name)
-            .metadata(serde_json::json!({
-                "tool_name": tool_name,
-                "arguments": arguments,
-            }))
-            .outcome(outcome);
-        if let Some(ms) = duration_ms {
-            builder.duration_ms(ms);
-        }
-        let new_entry = builder.build().expect("all required fields set");
-        Ok(self.repo.create(new_entry).await?)
+        let metadata = serde_json::json!({
+            "tool_name": tool_name,
+            "arguments": arguments,
+        });
+        self.insert(
+            subject.into(),
+            InteractionType::McpCall,
+            tool_name.to_string(),
+            metadata,
+            outcome,
+            duration_ms,
+        )
+        .await
     }
 
-    /// Find audit entries by subject.
+    /// List recent audit entries (most recent first).
+    #[instrument(name = "audit.list_recent", skip_all)]
+    pub async fn list_recent(&self, limit: i64) -> Result<Vec<AuditEntry>, AuditError> {
+        let rows = sqlx::query_as!(
+            AuditEntry,
+            r#"SELECT
+                id AS "id: AuditEntryId",
+                subject,
+                interaction_type,
+                action,
+                metadata AS "metadata: serde_json::Value",
+                outcome,
+                duration_ms,
+                recorded_at
+            FROM audit_entries
+            ORDER BY id DESC
+            LIMIT $1"#,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Find audit entries by subject string (most recent first).
     #[instrument(name = "audit.find_by_subject", skip_all)]
     pub async fn find_by_subject(
         &self,
         subject: &str,
-        limit: usize,
+        limit: i64,
     ) -> Result<Vec<AuditEntry>, AuditError> {
-        let query = es_entity::PaginatedQueryArgs {
-            first: limit,
-            after: None,
-        };
-        let result = self
-            .repo
-            .list_for_subject_by_created_at(
-                subject.to_string(),
-                query,
-                es_entity::ListDirection::Descending,
-            )
-            .await?;
-        Ok(result.entities)
+        let rows = sqlx::query_as!(
+            AuditEntry,
+            r#"SELECT
+                id AS "id: AuditEntryId",
+                subject,
+                interaction_type,
+                action,
+                metadata AS "metadata: serde_json::Value",
+                outcome,
+                duration_ms,
+                recorded_at
+            FROM audit_entries
+            WHERE subject = $1
+            ORDER BY id DESC
+            LIMIT $2"#,
+            subject,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn insert(
+        &self,
+        subject: AuditSubject,
+        interaction_type: InteractionType,
+        action: String,
+        metadata: serde_json::Value,
+        outcome: InteractionOutcome,
+        duration_ms: Option<u64>,
+    ) -> Result<AuditEntry, AuditError> {
+        let sub = subject.to_string();
+        let itype = interaction_type.to_string();
+        let out = outcome.to_string();
+        let dur = duration_ms.map(|ms| ms as i64);
+
+        let row = sqlx::query_as!(
+            AuditEntry,
+            r#"INSERT INTO audit_entries (subject, interaction_type, action, metadata, outcome, duration_ms)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING
+                id AS "id: AuditEntryId",
+                subject,
+                interaction_type,
+                action,
+                metadata AS "metadata: serde_json::Value",
+                outcome,
+                duration_ms,
+                recorded_at"#,
+            sub,
+            itype,
+            action,
+            metadata,
+            out,
+            dur,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
     }
 }
