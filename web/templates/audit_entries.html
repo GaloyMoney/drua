@@ -13,7 +13,7 @@
     <tbody>
       {% for entry in entries %}
       <tr>
-        <td class="query-text"><code>{{ entry.subject }}</code></td>
+        <td class="query-text">{{ entry.display_subject }}</td>
         <td>{{ entry.interaction_type }}</td>
         <td>{{ entry.action }}</td>
         <td><span class="outcome-{{ entry.outcome }}">{{ entry.outcome }}</span></td>
