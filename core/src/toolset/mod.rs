@@ -105,11 +105,11 @@ impl Catalog {
                     }
                 }
                 if let Some(q) = query {
-                    let q_lower = q.to_lowercase();
-                    let matches = e.prefixed_name.to_lowercase().contains(&q_lower)
-                        || e.tool_name.to_lowercase().contains(&q_lower)
-                        || e.brief_description.to_lowercase().contains(&q_lower)
-                        || e.upstream_name.to_lowercase().contains(&q_lower);
+                    let nq = normalize(q);
+                    let matches = normalize(&e.prefixed_name).contains(&nq)
+                        || normalize(&e.tool_name).contains(&nq)
+                        || normalize(&e.brief_description).contains(&nq)
+                        || normalize(&e.upstream_name).contains(&nq);
                     if !matches {
                         return false;
                     }
@@ -316,9 +316,127 @@ fn estimate_tokens(result: &CallToolResult) -> u64 {
     (total_chars / 4).max(1) as u64
 }
 
+/// Normalize a string for fuzzy keyword matching: lowercase and collapse
+/// underscores/hyphens into spaces so "search code", "search_code", and
+/// "search-code" all match each other.
+fn normalize(s: &str) -> String {
+    s.to_lowercase().replace(['_', '-'], " ")
+}
+
 fn first_sentence(s: &str) -> String {
     s.split_once(". ")
         .or_else(|| s.split_once(".\n"))
         .map(|(first, _)| format!("{first}."))
         .unwrap_or_else(|| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubToolSet {
+        entries: Vec<ToolSetEntry>,
+    }
+
+    impl StubToolSet {
+        fn with_tool(name: &str, description: &str) -> Self {
+            let tool = Tool::new(
+                name.to_string(),
+                description.to_string(),
+                JsonObject::default(),
+            );
+            Self {
+                entries: vec![ToolSetEntry {
+                    name: name.to_string(),
+                    description: tool,
+                }],
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolSet for StubToolSet {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn category(&self) -> &str {
+            "test"
+        }
+        fn category_description(&self) -> &str {
+            "Test toolset"
+        }
+        fn tools(&self) -> &[ToolSetEntry] {
+            &self.entries
+        }
+        async fn call(
+            &self,
+            _tool_name: &str,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            unimplemented!()
+        }
+    }
+
+    fn test_catalog(sets: Vec<Box<dyn ToolSet>>) -> Catalog {
+        Catalog {
+            sets: Arc::new(sets),
+            audit: None,
+            auth: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn search_matches_underscores_with_spaces() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+            "search_code",
+            "Semantic search over indexed codebases",
+        ))]);
+
+        let results = catalog.search(Some("search code"), None).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_name, "search_code");
+    }
+
+    #[tokio::test]
+    async fn search_matches_hyphens_with_spaces() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+            "list-pipelines",
+            "List CI pipelines",
+        ))]);
+
+        let results = catalog.search(Some("list pipelines"), None).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_name, "list-pipelines");
+    }
+
+    #[tokio::test]
+    async fn search_matches_spaces_with_underscores() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+            "search_code",
+            "Semantic search over indexed codebases",
+        ))]);
+
+        let results = catalog.search(Some("search_code"), None).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_name, "search_code");
+    }
+
+    #[tokio::test]
+    async fn search_no_match_returns_empty() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+            "search_code",
+            "Semantic search over indexed codebases",
+        ))]);
+
+        let results = catalog.search(Some("nonexistent"), None).await;
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn normalize_replaces_underscores_and_hyphens() {
+        assert_eq!(normalize("search_code"), "search code");
+        assert_eq!(normalize("list-pipelines"), "list pipelines");
+        assert_eq!(normalize("Search_Code"), "search code");
+        assert_eq!(normalize("no changes"), "no changes");
+    }
 }
