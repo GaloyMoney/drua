@@ -95,7 +95,7 @@ impl Catalog {
     }
 
     pub async fn search(&self, query: Option<&str>, category: Option<&str>) -> Vec<CatalogEntry> {
-        let results: Vec<CatalogEntry> = self
+        let mut entries: Vec<CatalogEntry> = self
             .entries()
             .into_iter()
             .filter(|e| {
@@ -104,19 +104,28 @@ impl Catalog {
                         return false;
                     }
                 }
-                if let Some(q) = query {
-                    let nq = normalize(q);
-                    let matches = normalize(&e.prefixed_name).contains(&nq)
-                        || normalize(&e.tool_name).contains(&nq)
-                        || normalize(&e.brief_description).contains(&nq)
-                        || normalize(&e.upstream_name).contains(&nq);
-                    if !matches {
-                        return false;
-                    }
-                }
                 true
             })
             .collect();
+
+        if let Some(q) = query {
+            let keywords: Vec<String> = normalize(q).split_whitespace().map(String::from).collect();
+            if !keywords.is_empty() {
+                let mut scored: Vec<_> = entries
+                    .into_iter()
+                    .filter_map(|e| {
+                        let score = keyword_score(&e, &keywords);
+                        if score > 0 {
+                            Some((score, e))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0));
+                entries = scored.into_iter().map(|(_, e)| e).collect();
+            }
+        }
 
         self.record_audit(
             "search_tools",
@@ -127,7 +136,7 @@ impl Catalog {
         )
         .await;
 
-        results
+        entries
     }
 
     pub async fn describe(&self, prefixed_name: &str) -> Option<CatalogEntry> {
@@ -323,6 +332,21 @@ fn normalize(s: &str) -> String {
     s.to_lowercase().replace(['_', '-'], " ")
 }
 
+/// Score a catalog entry against a set of keywords.
+/// Returns the count of query keywords found in the entry's searchable text.
+fn keyword_score(entry: &CatalogEntry, keywords: &[String]) -> usize {
+    let haystack = [
+        normalize(&entry.tool_name),
+        normalize(&entry.upstream_name),
+        normalize(&entry.brief_description),
+    ]
+    .join(" ");
+    keywords
+        .iter()
+        .filter(|kw| haystack.contains(kw.as_str()))
+        .count()
+}
+
 fn first_sentence(s: &str) -> String {
     s.split_once(". ")
         .or_else(|| s.split_once(".\n"))
@@ -340,16 +364,22 @@ mod tests {
 
     impl StubToolSet {
         fn with_tool(name: &str, description: &str) -> Self {
-            let tool = Tool::new(
-                name.to_string(),
-                description.to_string(),
-                JsonObject::default(),
-            );
+            Self::with_tools(vec![(name, description)])
+        }
+
+        fn with_tools(tools: Vec<(&str, &str)>) -> Self {
             Self {
-                entries: vec![ToolSetEntry {
-                    name: name.to_string(),
-                    description: tool,
-                }],
+                entries: tools
+                    .into_iter()
+                    .map(|(name, desc)| {
+                        let tool =
+                            Tool::new(name.to_string(), desc.to_string(), JsonObject::default());
+                        ToolSetEntry {
+                            name: name.to_string(),
+                            description: tool,
+                        }
+                    })
+                    .collect(),
             }
         }
     }
@@ -386,39 +416,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_matches_underscores_with_spaces() {
+    async fn search_ranks_by_keyword_hits() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tools(vec![
+            ("get_pipeline_status", "Get pipeline build status"),
+            ("list_pipelines", "List CI pipelines"),
+            ("search_code", "Semantic search over indexed codebases"),
+        ]))]);
+
+        // "pipeline status" → get_pipeline_status matches both keywords (score 2),
+        // list_pipelines matches only "pipeline" (score 1)
+        let results = catalog.search(Some("pipeline status"), None).await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].tool_name, "get_pipeline_status");
+        assert_eq!(results[1].tool_name, "list_pipelines");
+    }
+
+    #[tokio::test]
+    async fn search_individual_keywords_match_across_name() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+            "get_pipeline_status",
+            "Returns the current status of a CI pipeline",
+        ))]);
+
+        // "pipeline status" as keywords each match inside "get_pipeline_status"
+        let results = catalog.search(Some("pipeline status"), None).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_name, "get_pipeline_status");
+    }
+
+    #[tokio::test]
+    async fn search_normalizes_underscores_and_hyphens() {
         let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
             "search_code",
             "Semantic search over indexed codebases",
         ))]);
 
-        let results = catalog.search(Some("search code"), None).await;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].tool_name, "search_code");
+        // All three forms match
+        for query in ["search code", "search_code", "search-code"] {
+            let results = catalog.search(Some(query), None).await;
+            assert_eq!(results.len(), 1, "query '{query}' should match");
+            assert_eq!(results[0].tool_name, "search_code");
+        }
     }
 
     #[tokio::test]
-    async fn search_matches_hyphens_with_spaces() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
-            "list-pipelines",
-            "List CI pipelines",
-        ))]);
+    async fn search_single_keyword_matches() {
+        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tools(vec![
+            ("list_pipelines", "List CI pipelines"),
+            ("get_build_log", "Get build output"),
+        ]))]);
 
-        let results = catalog.search(Some("list pipelines"), None).await;
+        let results = catalog.search(Some("pipeline"), None).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].tool_name, "list-pipelines");
-    }
-
-    #[tokio::test]
-    async fn search_matches_spaces_with_underscores() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
-            "search_code",
-            "Semantic search over indexed codebases",
-        ))]);
-
-        let results = catalog.search(Some("search_code"), None).await;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].tool_name, "search_code");
+        assert_eq!(results[0].tool_name, "list_pipelines");
     }
 
     #[tokio::test]
