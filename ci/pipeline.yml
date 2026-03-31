@@ -134,6 +134,7 @@ jobs:
         CONCOURSE_PASSWORD: #@ data.values.deploy_concourse_password
         HONEYCOMB_API_KEY: #@ data.values.honeycomb_api_key
         GITHUB_PAT: #@ data.values.github_pat
+        LINGO_API_KEY: #@ data.values.lingo_api_key
       run:
         path: sh
         args:
@@ -156,6 +157,7 @@ jobs:
             concourse_password = "${CONCOURSE_PASSWORD}"
             honeycomb_api_key = "${HONEYCOMB_API_KEY}"
             github_pat = "${GITHUB_PAT}"
+            lingo_api_key = "${LINGO_API_KEY}"
             EOF
 
             printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json

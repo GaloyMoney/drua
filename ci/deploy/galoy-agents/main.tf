@@ -9,6 +9,9 @@ variable "honeycomb_api_key" {
 variable "github_pat" {
   default = ""
 }
+variable "lingo_api_key" {
+  default = ""
+}
 
 locals {
   cluster_name         = "galoy-agents-cluster"
@@ -67,6 +70,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "concourse-password"   = var.concourse_password
     "honeycomb-auth-header" = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
     "github-auth-header"   = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "lingo-auth-header"    = var.lingo_api_key
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
