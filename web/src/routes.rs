@@ -34,6 +34,8 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/agents", get(agent_list))
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}/revoke", post(revoke_agent))
+        .route("/audit", get(audit_page))
+        .route("/audit/entries", get(audit_entries))
         .route("/code-assistant", get(code_assistant_dashboard))
         .route("/code-assistant/recent", get(code_assistant_recent))
         .route(
@@ -196,6 +198,46 @@ async fn agent_list(State(state): State<AppState>, session: Session) -> Response
         agents: agents.iter().map(agent_to_view).collect(),
     }
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditFilterParams {
+    subject: Option<String>,
+}
+
+#[instrument(name = "web.audit_page", skip_all)]
+async fn audit_page(session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    AuditTemplate {}.into_response()
+}
+
+#[instrument(name = "web.audit_entries", skip_all)]
+async fn audit_entries(
+    State(state): State<AppState>,
+    session: Session,
+    Query(params): Query<AuditFilterParams>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let audit = state.app.audit();
+    let subject = params.subject.as_deref().filter(|s| !s.is_empty());
+
+    let entries = match subject {
+        Some(subj) => audit.find_by_subject(subj, 50).await,
+        None => audit.list_recent(50).await,
+    };
+
+    match entries {
+        Ok(entries) => AuditEntriesTemplate { entries }.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load audit entries");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[instrument(name = "web.code_assistant_dashboard", skip_all)]
