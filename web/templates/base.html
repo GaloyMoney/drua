@@ -16,8 +16,16 @@
       flex-shrink: 0;
     }
     .sidebar h4 { margin-bottom: 1.5rem; }
-    .sidebar nav ul { list-style: none; padding: 0; margin: 0; }
+    .sidebar nav ul { list-style: none; padding: 0; margin: 0 0 1rem 0; }
     .sidebar nav ul li { margin-bottom: 0.25rem; }
+    .sidebar .section-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--pico-muted-color);
+      padding: 0.5rem 0.75rem 0.25rem;
+      margin-top: 0.5rem;
+    }
     .sidebar nav ul li a {
       display: block;
       padding: 0.5rem 0.75rem;
@@ -82,8 +90,11 @@
     <nav>
       <ul>
         <li><a href="/dashboard" {% block nav_dashboard %}{% endblock %}>Agents</a></li>
-        <li><a href="/audit" {% block nav_audit %}{% endblock %}>Audit Log</a></li>
         <li><a href="/code-assistant" {% block nav_code_assistant %}{% endblock %}>Code Assistant</a></li>
+      </ul>
+      <div class="section-label">Administration</div>
+      <ul>
+        <li><a href="/audit" {% block nav_audit %}{% endblock %}>Audit Log</a></li>
         <li><a href="/sandboxes" {% block nav_sandboxes %}{% endblock %}>Sandboxes</a></li>
       </ul>
     </nav>
