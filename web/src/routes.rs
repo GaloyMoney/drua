@@ -288,10 +288,7 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
                     .clone()
                     .or_else(|| user.email.clone())
                     .unwrap_or_else(|| user.github_id.clone());
-                return AuditSubjectView {
-                    label,
-                    owner: None,
-                };
+                return AuditSubjectView { label, owner: None };
             }
         }
     } else if subject == "anonymous" {
