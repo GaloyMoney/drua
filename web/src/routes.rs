@@ -414,14 +414,15 @@ async fn sandbox_create(
     let result = if client.has_persistence() {
         client.create_sandbox(&form.name).await
     } else {
-        client.create_claim(&form.name).await.map(|c| {
-            sandbox_client::SandboxSummary {
+        client
+            .create_claim(&form.name)
+            .await
+            .map(|c| sandbox_client::SandboxSummary {
                 name: form.name.clone(),
                 sandbox_name: c.status.and_then(|s| s.sandbox.map(|r| r.name)),
                 phase: "Provisioning".to_string(),
                 ready: false,
-            }
-        })
+            })
     };
     match result {
         Ok(_) => SandboxCreatedTemplate { name: form.name }.into_response(),
