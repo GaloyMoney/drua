@@ -238,7 +238,6 @@ async fn audit_entries(
                 let subject = resolve_subject(&state.app, &entry.subject).await;
                 views.push(AuditEntryView {
                     subject,
-                    interaction_type: entry.interaction_type,
                     action: entry.action,
                     outcome: entry.outcome,
                     duration_ms: entry.duration_ms,

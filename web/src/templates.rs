@@ -87,7 +87,6 @@ pub struct AuditSubjectView {
 
 pub struct AuditEntryView {
     pub subject: AuditSubjectView,
-    pub interaction_type: String,
     pub action: String,
     pub outcome: String,
     pub duration_ms: Option<i64>,
