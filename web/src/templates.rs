@@ -136,3 +136,9 @@ pub struct SandboxCreatedTemplate {
 pub struct SandboxTerminalTemplate {
     pub name: String,
 }
+
+#[derive(Template, WebTemplate)]
+#[template(path = "sandbox_agent.html")]
+pub struct SandboxAgentTemplate {
+    pub name: String,
+}

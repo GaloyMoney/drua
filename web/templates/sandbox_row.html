@@ -12,6 +12,10 @@
       href="/sandboxes/{{ sb.name }}/terminal">
       Terminal
     </a>
+    <a role="button" class="outline"
+      href="/sandboxes/{{ sb.name }}/agent">
+      Agent
+    </a>
     {% endif %}
     <button class="secondary outline"
       hx-get="/sandboxes/{{ sb.name }}/status"
