@@ -4,24 +4,29 @@
  * Agent Harness — thin wrapper around @anthropic-ai/claude-agent-sdk
  *
  * Protocol:
- *   stdin  (JSON-lines): { "prompt": "...", "session_id": "optional" }
+ *   stdin  (JSON-lines): { "prompt": "...", "session_id": "...", "model": "...", "max_turns": 10 }
  *   stdout (JSON-lines): SDK events — { "type": "assistant"|"result"|"system"|... , ... }
  *
  * Environment:
  *   ANTHROPIC_API_KEY — required
- *   AGENT_CWD        — working directory for Claude (default: /workspace)
- *   AGENT_MODEL       — model override (default: claude-sonnet-4-6)
- *   AGENT_MAX_TURNS   — max agentic turns (default: 50)
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createInterface } from "node:readline";
+
+// ── Constants ─────────────────────────────────────────────────────────
+
+const CWD = "/workspace";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_MAX_TURNS = 10;
 
 // ── Types ──────────────────────────────────────────────────────────────
 
 interface HarnessInput {
   prompt: string;
   session_id?: string;
+  model?: string;
+  max_turns?: number;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -37,9 +42,8 @@ function emitError(message: string, details?: string): void {
 // ── Main loop ──────────────────────────────────────────────────────────
 
 async function handleMessage(input: HarnessInput): Promise<void> {
-  const cwd = process.env.AGENT_CWD ?? "/workspace";
-  const model = process.env.AGENT_MODEL ?? "claude-sonnet-4-6";
-  const maxTurns = parseInt(process.env.AGENT_MAX_TURNS ?? "50", 10);
+  const model = input.model ?? DEFAULT_MODEL;
+  const maxTurns = input.max_turns ?? DEFAULT_MAX_TURNS;
 
   try {
     const result = query({
@@ -47,7 +51,7 @@ async function handleMessage(input: HarnessInput): Promise<void> {
       options: {
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
-        cwd,
+        cwd: CWD,
         model,
         maxTurns,
         resume: input.session_id,

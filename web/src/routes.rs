@@ -1084,6 +1084,8 @@ async fn exec_proxy(
 struct AgentMessageRequest {
     prompt: String,
     session_id: Option<String>,
+    model: Option<String>,
+    max_turns: Option<u32>,
 }
 
 /// Send a prompt to the Claude agent harness running inside a sandbox pod.
@@ -1104,9 +1106,7 @@ async fn api_agent_message(
 
     // Spawn the relay task that bridges pod stdout → SSE events.
     tokio::spawn(async move {
-        if let Err(e) =
-            agent_message_relay(client, &name, &body.prompt, &body.session_id, tx.clone()).await
-        {
+        if let Err(e) = agent_message_relay(client, &name, &body, tx.clone()).await {
             tracing::error!(error = %e, sandbox = %name, "Agent message relay failed");
             let _ = tx
                 .send(Ok(Event::default().event("error").data(
@@ -1126,8 +1126,7 @@ async fn api_agent_message(
 async fn agent_message_relay(
     client: std::sync::Arc<sandbox_client::SandboxClient>,
     sandbox_name: &str,
-    prompt: &str,
-    session_id: &Option<String>,
+    request: &AgentMessageRequest,
     tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Build the harness command.
@@ -1136,9 +1135,12 @@ async fn agent_message_relay(
     let mut process = client.exec_sandbox_raw(sandbox_name, command).await?;
 
     // Write the prompt as a JSON-line to stdin.
+    // All fields are forwarded — the harness applies its own defaults for omitted ones.
     let input_line = serde_json::json!({
-        "prompt": prompt,
-        "session_id": session_id,
+        "prompt": request.prompt,
+        "session_id": request.session_id,
+        "model": request.model,
+        "max_turns": request.max_turns,
     });
 
     let mut stdin = process
