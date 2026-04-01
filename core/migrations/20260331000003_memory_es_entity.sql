@@ -1,11 +1,11 @@
 -- Memory tables: es-entity pattern + auxiliary search data.
-CREATE TABLE memories (
+CREATE TABLE IF NOT EXISTS memories (
     id UUID PRIMARY KEY,
     title VARCHAR NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE memory_events (
+CREATE TABLE IF NOT EXISTS memory_events (
     id UUID NOT NULL REFERENCES memories(id),
     sequence INT NOT NULL,
     event_type VARCHAR NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE memory_events (
 -- the DB user has sufficient privileges; IF NOT EXISTS makes it a no-op in prod.
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE memory_search_data (
+CREATE TABLE IF NOT EXISTS memory_search_data (
     memory_id UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     title_text TEXT NOT NULL DEFAULT '',
     content_text TEXT NOT NULL DEFAULT '',
@@ -36,5 +36,5 @@ CREATE TABLE memory_search_data (
     embedding vector(768)
 );
 
-CREATE INDEX memory_search_data_tsv_idx ON memory_search_data USING GIN (search_tsv);
-CREATE INDEX memory_search_data_embedding_idx ON memory_search_data USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS memory_search_data_tsv_idx ON memory_search_data USING GIN (search_tsv);
+CREATE INDEX IF NOT EXISTS memory_search_data_embedding_idx ON memory_search_data USING hnsw (embedding vector_cosine_ops);
