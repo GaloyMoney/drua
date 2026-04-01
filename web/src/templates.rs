@@ -80,11 +80,13 @@ pub struct CodeAssistantSearchResultsTemplate {
 #[template(path = "audit.html")]
 pub struct AuditTemplate {}
 
+#[allow(dead_code)]
 pub struct AuditSubjectView {
     pub label: String,
     pub owner: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct AuditEntryView {
     pub subject: AuditSubjectView,
     pub action: String,
