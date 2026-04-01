@@ -12,6 +12,9 @@ variable "github_pat" {
 variable "lingo_api_key" {
   default = ""
 }
+variable "anthropic_api_key" {
+  default = ""
+}
 
 locals {
   cluster_name         = "galoy-agents-cluster"
@@ -74,6 +77,19 @@ resource "kubernetes_secret" "galoy_agents" {
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
+}
+
+resource "kubernetes_secret" "sandbox_anthropic" {
+  metadata {
+    name      = "anthropic-api-key"
+    namespace = local.sandbox_namespace
+  }
+
+  data = {
+    "api-key" = var.anthropic_api_key
+  }
+
+  depends_on = [kubernetes_namespace.sandbox]
 }
 
 resource "google_container_node_pool" "gvisor" {

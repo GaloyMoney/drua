@@ -117,6 +117,7 @@ sandbox:
   nodeSelector:
     sandbox.gke.io/runtime: gvisor
   env: []
+  anthropicApiKeySecret: ""
   ## Example: Override or supplement nix cache config at runtime
   # env:
   # - name: NIX_CONFIG
