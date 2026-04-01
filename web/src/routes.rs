@@ -59,6 +59,7 @@ pub fn router() -> Router<AppState> {
         .route("/sandboxes/{name}/delete", post(sandbox_delete))
         .route("/sandboxes/{name}/status", get(sandbox_status))
         .route("/sandboxes/{name}/terminal", get(sandbox_terminal))
+        .route("/sandboxes/{name}/agent", get(sandbox_agent))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -782,6 +783,21 @@ async fn sandbox_terminal(
         return Redirect::to("/sandboxes").into_response();
     }
     SandboxTerminalTemplate { name }.into_response()
+}
+
+#[instrument(name = "web.sandbox_agent", skip_all)]
+async fn sandbox_agent(
+    State(state): State<AppState>,
+    session: Session,
+    Path(name): Path<String>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    if state.sandbox.is_none() {
+        return Redirect::to("/sandboxes").into_response();
+    }
+    SandboxAgentTemplate { name }.into_response()
 }
 
 // ---------------------------------------------------------------------------

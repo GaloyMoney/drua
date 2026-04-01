@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+
+{% block title %}Agent — {{ name }} — Galoy Agents{% endblock %}
+
+{% block nav_sandboxes %}class="active"{% endblock %}
+
+{% block head %}
+<style>
+  .agent-wrapper {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 4rem);
+  }
+  .agent-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+    flex-shrink: 0;
+  }
+  .agent-header h2 { margin: 0; }
+  .agent-status {
+    font-size: 0.85em;
+    padding: 0.25rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+  }
+  .status-idle { color: var(--pico-muted-color); }
+  .status-streaming { color: #e89f0c; }
+  .status-done { color: var(--pico-ins-color); }
+  .status-error { color: var(--pico-del-color); }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    background: var(--pico-code-background-color);
+    border-radius: var(--pico-border-radius);
+    padding: 1rem;
+    margin-bottom: 0.5rem;
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    min-height: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  #messages .msg-user {
+    color: var(--pico-primary);
+    margin-bottom: 0.5rem;
+  }
+  #messages .msg-assistant {
+    color: var(--pico-color);
+    margin-bottom: 0.5rem;
+  }
+  #messages .msg-tool {
+    color: var(--pico-muted-color);
+    font-size: 0.8rem;
+    margin-bottom: 0.25rem;
+  }
+  #messages .msg-error {
+    color: var(--pico-del-color);
+    margin-bottom: 0.5rem;
+  }
+  #messages .msg-result {
+    color: var(--pico-ins-color);
+    border-top: 1px solid var(--pico-muted-border-color);
+    padding-top: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .input-row {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+  .input-row textarea {
+    flex: 1;
+    resize: none;
+    margin: 0;
+    min-height: 2.5rem;
+    max-height: 8rem;
+    font-family: inherit;
+  }
+  .input-row button {
+    width: auto;
+    margin: 0;
+    align-self: flex-end;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="agent-wrapper">
+  <div class="agent-header">
+    <div>
+      <h2>Agent: {{ name }}</h2>
+      <a href="/sandboxes">&larr; Back to sandboxes</a>
+    </div>
+    <span id="agent-status" class="agent-status status-idle">Idle</span>
+  </div>
+
+  <div id="messages"></div>
+
+  <div class="input-row">
+    <textarea id="prompt-input" placeholder="Send a message to the agent..." rows="2"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+    <button id="send-btn" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+(function() {
+  const sandboxName = "{{ name }}";
+  const messagesEl = document.getElementById('messages');
+  const promptEl = document.getElementById('prompt-input');
+  const sendBtn = document.getElementById('send-btn');
+  const statusEl = document.getElementById('agent-status');
+
+  let sessionId = null;
+  let eventSource = null;
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = 'agent-status ' + cls;
+  }
+
+  function appendMessage(cls, text) {
+    const div = document.createElement('div');
+    div.className = cls;
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return div;
+  }
+
+  function setInputEnabled(enabled) {
+    promptEl.disabled = !enabled;
+    sendBtn.disabled = !enabled;
+    sendBtn.setAttribute('aria-busy', !enabled);
+  }
+
+  window.sendMessage = function() {
+    const prompt = promptEl.value.trim();
+    if (!prompt) return;
+
+    appendMessage('msg-user', '> ' + prompt);
+    promptEl.value = '';
+    setInputEnabled(false);
+    setStatus('Streaming...', 'status-streaming');
+
+    // Build request body
+    const body = { prompt: prompt };
+    if (sessionId) body.session_id = sessionId;
+
+    // Use fetch + ReadableStream to consume SSE manually,
+    // since EventSource only supports GET.
+    fetch('/api/v1/sandboxes/' + encodeURIComponent(sandboxName) + '/agent/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(function(response) {
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentAssistantDiv = null;
+      let currentText = '';
+
+      function processLine(line) {
+        if (line.startsWith('event: ')) return; // We parse from the data line
+        if (!line.startsWith('data: ')) return;
+
+        const jsonStr = line.slice(6); // strip "data: "
+        if (!jsonStr) return;
+
+        let event;
+        try {
+          event = JSON.parse(jsonStr);
+        } catch(e) {
+          return;
+        }
+
+        switch (event.type) {
+          case 'system':
+            if (event.session_id) sessionId = event.session_id;
+            break;
+
+          case 'assistant':
+            // Full assistant message — extract text content
+            if (event.message && event.message.content) {
+              const texts = event.message.content
+                .filter(function(b) { return b.type === 'text'; })
+                .map(function(b) { return b.text; })
+                .join('');
+              if (texts) {
+                currentText = texts;
+                if (!currentAssistantDiv) {
+                  currentAssistantDiv = appendMessage('msg-assistant', texts);
+                } else {
+                  currentAssistantDiv.textContent = texts;
+                }
+              }
+              // Show tool use
+              const tools = event.message.content
+                .filter(function(b) { return b.type === 'tool_use'; });
+              tools.forEach(function(t) {
+                const inputStr = JSON.stringify(t.input || {});
+                const preview = inputStr.length > 120 ? inputStr.slice(0, 120) + '...' : inputStr;
+                appendMessage('msg-tool', '  ↳ ' + t.name + '(' + preview + ')');
+              });
+              // Reset for next assistant message
+              currentAssistantDiv = null;
+              currentText = '';
+            }
+            break;
+
+          case 'result':
+            if (event.session_id) sessionId = event.session_id;
+            let info = '✓ Done';
+            if (event.total_cost_usd !== undefined) {
+              info += ' · $' + event.total_cost_usd.toFixed(4);
+            }
+            if (event.num_turns !== undefined) {
+              info += ' · ' + event.num_turns + ' turns';
+            }
+            if (event.duration_ms !== undefined) {
+              info += ' · ' + (event.duration_ms / 1000).toFixed(1) + 's';
+            }
+            appendMessage('msg-result', info);
+            setStatus('Done', 'status-done');
+            setInputEnabled(true);
+            break;
+
+          case 'error':
+            appendMessage('msg-error', '✗ Error: ' + (event.message || event.details || 'unknown'));
+            setStatus('Error', 'status-error');
+            setInputEnabled(true);
+            break;
+
+          default:
+            // Ignore other event types (partial messages, etc.)
+            break;
+        }
+
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      function pump() {
+        return reader.read().then(function(result) {
+          if (result.done) {
+            // Process any remaining buffer
+            if (buffer.trim()) {
+              buffer.split('\n').forEach(processLine);
+            }
+            if (sendBtn.disabled) {
+              setStatus('Done', 'status-done');
+              setInputEnabled(true);
+            }
+            return;
+          }
+          buffer += decoder.decode(result.value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          lines.forEach(processLine);
+          return pump();
+        });
+      }
+
+      return pump();
+    }).catch(function(err) {
+      appendMessage('msg-error', '✗ ' + err.message);
+      setStatus('Error', 'status-error');
+      setInputEnabled(true);
+    });
+  };
+
+  // Focus input on load
+  promptEl.focus();
+})();
+</script>
+{% endblock %}
