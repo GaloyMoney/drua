@@ -169,6 +169,14 @@ resource "kubectl_manifest" "sandbox_extensions" {
   ]
 }
 
+resource "postgresql_extension" "vector" {
+  provider = postgresql.galoy_agents
+  name     = "vector"
+  database = "galoy-agents"
+
+  depends_on = [module.postgresql]
+}
+
 resource "helm_release" "galoy_agents" {
   name      = "galoy-agents"
   chart     = "${path.module}/chart"
@@ -190,6 +198,7 @@ resource "helm_release" "galoy_agents" {
     google_container_node_pool.gvisor,
     kubectl_manifest.sandbox_controller,
     kubectl_manifest.sandbox_extensions,
+    postgresql_extension.vector,
   ]
 }
 
@@ -214,6 +223,16 @@ provider "kubectl" {
   token                  = data.google_client_config.default.access_token
   cluster_ca_certificate = base64decode(data.google_container_cluster.primary.master_auth.0.cluster_ca_certificate)
   load_config_file       = false
+}
+
+provider "postgresql" {
+  alias    = "galoy_agents"
+  host     = module.postgresql.creds["galoy-agents"].host
+  port     = 5432
+  username = module.postgresql.admin-creds.user
+  password = module.postgresql.admin-creds.password
+  database = "galoy-agents"
+  superuser = false
 }
 
 provider "helm" {
