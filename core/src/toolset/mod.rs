@@ -95,6 +95,7 @@ impl Catalog {
     }
 
     pub async fn search(&self, query: Option<&str>, category: Option<&str>) -> Vec<CatalogEntry> {
+        let start = std::time::Instant::now();
         let mut entries: Vec<CatalogEntry> = self
             .entries()
             .into_iter()
@@ -126,12 +127,13 @@ impl Catalog {
                 entries = scored.into_iter().map(|(_, e)| e).collect();
             }
         }
+        let duration_ms = start.elapsed().as_millis() as u64;
 
         self.record_audit(
             "search_tools",
             serde_json::json!({ "query": query, "category": category }),
             InteractionOutcome::Success,
-            None,
+            Some(duration_ms),
             None,
         )
         .await;
@@ -140,10 +142,12 @@ impl Catalog {
     }
 
     pub async fn describe(&self, prefixed_name: &str) -> Option<CatalogEntry> {
+        let start = std::time::Instant::now();
         let result = self
             .entries()
             .into_iter()
             .find(|e| e.prefixed_name == prefixed_name);
+        let duration_ms = start.elapsed().as_millis() as u64;
 
         let outcome = if result.is_some() {
             InteractionOutcome::Success
@@ -156,7 +160,7 @@ impl Catalog {
             "describe_tool",
             serde_json::json!({ "tool_name": prefixed_name }),
             outcome,
-            None,
+            Some(duration_ms),
             None,
         )
         .await;
