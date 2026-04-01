@@ -43,12 +43,15 @@ impl ConcourseToolSet {
             ),
             tool_entry(
                 "get_build_logs",
-                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished.",
+                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Supports server-side grep filtering to reduce output size.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "build_id": {"type": "integer", "description": "The numeric build ID"},
-                        "tail": {"type": "integer", "description": "Number of lines to return from the end of the log (default: 150)"}
+                        "tail": {"type": "integer", "description": "Number of lines to return from the end of the log (default: 150)"},
+                        "grep_pattern": {"type": "string", "description": "Regex pattern to filter log lines (only matching lines are returned). Applied before tail."},
+                        "invert_match": {"type": "boolean", "description": "When true, exclude lines matching grep_pattern instead of including them (like grep -v). Default: false"},
+                        "context_lines": {"type": "integer", "description": "Number of lines to show before and after each match (like grep -C). Only used with grep_pattern."}
                     },
                     "required": ["build_id"]
                 }),
@@ -198,21 +201,43 @@ impl ToolSet for ConcourseToolSet {
             "get_build_logs" => {
                 let build_id = int_arg(&args, "build_id")?;
                 let tail = args.get("tail").and_then(|v| v.as_i64()).unwrap_or(150) as usize;
+                let grep_pattern = args.get("grep_pattern").and_then(|v| v.as_str());
+                let invert_match = args
+                    .get("invert_match")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let context_lines = args
+                    .get("context_lines")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.max(0) as usize);
+
                 let logs = self.client.get_build_logs(build_id).await?;
                 if logs.is_empty() {
                     return Ok(CallToolResult::success(vec![Content::text(
                         "No log output available for this build.",
                     )]));
                 }
+
                 let lines: Vec<&str> = logs.lines().collect();
-                let output = if lines.len() > tail {
-                    let skipped = lines.len() - tail;
+
+                // Apply grep filter if provided
+                let filtered: Vec<&str> = if let Some(pattern) = grep_pattern {
+                    let re = regex::Regex::new(pattern).map_err(|e| {
+                        ToolSetsError::InvalidArgument(format!("invalid grep_pattern regex: {e}"))
+                    })?;
+                    filter_lines(&lines, &re, invert_match, context_lines)
+                } else {
+                    lines
+                };
+
+                let output = if filtered.len() > tail {
+                    let skipped = filtered.len() - tail;
                     format!(
                         "... ({skipped} lines omitted, showing last {tail})\n{}",
-                        lines[lines.len() - tail..].join("\n")
+                        filtered[filtered.len() - tail..].join("\n")
                     )
                 } else {
-                    logs
+                    filtered.join("\n")
                 };
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
@@ -323,6 +348,57 @@ fn int_arg(args: &JsonObject, key: &str) -> Result<i64, ToolSetsError> {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
         .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
+}
+
+/// Filter log lines by regex pattern with optional context lines.
+///
+/// When `invert` is false, returns lines that match the pattern (grep).
+/// When `invert` is true, returns lines that do NOT match (grep -v).
+/// When `context` is Some(n), includes n lines before/after each match (grep -C).
+fn filter_lines<'a>(
+    lines: &[&'a str],
+    re: &regex::Regex,
+    invert: bool,
+    context: Option<usize>,
+) -> Vec<&'a str> {
+    if context.is_none() || invert {
+        // Simple filter: no context lines, or inverted match (context + invert is unusual, skip context)
+        return lines
+            .iter()
+            .filter(|line| re.is_match(line) != invert)
+            .copied()
+            .collect();
+    }
+
+    let ctx = context.unwrap_or(0);
+    let mut included = vec![false; lines.len()];
+
+    for (i, line) in lines.iter().enumerate() {
+        if re.is_match(line) {
+            let start = i.saturating_sub(ctx);
+            let end = (i + ctx + 1).min(lines.len());
+            for flag in &mut included[start..end] {
+                *flag = true;
+            }
+        }
+    }
+
+    // Collect included lines, inserting "--" separators between non-contiguous groups
+    let mut result = Vec::new();
+    let mut prev_included = false;
+    for (i, line) in lines.iter().enumerate() {
+        if included[i] {
+            if !prev_included && !result.is_empty() {
+                result.push("--");
+            }
+            result.push(line);
+            prev_included = true;
+        } else {
+            prev_included = false;
+        }
+    }
+
+    result
 }
 
 fn extract_get_steps(plan: &[serde_json::Value], out: &mut Vec<serde_json::Value>) {
