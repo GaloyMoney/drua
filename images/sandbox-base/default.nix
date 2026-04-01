@@ -28,18 +28,42 @@ let
     fallback = true
   '';
 
-  # Wrapper script for running the agent harness.
-  # On first invocation it installs npm dependencies and compiles TypeScript.
+  # Agent harness — pre-built at image build time (zero runtime downloads).
+  # Uses buildNpmPackage for reproducible npm ci, then esbuild to produce a
+  # single-file ESM bundle that can run directly with `node`.
+  agentHarness = pkgs.buildNpmPackage {
+    pname = "agent-harness";
+    version = "0.1.0";
+    src = ./agent-harness;
+    npmDepsHash = "sha256-y1jTok6cf0uWMK6S64H7QMswLTpmLOh8Xo2Bl8EzHVU=";
+
+    nativeBuildInputs = [ pkgs.esbuild ];
+
+    # Skip the default `npm run build`; we bundle with esbuild instead.
+    dontNpmBuild = true;
+
+    buildPhase = ''
+      runHook preBuild
+      esbuild src/index.ts \
+        --bundle \
+        --platform=node \
+        --target=node22 \
+        --format=esm \
+        --outfile=dist/index.js
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out/lib
+      cp dist/index.js $out/lib/index.js
+      runHook postInstall
+    '';
+  };
+
+  # Thin wrapper — just exec node with the pre-built bundle.
   agentHarnessWrapper = pkgs.writeShellScriptBin "agent-harness" ''
-    set -euo pipefail
-    HARNESS_DIR=/opt/agent-harness
-    if [ ! -d "$HARNESS_DIR/node_modules" ]; then
-      (cd "$HARNESS_DIR" && ${pkgs.nodejs_22}/bin/npm install --no-fund --no-audit 2>&1 >&2)
-    fi
-    if [ ! -f "$HARNESS_DIR/dist/index.js" ]; then
-      (cd "$HARNESS_DIR" && ${pkgs.nodejs_22}/bin/npx tsc 2>&1 >&2)
-    fi
-    exec ${pkgs.nodejs_22}/bin/node "$HARNESS_DIR/dist/index.js" "$@"
+    exec ${pkgs.nodejs_22}/bin/node ${agentHarness}/lib/index.js "$@"
   '';
 in
 pkgs.dockerTools.buildLayeredImage {
@@ -73,14 +97,6 @@ pkgs.dockerTools.buildLayeredImage {
     chown 1000:1000 ./home/agent
     mkdir -p ./tmp
     chmod 1777 ./tmp
-
-    # Install agent harness source to /opt.
-    # npm install + tsc happen on first invocation inside the sandbox.
-    mkdir -p ./opt/agent-harness/src
-    cp ${./agent-harness/package.json} ./opt/agent-harness/package.json
-    cp ${./agent-harness/tsconfig.json} ./opt/agent-harness/tsconfig.json
-    cp ${./agent-harness/src/index.ts} ./opt/agent-harness/src/index.ts
-    chmod -R 777 ./opt/agent-harness
   '';
   config = {
     Cmd = [ "/bin/bash" ];
