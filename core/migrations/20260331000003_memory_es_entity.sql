@@ -20,7 +20,15 @@ CREATE TABLE IF NOT EXISTS memory_events (
 -- In production (Cloud SQL) the vector extension is pre-provisioned by Terraform
 -- using admin credentials. This CREATE is kept for local/CI environments where
 -- the DB user has sufficient privileges; IF NOT EXISTS makes it a no-op in prod.
-CREATE EXTENSION IF NOT EXISTS vector;
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN insufficient_privilege THEN
+    -- In Cloud SQL the extension is pre-provisioned by Terraform;
+    -- if it already exists this is fine, if it doesn't we can't help here.
+    NULL;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS memory_search_data (
     memory_id UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
