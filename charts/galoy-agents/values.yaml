@@ -74,7 +74,7 @@ galoyAgents:
     concoursePassword: ""
     annotations:
   codeAssistant:
-    indexHash: "db8fd52e7db584ee8878641c030662543f6ff7d7d8a9404898ecb40b19a773b5"
+    indexHash: "c0ec5ca88e64759ce6681e38a02a46e4bf2f26e36d3b8836ae97d70a2925ac3f"
     embedderHash: "cafb5f44fabcd69b20af172d93a06aed5adedf7618ea363c3015bb2676560730"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
