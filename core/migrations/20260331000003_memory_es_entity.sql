@@ -17,8 +17,10 @@ CREATE TABLE memory_events (
 
 -- Auxiliary search data for hybrid FTS + vector search.
 -- Managed by the application alongside the es-entity repo.
--- NOTE: The `vector` extension is provisioned via Terraform (infrastructure),
--- not here, because Cloud SQL requires cloudsqlsuperuser to CREATE EXTENSION.
+-- In production (Cloud SQL) the vector extension is pre-provisioned by Terraform
+-- using admin credentials. This CREATE is kept for local/CI environments where
+-- the DB user has sufficient privileges; IF NOT EXISTS makes it a no-op in prod.
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE memory_search_data (
     memory_id UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
