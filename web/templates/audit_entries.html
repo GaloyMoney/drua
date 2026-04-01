@@ -3,7 +3,6 @@
     <thead>
       <tr>
         <th>Subject</th>
-        <th>Type</th>
         <th>Action</th>
         <th>Outcome</th>
         <th>Duration</th>
@@ -15,7 +14,6 @@
       {% for entry in entries %}
       <tr>
         <td class="subject-cell"><strong>{{ entry.subject.label }}</strong>{% match entry.subject.owner %}{% when Some with (owner) %}<br><span class="subject-owner">↳ {{ owner }}</span>{% when None %}{% endmatch %}</td>
-        <td>{{ entry.interaction_type }}</td>
         <td>{{ entry.action }}</td>
         <td><span class="outcome-{{ entry.outcome }}">{{ entry.outcome }}</span></td>
         <td>{% match entry.duration_ms %}{% when Some with (ms) %}{{ ms }}ms{% when None %}—{% endmatch %}</td>
@@ -24,7 +22,7 @@
       </tr>
       {% if entry.metadata != serde_json::Value::Object(Default::default()) %}
       <tr>
-        <td colspan="7" style="padding: 0;">
+        <td colspan="6" style="padding: 0;">
           <details>
             <summary style="padding: 0.25rem 0.5rem; font-size: 0.8rem; cursor: pointer;">Show metadata</summary>
             <pre style="font-size: 0.75rem; max-height: 300px; overflow: auto; margin: 0; padding: 0.5rem;">{{ entry.metadata }}</pre>
@@ -34,7 +32,7 @@
       {% endif %}
       {% endfor %}
       {% if entries.is_empty() %}
-      <tr><td colspan="7">No audit entries found.</td></tr>
+      <tr><td colspan="6">No audit entries found.</td></tr>
       {% endif %}
     </tbody>
   </table>
