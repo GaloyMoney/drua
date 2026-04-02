@@ -103,15 +103,15 @@ pub struct AuditEntriesTemplate {
     pub entries: Vec<AuditEntryView>,
 }
 
-// ── Memories ─────────────────────────────────────────────────────────
+// ── Reports ──────────────────────────────────────────────────────────
 
 #[derive(Template, WebTemplate)]
-#[template(path = "memories.html")]
-pub struct MemoriesTemplate {
+#[template(path = "reports.html")]
+pub struct ReportsTemplate {
     pub enabled: bool,
 }
 
-pub struct MemoryView {
+pub struct ReportView {
     pub id: String,
     pub short_id: String,
     pub title: String,
@@ -121,35 +121,34 @@ pub struct MemoryView {
     pub pinned: bool,
 }
 
-pub struct MemorySearchResultView {
+pub struct ReportSearchResultView {
     pub id: String,
     pub short_id: String,
     pub title: String,
     pub content: String,
     pub tags: String,
     pub score: String,
-    pub decay_factor: String,
     pub pinned: bool,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "memories_list.html")]
-pub struct MemoriesListTemplate {
-    pub memories: Vec<MemoryView>,
+#[template(path = "reports_list.html")]
+pub struct ReportsListTemplate {
+    pub reports: Vec<ReportView>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "memories_search_results.html")]
-pub struct MemoriesSearchResultsTemplate {
+#[template(path = "reports_search_results.html")]
+pub struct ReportsSearchResultsTemplate {
     pub query: String,
-    pub results: Vec<MemorySearchResultView>,
+    pub results: Vec<ReportSearchResultView>,
     pub error: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "memories_detail.html")]
-pub struct MemoryDetailTemplate {
-    pub memory: MemoryView,
+#[template(path = "reports_detail.html")]
+pub struct ReportDetailTemplate {
+    pub report: ReportView,
 }
 
 // ── Sandboxes ────────────────────────────────────────────────────────

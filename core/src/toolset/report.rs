@@ -1,27 +1,27 @@
 use std::sync::Arc;
 
-use crate::memory::{Memories, StoreMemoryParams};
+use crate::report::{Reports, StoreReportParams};
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
 use super::{ToolSet, ToolSetEntry, ToolSetsError};
 
-pub struct MemoryToolSet {
-    service: Arc<Memories>,
+pub struct ReportToolSet {
+    service: Arc<Reports>,
     tools: Vec<ToolSetEntry>,
 }
 
-impl MemoryToolSet {
-    pub fn new(service: Arc<Memories>) -> Self {
+impl ReportToolSet {
+    pub fn new(service: Arc<Reports>) -> Self {
         let tools = vec![
             tool_entry(
-                "store_memory",
+                "store_report",
                 "Store a research finding, decision, or piece of knowledge for future agents. Always store important findings before completing a task.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "title": {
                             "type": "string",
-                            "description": "Descriptive title for the memory"
+                            "description": "Descriptive title for the report"
                         },
                         "content": {
                             "type": "string",
@@ -37,8 +37,8 @@ impl MemoryToolSet {
                 }),
             ),
             tool_entry(
-                "search_memory",
-                "Search stored memories and research reports. Always search before starting research — someone may have already investigated your topic.",
+                "search_report",
+                "Search stored reports and research findings. Always search before starting research — someone may have already investigated your topic.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -55,30 +55,17 @@ impl MemoryToolSet {
                 }),
             ),
             tool_entry(
-                "list_memories",
-                "List stored memories, ordered by most recent first.",
+                "get_report",
+                "Retrieve the full content of a stored report by its ID (or ID prefix).",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of results to return (default: 20)"
-                        }
-                    }
-                }),
-            ),
-            tool_entry(
-                "get_memory",
-                "Retrieve the full content of a stored memory by its ID (or ID prefix).",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "memory_id": {
+                        "report_id": {
                             "type": "string",
-                            "description": "The memory ID or prefix (e.g. first 8 characters)"
+                            "description": "The report ID or prefix (e.g. first 8 characters)"
                         }
                     },
-                    "required": ["memory_id"]
+                    "required": ["report_id"]
                 }),
             ),
         ];
@@ -98,17 +85,17 @@ impl MemoryToolSet {
             .map(|t| t.to_lowercase())
             .collect();
 
-        let memory = self
+        let report = self
             .service
-            .store(StoreMemoryParams {
+            .store(StoreReportParams {
                 title: title.to_string(),
                 content: content.to_string(),
                 tags: tags.clone(),
             })
             .await
-            .map_err(|e| ToolSetsError::Memory(e.to_string()))?;
+            .map_err(|e| ToolSetsError::Report(e.to_string()))?;
 
-        let id_str = memory.id.to_string();
+        let id_str = report.id.to_string();
         let short_id = &id_str[..8.min(id_str.len())];
         let tags_display = if tags.is_empty() {
             String::from("(none)")
@@ -116,8 +103,8 @@ impl MemoryToolSet {
             tags.join(", ")
         };
         let text = format!(
-            "Stored memory: \"{}\" (id: {short_id})\nTags: {tags_display}",
-            memory.title
+            "Stored report: \"{}\" (id: {short_id})\nTags: {tags_display}",
+            report.title
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -130,7 +117,7 @@ impl MemoryToolSet {
             .service
             .search(query, limit)
             .await
-            .map_err(|e| ToolSetsError::Memory(e.to_string()))?;
+            .map_err(|e| ToolSetsError::Report(e.to_string()))?;
 
         if results.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -142,11 +129,10 @@ impl MemoryToolSet {
 
         for (i, r) in results.iter().enumerate() {
             text.push_str(&format!(
-                "\n### {}. {} (score: {:.2}, decay: {:.0}%",
+                "\n### {}. {} (score: {:.2}",
                 i + 1,
                 r.title,
                 r.score,
-                r.decay_factor * 100.0,
             ));
             if r.pinned {
                 text.push_str(", pinned");
@@ -169,45 +155,14 @@ impl MemoryToolSet {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    async fn handle_list(&self, args: &JsonObject) -> Result<CallToolResult, ToolSetsError> {
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-
-        let memories = self
-            .service
-            .list(limit)
-            .await
-            .map_err(|e| ToolSetsError::Memory(e.to_string()))?;
-
-        if memories.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No memories found.",
-            )]));
-        }
-
-        let mut text = String::new();
-        for m in &memories {
-            let id_str = m.id.to_string();
-            let short_id = &id_str[..8.min(id_str.len())];
-            let tags_display = if m.tags.is_empty() {
-                String::new()
-            } else {
-                format!("\n  Tags: {}", m.tags.join(", "))
-            };
-
-            text.push_str(&format!("- {} (id: {short_id}){tags_display}\n", m.title));
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(text)]))
-    }
-
     async fn handle_get(&self, args: &JsonObject) -> Result<CallToolResult, ToolSetsError> {
-        let memory_id = str_arg(args, "memory_id")?;
+        let report_id = str_arg(args, "report_id")?;
 
         let found = self
             .service
-            .find_by_id_prefix(memory_id)
+            .find_by_id_prefix(report_id)
             .await
-            .map_err(|e| ToolSetsError::Memory(e.to_string()))?;
+            .map_err(|e| ToolSetsError::Report(e.to_string()))?;
 
         match found {
             Some(m) => {
@@ -226,16 +181,16 @@ impl MemoryToolSet {
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
             None => Ok(CallToolResult::success(vec![Content::text(format!(
-                "No memory found with ID prefix '{memory_id}'"
+                "No report found with ID prefix '{report_id}'"
             ))])),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ToolSet for MemoryToolSet {
+impl ToolSet for ReportToolSet {
     fn name(&self) -> &str {
-        "memory"
+        "report"
     }
 
     fn category(&self) -> &str {
@@ -243,7 +198,7 @@ impl ToolSet for MemoryToolSet {
     }
 
     fn category_description(&self) -> &str {
-        "Persistent memory store for research findings, decisions, and knowledge"
+        "Persistent knowledge base for research findings, decisions, and reports"
     }
 
     fn tools(&self) -> &[ToolSetEntry] {
@@ -257,10 +212,9 @@ impl ToolSet for MemoryToolSet {
     ) -> Result<CallToolResult, ToolSetsError> {
         let args = arguments.unwrap_or_default();
         match tool_name {
-            "store_memory" => self.handle_store(&args).await,
-            "search_memory" => self.handle_search(&args).await,
-            "list_memories" => self.handle_list(&args).await,
-            "get_memory" => self.handle_get(&args).await,
+            "store_report" => self.handle_store(&args).await,
+            "search_report" => self.handle_search(&args).await,
+            "get_report" => self.handle_get(&args).await,
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
     }

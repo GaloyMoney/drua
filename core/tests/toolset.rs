@@ -13,7 +13,7 @@ async fn init_toolsets() {
     let config = ToolSetsConfig {
         concourse: Default::default(),
         code_assistant: Default::default(),
-        memory: Default::default(),
+        report: Default::default(),
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),

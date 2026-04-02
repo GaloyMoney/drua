@@ -3,8 +3,8 @@ pub mod audit;
 pub mod auth;
 pub mod code_assistant;
 mod config;
-pub mod memory;
 pub mod primitives;
+pub mod report;
 pub mod toolset;
 pub mod user;
 
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
-use memory::Memories;
+use report::Reports;
 use toolset::{ToolSets, ToolSetsError};
 use user::Users;
 
@@ -25,7 +25,7 @@ pub struct App {
     agents: Agents,
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
-    memory: Option<Arc<Memories>>,
+    reports: Option<Arc<Reports>>,
     toolsets: Arc<ToolSets>,
 }
 
@@ -35,7 +35,7 @@ impl App {
             let p = &config.toolsets.code_assistant.db_path;
             !p.is_empty() && std::path::Path::new(p).exists()
         };
-        let needs_embedder = ca_db_exists || config.toolsets.memory.enabled;
+        let needs_embedder = ca_db_exists || config.toolsets.report.enabled;
 
         let embedder = if needs_embedder {
             Some(Arc::new(
@@ -60,12 +60,8 @@ impl App {
             None
         };
 
-        let memory = match (&embedder, config.toolsets.memory.enabled) {
-            (Some(emb), true) => Some(Arc::new(Memories::new(
-                pool,
-                emb.clone(),
-                config.toolsets.memory.decay_half_life_days,
-            ))),
+        let reports = match (&embedder, config.toolsets.report.enabled) {
+            (Some(emb), true) => Some(Arc::new(Reports::new(pool, emb.clone()))),
             _ => None,
         };
 
@@ -73,7 +69,7 @@ impl App {
         let toolsets = ToolSets::init(
             config.toolsets,
             code_assistant.clone(),
-            memory.clone(),
+            reports.clone(),
             Some(Arc::clone(&audit)),
         )
         .await?;
@@ -82,7 +78,7 @@ impl App {
             agents: Agents::new(pool),
             audit,
             code_assistant,
-            memory,
+            reports,
             toolsets: Arc::new(toolsets),
         })
     }
@@ -103,8 +99,8 @@ impl App {
         self.code_assistant.as_deref()
     }
 
-    pub fn memory(&self) -> Option<&Memories> {
-        self.memory.as_deref()
+    pub fn reports(&self) -> Option<&Reports> {
+        self.reports.as_deref()
     }
 
     pub fn toolsets(&self) -> &ToolSets {

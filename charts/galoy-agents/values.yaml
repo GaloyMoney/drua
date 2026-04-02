@@ -32,9 +32,8 @@ galoyAgents:
       githubClientId: ""
       githubRedirectUri: ""
       githubAllowedTeams: []
-    memory:
+    report:
       enabled: false
-      decayHalfLifeDays: 14.0
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"
     concourse:

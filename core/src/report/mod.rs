@@ -7,82 +7,66 @@ mod store;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use tracing::instrument;
 
-pub use entity::{Memory, NewMemory, SearchResult};
+pub use entity::{NewReport, Report, SearchResult};
 pub use error::*;
 use repo::*;
 use store::SearchStore;
 
-pub use config::MemoryConfig;
+pub use config::ReportConfig;
 
 use crate::primitives::*;
 use code_assistant_core::embedder::Embedder;
 
-/// Parameters for storing a new memory.
-pub struct StoreMemoryParams {
+/// Parameters for storing a new report.
+pub struct StoreReportParams {
     pub title: String,
     pub content: String,
     pub tags: Vec<String>,
 }
 
-/// Minimum strength before a memory is filtered from search results.
-const DECAY_MIN_STRENGTH: f64 = 0.05;
-
-/// Compute exponential decay factor based on time since last access.
-fn decay_factor(last_accessed: DateTime<Utc>, half_life_days: f64) -> f64 {
-    let lambda = (2.0_f64).ln() / half_life_days;
-    let days_elapsed = Utc::now()
-        .signed_duration_since(last_accessed)
-        .num_seconds() as f64
-        / 86400.0;
-    (-lambda * days_elapsed).exp()
-}
-
 #[derive(Clone)]
-pub struct Memories {
-    repo: MemoryRepo,
+pub struct Reports {
+    repo: ReportRepo,
     search_store: SearchStore,
     embedder: Arc<Embedder>,
-    decay_half_life_days: f64,
 }
 
-impl std::fmt::Debug for Memories {
+impl std::fmt::Debug for Reports {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Memories").finish_non_exhaustive()
+        f.debug_struct("Reports").finish_non_exhaustive()
     }
 }
 
-impl Memories {
-    pub fn new(pool: &sqlx::PgPool, embedder: Arc<Embedder>, decay_half_life_days: f64) -> Self {
-        let repo = MemoryRepo::new(pool);
+impl Reports {
+    pub fn new(pool: &sqlx::PgPool, embedder: Arc<Embedder>) -> Self {
+        let repo = ReportRepo::new(pool);
         let search_store = SearchStore::new(pool);
-        tracing::info!("Memory service ready (PostgreSQL)");
+        tracing::info!("Report service ready (PostgreSQL)");
         Self {
             repo,
             search_store,
             embedder,
-            decay_half_life_days,
         }
     }
 
     // ── Store ───────────────────────────────────────────────────────
 
-    #[instrument(name = "memory.store", skip_all, fields(title = %params.title))]
-    pub async fn store(&self, params: StoreMemoryParams) -> Result<Memory, MemoryError> {
-        let new_memory = NewMemory::builder()
+    #[instrument(name = "report.store", skip_all, fields(title = %params.title))]
+    pub async fn store(&self, params: StoreReportParams) -> Result<Report, ReportError> {
+        let new_report = NewReport::builder()
             .title(params.title.clone())
             .content(params.content.clone())
             .tags(params.tags.clone())
             .build()
-            .expect("Could not build new memory");
-        let memory_id = new_memory.id;
+            .expect("Could not build new report");
+        let report_id = new_report.id;
 
-        let memory = self.repo.create(new_memory).await?;
+        let report = self.repo.create(new_report).await?;
 
         self.search_store
-            .insert_search_data(memory_id, &params)
+            .insert_search_data(report_id, &params)
             .await?;
 
         // Generate embedding asynchronously.
@@ -92,7 +76,7 @@ impl Memories {
         tokio::task::spawn(async move {
             match embedder.embed_document(&text).await {
                 Ok(embedding) => {
-                    if let Err(e) = search_store.upsert_embedding(memory_id, &embedding).await {
+                    if let Err(e) = search_store.upsert_embedding(report_id, &embedding).await {
                         tracing::warn!(error = %e, "Failed to store embedding");
                     }
                 }
@@ -102,36 +86,36 @@ impl Memories {
             }
         });
 
-        tracing::info!(id = %memory.id, "Memory stored");
-        Ok(memory)
+        tracing::info!(id = %report.id, "Report stored");
+        Ok(report)
     }
 
     // ── List ────────────────────────────────────────────────────────
 
-    #[instrument(name = "memory.list", skip_all)]
-    pub async fn list(&self, limit: usize) -> Result<Vec<Memory>, MemoryError> {
+    #[instrument(name = "report.list", skip_all)]
+    pub async fn list(&self, limit: usize) -> Result<Vec<Report>, ReportError> {
         let ids = self.search_store.list_ids(limit as i64).await?;
-        let mut memories = Vec::with_capacity(ids.len());
+        let mut reports = Vec::with_capacity(ids.len());
         for id in ids {
             match self.repo.find_by_id(id).await {
-                Ok(memory) => memories.push(memory),
+                Ok(report) => reports.push(report),
                 Err(e) => {
-                    tracing::warn!(id = %id, error = %e, "Failed to hydrate memory, skipping");
+                    tracing::warn!(id = %id, error = %e, "Failed to hydrate report, skipping");
                 }
             }
         }
-        Ok(memories)
+        Ok(reports)
     }
 
     // ── Get ─────────────────────────────────────────────────────────
 
-    #[instrument(name = "memory.find_by_id", skip_all)]
-    pub async fn find_by_id(&self, id: MemoryId) -> Result<Memory, MemoryError> {
+    #[instrument(name = "report.find_by_id", skip_all)]
+    pub async fn find_by_id(&self, id: ReportId) -> Result<Report, ReportError> {
         Ok(self.repo.find_by_id(id).await?)
     }
 
-    #[instrument(name = "memory.find_by_id_prefix", skip_all)]
-    pub async fn find_by_id_prefix(&self, prefix: &str) -> Result<Option<Memory>, MemoryError> {
+    #[instrument(name = "report.find_by_id_prefix", skip_all)]
+    pub async fn find_by_id_prefix(&self, prefix: &str) -> Result<Option<Report>, ReportError> {
         let id = self.search_store.find_id_by_prefix(prefix).await?;
         match id {
             Some(id) => Ok(Some(self.repo.find_by_id(id).await?)),
@@ -142,12 +126,12 @@ impl Memories {
     // ── Search ──────────────────────────────────────────────────────
 
     /// Hybrid search: FTS + vector with Reciprocal Rank Fusion.
-    #[instrument(name = "memory.search", skip_all, fields(%query))]
+    #[instrument(name = "report.search", skip_all, fields(%query))]
     pub async fn search(
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<SearchResult>, MemoryError> {
+    ) -> Result<Vec<SearchResult>, ReportError> {
         let fetch_limit = (limit * 3) as i64;
 
         // 1. FTS keyword search.
@@ -172,7 +156,7 @@ impl Memories {
 
         // 3. Reciprocal Rank Fusion.
         let k = 60.0_f64;
-        let mut scores: HashMap<MemoryId, f64> = HashMap::new();
+        let mut scores: HashMap<ReportId, f64> = HashMap::new();
 
         for (rank, result) in fts_results.iter().enumerate() {
             *scores.entry(result.id).or_default() += 1.0 / (k + rank as f64 + 1.0);
@@ -182,12 +166,11 @@ impl Memories {
         }
 
         // Sort by RRF score descending.
-        let mut ranked: Vec<(MemoryId, f64)> = scores.into_iter().collect();
+        let mut ranked: Vec<(ReportId, f64)> = scores.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Fetch full memories and build results with decay scoring.
+        // Fetch full reports and build results.
         let mut results = Vec::new();
-        let half_life = self.decay_half_life_days;
 
         for (id, rrf_score) in &ranked {
             let m = match self.repo.find_by_id(*id).await {
@@ -195,51 +178,23 @@ impl Memories {
                 Err(_) => continue,
             };
 
-            let meta =
-                self.search_store
-                    .get_access_metadata(*id)
-                    .await
-                    .unwrap_or(store::AccessMetadata {
-                        last_accessed: None,
-                    });
-
-            let df = if m.pinned {
-                1.0
-            } else {
-                let accessed = meta.last_accessed.unwrap_or(m.created_at());
-                decay_factor(accessed, half_life)
-            };
-
-            // Filter below minimum strength.
-            if !m.pinned && df < DECAY_MIN_STRENGTH {
-                continue;
-            }
-
-            let adjusted_score = rrf_score * df;
             results.push(SearchResult {
                 id: m.id,
                 title: m.title.clone(),
                 content: m.content.clone(),
                 tags: m.tags.clone(),
-                score: adjusted_score,
-                decay_factor: df,
+                score: *rrf_score,
                 pinned: m.pinned,
             });
         }
 
-        // Re-sort by adjusted score descending.
+        // Re-sort by score descending.
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(limit);
-
-        // Record access for returned memories.
-        let returned_ids: Vec<MemoryId> = results.iter().map(|r| r.id).collect();
-        if let Err(e) = self.search_store.record_access(&returned_ids).await {
-            tracing::warn!(error = %e, "Failed to record access for search results");
-        }
 
         Ok(results)
     }

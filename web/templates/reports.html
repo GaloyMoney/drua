@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 
-{% block title %}Memories — Galoy Agents{% endblock %}
+{% block title %}Reports — Galoy Agents{% endblock %}
 
-{% block nav_memories %}class="active"{% endblock %}
+{% block nav_reports %}class="active"{% endblock %}
 
 {% block head %}
 <style>
@@ -22,7 +22,7 @@
     color: var(--pico-color);
     margin-right: 0.25rem;
   }
-  .memory-content {
+  .report-content {
     white-space: pre-wrap;
     font-size: 0.85rem;
     max-height: 300px;
@@ -39,20 +39,20 @@
 {% endblock %}
 
 {% block content %}
-<h2>Memories</h2>
+<h2>Reports</h2>
 
 {% if !enabled %}
-<p>Memory service is not enabled. Set <code>toolsets.memory.enabled: true</code> in configuration.</p>
+<p>Report service is not enabled. Set <code>toolsets.report.enabled: true</code> in configuration.</p>
 {% else %}
 
 <section>
-  <h3>Search Memories</h3>
-  <form hx-get="/memories/search" hx-target="#results-area" hx-swap="innerHTML"
+  <h3>Search Reports</h3>
+  <form hx-get="/reports/search" hx-target="#results-area" hx-swap="innerHTML"
         hx-indicator="#search-spinner">
     <div style="display: flex; gap: 1rem; align-items: end;">
       <label style="flex: 1;">
         Query
-        <input type="text" name="q" placeholder="Search memories..." required>
+        <input type="text" name="q" placeholder="Search reports..." required>
       </label>
       <button type="submit" style="width: auto; margin-bottom: 0;">Search</button>
     </div>
@@ -61,9 +61,9 @@
 </section>
 
 <section>
-  <h3>Recent Memories</h3>
+  <h3>Recent Reports</h3>
   <div id="results-area"
-       hx-get="/memories/list" hx-trigger="load" hx-swap="innerHTML">
+       hx-get="/reports/list" hx-trigger="load" hx-swap="innerHTML">
     <p aria-busy="true">Loading...</p>
   </div>
 </section>
