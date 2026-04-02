@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO memories (id, title, created_at) VALUES ($1, $2, COALESCE($3, NOW()))",
+  "query": "INSERT INTO reports (id, title, created_at) VALUES ($1, $2, COALESCE($3, NOW()))",
   "describe": {
     "columns": [],
     "parameters": {
@@ -12,5 +12,5 @@
     },
     "nullable": []
   },
-  "hash": "4565bcdaedd3785eb7f0570ff1ace3cbcd9de3db48448cb8a8e20dcfb4b93986"
+  "hash": "acb1285ec07c90e0786807bf100904bc5ce4571339b581d9071a491ea756e391"
 }

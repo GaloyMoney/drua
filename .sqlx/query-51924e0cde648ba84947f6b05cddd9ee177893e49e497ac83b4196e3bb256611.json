@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE memories SET title = $2 WHERE id = $1",
+  "query": "UPDATE reports SET title = $2 WHERE id = $1",
   "describe": {
     "columns": [],
     "parameters": {
@@ -11,5 +11,5 @@
     },
     "nullable": []
   },
-  "hash": "c36b7399d85e548c39f2c252b32bb73b0d6277744c69661241b723f35e917906"
+  "hash": "51924e0cde648ba84947f6b05cddd9ee177893e49e497ac83b4196e3bb256611"
 }

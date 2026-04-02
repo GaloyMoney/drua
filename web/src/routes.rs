@@ -49,10 +49,10 @@ pub fn router() -> Router<AppState> {
             get(code_assistant_least_useful),
         )
         .route("/code-assistant/search", get(code_assistant_search))
-        .route("/memories", get(memories_page))
-        .route("/memories/list", get(memories_list))
-        .route("/memories/search", get(memories_search))
-        .route("/memories/{id}", get(memories_detail))
+        .route("/reports", get(reports_page))
+        .route("/reports/list", get(reports_list))
+        .route("/reports/search", get(reports_search))
+        .route("/reports/{id}", get(reports_detail))
         .route("/sandboxes", get(sandboxes_page))
         .route("/sandboxes/list", get(sandbox_list))
         .route("/sandboxes/create", post(sandbox_create))
@@ -467,12 +467,12 @@ async fn code_assistant_search(
 }
 
 // ---------------------------------------------------------------------------
-// Memories
+// Reports
 // ---------------------------------------------------------------------------
 
-fn memory_to_view(m: &domain::memory::Memory) -> MemoryView {
+fn report_to_view(m: &domain::report::Report) -> ReportView {
     let id_str = m.id.to_string();
-    MemoryView {
+    ReportView {
         id: id_str.clone(),
         short_id: id_str[..8.min(id_str.len())].to_string(),
         title: m.title.clone(),
@@ -487,50 +487,50 @@ fn memory_to_view(m: &domain::memory::Memory) -> MemoryView {
     }
 }
 
-#[instrument(name = "web.memories_page", skip_all)]
-async fn memories_page(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.reports_page", skip_all)]
+async fn reports_page(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return Redirect::to("/").into_response();
     }
-    MemoriesTemplate {
-        enabled: state.app.memory().is_some(),
+    ReportsTemplate {
+        enabled: state.app.reports().is_some(),
     }
     .into_response()
 }
 
-#[instrument(name = "web.memories_list", skip_all)]
-async fn memories_list(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.reports_list", skip_all)]
+async fn reports_list(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let svc = match state.app.memory() {
+    let svc = match state.app.reports() {
         Some(svc) => svc,
-        None => return MemoriesListTemplate { memories: vec![] }.into_response(),
+        None => return ReportsListTemplate { reports: vec![] }.into_response(),
     };
 
     match svc.list(50).await {
-        Ok(memories) => MemoriesListTemplate {
-            memories: memories.iter().map(memory_to_view).collect(),
+        Ok(reports) => ReportsListTemplate {
+            reports: reports.iter().map(report_to_view).collect(),
         }
         .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to list memories");
+            tracing::error!(error = %e, "Failed to list reports");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MemoriesSearchParams {
+pub struct ReportsSearchParams {
     q: Option<String>,
 }
 
-#[instrument(name = "web.memories_search", skip_all)]
-async fn memories_search(
+#[instrument(name = "web.reports_search", skip_all)]
+async fn reports_search(
     State(state): State<AppState>,
     session: Session,
-    Query(params): Query<MemoriesSearchParams>,
+    Query(params): Query<ReportsSearchParams>,
 ) -> Response {
     if extract_user_id(&session).await.is_none() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
@@ -538,7 +538,7 @@ async fn memories_search(
 
     let query = params.q.unwrap_or_default();
     if query.is_empty() {
-        return MemoriesSearchResultsTemplate {
+        return ReportsSearchResultsTemplate {
             query,
             results: vec![],
             error: None,
@@ -546,13 +546,13 @@ async fn memories_search(
         .into_response();
     }
 
-    let svc = match state.app.memory() {
+    let svc = match state.app.reports() {
         Some(svc) => svc,
         None => {
-            return MemoriesSearchResultsTemplate {
+            return ReportsSearchResultsTemplate {
                 query,
                 results: vec![],
-                error: Some("Memory service is not enabled".to_string()),
+                error: Some("Report service is not enabled".to_string()),
             }
             .into_response();
         }
@@ -564,7 +564,7 @@ async fn memories_search(
                 .iter()
                 .map(|r| {
                     let id_str = r.id.to_string();
-                    MemorySearchResultView {
+                    ReportSearchResultView {
                         id: id_str.clone(),
                         short_id: id_str[..8.min(id_str.len())].to_string(),
                         title: r.title.clone(),
@@ -575,19 +575,18 @@ async fn memories_search(
                             r.tags.join(", ")
                         },
                         score: format!("{:.3}", r.score),
-                        decay_factor: format!("{:.0}%", r.decay_factor * 100.0),
                         pinned: r.pinned,
                     }
                 })
                 .collect();
-            MemoriesSearchResultsTemplate {
+            ReportsSearchResultsTemplate {
                 query,
                 results: views,
                 error: None,
             }
             .into_response()
         }
-        Err(e) => MemoriesSearchResultsTemplate {
+        Err(e) => ReportsSearchResultsTemplate {
             query,
             results: vec![],
             error: Some(e.to_string()),
@@ -596,8 +595,8 @@ async fn memories_search(
     }
 }
 
-#[instrument(name = "web.memories_detail", skip_all)]
-async fn memories_detail(
+#[instrument(name = "web.reports_detail", skip_all)]
+async fn reports_detail(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<String>,
@@ -606,19 +605,19 @@ async fn memories_detail(
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let svc = match state.app.memory() {
+    let svc = match state.app.reports() {
         Some(svc) => svc,
         None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
 
     match svc.find_by_id_prefix(&id).await {
-        Ok(Some(m)) => MemoryDetailTemplate {
-            memory: memory_to_view(&m),
+        Ok(Some(m)) => ReportDetailTemplate {
+            report: report_to_view(&m),
         }
         .into_response(),
         Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to find memory by prefix");
+            tracing::error!(error = %e, "Failed to find report by prefix");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

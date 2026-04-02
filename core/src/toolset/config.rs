@@ -9,21 +9,14 @@ pub struct ToolSetsConfig {
     #[serde(default)]
     pub code_assistant: CodeAssistantToolSetConfig,
     #[serde(default)]
-    pub memory: MemoryToolSetConfig,
+    pub report: ReportToolSetConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct MemoryToolSetConfig {
-    /// Enable the memory toolset.
+pub struct ReportToolSetConfig {
+    /// Enable the report toolset.
     #[serde(default)]
     pub enabled: bool,
-    /// Half-life in days for memory decay scoring (default: 14.0).
-    #[serde(default = "default_decay_half_life_days")]
-    pub decay_half_life_days: f64,
-}
-
-fn default_decay_half_life_days() -> f64 {
-    14.0
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

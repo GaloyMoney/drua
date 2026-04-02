@@ -1,0 +1,20 @@
+<article>
+  <header>
+    <h3>{{ report.title }}</h3>
+    <small>
+      ID: <code>{{ report.id }}</code>
+      {% if report.pinned %} | <span class="badge badge-pinned">pinned</span>{% endif %}
+    </small>
+  </header>
+  {% if !report.tags.is_empty() %}
+  <p>
+    {% for tag in report.tags.split(", ") %}
+      {% if !tag.is_empty() %}<span class="badge badge-tag">{{ tag }}</span>{% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+  <div class="report-content">{{ report.content }}</div>
+  <footer>
+    <small>Created: {{ report.created_at }}</small>
+  </footer>
+</article>

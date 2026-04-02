@@ -1,5 +1,5 @@
-{% if memories.is_empty() %}
-<p>No memories stored yet.</p>
+{% if reports.is_empty() %}
+<p>No reports stored yet.</p>
 {% else %}
 <figure>
   <table>
@@ -12,7 +12,7 @@
       </tr>
     </thead>
     <tbody>
-      {% for m in memories %}
+      {% for m in reports %}
       <tr>
         <td><code>{{ m.short_id }}</code></td>
         <td>
@@ -30,7 +30,7 @@
         <td colspan="4" style="padding: 0;">
           <details>
             <summary>Show content</summary>
-            <div class="memory-content">{{ m.content }}</div>
+            <div class="report-content">{{ m.content }}</div>
           </details>
         </td>
       </tr>

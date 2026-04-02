@@ -8,9 +8,8 @@ oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
 toolsets:
-  memory:
+  report:
     enabled: false
-    decay_half_life_days: 14.0
   code_assistant:
     db_path: "./data/code-assistant.db"
   concourse:

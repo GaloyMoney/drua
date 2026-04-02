@@ -7,13 +7,13 @@ use crate::primitives::*;
 use super::entity::*;
 
 #[derive(EsRepo, Clone)]
-#[es_repo(entity = "Memory", columns(title(ty = "String")))]
-pub struct MemoryRepo {
+#[es_repo(entity = "Report", columns(title(ty = "String")))]
+pub struct ReportRepo {
     #[allow(dead_code)]
     pool: PgPool,
 }
 
-impl MemoryRepo {
+impl ReportRepo {
     pub fn new(pool: &PgPool) -> Self {
         Self { pool: pool.clone() }
     }

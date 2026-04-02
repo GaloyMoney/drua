@@ -20,9 +20,8 @@ data:
       {{- end }}
     {{- end }}
     toolsets:
-      memory:
-        enabled: {{ .Values.galoyAgents.config.memory.enabled }}
-        decay_half_life_days: {{ .Values.galoyAgents.config.memory.decayHalfLifeDays }}
+      report:
+        enabled: {{ .Values.galoyAgents.config.report.enabled }}
       code_assistant:
         db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}
       concourse:

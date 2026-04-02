@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM memories WHERE title = $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $2 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN memory_events e ON i.id = e.id ORDER BY i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM reports WHERE id = ANY($1)) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $2 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN report_events e ON i.id = e.id ORDER BY i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,7 +31,7 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
+        "UuidArray",
         "Bool"
       ]
     },
@@ -43,5 +43,5 @@
       false
     ]
   },
-  "hash": "dfc9b52cad5f6dbaef21fa79952e7a4f8784229095085f91d7f8b7026e840464"
+  "hash": "cd0b3359070c28e215809fdb7a57c91ca4ba9c632368fd25c2fe847ff9fec33e"
 }
