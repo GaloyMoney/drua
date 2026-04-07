@@ -15,12 +15,8 @@ pub enum AgentEvent {
         agent_type: AgentType,
         name: String,
     },
-    SandboxProvisioned {
-        sandbox_name: String,
-    },
-    SandboxReady {
-        sandbox_name: String,
-    },
+    SandboxProvisioned {},
+    SandboxReady {},
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,8 +37,6 @@ pub struct Agent {
     pub name: String,
     #[builder(default)]
     pub sandbox_state: SandboxState,
-    #[builder(setter(strip_option), default)]
-    pub sandbox_name: Option<String>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -53,17 +47,19 @@ impl Agent {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub(super) fn sandbox_provisioned(&mut self, sandbox_name: String) {
-        self.sandbox_state = SandboxState::Provisioning;
-        self.sandbox_name = Some(sandbox_name.clone());
-        self.events
-            .push(AgentEvent::SandboxProvisioned { sandbox_name });
+    /// Deterministic sandbox name derived from the agent ID.
+    pub fn sandbox_name(&self) -> String {
+        format!("agent-{}", &self.id.to_string()[..8])
     }
 
-    pub(super) fn sandbox_ready(&mut self, sandbox_name: String) {
+    pub(super) fn sandbox_provisioned(&mut self) {
+        self.sandbox_state = SandboxState::Provisioning;
+        self.events.push(AgentEvent::SandboxProvisioned {});
+    }
+
+    pub(super) fn sandbox_ready(&mut self) {
         self.sandbox_state = SandboxState::Ready;
-        self.sandbox_name = Some(sandbox_name.clone());
-        self.events.push(AgentEvent::SandboxReady { sandbox_name });
+        self.events.push(AgentEvent::SandboxReady {});
     }
 }
 
@@ -91,15 +87,11 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .agent_type(*agent_type)
                         .name(name.clone());
                 }
-                AgentEvent::SandboxProvisioned { sandbox_name } => {
-                    builder = builder
-                        .sandbox_state(SandboxState::Provisioning)
-                        .sandbox_name(sandbox_name.clone());
+                AgentEvent::SandboxProvisioned {} => {
+                    builder = builder.sandbox_state(SandboxState::Provisioning);
                 }
-                AgentEvent::SandboxReady { sandbox_name } => {
-                    builder = builder
-                        .sandbox_state(SandboxState::Ready)
-                        .sandbox_name(sandbox_name.clone());
+                AgentEvent::SandboxReady {} => {
+                    builder = builder.sandbox_state(SandboxState::Ready);
                 }
             }
         }
@@ -166,6 +158,6 @@ mod tests {
         assert_eq!(agent.name, "workspace-lead");
         assert_eq!(agent.agent_type, AgentType::WorkspaceLead);
         assert_eq!(agent.sandbox_state, SandboxState::None);
-        assert_eq!(agent.sandbox_name, None);
+        assert!(agent.sandbox_name().starts_with("agent-"));
     }
 }

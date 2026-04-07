@@ -150,16 +150,15 @@ impl Agents {
         client: &sandbox_client::SandboxClient,
         agent: &mut Agent,
     ) -> Result<String, AgentError> {
-        let sandbox_name = format!("agent-{}", &agent.id.to_string()[..8]);
+        let sandbox_name = agent.sandbox_name();
 
         match agent.sandbox_state {
             SandboxState::Ready => return Ok(sandbox_name),
             SandboxState::Provisioning => {
-                // Wait for it to become ready
                 client
                     .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
                     .await?;
-                agent.sandbox_ready(sandbox_name.clone());
+                agent.sandbox_ready();
                 self.repo.update(agent).await?;
                 return Ok(sandbox_name);
             }
@@ -177,14 +176,14 @@ impl Agents {
             Err(e) => return Err(e.into()),
         }
 
-        agent.sandbox_provisioned(sandbox_name.clone());
+        agent.sandbox_provisioned();
         self.repo.update(agent).await?;
 
         client
             .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
             .await?;
 
-        agent.sandbox_ready(sandbox_name.clone());
+        agent.sandbox_ready();
         self.repo.update(agent).await?;
 
         Ok(sandbox_name)
