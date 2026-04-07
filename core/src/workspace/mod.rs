@@ -2,6 +2,8 @@ mod entity;
 pub mod error;
 pub(crate) mod repo;
 
+use std::sync::Arc;
+
 use tracing::instrument;
 
 pub use entity::Workspace;
@@ -9,17 +11,19 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
+use crate::agent::Agents;
 use crate::primitives::*;
 
 #[derive(Clone)]
 pub struct Workspaces {
     repo: WorkspaceRepo,
+    agents: Arc<Agents>,
 }
 
 impl Workspaces {
-    pub fn new(pool: &sqlx::PgPool) -> Self {
+    pub fn new(pool: &sqlx::PgPool, agents: Arc<Agents>) -> Self {
         let repo = WorkspaceRepo::new(pool);
-        Self { repo }
+        Self { repo, agents }
     }
 
     #[instrument(name = "domain.workspace.create", skip(self))]
@@ -28,8 +32,23 @@ impl Workspaces {
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
-        let new_workspace = build_new_workspace(name, description);
-        let workspace = self.repo.create(new_workspace).await?;
+        let name = name.into();
+        let new_workspace = build_new_workspace(&name, description);
+        let workspace_id = new_workspace.id;
+
+        let mut op = self.repo.begin_op().await?;
+        let workspace = self.repo.create_in_op(&mut op, new_workspace).await?;
+
+        self.agents
+            .create_in_op(
+                &mut op,
+                workspace_id,
+                AgentType::WorkspaceLead,
+                format!("{name}-lead"),
+            )
+            .await?;
+
+        op.commit().await?;
         Ok(workspace)
     }
 

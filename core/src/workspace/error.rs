@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::agent::AgentError;
+
 use super::repo::{WorkspaceCreateError, WorkspaceFindError, WorkspaceModifyError};
 
 #[derive(Error, Debug)]
@@ -12,4 +14,6 @@ pub enum WorkspaceError {
     Modify(#[from] WorkspaceModifyError),
     #[error("WorkspaceError - Find: {0}")]
     Find(#[from] WorkspaceFindError),
+    #[error("WorkspaceError - Agent: {0}")]
+    Agent(#[from] AgentError),
 }
