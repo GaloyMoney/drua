@@ -190,8 +190,9 @@ impl Agents {
                         client
                             .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
                             .await?;
-                        let _ = agent.sandbox_ready();
-                        self.repo.update(agent).await?;
+                        if agent.sandbox_ready().did_execute() {
+                            self.repo.update(agent).await?;
+                        }
                         return Ok(sandbox_name);
                     }
                     Err(sandbox_client::SandboxError::NotFound(_)) => {
@@ -199,8 +200,9 @@ impl Agents {
                             sandbox = %sandbox_name,
                             "Sandbox missing from cluster, resetting state"
                         );
-                        let _ = agent.sandbox_lost();
-                        self.repo.update(agent).await?;
+                        if agent.sandbox_lost().did_execute() {
+                            self.repo.update(agent).await?;
+                        }
                         // Fall through to creation below
                     }
                     Err(e) => return Err(e.into()),
@@ -220,15 +222,17 @@ impl Agents {
             Err(e) => return Err(e.into()),
         }
 
-        let _ = agent.sandbox_provisioned();
-        self.repo.update(agent).await?;
+        if agent.sandbox_provisioned().did_execute() {
+            self.repo.update(agent).await?;
+        }
 
         client
             .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
             .await?;
 
-        let _ = agent.sandbox_ready();
-        self.repo.update(agent).await?;
+        if agent.sandbox_ready().did_execute() {
+            self.repo.update(agent).await?;
+        }
 
         Ok(sandbox_name)
     }
