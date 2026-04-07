@@ -5,6 +5,33 @@ use es_entity::*;
 
 use crate::primitives::*;
 
+/// Configuration for an agent's sandbox environment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Enable persistent volume for the sandbox workspace.
+    #[serde(default)]
+    pub persistent_volume: bool,
+    /// PVC size (e.g., "10Gi"). Only used when persistent_volume is true.
+    #[serde(default = "default_pvc_size")]
+    pub pvc_size: String,
+    /// CPU resource request/limit (e.g., "500m", "1").
+    #[serde(default)]
+    pub resource_cpu: Option<String>,
+    /// Memory resource request/limit (e.g., "512Mi", "2Gi").
+    #[serde(default)]
+    pub resource_mem: Option<String>,
+    /// Default LLM model for the agent harness (e.g., "claude-sonnet-4-6").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Default max turns for agent harness conversations.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+}
+
+fn default_pvc_size() -> String {
+    "10Gi".to_string()
+}
+
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[es_event(id = "AgentId")]
@@ -14,6 +41,8 @@ pub enum AgentEvent {
         workspace_id: WorkspaceId,
         agent_type: AgentType,
         name: String,
+        #[serde(default)]
+        sandbox_config: SandboxConfig,
     },
     SandboxProvisioned {},
     SandboxReady {},
@@ -35,6 +64,8 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_type: AgentType,
     pub name: String,
+    #[builder(default)]
+    pub sandbox_config: SandboxConfig,
     #[builder(default)]
     pub sandbox_state: SandboxState,
     events: EntityEvents<AgentEvent>,
@@ -80,12 +111,14 @@ impl TryFromEvents<AgentEvent> for Agent {
                     workspace_id,
                     agent_type,
                     name,
+                    sandbox_config,
                 } => {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
                         .agent_type(*agent_type)
-                        .name(name.clone());
+                        .name(name.clone())
+                        .sandbox_config(sandbox_config.clone());
                 }
                 AgentEvent::SandboxProvisioned {} => {
                     builder = builder.sandbox_state(SandboxState::Provisioning);
@@ -108,6 +141,8 @@ pub struct NewAgent {
     pub(super) agent_type: AgentType,
     #[builder(setter(into))]
     pub(super) name: String,
+    #[builder(default)]
+    pub(super) sandbox_config: SandboxConfig,
 }
 
 impl NewAgent {
@@ -127,6 +162,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 workspace_id: self.workspace_id,
                 agent_type: self.agent_type,
                 name: self.name,
+                sandbox_config: self.sandbox_config,
             }],
         )
     }
@@ -138,7 +174,7 @@ mod tests {
 
     use crate::primitives::{AgentId, AgentType, WorkspaceId};
 
-    use super::{Agent, NewAgent, SandboxState};
+    use super::{Agent, NewAgent, SandboxConfig, SandboxState};
 
     fn new_agent() -> Agent {
         let new = NewAgent::builder()
@@ -146,6 +182,11 @@ mod tests {
             .workspace_id(WorkspaceId::new())
             .agent_type(AgentType::WorkspaceLead)
             .name("workspace-lead")
+            .sandbox_config(SandboxConfig {
+                persistent_volume: true,
+                model: Some("claude-sonnet-4-6".to_string()),
+                ..Default::default()
+            })
             .build()
             .unwrap();
 
@@ -159,5 +200,10 @@ mod tests {
         assert_eq!(agent.agent_type, AgentType::WorkspaceLead);
         assert_eq!(agent.sandbox_state, SandboxState::None);
         assert!(agent.sandbox_name().starts_with("agent-"));
+        assert!(agent.sandbox_config.persistent_volume);
+        assert_eq!(
+            agent.sandbox_config.model,
+            Some("claude-sonnet-4-6".to_string())
+        );
     }
 }
