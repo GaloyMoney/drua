@@ -60,6 +60,12 @@ pub fn router() -> Router<AppState> {
         .route("/sandboxes/{name}/status", get(sandbox_status))
         .route("/sandboxes/{name}/terminal", get(sandbox_terminal))
         .route("/sandboxes/{name}/agent", get(sandbox_agent))
+        .route("/workspaces", get(workspaces_page))
+        .route("/workspaces/new", get(workspace_new))
+        .route("/workspaces/list", get(workspace_list))
+        .route("/workspaces", post(workspace_create))
+        .route("/workspaces/{id}", get(workspace_detail))
+        .route("/workspaces/{id}", post(workspace_update))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -797,6 +803,126 @@ async fn sandbox_agent(
         return Redirect::to("/sandboxes").into_response();
     }
     SandboxAgentTemplate { name }.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------------
+
+fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
+    WorkspaceView {
+        id: ws.id.to_string(),
+        name: ws.name.clone(),
+        description: ws.description.clone().unwrap_or_default(),
+        created_at: ws.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+#[instrument(name = "web.workspaces_page", skip_all)]
+async fn workspaces_page(session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    WorkspacesTemplate {}.into_response()
+}
+
+#[instrument(name = "web.workspace_list", skip_all)]
+async fn workspace_list(State(state): State<AppState>, session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match state.app.workspaces().list_all().await {
+        Ok(workspaces) => WorkspaceListTemplate {
+            workspaces: workspaces.iter().map(workspace_to_view).collect(),
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list workspaces");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.workspace_new", skip_all)]
+async fn workspace_new(session: Session) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+    WorkspaceNewTemplate {}.into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceForm {
+    name: String,
+    description: Option<String>,
+}
+
+#[instrument(name = "web.workspace_create", skip_all)]
+async fn workspace_create(
+    State(state): State<AppState>,
+    session: Session,
+    Form(form): Form<WorkspaceForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let description = form.description.filter(|d| !d.is_empty());
+    match state.app.workspaces().create(&form.name, description).await {
+        Ok(_) => Redirect::to("/workspaces").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create workspace");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.workspace_detail", skip_all)]
+async fn workspace_detail(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    match state.app.workspaces().find_by_id(workspace_id).await {
+        Ok(ws) => WorkspaceDetailTemplate {
+            workspace: workspace_to_view(&ws),
+        }
+        .into_response(),
+        Err(_) => Redirect::to("/workspaces").into_response(),
+    }
+}
+
+#[instrument(name = "web.workspace_update", skip_all)]
+async fn workspace_update(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<WorkspaceForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let description = form.description.filter(|d| !d.is_empty());
+    match state
+        .app
+        .workspaces()
+        .update(workspace_id, &form.name, description)
+        .await
+    {
+        Ok(_) => Redirect::to("/workspaces").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to update workspace");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
