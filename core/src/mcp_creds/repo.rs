@@ -9,8 +9,7 @@ use super::entity::*;
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "McpCreds",
-    tbl = "agents",
-    events_tbl = "agent_events",
+    events_tbl = "mcp_cred_events",
     columns(
         user_id(ty = "UserId", list_for(by(created_at))),
         token_hash(ty = "String", list_by)
