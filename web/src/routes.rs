@@ -817,12 +817,14 @@ async fn api_agent_message(
     require_auth!(auth);
 
     let agent_id = AgentId::from(id);
+    let catalog = state.app.toolsets().catalog().with_auth(&auth);
     let rx = match state
         .app
         .agents()
         .send_message(
             agent_id,
             body.prompt,
+            Some(catalog),
             body.session_id,
             body.model,
             body.max_turns,

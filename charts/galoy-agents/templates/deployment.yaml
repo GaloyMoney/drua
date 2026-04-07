@@ -145,6 +145,12 @@ spec:
               key: {{ printf "%s-auth-header" .name | quote }}
               optional: true
         {{- end }}
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "anthropic-api-key"
+              optional: true
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:

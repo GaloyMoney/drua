@@ -17,7 +17,39 @@ pub struct Config {
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
+    pub agents: AgentsConfig,
+    #[serde(default)]
     pub toolsets: ToolSetsConfig,
+    #[serde(skip)]
+    pub anthropic_api_key: String,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub light: LightConfig,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightConfig {
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_max_turns")]
+    pub max_turns: usize,
+}
+
+fn default_model() -> String {
+    "claude-sonnet-4-20250514".to_string()
+}
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_max_turns() -> usize {
+    25
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -115,6 +147,7 @@ pub struct EnvSecrets {
     pub pg_con: String,
     pub github_client_secret: String,
     pub github_allowed_teams: Vec<String>,
+    pub anthropic_api_key: String,
 }
 
 impl Config {
@@ -132,6 +165,7 @@ impl Config {
 
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_secret = secrets.github_client_secret;
+        config.anthropic_api_key = secrets.anthropic_api_key;
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }

@@ -23,6 +23,10 @@ struct Cli {
     /// If empty, all GitHub users can log in.
     #[arg(long, env = "GITHUB_ALLOWED_TEAMS", default_value = "")]
     github_allowed_teams: String,
+
+    /// Anthropic API key for the light agent runtime.
+    #[arg(long, env = "ANTHROPIC_API_KEY", default_value = "")]
+    anthropic_api_key: String,
 }
 
 #[tokio::main]
@@ -53,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
             pg_con: cli.pg_con,
             github_client_secret: cli.github_client_secret,
             github_allowed_teams: allowed_teams,
+            anthropic_api_key: cli.anthropic_api_key,
         },
     )?;
 
@@ -72,6 +77,12 @@ async fn main() -> anyhow::Result<()> {
                         mount_path: p.mount_path.clone(),
                     }
                 }),
+            },
+            light: galoy_agents_core::agent::config::LightRuntimeConfig {
+                model: config.agents.light.model.clone(),
+                max_tokens: config.agents.light.max_tokens,
+                max_turns: config.agents.light.max_turns,
+                api_key: config.anthropic_api_key.clone(),
             },
         },
         toolsets: config.toolsets.clone(),
