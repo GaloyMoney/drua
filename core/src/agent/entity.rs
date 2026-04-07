@@ -93,19 +93,40 @@ impl Agent {
         format!("agent-{}", &self.id.to_string()[..8])
     }
 
-    pub(super) fn sandbox_provisioned(&mut self) {
+    pub(super) fn sandbox_provisioned(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentEvent::SandboxProvisioned { .. },
+            resets_on: AgentEvent::SandboxLost { .. }
+        );
+
         self.sandbox_state = SandboxState::Provisioning;
         self.events.push(AgentEvent::SandboxProvisioned {});
+        Idempotent::Executed(())
     }
 
-    pub(super) fn sandbox_ready(&mut self) {
+    pub(super) fn sandbox_ready(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentEvent::SandboxReady { .. },
+            resets_on: AgentEvent::SandboxLost { .. }
+        );
+
         self.sandbox_state = SandboxState::Ready;
         self.events.push(AgentEvent::SandboxReady {});
+        Idempotent::Executed(())
     }
 
-    pub(super) fn sandbox_lost(&mut self) {
+    pub(super) fn sandbox_lost(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentEvent::SandboxLost { .. },
+            resets_on: AgentEvent::SandboxProvisioned { .. }
+        );
+
         self.sandbox_state = SandboxState::None;
         self.events.push(AgentEvent::SandboxLost {});
+        Idempotent::Executed(())
     }
 }
 

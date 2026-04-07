@@ -190,7 +190,7 @@ impl Agents {
                         client
                             .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
                             .await?;
-                        agent.sandbox_ready();
+                        let _ = agent.sandbox_ready();
                         self.repo.update(agent).await?;
                         return Ok(sandbox_name);
                     }
@@ -199,7 +199,7 @@ impl Agents {
                             sandbox = %sandbox_name,
                             "Sandbox missing from cluster, resetting state"
                         );
-                        agent.sandbox_lost();
+                        let _ = agent.sandbox_lost();
                         self.repo.update(agent).await?;
                         // Fall through to creation below
                     }
@@ -220,14 +220,14 @@ impl Agents {
             Err(e) => return Err(e.into()),
         }
 
-        agent.sandbox_provisioned();
+        let _ = agent.sandbox_provisioned();
         self.repo.update(agent).await?;
 
         client
             .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
             .await?;
 
-        agent.sandbox_ready();
+        let _ = agent.sandbox_ready();
         self.repo.update(agent).await?;
 
         Ok(sandbox_name)
