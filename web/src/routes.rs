@@ -802,9 +802,6 @@ macro_rules! require_auth {
 #[derive(Deserialize)]
 struct AgentMessageRequest {
     prompt: String,
-    session_id: Option<String>,
-    model: Option<String>,
-    max_turns: Option<u32>,
 }
 
 #[instrument(name = "api.agent.message", skip_all)]
@@ -817,20 +814,7 @@ async fn api_agent_message(
     require_auth!(auth);
 
     let agent_id = AgentId::from(id);
-    let catalog = state.app.toolsets().catalog().with_auth(&auth);
-    let rx = match state
-        .app
-        .agents()
-        .send_message(
-            agent_id,
-            body.prompt,
-            Some(catalog),
-            body.session_id,
-            body.model,
-            body.max_turns,
-        )
-        .await
-    {
+    let rx = match state.app.agents().send_message(agent_id, body.prompt).await {
         Ok(rx) => rx,
         Err(e) => {
             tracing::error!(error = %e, "Failed to send message to agent");

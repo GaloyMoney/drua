@@ -33,6 +33,7 @@ pub struct CatalogEntry {
 
 /// Shared catalog of tool sets. Use [`Catalog::with_auth`] to create a
 /// request-scoped handle that records audit entries automatically.
+#[derive(Clone)]
 pub struct Catalog {
     sets: Arc<Vec<Box<dyn ToolSet>>>,
     audit: Option<Arc<Audit>>,

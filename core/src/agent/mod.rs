@@ -33,10 +33,15 @@ pub struct Agents {
     repo: AgentRepo,
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
     light_config: config::LightRuntimeConfig,
+    catalog: Catalog,
 }
 
 impl Agents {
-    pub async fn init(pool: &sqlx::PgPool, config: AgentConfig) -> Result<Self, AgentError> {
+    pub async fn init(
+        pool: &sqlx::PgPool,
+        config: AgentConfig,
+        catalog: Catalog,
+    ) -> Result<Self, AgentError> {
         let repo = AgentRepo::new(pool);
         let sandbox = if config.sandbox.enabled {
             let client = sandbox_client::SandboxClient::try_from_env(
@@ -61,6 +66,7 @@ impl Agents {
             repo,
             sandbox,
             light_config: config.light,
+            catalog,
         })
     }
 
@@ -131,27 +137,25 @@ impl Agents {
     ///
     /// - `RuntimeKind::Light` runs an in-process agentic loop via the Anthropic API
     /// - `RuntimeKind::Sandbox` runs the agent harness inside a K8s sandbox pod
-    #[instrument(name = "domain.agent.send_message", skip(self, prompt, catalog))]
+    #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
         &self,
         id: AgentId,
         prompt: String,
-        catalog: Option<Catalog>,
-        session_id: Option<String>,
-        model: Option<String>,
-        max_turns: Option<u32>,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
         match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
-                let catalog = catalog.ok_or(AgentError::LightAgentNotConfigured)?;
-                light::run(prompt, &self.light_config, &agent.chat_config, catalog).await
+                light::run(
+                    prompt,
+                    &self.light_config,
+                    &agent.chat_config,
+                    self.catalog.clone(),
+                )
+                .await
             }
-            RuntimeKind::Sandbox => {
-                self.send_message_sandbox(agent, prompt, session_id, model, max_turns)
-                    .await
-            }
+            RuntimeKind::Sandbox => self.send_message_sandbox(agent, prompt).await,
         }
     }
 
@@ -160,9 +164,6 @@ impl Agents {
         &self,
         mut agent: Agent,
         prompt: String,
-        session_id: Option<String>,
-        model: Option<String>,
-        max_turns: Option<u32>,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let base_client = self
             .sandbox
@@ -172,8 +173,9 @@ impl Agents {
         let client = sandbox::configure_client(base_client, &agent.sandbox_config);
         let sandbox_name = sandbox::ensure_sandbox(&client, &mut agent, &self.repo).await?;
 
-        let model = model.or_else(|| agent.chat_config.model.clone());
-        let max_turns = max_turns.or(agent.chat_config.max_turns);
+        let session_id = Some(agent.id.to_string());
+        let model = agent.chat_config.model.clone();
+        let max_turns = agent.chat_config.max_turns;
 
         let client = Arc::new(client);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);

@@ -72,7 +72,6 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let agents = Arc::new(Agents::init(pool, config.agents).await?);
         let toolsets = ToolSets::init(
             config.toolsets,
             code_assistant.clone(),
@@ -80,6 +79,8 @@ impl App {
             Some(Arc::clone(&audit)),
         )
         .await?;
+        let toolsets = Arc::new(toolsets);
+        let agents = Arc::new(Agents::init(pool, config.agents, toolsets.catalog().clone()).await?);
         Ok(Self {
             users: Users::new(pool),
             mcp_creds: McpCredentials::new(pool),
@@ -87,7 +88,7 @@ impl App {
             audit,
             code_assistant,
             reports,
-            toolsets: Arc::new(toolsets),
+            toolsets,
             workspaces: Workspaces::new(pool, agents),
         })
     }
