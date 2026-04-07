@@ -16,7 +16,7 @@ pub enum AgentError {
     Query(#[from] AgentQueryError),
     #[error("AgentError - Sandbox: {0}")]
     Sandbox(#[from] sandbox_client::SandboxError),
-    #[error("AgentError - SandboxNotConfigured")]
+    #[error("Sandbox runtime is not configured. Enable sandbox in the server configuration to chat with agents.")]
     SandboxNotConfigured,
     #[error("AgentError - SandboxExec: {0}")]
     SandboxExec(String),
