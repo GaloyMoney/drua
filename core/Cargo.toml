@@ -22,11 +22,11 @@ serde_json = "1.0"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 pgvector = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rmcp = { workspace = true }
 thiserror = "2.0"
 sandbox-client = { workspace = true }
-tokio = { version = "1", features = ["rt", "io-util"] }
+tokio = { version = "1", features = ["rt", "io-util", "sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 

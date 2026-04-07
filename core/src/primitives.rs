@@ -6,3 +6,17 @@ es_entity::entity_id! { UserId, McpCredsId, ReportId, WorkspaceId, AgentId }
 pub enum AgentType {
     WorkspaceLead,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeKind {
+    Light,
+    Sandbox,
+}
+
+impl AgentType {
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        match self {
+            AgentType::WorkspaceLead => RuntimeKind::Light,
+        }
+    }
+}

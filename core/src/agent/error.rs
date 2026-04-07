@@ -20,4 +20,14 @@ pub enum AgentError {
     SandboxNotConfigured,
     #[error("AgentError - SandboxExec: {0}")]
     SandboxExec(String),
+    #[error("AgentError - AnthropicApi: status={status}, message={message}")]
+    AnthropicApi { status: u16, message: String },
+    #[error("AgentError - Http: {0}")]
+    Http(reqwest::Error),
+    #[error("Light agent is not configured. Set ANTHROPIC_API_KEY and provide a catalog.")]
+    LightAgentNotConfigured,
+    #[error("AgentError - MaxTurnsReached: {0}")]
+    MaxTurnsReached(usize),
+    #[error("AgentError - ChannelClosed")]
+    ChannelClosed,
 }
