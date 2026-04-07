@@ -80,8 +80,41 @@ struct CallToolParams {
     #[serde(alias = "name")]
     tool_name: String,
     /// Tool arguments matching the schema from describe_tool
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_arguments")]
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Deserialize `arguments` from either a JSON object or a stringified JSON object.
+///
+/// Some MCP clients send arguments as a JSON string (e.g. `"{\"key\": \"value\"}"`)
+/// instead of a parsed object (`{"key": "value"}`). This deserializer accepts both.
+fn deserialize_arguments<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde::Deserialize;
+
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Object(map)) => Ok(Some(map)),
+        Some(serde_json::Value::String(s)) => {
+            let parsed: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| D::Error::custom(format!("invalid JSON in arguments string: {e}")))?;
+            match parsed {
+                serde_json::Value::Object(map) => Ok(Some(map)),
+                _ => Err(D::Error::custom(
+                    "arguments string must contain a JSON object",
+                )),
+            }
+        }
+        Some(_) => Err(D::Error::custom(
+            "arguments must be a JSON object or a JSON string containing an object",
+        )),
+    }
 }
 
 #[tool_router]
@@ -217,5 +250,75 @@ impl ServerHandler for McpGateway {
         );
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_tool_params_accepts_object_arguments() {
+        let json = serde_json::json!({
+            "tool_name": "honeycomb_query",
+            "arguments": {"query": "test", "label": "service_method"}
+        });
+        let params: CallToolParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.tool_name, "honeycomb_query");
+        let args = params.arguments.unwrap();
+        assert_eq!(args["query"], "test");
+        assert_eq!(args["label"], "service_method");
+    }
+
+    #[test]
+    fn call_tool_params_accepts_stringified_arguments() {
+        let json = serde_json::json!({
+            "tool_name": "search_code",
+            "arguments": "{\n  \"query\": \"create_in_op DbOp atomic\",\n  \"label\": \"service_method\"\n}"
+        });
+        let params: CallToolParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.tool_name, "search_code");
+        let args = params.arguments.unwrap();
+        assert_eq!(args["query"], "create_in_op DbOp atomic");
+        assert_eq!(args["label"], "service_method");
+    }
+
+    #[test]
+    fn call_tool_params_accepts_null_arguments() {
+        let json = serde_json::json!({
+            "tool_name": "some_tool",
+            "arguments": null
+        });
+        let params: CallToolParams = serde_json::from_value(json).unwrap();
+        assert!(params.arguments.is_none());
+    }
+
+    #[test]
+    fn call_tool_params_accepts_missing_arguments() {
+        let json = serde_json::json!({
+            "tool_name": "some_tool"
+        });
+        let params: CallToolParams = serde_json::from_value(json).unwrap();
+        assert!(params.arguments.is_none());
+    }
+
+    #[test]
+    fn call_tool_params_rejects_invalid_json_string() {
+        let json = serde_json::json!({
+            "tool_name": "some_tool",
+            "arguments": "not valid json"
+        });
+        let result = serde_json::from_value::<CallToolParams>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_tool_params_rejects_non_object_json_string() {
+        let json = serde_json::json!({
+            "tool_name": "some_tool",
+            "arguments": "[1, 2, 3]"
+        });
+        let result = serde_json::from_value::<CallToolParams>(json);
+        assert!(result.is_err());
     }
 }
