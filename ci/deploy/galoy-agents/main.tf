@@ -103,7 +103,7 @@ resource "google_container_node_pool" "gvisor" {
 
   autoscaling {
     min_node_count = 0
-    max_node_count = 3
+    max_node_count = 1
   }
 
   node_config {
