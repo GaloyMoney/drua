@@ -53,6 +53,7 @@ pub enum AgentEvent {
     },
     SandboxProvisioned {},
     SandboxReady {},
+    SandboxLost {},
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +102,11 @@ impl Agent {
         self.sandbox_state = SandboxState::Ready;
         self.events.push(AgentEvent::SandboxReady {});
     }
+
+    pub(super) fn sandbox_lost(&mut self) {
+        self.sandbox_state = SandboxState::None;
+        self.events.push(AgentEvent::SandboxLost {});
+    }
 }
 
 impl core::fmt::Display for Agent {
@@ -136,6 +142,9 @@ impl TryFromEvents<AgentEvent> for Agent {
                 }
                 AgentEvent::SandboxReady {} => {
                     builder = builder.sandbox_state(SandboxState::Ready);
+                }
+                AgentEvent::SandboxLost {} => {
+                    builder = builder.sandbox_state(SandboxState::None);
                 }
             }
         }

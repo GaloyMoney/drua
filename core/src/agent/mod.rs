@@ -170,6 +170,8 @@ impl Agents {
     }
 
     /// Ensure the agent has a running sandbox, creating one if needed.
+    /// If the entity thinks a sandbox exists but it was deleted externally
+    /// (e.g. namespace recreation), reset state and recreate.
     async fn ensure_sandbox(
         &self,
         client: &sandbox_client::SandboxClient,
@@ -178,14 +180,34 @@ impl Agents {
         let sandbox_name = agent.sandbox_name();
 
         match agent.sandbox_state {
-            SandboxState::Ready => return Ok(sandbox_name),
-            SandboxState::Provisioning => {
-                client
-                    .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
-                    .await?;
-                agent.sandbox_ready();
-                self.repo.update(agent).await?;
-                return Ok(sandbox_name);
+            SandboxState::Ready | SandboxState::Provisioning => {
+                match client.get_sandbox(&sandbox_name).await {
+                    Ok(_) if agent.sandbox_state == SandboxState::Ready => {
+                        return Ok(sandbox_name);
+                    }
+                    Ok(_) => {
+                        // Provisioning — wait for ready
+                        client
+                            .wait_sandbox_ready(
+                                &sandbox_name,
+                                std::time::Duration::from_secs(120),
+                            )
+                            .await?;
+                        agent.sandbox_ready();
+                        self.repo.update(agent).await?;
+                        return Ok(sandbox_name);
+                    }
+                    Err(sandbox_client::SandboxError::NotFound(_)) => {
+                        tracing::warn!(
+                            sandbox = %sandbox_name,
+                            "Sandbox missing from cluster, resetting state"
+                        );
+                        agent.sandbox_lost();
+                        self.repo.update(agent).await?;
+                        // Fall through to creation below
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             SandboxState::None => {}
         }
