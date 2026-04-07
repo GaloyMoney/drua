@@ -76,7 +76,12 @@ async function sendMessage() {
     });
 
     if (!resp.ok) {
-      appendMsg('msg-error', 'Error: ' + resp.status);
+      try {
+        const err = await resp.json();
+        appendMsg('msg-error', err.error || ('Error: ' + resp.status));
+      } catch {
+        appendMsg('msg-error', 'Error: ' + resp.status);
+      }
       return;
     }
 
