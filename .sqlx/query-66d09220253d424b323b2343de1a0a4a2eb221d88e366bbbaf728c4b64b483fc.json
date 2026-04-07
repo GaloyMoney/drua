@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM agents WHERE user_id = $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $2 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN agent_events e ON i.id = e.id ORDER BY i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM mcp_creds WHERE COALESCE(user_id = $1, $1 IS NULL) AND (COALESCE(id < $3, true)) ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN mcp_cred_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,8 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Int8",
+        "Uuid",
         "Bool"
       ]
     },
@@ -43,5 +45,5 @@
       false
     ]
   },
-  "hash": "8f9e1838099fe87e08820a50e502075f93e67f810ef3feb59af9363a4c9f8068"
+  "hash": "66d09220253d424b323b2343de1a0a4a2eb221d88e366bbbaf728c4b64b483fc"
 }
