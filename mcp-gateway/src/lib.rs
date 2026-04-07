@@ -38,7 +38,7 @@ impl McpGateway {
 
     fn require_auth(parts: &http::request::Parts) -> Result<&AuthContext, ErrorData> {
         match parts.extensions.get::<AuthContext>() {
-            Some(auth @ AuthContext::Agent(_, _)) => Ok(auth),
+            Some(auth @ AuthContext::McpCreds(_, _)) => Ok(auth),
             _ => Err(ErrorData::new(
                 ErrorCode::INVALID_REQUEST,
                 "Authentication required: provide a valid Bearer token",

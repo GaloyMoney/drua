@@ -1,6 +1,6 @@
-<article aria-label="Agent created">
+<article aria-label="MCP credentials created">
   <header>
-    <h3>Agent Created: {{ agent_name }}</h3>
+    <h3>MCP Credentials Created: {{ creds_name }}</h3>
   </header>
   <p class="token-warning">This configuration will not be shown again. Copy it now.</p>
 
@@ -28,6 +28,6 @@
 </article>
 
 <script>
-  document.querySelector('#agent-list')
-    && htmx.ajax('GET', '/dashboard/agents', {target: '#agent-list', swap: 'innerHTML'});
+  document.querySelector('#creds-list')
+    && htmx.ajax('GET', '/dashboard/mcp-creds', {target: '#creds-list', swap: 'innerHTML'});
 </script>

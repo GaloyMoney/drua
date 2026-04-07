@@ -2,15 +2,15 @@ use thiserror::Error;
 
 use galoy_agents_core as domain;
 
-use domain::agent::error::AgentError;
+use domain::mcp_creds::error::McpCredsError;
 use domain::user::error::UserError;
 
 #[derive(Error, Debug)]
 pub enum AuthError {
     #[error("AuthError - User: {0}")]
     User(#[from] UserError),
-    #[error("AuthError - Agent: {0}")]
-    Agent(#[from] AgentError),
+    #[error("AuthError - McpCreds: {0}")]
+    McpCreds(#[from] McpCredsError),
     #[error("AuthError - OAuth: {0}")]
     OAuth(String),
     #[error("AuthError - CsrfMismatch")]

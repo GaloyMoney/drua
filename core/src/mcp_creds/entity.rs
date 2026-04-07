@@ -7,10 +7,10 @@ use crate::primitives::*;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[es_event(id = "AgentId")]
-pub enum AgentEvent {
+#[es_event(id = "McpCredsId")]
+pub enum McpCredsEvent {
     Initialized {
-        id: AgentId,
+        id: McpCredsId,
         user_id: UserId,
         name: String,
         token_hash: String,
@@ -23,18 +23,18 @@ pub enum AgentEvent {
 
 #[derive(EsEntity, Builder)]
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
-pub struct Agent {
-    pub id: AgentId,
+pub struct McpCreds {
+    pub id: McpCredsId,
     pub user_id: UserId,
     pub name: String,
     pub(crate) token_hash: String,
     pub scopes: Vec<String>,
     #[builder(setter(strip_option), default)]
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
-    events: EntityEvents<AgentEvent>,
+    events: EntityEvents<McpCredsEvent>,
 }
 
-impl Agent {
+impl McpCreds {
     pub fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.events
             .entity_first_persisted_at()
@@ -52,30 +52,30 @@ impl Agent {
     pub(super) fn revoke(&mut self) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
-            already_applied: AgentEvent::Revoked { .. }
+            already_applied: McpCredsEvent::Revoked { .. }
         );
 
         let revoked_at = chrono::Utc::now();
-        self.events.push(AgentEvent::Revoked { revoked_at });
+        self.events.push(McpCredsEvent::Revoked { revoked_at });
         self.revoked_at = Some(revoked_at);
 
         Idempotent::Executed(())
     }
 }
 
-impl core::fmt::Display for Agent {
+impl core::fmt::Display for McpCreds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Agent: {}, name: {}", self.id, self.name)
+        write!(f, "McpCreds: {}, name: {}", self.id, self.name)
     }
 }
 
-impl TryFromEvents<AgentEvent> for Agent {
-    fn try_from_events(events: EntityEvents<AgentEvent>) -> Result<Self, EntityHydrationError> {
-        let mut builder = AgentBuilder::default();
+impl TryFromEvents<McpCredsEvent> for McpCreds {
+    fn try_from_events(events: EntityEvents<McpCredsEvent>) -> Result<Self, EntityHydrationError> {
+        let mut builder = McpCredsBuilder::default();
 
         for event in events.iter_all() {
             match event {
-                AgentEvent::Initialized {
+                McpCredsEvent::Initialized {
                     id,
                     user_id,
                     name,
@@ -89,7 +89,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .token_hash(token_hash.clone())
                         .scopes(scopes.clone());
                 }
-                AgentEvent::Revoked { revoked_at } => {
+                McpCredsEvent::Revoked { revoked_at } => {
                     builder = builder.revoked_at(*revoked_at);
                 }
             }
@@ -100,9 +100,9 @@ impl TryFromEvents<AgentEvent> for Agent {
 }
 
 #[derive(Debug, Builder)]
-pub struct NewAgent {
+pub struct NewMcpCreds {
     #[builder(setter(into))]
-    pub(super) id: AgentId,
+    pub(super) id: McpCredsId,
     pub(super) user_id: UserId,
     #[builder(setter(into))]
     pub(super) name: String,
@@ -111,19 +111,19 @@ pub struct NewAgent {
     pub(super) scopes: Vec<String>,
 }
 
-impl NewAgent {
-    pub fn builder() -> NewAgentBuilder {
-        let mut builder = NewAgentBuilder::default();
-        builder.id(AgentId::new());
+impl NewMcpCreds {
+    pub fn builder() -> NewMcpCredsBuilder {
+        let mut builder = NewMcpCredsBuilder::default();
+        builder.id(McpCredsId::new());
         builder
     }
 }
 
-impl IntoEvents<AgentEvent> for NewAgent {
-    fn into_events(self) -> EntityEvents<AgentEvent> {
+impl IntoEvents<McpCredsEvent> for NewMcpCreds {
+    fn into_events(self) -> EntityEvents<McpCredsEvent> {
         EntityEvents::init(
             self.id,
-            [AgentEvent::Initialized {
+            [McpCredsEvent::Initialized {
                 id: self.id,
                 user_id: self.user_id,
                 name: self.name,
@@ -138,40 +138,40 @@ impl IntoEvents<AgentEvent> for NewAgent {
 mod tests {
     use es_entity::{Idempotent, IntoEvents as _, TryFromEvents as _};
 
-    use crate::primitives::{AgentId, UserId};
+    use crate::primitives::{McpCredsId, UserId};
 
-    use super::{Agent, NewAgent};
+    use super::{McpCreds, NewMcpCreds};
 
-    fn new_agent() -> Agent {
-        let new_agent = NewAgent::builder()
-            .id(AgentId::new())
+    fn new_mcp_creds() -> McpCreds {
+        let new = NewMcpCreds::builder()
+            .id(McpCredsId::new())
             .user_id(UserId::new())
-            .name("test-agent")
+            .name("test-creds")
             .token_hash("hash123")
             .scopes(vec!["read".to_string(), "write".to_string()])
             .build()
             .unwrap();
 
-        Agent::try_from_events(new_agent.into_events()).unwrap()
+        McpCreds::try_from_events(new.into_events()).unwrap()
     }
 
     #[test]
-    fn agent_hydration() {
-        let agent = new_agent();
-        assert_eq!(agent.name, "test-agent");
-        assert_eq!(agent.scopes, vec!["read", "write"]);
-        assert!(!agent.is_revoked());
+    fn mcp_creds_hydration() {
+        let creds = new_mcp_creds();
+        assert_eq!(creds.name, "test-creds");
+        assert_eq!(creds.scopes, vec!["read", "write"]);
+        assert!(!creds.is_revoked());
     }
 
     #[test]
-    fn agent_revoke() {
-        let mut agent = new_agent();
+    fn mcp_creds_revoke() {
+        let mut creds = new_mcp_creds();
 
-        let result = agent.revoke();
+        let result = creds.revoke();
         assert!(matches!(result, Idempotent::Executed(())));
-        assert!(agent.is_revoked());
+        assert!(creds.is_revoked());
 
-        let result = agent.revoke();
+        let result = creds.revoke();
         assert!(matches!(result, Idempotent::AlreadyApplied));
     }
 }

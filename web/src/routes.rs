@@ -20,10 +20,10 @@ use tracing::instrument;
 
 use galoy_agents_core as domain;
 
-use domain::agent::token::generate_token;
-use domain::agent::Agent;
 use domain::auth::AuthContext;
-use domain::primitives::{AgentId, UserId};
+use domain::mcp_creds::token::generate_token;
+use domain::mcp_creds::McpCreds;
+use domain::primitives::{McpCredsId, UserId};
 
 use crate::templates::*;
 use crate::AppState;
@@ -37,9 +37,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
         .route("/dashboard", get(dashboard))
-        .route("/dashboard/agents", get(agent_list))
-        .route("/agents/create", post(create_agent))
-        .route("/agents/{id}/revoke", post(revoke_agent))
+        .route("/dashboard/mcp-creds", get(mcp_creds_list))
+        .route("/mcp-creds/create", post(create_mcp_creds))
+        .route("/mcp-creds/{id}/revoke", post(revoke_mcp_creds))
         .route("/audit", get(audit_page))
         .route("/audit/entries", get(audit_entries))
         .route("/code-assistant", get(code_assistant_dashboard))
@@ -72,12 +72,12 @@ async fn extract_user_id(session: &Session) -> Option<UserId> {
     session.get("user_id").await.ok()?
 }
 
-fn agent_to_view(agent: &Agent) -> AgentView {
-    AgentView {
-        id: agent.id.to_string(),
-        name: agent.name.clone(),
-        created_at: agent.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
-        is_revoked: agent.is_revoked(),
+fn mcp_creds_to_view(creds: &McpCreds) -> McpCredsView {
+    McpCredsView {
+        id: creds.id.to_string(),
+        name: creds.name.clone(),
+        created_at: creds.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+        is_revoked: creds.is_revoked(),
     }
 }
 
@@ -104,9 +104,9 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
         Err(_) => return Redirect::to("/").into_response(),
     };
 
-    let agents = state
+    let mcp_creds = state
         .app
-        .agents()
+        .mcp_creds()
         .list_all_for_user(user.id)
         .await
         .unwrap_or_default();
@@ -115,13 +115,13 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
 
     DashboardTemplate {
         user_name,
-        agents: agents.iter().map(agent_to_view).collect(),
+        mcp_creds: mcp_creds.iter().map(mcp_creds_to_view).collect(),
     }
     .into_response()
 }
 
 #[derive(serde::Deserialize)]
-pub struct CreateAgentForm {
+pub struct CreateMcpCredsForm {
     name: String,
 }
 
@@ -144,11 +144,11 @@ fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
     (mcp_json, cli_command)
 }
 
-#[instrument(name = "web.create_agent", skip_all)]
-async fn create_agent(
+#[instrument(name = "web.create_mcp_creds", skip_all)]
+async fn create_mcp_creds(
     State(state): State<AppState>,
     session: Session,
-    Form(form): Form<CreateAgentForm>,
+    Form(form): Form<CreateMcpCredsForm>,
 ) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
@@ -159,14 +159,14 @@ async fn create_agent(
 
     match state
         .app
-        .agents()
+        .mcp_creds()
         .create_for_user(user_id, &form.name, token_hash, vec![])
         .await
     {
-        Ok(_agent) => {
+        Ok(_) => {
             let (mcp_json, cli_command) = build_mcp_config(&state.mcp_endpoint, &raw_token);
-            AgentCreatedTemplate {
-                agent_name: form.name,
+            McpCredsCreatedTemplate {
+                creds_name: form.name,
                 mcp_json,
                 cli_command,
             }
@@ -176,8 +176,8 @@ async fn create_agent(
     }
 }
 
-#[instrument(name = "web.revoke_agent", skip_all)]
-async fn revoke_agent(
+#[instrument(name = "web.revoke_mcp_creds", skip_all)]
+async fn revoke_mcp_creds(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -187,32 +187,32 @@ async fn revoke_agent(
         None => return Redirect::to("/").into_response(),
     };
 
-    let agent_id = AgentId::from(id);
-    match state.app.agents().revoke(user_id, agent_id).await {
-        Ok(agent) => AgentRowTemplate {
-            agent: agent_to_view(&agent),
+    let creds_id = McpCredsId::from(id);
+    match state.app.mcp_creds().revoke(user_id, creds_id).await {
+        Ok(creds) => McpCredsRowTemplate {
+            creds: mcp_creds_to_view(&creds),
         }
         .into_response(),
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
-#[instrument(name = "web.agent_list", skip_all)]
-async fn agent_list(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.mcp_creds_list", skip_all)]
+async fn mcp_creds_list(State(state): State<AppState>, session: Session) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };
 
-    let agents = state
+    let mcp_creds = state
         .app
-        .agents()
+        .mcp_creds()
         .list_all_for_user(user_id)
         .await
         .unwrap_or_default();
 
-    AgentListTemplate {
-        agents: agents.iter().map(agent_to_view).collect(),
+    McpCredsListTemplate {
+        mcp_creds: mcp_creds.iter().map(mcp_creds_to_view).collect(),
     }
     .into_response()
 }
@@ -273,13 +273,13 @@ async fn audit_entries(
 }
 
 async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSubjectView {
-    if let Some(agent_id_str) = subject.strip_prefix("agent::") {
-        if let Ok(agent_id) = agent_id_str.parse::<uuid::Uuid>() {
-            let agent_id = galoy_agents_core::primitives::AgentId::from(agent_id);
-            if let Ok(agent) = app.agents().find_by_id(agent_id).await {
+    if let Some(creds_id_str) = subject.strip_prefix("mcp_creds::") {
+        if let Ok(creds_id) = creds_id_str.parse::<uuid::Uuid>() {
+            let creds_id = galoy_agents_core::primitives::McpCredsId::from(creds_id);
+            if let Ok(creds) = app.mcp_creds().find_by_id(creds_id).await {
                 let user_name = app
                     .users()
-                    .find_by_id(agent.user_id)
+                    .find_by_id(creds.user_id)
                     .await
                     .ok()
                     .map(|u| {
@@ -290,7 +290,7 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
                     })
                     .unwrap_or_else(|| "unknown".to_string());
                 return AuditSubjectView {
-                    label: agent.name,
+                    label: creds.name,
                     owner: Some(user_name),
                 };
             }
@@ -956,7 +956,7 @@ pub fn api_router() -> Router<AppState> {
 macro_rules! require_auth {
     ($auth:expr) => {
         match $auth {
-            AuthContext::Agent(_, _) | AuthContext::User(_) => {}
+            AuthContext::McpCreds(_, _) | AuthContext::User(_) => {}
             AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
         }
     };

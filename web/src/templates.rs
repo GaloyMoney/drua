@@ -4,7 +4,7 @@ use askama_web::WebTemplate;
 use galoy_agents_core::code_assistant::logs::{CodeAssistantRequestRow, DashboardStats};
 use galoy_agents_core::code_assistant::LabelOriginCounts;
 
-pub struct AgentView {
+pub struct McpCredsView {
     pub id: String,
     pub name: String,
     pub created_at: String,
@@ -21,27 +21,27 @@ pub struct LoginTemplate {
 #[template(path = "dashboard.html")]
 pub struct DashboardTemplate {
     pub user_name: String,
-    pub agents: Vec<AgentView>,
+    pub mcp_creds: Vec<McpCredsView>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "agent_created.html")]
-pub struct AgentCreatedTemplate {
-    pub agent_name: String,
+#[template(path = "mcp_creds_created.html")]
+pub struct McpCredsCreatedTemplate {
+    pub creds_name: String,
     pub mcp_json: String,
     pub cli_command: String,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "agent_row.html")]
-pub struct AgentRowTemplate {
-    pub agent: AgentView,
+#[template(path = "mcp_creds_row.html")]
+pub struct McpCredsRowTemplate {
+    pub creds: McpCredsView,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "agent_list.html")]
-pub struct AgentListTemplate {
-    pub agents: Vec<AgentView>,
+#[template(path = "mcp_creds_list.html")]
+pub struct McpCredsListTemplate {
+    pub mcp_creds: Vec<McpCredsView>,
 }
 
 #[derive(Template, WebTemplate)]

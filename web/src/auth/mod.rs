@@ -12,8 +12,8 @@ pub use error::AuthError;
 
 use galoy_agents_core as domain;
 
-use domain::agent::token::hash_token;
 use domain::auth::AuthContext;
+use domain::mcp_creds::token::hash_token;
 use domain::primitives::UserId;
 
 use crate::AppState;
@@ -64,9 +64,9 @@ async fn resolve_auth_context(
     // 1. Check Authorization: Bearer header
     if let Some(raw_token) = bearer_token {
         let token_hash = hash_token(&raw_token);
-        if let Ok(Some(agent)) = state.app.agents().find_by_token_hash(&token_hash).await {
-            if !agent.is_revoked() {
-                return AuthContext::Agent(agent.id, agent.user_id);
+        if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
+            if !creds.is_revoked() {
+                return AuthContext::McpCreds(creds.id, creds.user_id);
             }
         }
     }

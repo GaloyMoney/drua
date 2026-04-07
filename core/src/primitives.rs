@@ -1,1 +1,1 @@
-es_entity::entity_id! { UserId, AgentId, ReportId, WorkspaceId }
+es_entity::entity_id! { UserId, McpCredsId, ReportId, WorkspaceId }
