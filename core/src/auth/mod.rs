@@ -5,7 +5,7 @@ use crate::primitives::*;
 #[derive(Debug, Clone)]
 pub enum AuthContext {
     User(UserId),
-    Agent(AgentId, UserId),
+    McpCreds(McpCredsId, UserId),
     Anonymous,
 }
 
@@ -13,7 +13,7 @@ impl AuthContext {
     pub fn user_id(&self) -> Result<UserId, &'static str> {
         match self {
             AuthContext::User(user_id) => Ok(*user_id),
-            AuthContext::Agent(_, _) => Err("Agent auth not allowed here"),
+            AuthContext::McpCreds(_, _) => Err("McpCreds auth not allowed here"),
             AuthContext::Anonymous => Err("Authentication required"),
         }
     }

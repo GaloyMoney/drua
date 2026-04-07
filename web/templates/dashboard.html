@@ -8,19 +8,19 @@
 <p>Welcome, {{ user_name }}</p>
 
 <section>
-  <h2>Create Agent</h2>
-  <form hx-post="/agents/create" hx-target="#agent-result" hx-swap="innerHTML">
+  <h2>Create MCP Credentials</h2>
+  <form hx-post="/mcp-creds/create" hx-target="#creds-result" hx-swap="innerHTML">
     <label>
       Name
-      <input type="text" name="name" required placeholder="my-agent">
+      <input type="text" name="name" required placeholder="my-creds">
     </label>
-    <button type="submit">Create Agent</button>
+    <button type="submit">Create Credentials</button>
   </form>
-  <div id="agent-result"></div>
+  <div id="creds-result"></div>
 </section>
 
 <section>
-  <h2>Your Agents</h2>
+  <h2>Your MCP Credentials</h2>
   <figure>
     <table>
       <thead>
@@ -31,9 +31,9 @@
           <th></th>
         </tr>
       </thead>
-      <tbody id="agent-list">
-        {% for agent in agents %}
-        {% include "agent_row.html" %}
+      <tbody id="creds-list">
+        {% for creds in mcp_creds %}
+        {% include "mcp_creds_row.html" %}
         {% endfor %}
       </tbody>
     </table>

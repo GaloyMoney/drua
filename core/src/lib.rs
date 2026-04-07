@@ -1,8 +1,8 @@
-pub mod agent;
 pub mod audit;
 pub mod auth;
 pub mod code_assistant;
 mod config;
+pub mod mcp_creds;
 pub mod primitives;
 pub mod report;
 pub mod toolset;
@@ -13,9 +13,9 @@ pub use config::*;
 
 use std::sync::Arc;
 
-use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
+use mcp_creds::McpCredentials;
 use report::Reports;
 use toolset::{ToolSets, ToolSetsError};
 use user::Users;
@@ -24,7 +24,7 @@ use workspace::Workspaces;
 #[derive(Clone)]
 pub struct App {
     users: Users,
-    agents: Agents,
+    mcp_creds: McpCredentials,
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
     reports: Option<Arc<Reports>>,
@@ -78,7 +78,7 @@ impl App {
         .await?;
         Ok(Self {
             users: Users::new(pool),
-            agents: Agents::new(pool),
+            mcp_creds: McpCredentials::new(pool),
             audit,
             code_assistant,
             reports,
@@ -91,8 +91,8 @@ impl App {
         &self.users
     }
 
-    pub fn agents(&self) -> &Agents {
-        &self.agents
+    pub fn mcp_creds(&self) -> &McpCredentials {
+        &self.mcp_creds
     }
 
     pub fn audit(&self) -> &Audit {

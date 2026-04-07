@@ -1,20 +1,20 @@
-<tr id="agent-{{ agent.id }}">
-  <td>{{ agent.name }}</td>
-  <td>{{ agent.created_at }}</td>
+<tr id="creds-{{ creds.id }}">
+  <td>{{ creds.name }}</td>
+  <td>{{ creds.created_at }}</td>
   <td>
-    {% if agent.is_revoked %}
+    {% if creds.is_revoked %}
     <span class="badge-revoked">Revoked</span>
     {% else %}
     <span class="badge-active">Active</span>
     {% endif %}
   </td>
   <td>
-    {% if !agent.is_revoked %}
+    {% if !creds.is_revoked %}
     <button
-      hx-post="/agents/{{ agent.id }}/revoke"
-      hx-target="#agent-{{ agent.id }}"
+      hx-post="/mcp-creds/{{ creds.id }}/revoke"
+      hx-target="#creds-{{ creds.id }}"
       hx-swap="outerHTML"
-      hx-confirm="Are you sure you want to revoke this agent?"
+      hx-confirm="Are you sure you want to revoke these credentials?"
       class="secondary outline"
       style="padding: 0.25rem 0.5rem; margin: 0;"
     >
