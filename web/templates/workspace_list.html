@@ -17,7 +17,10 @@
         <td><strong>{{ ws.name }}</strong></td>
         <td>{{ ws.description }}</td>
         <td>{{ ws.created_at }}</td>
-        <td><a href="/workspaces/{{ ws.id }}">Edit</a></td>
+        <td style="display: flex; gap: 0.5rem;">
+          <a href="/workspaces/{{ ws.id }}/chat">Chat</a>
+          <a href="/workspaces/{{ ws.id }}">Edit</a>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
