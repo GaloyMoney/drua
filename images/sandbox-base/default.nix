@@ -57,6 +57,14 @@ let
       runHook preInstall
       mkdir -p $out/lib
       cp dist/index.js $out/lib/index.js
+
+      # The SDK's query() spawns cli.js as a child process — it cannot be
+      # bundled by esbuild.  Copy the SDK runtime files so cli.js is
+      # reachable at $out/lib/sdk/cli.js.
+      mkdir -p $out/lib/sdk
+      cp node_modules/@anthropic-ai/claude-agent-sdk/cli.js $out/lib/sdk/
+      cp node_modules/@anthropic-ai/claude-agent-sdk/*.wasm  $out/lib/sdk/ 2>/dev/null || true
+      cp -r node_modules/@anthropic-ai/claude-agent-sdk/vendor $out/lib/sdk/ 2>/dev/null || true
       runHook postInstall
     '';
   };

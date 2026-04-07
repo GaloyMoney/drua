@@ -13,12 +13,19 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createInterface } from "node:readline";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
 const CWD = "/workspace";
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_MAX_TURNS = 10;
+
+// Resolve the SDK's cli.js — placed alongside the bundle by the Nix build.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const CLI_JS_PATH = join(__dirname, "sdk", "cli.js");
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -51,6 +58,7 @@ async function handleMessage(input: HarnessInput): Promise<void> {
       options: {
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
+        pathToClaudeCodeExecutable: CLI_JS_PATH,
         cwd: CWD,
         model,
         maxTurns,
