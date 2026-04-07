@@ -1,3 +1,4 @@
+pub mod config;
 mod entity;
 pub mod error;
 pub(crate) mod repo;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::instrument;
 
+pub use config::AgentConfig;
 use entity::*;
 pub use entity::{Agent, ChatConfig, SandboxConfig, SandboxState};
 pub use error::*;
@@ -31,9 +33,28 @@ pub struct Agents {
 }
 
 impl Agents {
-    pub fn new(pool: &sqlx::PgPool, sandbox: Option<Arc<sandbox_client::SandboxClient>>) -> Self {
+    pub async fn init(pool: &sqlx::PgPool, config: AgentConfig) -> Result<Self, AgentError> {
         let repo = AgentRepo::new(pool);
-        Self { repo, sandbox }
+        let sandbox = if config.sandbox.enabled {
+            let client = sandbox_client::SandboxClient::try_from_env(
+                config.sandbox.namespace.clone(),
+                config.sandbox.template_name.clone(),
+            )
+            .await?;
+            let client = if let Some(ref p) = config.sandbox.persistence {
+                client.with_persistence(sandbox_client::PersistenceConfig {
+                    size: p.size.clone(),
+                    storage_class: p.storage_class.clone(),
+                    mount_path: p.mount_path.clone(),
+                })
+            } else {
+                client
+            };
+            Some(Arc::new(client))
+        } else {
+            None
+        };
+        Ok(Self { repo, sandbox })
     }
 
     #[instrument(name = "domain.agent.create", skip(self))]

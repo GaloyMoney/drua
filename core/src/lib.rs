@@ -36,11 +36,7 @@ pub struct App {
 }
 
 impl App {
-    pub async fn init(
-        pool: &sqlx::PgPool,
-        config: AppConfig,
-        sandbox: Option<sandbox_client::SandboxClient>,
-    ) -> Result<Self, AppError> {
+    pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
         let ca_db_exists = {
             let p = &config.toolsets.code_assistant.db_path;
             !p.is_empty() && std::path::Path::new(p).exists()
@@ -76,8 +72,7 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let sandbox = sandbox.map(Arc::new);
-        let agents = Arc::new(Agents::new(pool, sandbox));
+        let agents = Arc::new(Agents::init(pool, config.agents).await?);
         let toolsets = ToolSets::init(
             config.toolsets,
             code_assistant.clone(),
@@ -132,6 +127,8 @@ impl App {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
+    #[error("AppError - Agent: {0}")]
+    Agent(#[from] agent::AgentError),
     #[error("AppError - ToolSets: {0}")]
     ToolSets(#[from] ToolSetsError),
     #[error("AppError - Embedder: {0}")]

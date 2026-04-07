@@ -60,28 +60,24 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("../core/migrations").run(&pool).await?;
 
     let app_config = galoy_agents_core::AppConfig {
+        agents: galoy_agents_core::agent::AgentConfig {
+            sandbox: galoy_agents_core::agent::config::SandboxClientConfig {
+                enabled: config.sandbox.enabled,
+                namespace: config.sandbox.namespace.clone(),
+                template_name: config.sandbox.template_name.clone(),
+                persistence: config.sandbox.persistence.as_ref().map(|p| {
+                    galoy_agents_core::agent::config::PersistenceConfig {
+                        size: p.size.clone(),
+                        storage_class: p.storage_class.clone(),
+                        mount_path: p.mount_path.clone(),
+                    }
+                }),
+            },
+        },
         toolsets: config.toolsets.clone(),
     };
-    let sandbox_client = sandbox_client::SandboxClient::try_from_env(
-        config.sandbox.namespace.clone(),
-        config.sandbox.template_name.clone(),
-    )
-    .await
-    .ok()
-    .filter(|_| config.sandbox.enabled)
-    .map(|client| {
-        if let Some(ref p) = config.sandbox.persistence {
-            client.with_persistence(sandbox_client::PersistenceConfig {
-                size: p.size.clone(),
-                storage_class: p.storage_class.clone(),
-                mount_path: p.mount_path.clone(),
-            })
-        } else {
-            client
-        }
-    });
 
-    let app = galoy_agents_core::App::init(&pool, app_config, sandbox_client).await?;
+    let app = galoy_agents_core::App::init(&pool, app_config).await?;
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
     let server_config = galoy_agents_web::server::ServerConfig {
