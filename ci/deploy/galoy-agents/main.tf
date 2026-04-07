@@ -190,6 +190,7 @@ resource "helm_release" "galoy_agents" {
   ]
 
   dependency_update = true
+  force_update      = true
   timeout           = 900 # 15 minutes
 
   depends_on = [
