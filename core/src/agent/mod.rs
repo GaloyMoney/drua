@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::instrument;
 
 use entity::*;
-pub use entity::{Agent, SandboxState};
+pub use entity::{Agent, SandboxConfig, SandboxState};
 pub use error::*;
 use repo::*;
 
@@ -109,15 +109,22 @@ impl Agents {
         model: Option<String>,
         max_turns: Option<u32>,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
-        let client = self
+        let base_client = self
             .sandbox
             .as_ref()
-            .ok_or(AgentError::SandboxNotConfigured)?
-            .clone();
+            .ok_or(AgentError::SandboxNotConfigured)?;
 
         let mut agent = self.repo.find_by_id(id).await?;
+
+        // Configure sandbox client from agent's sandbox config
+        let client = self.configure_client(base_client, &agent.sandbox_config);
         let sandbox_name = self.ensure_sandbox(&client, &mut agent).await?;
 
+        // Apply agent config defaults for model/max_turns
+        let model = model.or_else(|| agent.sandbox_config.model.clone());
+        let max_turns = max_turns.or(agent.sandbox_config.max_turns);
+
+        let client = Arc::new(client);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
         tokio::spawn(async move {
@@ -142,6 +149,24 @@ impl Agents {
         });
 
         Ok(rx)
+    }
+
+    /// Clone the base sandbox client and apply agent-specific configuration.
+    fn configure_client(
+        &self,
+        base: &sandbox_client::SandboxClient,
+        config: &SandboxConfig,
+    ) -> sandbox_client::SandboxClient {
+        let client = base.clone();
+        if config.persistent_volume {
+            client.with_persistence(sandbox_client::PersistenceConfig {
+                size: config.pvc_size.clone(),
+                storage_class: String::new(),
+                mount_path: "/workspace".to_string(),
+            })
+        } else {
+            client
+        }
     }
 
     /// Ensure the agent has a running sandbox, creating one if needed.
