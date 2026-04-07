@@ -1,19 +1,15 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
-    },
+    extract::{Path, Query, State},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Redirect, Response,
     },
-    routing::{delete, get, post},
+    routing::{get, post},
     Extension, Form, Json, Router,
 };
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_sessions::Session;
 use tracing::instrument;
@@ -23,7 +19,7 @@ use galoy_agents_core as domain;
 use domain::auth::AuthContext;
 use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{McpCredsId, UserId};
+use domain::primitives::{AgentId, McpCredsId, UserId};
 
 use crate::templates::*;
 use crate::AppState;
@@ -53,13 +49,7 @@ pub fn router() -> Router<AppState> {
         .route("/reports/list", get(reports_list))
         .route("/reports/search", get(reports_search))
         .route("/reports/{id}", get(reports_detail))
-        .route("/sandboxes", get(sandboxes_page))
-        .route("/sandboxes/list", get(sandbox_list))
-        .route("/sandboxes/create", post(sandbox_create))
-        .route("/sandboxes/{name}/delete", post(sandbox_delete))
-        .route("/sandboxes/{name}/status", get(sandbox_status))
-        .route("/sandboxes/{name}/terminal", get(sandbox_terminal))
-        .route("/sandboxes/{name}/agent", get(sandbox_agent))
+        .route("/workspaces/{id}/chat", get(workspace_chat))
         .route("/workspaces", get(workspaces_page))
         .route("/workspaces/new", get(workspace_new))
         .route("/workspaces/list", get(workspace_list))
@@ -630,182 +620,6 @@ async fn reports_detail(
 }
 
 // ---------------------------------------------------------------------------
-// Sandboxes
-// ---------------------------------------------------------------------------
-
-fn summary_to_view(s: &sandbox_client::SandboxSummary) -> SandboxView {
-    SandboxView {
-        name: s.name.clone(),
-        sandbox_name: s.sandbox_name.clone().unwrap_or_default(),
-        phase: s.phase.clone(),
-    }
-}
-
-#[instrument(name = "web.sandboxes_page", skip_all)]
-async fn sandboxes_page(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
-    SandboxesTemplate {
-        enabled: state.sandbox.is_some(),
-    }
-    .into_response()
-}
-
-#[instrument(name = "web.sandbox_list", skip_all)]
-async fn sandbox_list(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-    let client = match state.sandbox.as_ref() {
-        Some(c) => c,
-        None => return SandboxListTemplate { sandboxes: vec![] }.into_response(),
-    };
-    let result = if client.has_persistence() {
-        client.list_sandboxes().await
-    } else {
-        client.list_claims().await
-    };
-    match result {
-        Ok(summaries) => SandboxListTemplate {
-            sandboxes: summaries.iter().map(summary_to_view).collect(),
-        }
-        .into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to list sandboxes");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-pub struct CreateSandboxForm {
-    name: String,
-}
-
-#[instrument(name = "web.sandbox_create", skip_all)]
-async fn sandbox_create(
-    State(state): State<AppState>,
-    session: Session,
-    Form(form): Form<CreateSandboxForm>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
-    let client = match state.sandbox.as_ref() {
-        Some(c) => c,
-        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let result = if client.has_persistence() {
-        client.create_sandbox(&form.name).await
-    } else {
-        client
-            .create_claim(&form.name)
-            .await
-            .map(|c| sandbox_client::SandboxSummary {
-                name: form.name.clone(),
-                sandbox_name: c.status.and_then(|s| s.sandbox.map(|r| r.name)),
-                phase: "Provisioning".to_string(),
-                ready: false,
-            })
-    };
-    match result {
-        Ok(_) => SandboxCreatedTemplate { name: form.name }.into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create sandbox");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "web.sandbox_delete", skip_all)]
-async fn sandbox_delete(
-    State(state): State<AppState>,
-    session: Session,
-    Path(name): Path<String>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
-    let client = match state.sandbox.as_ref() {
-        Some(c) => c,
-        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let result = if client.has_persistence() {
-        client.delete_sandbox(&name).await
-    } else {
-        client.delete_claim(&name).await
-    };
-    match result {
-        Ok(_) => "".into_response(), // Row disappears via hx-swap="outerHTML"
-        Err(e) => {
-            tracing::error!(error = %e, name = %name, "Failed to delete sandbox");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "web.sandbox_status", skip_all)]
-async fn sandbox_status(
-    State(state): State<AppState>,
-    session: Session,
-    Path(name): Path<String>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-    let client = match state.sandbox.as_ref() {
-        Some(c) => c,
-        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let result = if client.has_persistence() {
-        client.get_sandbox(&name).await
-    } else {
-        client.get_claim(&name).await
-    };
-    match result {
-        Ok(summary) => SandboxRowTemplate {
-            sb: summary_to_view(&summary),
-        }
-        .into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, name = %name, "Failed to get sandbox status");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "web.sandbox_terminal", skip_all)]
-async fn sandbox_terminal(
-    State(state): State<AppState>,
-    session: Session,
-    Path(name): Path<String>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
-    if state.sandbox.is_none() {
-        return Redirect::to("/sandboxes").into_response();
-    }
-    SandboxTerminalTemplate { name }.into_response()
-}
-
-#[instrument(name = "web.sandbox_agent", skip_all)]
-async fn sandbox_agent(
-    State(state): State<AppState>,
-    session: Session,
-    Path(name): Path<String>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
-    if state.sandbox.is_none() {
-        return Redirect::to("/sandboxes").into_response();
-    }
-    SandboxAgentTemplate { name }.into_response()
-}
-
-// ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
 
@@ -926,31 +740,54 @@ async fn workspace_update(
 }
 
 // ---------------------------------------------------------------------------
-// JSON API  (/api/v1/sandboxes)
+// Workspace Chat
 // ---------------------------------------------------------------------------
 
-/// Wire protocol frame types for WebSocket exec proxy.
-mod ws_proto {
-    pub const STDIN: u8 = 0x01;
-    pub const STDOUT: u8 = 0x02;
-    #[allow(dead_code)]
-    pub const STDERR: u8 = 0x03;
-    pub const RESIZE: u8 = 0x04;
-    pub const EXIT: u8 = 0xFF;
+#[instrument(name = "web.workspace_chat", skip_all)]
+async fn workspace_chat(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let lead = agents
+        .iter()
+        .find(|a| a.agent_type == domain::primitives::AgentType::WorkspaceLead);
+
+    let agent_id = match lead {
+        Some(a) => a.id.to_string(),
+        None => return Redirect::to("/workspaces").into_response(),
+    };
+
+    WorkspaceChatTemplate {
+        workspace: workspace_to_view(&ws),
+        agent_id,
+    }
+    .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// JSON API
+// ---------------------------------------------------------------------------
+
 pub fn api_router() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/sandboxes", post(api_create_sandbox))
-        .route("/api/v1/sandboxes", get(api_list_sandboxes))
-        .route("/api/v1/sandboxes/_debug", get(api_debug_sandboxes))
-        .route("/api/v1/sandboxes/{name}", get(api_get_sandbox))
-        .route("/api/v1/sandboxes/{name}", delete(api_delete_sandbox))
-        .route("/api/v1/sandboxes/{name}/exec", get(api_exec_sandbox))
-        .route(
-            "/api/v1/sandboxes/{name}/agent/message",
-            post(api_agent_message),
-        )
+    Router::new().route("/api/v1/agents/{id}/message", post(api_agent_message))
 }
 
 macro_rules! require_auth {
@@ -962,265 +799,6 @@ macro_rules! require_auth {
     };
 }
 
-macro_rules! require_sandbox {
-    ($state:expr) => {
-        match $state.sandbox.as_ref() {
-            Some(c) => c,
-            None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        }
-    };
-}
-
-#[instrument(name = "api.sandbox.debug", skip_all)]
-async fn api_debug_sandboxes(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<AppState>,
-) -> Response {
-    require_auth!(auth);
-    let client = require_sandbox!(state);
-    match client.debug_status().await {
-        Ok(info) => Json(info).into_response(),
-        Err(e) => {
-            let body = serde_json::json!({ "error": e.to_string() });
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct CreateSandboxRequest {
-    name: String,
-}
-
-#[instrument(name = "api.sandbox.create", skip_all)]
-async fn api_create_sandbox(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<AppState>,
-    Json(body): Json<CreateSandboxRequest>,
-) -> Response {
-    require_auth!(auth);
-    let client = require_sandbox!(state);
-    match client.create_sandbox(&body.name).await {
-        Ok(summary) => (axum::http::StatusCode::CREATED, Json(summary)).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "API: failed to create sandbox");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "api.sandbox.list", skip_all)]
-async fn api_list_sandboxes(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<AppState>,
-) -> Response {
-    require_auth!(auth);
-    let client = require_sandbox!(state);
-    match client.list_sandboxes().await {
-        Ok(summaries) => Json(summaries).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "API: failed to list sandboxes");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "api.sandbox.get", skip_all, fields(%name))]
-async fn api_get_sandbox(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Response {
-    require_auth!(auth);
-    let client = require_sandbox!(state);
-    match client.get_sandbox(&name).await {
-        Ok(summary) => Json(summary).into_response(),
-        Err(sandbox_client::SandboxError::NotFound(_)) => {
-            axum::http::StatusCode::NOT_FOUND.into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "API: failed to get sandbox");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "api.sandbox.delete", skip_all, fields(%name))]
-async fn api_delete_sandbox(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Response {
-    require_auth!(auth);
-    let client = require_sandbox!(state);
-    match client.delete_sandbox(&name).await {
-        Ok(_) => axum::http::StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "API: failed to delete sandbox");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-/// Query parameters for the exec WebSocket endpoint.
-#[derive(Deserialize)]
-struct ExecParams {
-    /// Shell command to execute (defaults to "sh").
-    cmd: Option<String>,
-}
-
-#[instrument(name = "api.sandbox.exec", skip_all, fields(%name))]
-async fn api_exec_sandbox(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    Query(params): Query<ExecParams>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    require_auth!(auth);
-    let client = require_sandbox!(state).clone();
-
-    let cmd = params.cmd.unwrap_or_else(|| "sh".to_string());
-    let command: Vec<String> = cmd.split_whitespace().map(String::from).collect();
-
-    ws.on_upgrade(move |socket| exec_proxy(socket, client, name, command))
-}
-
-/// Bridge a WebSocket connection to a kube-rs exec session.
-async fn exec_proxy(
-    socket: WebSocket,
-    client: std::sync::Arc<sandbox_client::SandboxClient>,
-    sandbox_name: String,
-    command: Vec<String>,
-) {
-    use futures::stream::StreamExt;
-
-    tracing::info!(sandbox = %sandbox_name, "Exec proxy: starting");
-
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
-    // Helper to send an error message back to the client over the WebSocket
-    macro_rules! ws_error {
-        ($sender:expr, $msg:expr) => {{
-            use futures::sink::SinkExt;
-            let err_msg = format!("exec proxy error: {}\r\n", $msg);
-            let mut frame = Vec::with_capacity(1 + err_msg.len());
-            frame.push(ws_proto::STDERR);
-            frame.extend_from_slice(err_msg.as_bytes());
-            let _ = $sender.send(Message::Binary(frame.into())).await;
-            let _ = $sender
-                .send(Message::Binary(vec![ws_proto::EXIT, 1].into()))
-                .await;
-            let _ = $sender.close().await;
-        }};
-    }
-
-    // Start exec in the sandbox pod
-    let mut process = match client.exec_sandbox(&sandbox_name, command).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "Exec proxy: failed to exec into sandbox");
-            ws_error!(ws_sender, e);
-            return;
-        }
-    };
-
-    let mut pod_stdin = match process.stdin() {
-        Some(s) => s,
-        None => {
-            tracing::error!("Exec proxy: no stdin stream");
-            ws_error!(ws_sender, "no stdin stream from pod");
-            return;
-        }
-    };
-
-    let mut pod_stdout = match process.stdout() {
-        Some(s) => s,
-        None => {
-            tracing::error!("Exec proxy: no stdout stream");
-            ws_error!(ws_sender, "no stdout stream from pod");
-            return;
-        }
-    };
-
-    // Pod stdout → WebSocket (0x02 prefix)
-    let stdout_task = tokio::spawn(async move {
-        use futures::sink::SinkExt;
-        let mut buf = [0u8; 4096];
-        loop {
-            match pod_stdout.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    let mut frame = Vec::with_capacity(1 + n);
-                    frame.push(ws_proto::STDOUT);
-                    frame.extend_from_slice(&buf[..n]);
-                    if ws_sender.send(Message::Binary(frame.into())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Exec proxy: pod stdout error");
-                    // Send exit frame
-                    let exit_frame = vec![ws_proto::EXIT, 1];
-                    let _ = ws_sender.send(Message::Binary(exit_frame.into())).await;
-                    break;
-                }
-            }
-        }
-        // Send exit frame on clean close
-        let _ = ws_sender
-            .send(Message::Binary(vec![ws_proto::EXIT, 0].into()))
-            .await;
-        let _ = ws_sender.close().await;
-    });
-
-    // WebSocket → Pod stdin (strip 0x01 prefix)
-    let stdin_task = tokio::spawn(async move {
-        while let Some(msg) = ws_receiver.next().await {
-            match msg {
-                Ok(Message::Binary(data)) => {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    match data[0] {
-                        ws_proto::STDIN => {
-                            if pod_stdin.write_all(&data[1..]).await.is_err() {
-                                break;
-                            }
-                        }
-                        ws_proto::RESIZE => {
-                            // Resize: 0x04 + cols(u16be) + rows(u16be)
-                            // kube-rs AttachedProcess doesn't expose resize,
-                            // so we log and skip for now.
-                            if data.len() >= 5 {
-                                let cols = u16::from_be_bytes([data[1], data[2]]);
-                                let rows = u16::from_be_bytes([data[3], data[4]]);
-                                tracing::debug!(cols, rows, "Exec proxy: resize requested");
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(Message::Close(_)) | Err(_) => break,
-                _ => {}
-            }
-        }
-    });
-
-    // Wait for either task to finish, then abort the other
-    tokio::select! {
-        _ = stdout_task => {}
-        _ = stdin_task => {}
-    }
-
-    tracing::info!(sandbox = %sandbox_name, "Exec proxy: session ended");
-}
-
-// ---------------------------------------------------------------------------
-// Agent harness – POST /api/v1/sandboxes/{name}/agent/message
-// ---------------------------------------------------------------------------
-
-/// Request body for the agent message endpoint.
 #[derive(Deserialize)]
 struct AgentMessageRequest {
     prompt: String,
@@ -1229,121 +807,57 @@ struct AgentMessageRequest {
     max_turns: Option<u32>,
 }
 
-/// Send a prompt to the Claude agent harness running inside a sandbox pod.
-///
-/// The harness is exec'd via the Kubernetes API (non-TTY). The prompt is
-/// written as a JSON-line to stdin; SDK events are streamed back as SSE.
-#[instrument(name = "api.sandbox.agent_message", skip_all, fields(%name))]
+#[instrument(name = "api.agent.message", skip_all)]
 async fn api_agent_message(
     Extension(auth): Extension<AuthContext>,
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    Path(id): Path<uuid::Uuid>,
     Json(body): Json<AgentMessageRequest>,
 ) -> Response {
     require_auth!(auth);
-    let client = require_sandbox!(state).clone();
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
-
-    // Spawn the relay task that bridges pod stdout → SSE events.
-    tokio::spawn(async move {
-        if let Err(e) = agent_message_relay(client, &name, &body, tx.clone()).await {
-            tracing::error!(error = %e, sandbox = %name, "Agent message relay failed");
-            let _ = tx
-                .send(Ok(Event::default().event("error").data(
-                    serde_json::json!({"type":"error","message": e.to_string()}).to_string(),
-                )))
-                .await;
+    let agent_id = AgentId::from(id);
+    let rx = match state
+        .app
+        .agents()
+        .send_message(
+            agent_id,
+            body.prompt,
+            body.session_id,
+            body.model,
+            body.max_turns,
+        )
+        .await
+    {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to send message to agent");
+            let body = serde_json::json!({ "error": e.to_string() });
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
         }
-    });
+    };
 
-    let stream = ReceiverStream::new(rx);
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
+    let (tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
-/// Execute the agent harness inside the pod and relay stdout → SSE channel.
-async fn agent_message_relay(
-    client: std::sync::Arc<sandbox_client::SandboxClient>,
-    sandbox_name: &str,
-    request: &AgentMessageRequest,
-    tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Build the harness command.
-    let command = vec!["agent-harness".to_string()];
-
-    let mut process = client.exec_sandbox_raw(sandbox_name, command).await?;
-
-    // Write the prompt as a JSON-line to stdin.
-    // All fields are forwarded — the harness applies its own defaults for omitted ones.
-    let input_line = serde_json::json!({
-        "prompt": request.prompt,
-        "session_id": request.session_id,
-        "model": request.model,
-        "max_turns": request.max_turns,
-    });
-
-    let mut stdin = process
-        .stdin()
-        .ok_or("no stdin stream from agent harness")?;
-
-    let payload = format!("{}\n", input_line);
-    stdin.write_all(payload.as_bytes()).await?;
-    // Close stdin so the harness knows the message is complete.
-    drop(stdin);
-
-    // Read stdout line by line and emit SSE events.
-    let mut stdout = process
-        .stdout()
-        .ok_or("no stdout stream from agent harness")?;
-
-    let mut buf = Vec::with_capacity(4096);
-    let mut tmp = [0u8; 4096];
-
-    loop {
-        match stdout.read(&mut tmp).await {
-            Ok(0) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-
-                // Process complete lines from the buffer.
-                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = buf.drain(..=pos).collect();
-                    let line_str = String::from_utf8_lossy(&line).trim().to_string();
-                    if line_str.is_empty() {
-                        continue;
-                    }
-
-                    // Determine event type from the JSON if possible.
-                    let event_type = serde_json::from_str::<serde_json::Value>(&line_str)
-                        .ok()
-                        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
-                        .unwrap_or_else(|| "message".to_string());
-
-                    let event = Event::default().event(&event_type).data(line_str);
-
-                    if tx.send(Ok(event)).await.is_err() {
-                        // Client disconnected.
-                        return Ok(());
-                    }
+    tokio::spawn(async move {
+        let mut rx = rx;
+        while let Some(event) = rx.recv().await {
+            let sse_event = match event {
+                domain::agent::AgentMessageEvent::Data { event_type, data } => {
+                    Event::default().event(&event_type).data(data)
                 }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Agent harness stdout error");
+                domain::agent::AgentMessageEvent::Error { message } => Event::default()
+                    .event("error")
+                    .data(serde_json::json!({"type":"error","message": message}).to_string()),
+            };
+            if tx.send(Ok(sse_event)).await.is_err() {
                 break;
             }
         }
-    }
+    });
 
-    // Flush any remaining partial line in the buffer.
-    if !buf.is_empty() {
-        let line_str = String::from_utf8_lossy(&buf).trim().to_string();
-        if !line_str.is_empty() {
-            let event = Event::default().event("message").data(line_str);
-            let _ = tx.send(Ok(event)).await;
-        }
-    }
-
-    Ok(())
+    let stream = ReceiverStream::new(sse_rx);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }

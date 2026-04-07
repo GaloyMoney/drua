@@ -25,7 +25,8 @@ pgvector = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rmcp = { workspace = true }
 thiserror = "2.0"
-tokio = { version = "1", features = ["rt"] }
+sandbox-client = { workspace = true }
+tokio = { version = "1", features = ["rt", "io-util"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 

@@ -151,50 +151,6 @@ pub struct ReportDetailTemplate {
     pub report: ReportView,
 }
 
-// ── Sandboxes ────────────────────────────────────────────────────────
-
-pub struct SandboxView {
-    pub name: String,
-    pub sandbox_name: String,
-    pub phase: String,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "sandboxes.html")]
-pub struct SandboxesTemplate {
-    pub enabled: bool,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "sandbox_list.html")]
-pub struct SandboxListTemplate {
-    pub sandboxes: Vec<SandboxView>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "sandbox_row.html")]
-pub struct SandboxRowTemplate {
-    pub sb: SandboxView,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "sandbox_created.html")]
-pub struct SandboxCreatedTemplate {
-    pub name: String,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "sandbox_terminal.html")]
-pub struct SandboxTerminalTemplate {
-    pub name: String,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "sandbox_agent.html")]
-pub struct SandboxAgentTemplate {
-    pub name: String,
-}
-
 // ── Workspaces ───────────────────────────────────────────────────────
 
 pub struct WorkspaceView {
@@ -222,4 +178,11 @@ pub struct WorkspaceNewTemplate {}
 #[template(path = "workspace_detail.html")]
 pub struct WorkspaceDetailTemplate {
     pub workspace: WorkspaceView,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_chat.html")]
+pub struct WorkspaceChatTemplate {
+    pub workspace: WorkspaceView,
+    pub agent_id: String,
 }

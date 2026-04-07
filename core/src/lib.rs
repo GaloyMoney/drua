@@ -36,7 +36,11 @@ pub struct App {
 }
 
 impl App {
-    pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
+    pub async fn init(
+        pool: &sqlx::PgPool,
+        config: AppConfig,
+        sandbox: Option<sandbox_client::SandboxClient>,
+    ) -> Result<Self, AppError> {
         let ca_db_exists = {
             let p = &config.toolsets.code_assistant.db_path;
             !p.is_empty() && std::path::Path::new(p).exists()
@@ -72,7 +76,8 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let agents = Arc::new(Agents::new(pool));
+        let sandbox = sandbox.map(Arc::new);
+        let agents = Arc::new(Agents::new(pool, sandbox));
         let toolsets = ToolSets::init(
             config.toolsets,
             code_assistant.clone(),

@@ -2,24 +2,38 @@ mod entity;
 pub mod error;
 pub(crate) mod repo;
 
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::instrument;
 
-pub use entity::Agent;
 use entity::*;
+pub use entity::{Agent, SandboxState};
 pub use error::*;
 use repo::*;
 
 use crate::primitives::*;
 
+/// An event emitted during an agent message exchange.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentMessageEvent {
+    /// Agent harness produced a line of output.
+    Data { event_type: String, data: String },
+    /// An error occurred.
+    Error { message: String },
+}
+
 #[derive(Clone)]
 pub struct Agents {
     repo: AgentRepo,
+    sandbox: Option<Arc<sandbox_client::SandboxClient>>,
 }
 
 impl Agents {
-    pub fn new(pool: &sqlx::PgPool) -> Self {
+    pub fn new(pool: &sqlx::PgPool, sandbox: Option<Arc<sandbox_client::SandboxClient>>) -> Self {
         let repo = AgentRepo::new(pool);
-        Self { repo }
+        Self { repo, sandbox }
     }
 
     #[instrument(name = "domain.agent.create", skip(self))]
@@ -83,4 +97,183 @@ impl Agents {
             .await?;
         Ok(result.entities)
     }
+
+    /// Send a message to an agent, ensuring its sandbox is running.
+    /// Returns a channel receiver that streams agent harness events.
+    #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
+    pub async fn send_message(
+        &self,
+        id: AgentId,
+        prompt: String,
+        session_id: Option<String>,
+        model: Option<String>,
+        max_turns: Option<u32>,
+    ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
+        let client = self
+            .sandbox
+            .as_ref()
+            .ok_or(AgentError::SandboxNotConfigured)?
+            .clone();
+
+        let mut agent = self.repo.find_by_id(id).await?;
+        let sandbox_name = self.ensure_sandbox(&client, &mut agent).await?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
+
+        tokio::spawn(async move {
+            if let Err(e) = relay_agent_message(
+                client,
+                &sandbox_name,
+                prompt,
+                session_id,
+                model,
+                max_turns,
+                tx.clone(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, sandbox = %sandbox_name, "Agent message relay failed");
+                let _ = tx
+                    .send(AgentMessageEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
+            }
+        });
+
+        Ok(rx)
+    }
+
+    /// Ensure the agent has a running sandbox, creating one if needed.
+    async fn ensure_sandbox(
+        &self,
+        client: &sandbox_client::SandboxClient,
+        agent: &mut Agent,
+    ) -> Result<String, AgentError> {
+        let sandbox_name = format!("agent-{}", &agent.id.to_string()[..8]);
+
+        match agent.sandbox_state {
+            SandboxState::Ready => return Ok(sandbox_name),
+            SandboxState::Provisioning => {
+                // Wait for it to become ready
+                client
+                    .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
+                    .await?;
+                agent.sandbox_ready(sandbox_name.clone());
+                self.repo.update(agent).await?;
+                return Ok(sandbox_name);
+            }
+            SandboxState::None => {}
+        }
+
+        // Try to create; if already exists, just wait for ready
+        match client.create_sandbox(&sandbox_name).await {
+            Ok(_) => {}
+            Err(sandbox_client::SandboxError::Kube(e))
+                if e.to_string().contains("already exists") =>
+            {
+                tracing::info!(sandbox = %sandbox_name, "Sandbox already exists, waiting for ready");
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        agent.sandbox_provisioned(sandbox_name.clone());
+        self.repo.update(agent).await?;
+
+        client
+            .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
+            .await?;
+
+        agent.sandbox_ready(sandbox_name.clone());
+        self.repo.update(agent).await?;
+
+        Ok(sandbox_name)
+    }
+}
+
+/// Execute the agent harness inside a sandbox pod and relay stdout → channel.
+async fn relay_agent_message(
+    client: Arc<sandbox_client::SandboxClient>,
+    sandbox_name: &str,
+    prompt: String,
+    session_id: Option<String>,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    tx: tokio::sync::mpsc::Sender<AgentMessageEvent>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let command = vec!["agent-harness".to_string()];
+    let mut process = client.exec_sandbox_raw(sandbox_name, command).await?;
+
+    let input_line = serde_json::json!({
+        "prompt": prompt,
+        "session_id": session_id,
+        "model": model,
+        "max_turns": max_turns,
+    });
+
+    let mut stdin = process
+        .stdin()
+        .ok_or("no stdin stream from agent harness")?;
+    let payload = format!("{}\n", input_line);
+    stdin.write_all(payload.as_bytes()).await?;
+    drop(stdin);
+
+    let mut stdout = process
+        .stdout()
+        .ok_or("no stdout stream from agent harness")?;
+
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+
+    loop {
+        match stdout.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=pos).collect();
+                    let line_str = String::from_utf8_lossy(&line).trim().to_string();
+                    if line_str.is_empty() {
+                        continue;
+                    }
+
+                    let event_type = serde_json::from_str::<serde_json::Value>(&line_str)
+                        .ok()
+                        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+                        .unwrap_or_else(|| "message".to_string());
+
+                    if tx
+                        .send(AgentMessageEvent::Data {
+                            event_type,
+                            data: line_str,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Agent harness stdout error");
+                break;
+            }
+        }
+    }
+
+    // Flush remaining partial line
+    if !buf.is_empty() {
+        let line_str = String::from_utf8_lossy(&buf).trim().to_string();
+        if !line_str.is_empty() {
+            let _ = tx
+                .send(AgentMessageEvent::Data {
+                    event_type: "message".to_string(),
+                    data: line_str,
+                })
+                .await;
+        }
+    }
+
+    Ok(())
 }
