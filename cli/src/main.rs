@@ -62,17 +62,6 @@ async fn main() -> anyhow::Result<()> {
     let app_config = galoy_agents_core::AppConfig {
         toolsets: config.toolsets.clone(),
     };
-    let app = galoy_agents_core::App::init(&pool, app_config).await?;
-    let auth_config = config.auth_config();
-    let oauth_client = auth_config.oauth_client();
-    let server_config = galoy_agents_web::server::ServerConfig {
-        host: config.server.host.clone(),
-        port: config.server.port,
-        secure_cookies: config.server.secure_cookies,
-    };
-
-    let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(app.clone());
-
     let sandbox_client = sandbox_client::SandboxClient::try_from_env(
         config.sandbox.namespace.clone(),
         config.sandbox.template_name.clone(),
@@ -92,12 +81,22 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let app = galoy_agents_core::App::init(&pool, app_config, sandbox_client).await?;
+    let auth_config = config.auth_config();
+    let oauth_client = auth_config.oauth_client();
+    let server_config = galoy_agents_web::server::ServerConfig {
+        host: config.server.host.clone(),
+        port: config.server.port,
+        secure_cookies: config.server.secure_cookies,
+    };
+
+    let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(app.clone());
+
     let app_state = galoy_agents_web::AppState::new(
         app,
         oauth_client,
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
-        sandbox_client,
     );
 
     let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);

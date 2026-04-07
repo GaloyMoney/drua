@@ -3,8 +3,6 @@ mod routes;
 pub mod server;
 mod templates;
 
-use std::sync::Arc;
-
 use axum::Router;
 
 use galoy_agents_core as domain;
@@ -13,7 +11,6 @@ use domain::App;
 
 use auth::config::OAuthClient;
 use domain::code_assistant::CodeAssistant;
-use sandbox_client::SandboxClient;
 
 /// Unified application state shared by all routes and middleware.
 #[derive(Clone)]
@@ -23,7 +20,6 @@ pub struct AppState {
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
     pub code_assistant: Option<CodeAssistant>,
-    pub sandbox: Option<Arc<SandboxClient>>,
 }
 
 impl AppState {
@@ -32,7 +28,6 @@ impl AppState {
         oauth_client: OAuthClient,
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
-        sandbox: Option<SandboxClient>,
     ) -> Self {
         let code_assistant = app.code_assistant().cloned();
         Self {
@@ -41,7 +36,6 @@ impl AppState {
             mcp_endpoint,
             github_allowed_teams,
             code_assistant,
-            sandbox: sandbox.map(Arc::new),
         }
     }
 }

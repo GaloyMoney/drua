@@ -7,12 +7,11 @@ edition.workspace = true
 
 [dependencies]
 galoy-agents-core = { path = "../core" }
-sandbox-client = { workspace = true }
 anyhow = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 async-trait = "0.1"
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 chrono = "0.4"
 axum-extra = { version = "0.10", features = ["cookie"] }
 oauth2 = { version = "5.0", features = ["reqwest"] }
@@ -25,8 +24,7 @@ thiserror = "2.0"
 time = "0.3"
 tower-http = { version = "0.6", features = ["cors"] }
 tower-service = "0.3"
-futures = { workspace = true }
-tokio = { version = "1", features = ["net", "io-util"] }
+tokio = { version = "1", features = ["net"] }
 tokio-stream = "0.1"
 tower-sessions = "0.15"
 tracing = "0.1"

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}Chat — {{ workspace.name }} — Galoy Agents{% endblock %}
+
+{% block nav_workspaces %}class="active"{% endblock %}
+
+{% block head %}
+<style>
+  .chat-container { display: flex; flex-direction: column; height: calc(100vh - 6rem); }
+  .chat-header { margin-bottom: 1rem; }
+  .chat-header a { font-size: 0.85rem; }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    padding: 1rem;
+    margin-bottom: 1rem;
+    font-family: monospace;
+    font-size: 0.85rem;
+    background: var(--pico-code-background-color);
+  }
+  .messages .msg { margin-bottom: 0.5rem; white-space: pre-wrap; word-break: break-word; }
+  .messages .msg-system { color: var(--pico-muted-color); }
+  .messages .msg-assistant { color: var(--pico-color); }
+  .messages .msg-error { color: var(--pico-del-color); }
+  .messages .msg-result { color: var(--pico-ins-color); }
+  .chat-input { display: flex; gap: 0.5rem; }
+  .chat-input textarea { flex: 1; resize: none; }
+  .chat-input button { width: auto; align-self: end; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="chat-container">
+  <div class="chat-header">
+    <a href="/workspaces/{{ workspace.id }}">&larr; {{ workspace.name }}</a>
+    <h2>Workspace Lead</h2>
+  </div>
+
+  <div class="messages" id="messages"></div>
+
+  <div class="chat-input">
+    <textarea id="prompt" rows="3" placeholder="Type a message..."></textarea>
+    <button id="send-btn" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+const agentId = '{{ agent_id }}';
+let sessionId = null;
+
+function appendMsg(cls, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  el.textContent = text;
+  const container = document.getElementById('messages');
+  container.appendChild(el);
+  container.scrollTop = container.scrollHeight;
+}
+
+async function sendMessage() {
+  const textarea = document.getElementById('prompt');
+  const prompt = textarea.value.trim();
+  if (!prompt) return;
+
+  textarea.value = '';
+  document.getElementById('send-btn').disabled = true;
+  appendMsg('msg-system', '> ' + prompt);
+
+  try {
+    const resp = await fetch('/api/v1/agents/' + agentId + '/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, session_id: sessionId }),
+    });
+
+    if (!resp.ok) {
+      appendMsg('msg-error', 'Error: ' + resp.status);
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          if (!data) continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.type === 'system' && parsed.session_id) {
+              sessionId = parsed.session_id;
+            } else if (parsed.type === 'assistant') {
+              const text = parsed.message?.content
+                ?.filter(c => c.type === 'text')
+                .map(c => c.text)
+                .join('') || JSON.stringify(parsed);
+              appendMsg('msg-assistant', text);
+            } else if (parsed.type === 'result') {
+              appendMsg('msg-result', 'Done — ' + (parsed.duration_ms || 0) + 'ms, ' + (parsed.num_turns || 0) + ' turns');
+            } else if (parsed.type === 'error') {
+              appendMsg('msg-error', parsed.message || JSON.stringify(parsed));
+            }
+          } catch {
+            appendMsg('msg-assistant', data);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    appendMsg('msg-error', 'Network error: ' + e.message);
+  } finally {
+    document.getElementById('send-btn').disabled = false;
+    textarea.focus();
+  }
+}
+
+document.getElementById('prompt').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+</script>
+{% endblock %}

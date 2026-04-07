@@ -1,7 +1,0 @@
-{% if sandboxes.is_empty() %}
-<tr><td colspan="4"><em>No active sandboxes.</em></td></tr>
-{% else %}
-{% for sb in sandboxes %}
-{% include "sandbox_row.html" %}
-{% endfor %}
-{% endif %}

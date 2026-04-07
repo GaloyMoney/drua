@@ -15,6 +15,21 @@ pub enum AgentEvent {
         agent_type: AgentType,
         name: String,
     },
+    SandboxProvisioned {
+        sandbox_name: String,
+    },
+    SandboxReady {
+        sandbox_name: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxState {
+    #[default]
+    None,
+    Provisioning,
+    Ready,
 }
 
 #[derive(EsEntity, Builder)]
@@ -24,6 +39,10 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_type: AgentType,
     pub name: String,
+    #[builder(default)]
+    pub sandbox_state: SandboxState,
+    #[builder(setter(strip_option), default)]
+    pub sandbox_name: Option<String>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -32,6 +51,19 @@ impl Agent {
         self.events
             .entity_first_persisted_at()
             .expect("entity_first_persisted_at not found")
+    }
+
+    pub(super) fn sandbox_provisioned(&mut self, sandbox_name: String) {
+        self.sandbox_state = SandboxState::Provisioning;
+        self.sandbox_name = Some(sandbox_name.clone());
+        self.events
+            .push(AgentEvent::SandboxProvisioned { sandbox_name });
+    }
+
+    pub(super) fn sandbox_ready(&mut self, sandbox_name: String) {
+        self.sandbox_state = SandboxState::Ready;
+        self.sandbox_name = Some(sandbox_name.clone());
+        self.events.push(AgentEvent::SandboxReady { sandbox_name });
     }
 }
 
@@ -58,6 +90,16 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .workspace_id(*workspace_id)
                         .agent_type(*agent_type)
                         .name(name.clone());
+                }
+                AgentEvent::SandboxProvisioned { sandbox_name } => {
+                    builder = builder
+                        .sandbox_state(SandboxState::Provisioning)
+                        .sandbox_name(sandbox_name.clone());
+                }
+                AgentEvent::SandboxReady { sandbox_name } => {
+                    builder = builder
+                        .sandbox_state(SandboxState::Ready)
+                        .sandbox_name(sandbox_name.clone());
                 }
             }
         }
@@ -104,7 +146,7 @@ mod tests {
 
     use crate::primitives::{AgentId, AgentType, WorkspaceId};
 
-    use super::{Agent, NewAgent};
+    use super::{Agent, NewAgent, SandboxState};
 
     fn new_agent() -> Agent {
         let new = NewAgent::builder()
@@ -123,5 +165,7 @@ mod tests {
         let agent = new_agent();
         assert_eq!(agent.name, "workspace-lead");
         assert_eq!(agent.agent_type, AgentType::WorkspaceLead);
+        assert_eq!(agent.sandbox_state, SandboxState::None);
+        assert_eq!(agent.sandbox_name, None);
     }
 }

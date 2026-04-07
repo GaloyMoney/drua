@@ -14,4 +14,10 @@ pub enum AgentError {
     Find(#[from] AgentFindError),
     #[error("AgentError - Query: {0}")]
     Query(#[from] AgentQueryError),
+    #[error("AgentError - Sandbox: {0}")]
+    Sandbox(#[from] sandbox_client::SandboxError),
+    #[error("AgentError - SandboxNotConfigured")]
+    SandboxNotConfigured,
+    #[error("AgentError - SandboxExec: {0}")]
+    SandboxExec(String),
 }
