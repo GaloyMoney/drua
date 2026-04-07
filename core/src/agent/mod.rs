@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::instrument;
 
 use entity::*;
-pub use entity::{Agent, SandboxConfig, SandboxState};
+pub use entity::{Agent, ChatConfig, SandboxConfig, SandboxState};
 pub use error::*;
 use repo::*;
 
@@ -120,9 +120,9 @@ impl Agents {
         let client = self.configure_client(base_client, &agent.sandbox_config);
         let sandbox_name = self.ensure_sandbox(&client, &mut agent).await?;
 
-        // Apply agent config defaults for model/max_turns
-        let model = model.or_else(|| agent.sandbox_config.model.clone());
-        let max_turns = max_turns.or(agent.sandbox_config.max_turns);
+        // Apply agent chat config defaults for model/max_turns
+        let model = model.or_else(|| agent.chat_config.model.clone());
+        let max_turns = max_turns.or(agent.chat_config.max_turns);
 
         let client = Arc::new(client);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
