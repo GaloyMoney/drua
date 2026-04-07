@@ -188,10 +188,7 @@ impl Agents {
                     Ok(_) => {
                         // Provisioning — wait for ready
                         client
-                            .wait_sandbox_ready(
-                                &sandbox_name,
-                                std::time::Duration::from_secs(120),
-                            )
+                            .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
                             .await?;
                         agent.sandbox_ready();
                         self.repo.update(agent).await?;
