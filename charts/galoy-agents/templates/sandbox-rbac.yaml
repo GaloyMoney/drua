@@ -1,3 +1,4 @@
+{{- /* Sandbox RBAC — grants the main app SA access to sandbox CRs in the sandbox namespace */ -}}
 {{- if .Values.sandbox.enabled }}
 apiVersion: v1
 kind: ServiceAccount
