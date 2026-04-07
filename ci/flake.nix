@@ -96,6 +96,70 @@
         fi
       '';
 
+      packages.open-chart-hash-pr = pkgs.writeShellScriptBin "open-chart-hash-pr" ''
+        set -euo pipefail
+
+        : "''${GITHUB_TOKEN:?GITHUB_TOKEN must be set}"
+
+        REPO="GaloyMoney/galoy-agents"
+        HEAD="ci/chart-hash-update"
+        BASE="main"
+        API="https://api.github.com"
+
+        export PATH="${pkgs.lib.makeBinPath [pkgs.curl pkgs.jq]}:$PATH"
+
+        auth_header="Authorization: token $GITHUB_TOKEN"
+
+        # Check if the bot branch has changes relative to main
+        compare=$(curl -sf -H "$auth_header" \
+          "$API/repos/$REPO/compare/$BASE...$HEAD")
+        status=$(echo "$compare" | jq -r '.status')
+        if [ "$status" = "identical" ] || [ "$status" = "behind" ]; then
+          echo "No changes between $HEAD and $BASE, skipping PR"
+          exit 0
+        fi
+
+        # Check for an existing open PR from the bot branch
+        pr_number=$(curl -sf -H "$auth_header" \
+          "$API/repos/$REPO/pulls?head=GaloyMoney:$HEAD&base=$BASE&state=open" | \
+          jq -r 'if length > 0 then .[0].number else empty end')
+
+        if [ -z "''${pr_number:-}" ]; then
+          echo "Creating PR..."
+          pr_response=$(curl -sf -X POST \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            "$API/repos/$REPO/pulls" \
+            -d "{\"title\":\"ci(chart): update code-assistant hashes\",\"head\":\"$HEAD\",\"base\":\"$BASE\",\"body\":\"Automated chart hash update from CI\"}")
+          pr_number=$(echo "$pr_response" | jq -r '.number')
+
+          if [ -z "$pr_number" ] || [ "$pr_number" = "null" ]; then
+            echo "PR creation failed: $pr_response"
+            exit 1
+          fi
+          echo "Created PR #$pr_number"
+        else
+          echo "Found existing PR #$pr_number"
+        fi
+
+        # Merge the PR via squash
+        echo "Merging PR #$pr_number..."
+        merge_response=$(curl -s -w "\n%{http_code}" -X PUT \
+          -H "$auth_header" \
+          -H "Content-Type: application/json" \
+          "$API/repos/$REPO/pulls/$pr_number/merge" \
+          -d '{"merge_method":"squash"}')
+        http_code=$(echo "$merge_response" | tail -1)
+        body=$(echo "$merge_response" | head -n -1)
+
+        if [ "$http_code" = "200" ]; then
+          echo "PR #$pr_number merged successfully"
+        else
+          echo "Merge failed (HTTP $http_code): $body"
+          exit 1
+        fi
+      '';
+
       packages.commit-hash = pkgs.writeShellScriptBin "commit-hash" ''
         set -euo pipefail
 

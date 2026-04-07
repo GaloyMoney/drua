@@ -296,10 +296,31 @@ jobs:
                 charts/galoy-agents/values.yaml \
                 "galoyAgents.codeAssistant.embedderHash" \
                 "$EMBEDDER_HASH"
-  - put: repo-chart-values
+  - put: repo-bot-branch
     params:
       repository: repo-updated
-      rebase: true
+      force: true
+  - task: open-chart-hash-pr
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+        GITHUB_TOKEN: #@ data.values.github_pat
+      run:
+        path: sh
+        args:
+          - -ec
+          - |
+            set -euo pipefail
+            cachix use $CACHIX_CACHE_NAME
+
+            cd repo
+            export GITHUB_TOKEN
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#open-chart-hash-pr
 
 - name: build-sandbox-base-image
   serial: true
@@ -388,11 +409,11 @@ resources:
     paths:
     - code-assistant/labels/
 
-- name: repo-chart-values
+- name: repo-bot-branch
   type: git
   source:
     uri: #@ data.values.git_uri
-    branch: #@ data.values.git_branch
+    branch: ci/chart-hash-update
     private_key: #@ data.values.github_private_key
 
 - name: deploy-config
