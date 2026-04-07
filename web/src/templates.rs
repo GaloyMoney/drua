@@ -194,3 +194,32 @@ pub struct SandboxTerminalTemplate {
 pub struct SandboxAgentTemplate {
     pub name: String,
 }
+
+// ── Workspaces ───────────────────────────────────────────────────────
+
+pub struct WorkspaceView {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspaces.html")]
+pub struct WorkspacesTemplate {}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_list.html")]
+pub struct WorkspaceListTemplate {
+    pub workspaces: Vec<WorkspaceView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_new.html")]
+pub struct WorkspaceNewTemplate {}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_detail.html")]
+pub struct WorkspaceDetailTemplate {
+    pub workspace: WorkspaceView,
+}

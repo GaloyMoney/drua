@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}{{ workspace.name }} — Galoy Agents{% endblock %}
+
+{% block nav_workspaces %}class="active"{% endblock %}
+
+{% block content %}
+<h2>Edit Workspace</h2>
+
+<form method="post" action="/workspaces/{{ workspace.id }}">
+  <label>
+    Name
+    <input type="text" name="name" required value="{{ workspace.name }}">
+  </label>
+  <label>
+    Description
+    <textarea name="description" rows="3">{{ workspace.description }}</textarea>
+  </label>
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Save Changes</button>
+    <a href="/workspaces" role="button" class="outline">Cancel</a>
+  </div>
+</form>
+
+<footer>
+  <small>Created: {{ workspace.created_at }} | ID: <code>{{ workspace.id }}</code></small>
+</footer>
+{% endblock %}

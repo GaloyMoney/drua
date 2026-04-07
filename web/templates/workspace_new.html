@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}New Workspace — Galoy Agents{% endblock %}
+
+{% block nav_workspaces %}class="active"{% endblock %}
+
+{% block content %}
+<h2>New Workspace</h2>
+
+<form method="post" action="/workspaces">
+  <label>
+    Name
+    <input type="text" name="name" required placeholder="e.g. platform-team">
+  </label>
+  <label>
+    Description
+    <textarea name="description" rows="3" placeholder="What is this workspace for?"></textarea>
+  </label>
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Create Workspace</button>
+    <a href="/workspaces" role="button" class="outline">Cancel</a>
+  </div>
+</form>
+{% endblock %}

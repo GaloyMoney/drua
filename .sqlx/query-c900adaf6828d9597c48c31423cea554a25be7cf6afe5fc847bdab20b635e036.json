@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workspaces (id, name, created_at) VALUES ($1, $2, COALESCE($3, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c900adaf6828d9597c48c31423cea554a25be7cf6afe5fc847bdab20b635e036"
+}

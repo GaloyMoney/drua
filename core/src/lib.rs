@@ -7,6 +7,7 @@ pub mod primitives;
 pub mod report;
 pub mod toolset;
 pub mod user;
+pub mod workspace;
 
 pub use config::*;
 
@@ -18,6 +19,7 @@ use code_assistant::CodeAssistant;
 use report::Reports;
 use toolset::{ToolSets, ToolSetsError};
 use user::Users;
+use workspace::Workspaces;
 
 #[derive(Clone)]
 pub struct App {
@@ -27,6 +29,7 @@ pub struct App {
     code_assistant: Option<Arc<CodeAssistant>>,
     reports: Option<Arc<Reports>>,
     toolsets: Arc<ToolSets>,
+    workspaces: Workspaces,
 }
 
 impl App {
@@ -80,6 +83,7 @@ impl App {
             code_assistant,
             reports,
             toolsets: Arc::new(toolsets),
+            workspaces: Workspaces::new(pool),
         })
     }
 
@@ -105,6 +109,10 @@ impl App {
 
     pub fn toolsets(&self) -> &ToolSets {
         &self.toolsets
+    }
+
+    pub fn workspaces(&self) -> &Workspaces {
+        &self.workspaces
     }
 }
 

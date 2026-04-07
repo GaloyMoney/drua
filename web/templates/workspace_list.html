@@ -1,0 +1,26 @@
+{% if workspaces.is_empty() %}
+<p>No workspaces yet. Create one to get started.</p>
+{% else %}
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Created</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ws in workspaces %}
+      <tr>
+        <td><strong>{{ ws.name }}</strong></td>
+        <td>{{ ws.description }}</td>
+        <td>{{ ws.created_at }}</td>
+        <td><a href="/workspaces/{{ ws.id }}">Edit</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</figure>
+{% endif %}
