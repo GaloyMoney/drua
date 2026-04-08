@@ -109,10 +109,7 @@ fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
             }
         }
         "result" => {
-            let turns = v
-                .get("num_turns")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0) as u32;
+            let turns = v.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
             let input_tokens = v
                 .get("total_input_tokens")
                 .or_else(|| v.get("input_tokens"))
