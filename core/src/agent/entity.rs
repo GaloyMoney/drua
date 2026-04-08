@@ -56,6 +56,8 @@ pub enum AgentEvent {
         agent_type: AgentType,
         name: String,
         #[serde(default)]
+        mcp_creds_id: Option<McpCredsId>,
+        #[serde(default)]
         sandbox_config: SandboxConfig,
         #[serde(default)]
         chat_config: ChatConfig,
@@ -81,6 +83,8 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_type: AgentType,
     pub name: String,
+    #[builder(setter(strip_option), default)]
+    pub mcp_creds_id: Option<McpCredsId>,
     #[builder(default)]
     pub sandbox_config: SandboxConfig,
     #[builder(default)]
@@ -156,6 +160,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                     workspace_id,
                     agent_type,
                     name,
+                    mcp_creds_id,
                     sandbox_config,
                     chat_config,
                 } => {
@@ -166,6 +171,9 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .name(name.clone())
                         .sandbox_config(sandbox_config.clone())
                         .chat_config(chat_config.clone());
+                    if let Some(creds_id) = mcp_creds_id {
+                        builder = builder.mcp_creds_id(*creds_id);
+                    }
                 }
                 AgentEvent::SandboxProvisioned {} => {
                     builder = builder.sandbox_state(SandboxState::Provisioning);
@@ -191,6 +199,8 @@ pub struct NewAgent {
     pub(super) agent_type: AgentType,
     #[builder(setter(into))]
     pub(super) name: String,
+    #[builder(setter(strip_option), default)]
+    pub(super) mcp_creds_id: Option<McpCredsId>,
     #[builder(default)]
     pub(super) sandbox_config: SandboxConfig,
     #[builder(default)]
@@ -214,6 +224,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 workspace_id: self.workspace_id,
                 agent_type: self.agent_type,
                 name: self.name,
+                mcp_creds_id: self.mcp_creds_id,
                 sandbox_config: self.sandbox_config,
                 chat_config: self.chat_config,
             }],

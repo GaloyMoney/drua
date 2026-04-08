@@ -29,6 +29,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.create", skip(self))]
     pub async fn create(
         &self,
+        user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
@@ -44,6 +45,7 @@ impl Workspaces {
                 &mut op,
                 workspace_id,
                 AgentType::WorkspaceLead,
+                user_id,
                 format!("{name}-lead"),
             )
             .await?;

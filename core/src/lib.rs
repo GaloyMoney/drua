@@ -80,10 +80,19 @@ impl App {
         )
         .await?;
         let toolsets = Arc::new(toolsets);
-        let agents = Arc::new(Agents::init(pool, config.agents, toolsets.catalog().clone()).await?);
+        let mcp_creds = McpCredentials::new(pool);
+        let agents = Arc::new(
+            Agents::init(
+                pool,
+                config.agents,
+                Arc::clone(&toolsets),
+                mcp_creds.clone(),
+            )
+            .await?,
+        );
         Ok(Self {
             users: Users::new(pool),
-            mcp_creds: McpCredentials::new(pool),
+            mcp_creds,
             agents: Arc::clone(&agents),
             audit,
             code_assistant,
