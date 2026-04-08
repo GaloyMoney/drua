@@ -105,12 +105,21 @@ async function sendMessage() {
             const parsed = JSON.parse(data);
             if (parsed.type === 'system' && parsed.session_id) {
               sessionId = parsed.session_id;
+            } else if (parsed.type === 'text') {
+              appendMsg('msg-assistant', parsed.text);
             } else if (parsed.type === 'assistant') {
               const text = parsed.message?.content
                 ?.filter(c => c.type === 'text')
                 .map(c => c.text)
                 .join('') || JSON.stringify(parsed);
               appendMsg('msg-assistant', text);
+            } else if (parsed.type === 'tool_call') {
+              appendMsg('msg-system', '🔧 ' + parsed.name);
+            } else if (parsed.type === 'tool_result') {
+              appendMsg('msg-system', (parsed.is_error ? '❌ ' : '✓ ') + parsed.name);
+            } else if (parsed.type === 'done') {
+              const tokens = (parsed.total_input_tokens || 0) + (parsed.total_output_tokens || 0);
+              appendMsg('msg-result', 'Done — ' + (parsed.turns || 0) + ' turns, ' + tokens + ' tokens');
             } else if (parsed.type === 'result') {
               appendMsg('msg-result', 'Done — ' + (parsed.duration_ms || 0) + 'ms, ' + (parsed.num_turns || 0) + ' turns');
             } else if (parsed.type === 'error') {
