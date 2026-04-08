@@ -70,11 +70,12 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
 pub(super) fn configure_client(
     base: &sandbox_client::SandboxClient,
     config: &SandboxConfig,
+    storage_class: &str,
 ) -> sandbox_client::SandboxClient {
     let mut client = base.clone();
     client = client.with_persistence(sandbox_client::PersistenceConfig {
         size: config.pvc_size.clone(),
-        storage_class: String::new(),
+        storage_class: storage_class.to_string(),
         mount_path: "/workspace".to_string(),
     });
     if !config.resource_cpu.is_empty() || !config.resource_mem.is_empty() {

@@ -31,6 +31,7 @@ pub struct Agents {
     harness_pool: harness_pool::HarnessPool,
     light_config: config::LightRuntimeConfig,
     mcp_gateway_url: String,
+    default_storage_class: String,
     toolsets: Arc<ToolSets>,
     mcp_creds: McpCredentials,
     chat_history: ChatHistory,
@@ -56,12 +57,19 @@ impl Agents {
             None
         };
         let mcp_gateway_url = config.sandbox.mcp_gateway_url.clone();
+        let default_storage_class = config
+            .sandbox
+            .persistence
+            .as_ref()
+            .map(|p| p.storage_class.clone())
+            .unwrap_or_default();
         Ok(Self {
             repo,
             sandbox,
             harness_pool: harness_pool::HarnessPool::new(),
             light_config: config.light,
             mcp_gateway_url,
+            default_storage_class,
             toolsets,
             mcp_creds,
             chat_history,
@@ -226,7 +234,11 @@ impl Agents {
             .as_ref()
             .ok_or(AgentError::SandboxNotConfigured)?;
 
-        let client = sandbox::configure_client(base_client, &agent.sandbox_config);
+        let client = sandbox::configure_client(
+            base_client,
+            &agent.sandbox_config,
+            &self.default_storage_class,
+        );
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
         let pool = self.harness_pool.clone();
