@@ -79,9 +79,6 @@ async fn main() -> anyhow::Result<()> {
                 }),
             },
             light: galoy_agents_core::agent::config::LightRuntimeConfig {
-                model: config.agents.light.model.clone(),
-                max_tokens: config.agents.light.max_tokens,
-                max_turns: config.agents.light.max_turns,
                 api_key: config.anthropic_api_key.clone(),
             },
         },
