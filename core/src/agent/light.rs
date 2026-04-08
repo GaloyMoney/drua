@@ -249,6 +249,7 @@ pub(super) async fn run(
     prompt: String,
     config: &LightRuntimeConfig,
     chat_config: &ChatConfig,
+    system_prompt: &str,
     catalog: Catalog,
 ) -> Result<mpsc::Receiver<AgentMessageEvent>, AgentError> {
     if config.api_key.is_empty() {
@@ -267,7 +268,7 @@ pub(super) async fn run(
         .unwrap_or(ChatConfig::DEFAULT_MAX_TURNS) as usize;
 
     let tools = build_tool_definitions(&catalog);
-    let system = build_system_prompt(&catalog);
+    let system = build_system_prompt(system_prompt, &catalog);
 
     let session = LightSession {
         client: AnthropicClient::new(config.api_key.clone()),
@@ -309,12 +310,13 @@ async fn send(
     Ok(())
 }
 
-fn build_system_prompt(catalog: &Catalog) -> String {
-    format!(
-        "You are a helpful assistant with access to tools. \
-         Use tools when needed to answer the user's question accurately.\n\n{}",
-        catalog.instructions()
-    )
+fn build_system_prompt(base: &str, catalog: &Catalog) -> String {
+    let instructions = catalog.instructions();
+    if instructions.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}\n\n{instructions}")
+    }
 }
 
 fn build_tool_definitions(catalog: &Catalog) -> Vec<serde_json::Value> {

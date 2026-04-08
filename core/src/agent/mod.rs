@@ -151,6 +151,7 @@ impl Agents {
                     prompt,
                     &self.light_config,
                     &agent.chat_config,
+                    agent.agent_type.system_prompt(),
                     self.catalog.clone(),
                 )
                 .await
