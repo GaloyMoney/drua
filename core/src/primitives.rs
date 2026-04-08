@@ -87,7 +87,7 @@ pub enum AgentMessageEvent {
 impl AgentType {
     pub fn runtime_kind(&self) -> RuntimeKind {
         match self {
-            AgentType::WorkspaceLead => RuntimeKind::Light,
+            AgentType::WorkspaceLead => RuntimeKind::Sandbox,
         }
     }
 
