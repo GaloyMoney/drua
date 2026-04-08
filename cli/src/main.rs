@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
                         mount_path: p.mount_path.clone(),
                     }
                 }),
+                mcp_gateway_url: config.server.mcp_endpoint.clone(),
             },
             light: galoy_agents_core::agent::config::LightRuntimeConfig {
                 api_key: config.anthropic_api_key.clone(),

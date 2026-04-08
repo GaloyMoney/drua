@@ -44,6 +44,8 @@ pub(super) struct HarnessMessage {
     pub model: Option<String>,
     pub max_turns: Option<u32>,
     pub disallowed_tools: Vec<String>,
+    /// MCP server configurations to pass to the harness (sent only on the first message).
+    pub mcp_servers: Option<serde_json::Value>,
 }
 
 /// Pool of active harness exec sessions keyed by [`AgentId`].
@@ -85,13 +87,16 @@ impl HarnessPool {
             .await?;
         let mut guard = session.lock().await;
 
-        let input_line = serde_json::json!({
+        let mut input_line = serde_json::json!({
             "prompt": msg.prompt,
             "session_id": msg.session_id,
             "model": msg.model,
             "max_turns": msg.max_turns,
             "disallowed_tools": msg.disallowed_tools,
         });
+        if let Some(mcp_servers) = msg.mcp_servers {
+            input_line["mcp_servers"] = mcp_servers;
+        }
         let payload = format!("{}\n", input_line);
 
         // Write prompt — if the exec session is dead we'll find out here.
