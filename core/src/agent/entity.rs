@@ -120,11 +120,8 @@ pub struct Agent {
     pub agent_type: AgentType,
     pub name: String,
     pub mcp_creds_id: McpCredsId,
-    #[builder(default)]
     pub sandbox_config: SandboxConfig,
-    #[builder(default)]
     pub chat_config: ChatConfig,
-    #[builder(default)]
     pub sandbox_state: SandboxState,
     events: EntityEvents<AgentEvent>,
 }
@@ -206,7 +203,8 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .name(name.clone())
                         .mcp_creds_id(*mcp_creds_id)
                         .sandbox_config(sandbox_config.clone())
-                        .chat_config(chat_config.clone());
+                        .chat_config(chat_config.clone())
+                        .sandbox_state(SandboxState::None);
                 }
                 AgentEvent::SandboxProvisioned {} => {
                     builder = builder.sandbox_state(SandboxState::Provisioning);
