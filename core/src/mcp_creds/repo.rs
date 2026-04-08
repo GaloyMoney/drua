@@ -11,7 +11,7 @@ use super::entity::*;
     entity = "McpCreds",
     events_tbl = "mcp_cred_events",
     columns(
-        user_id(ty = "UserId", list_for(by(created_at))),
+        owner_id(ty = "McpCredsOwnerId", list_for(by(created_at))),
         token_hash(ty = "String", list_by)
     )
 )]

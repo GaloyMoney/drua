@@ -38,9 +38,14 @@ pub enum AuditSubject {
     User {
         user_id: UserId,
     },
-    McpCreds {
+    ExportedAgent {
         mcp_creds_id: McpCredsId,
         user_id: UserId,
+    },
+    InternalAgent {
+        user_id: UserId,
+        agent_id: AgentId,
+        mcp_creds_id: McpCredsId,
     },
     Anonymous,
 }
@@ -49,10 +54,15 @@ impl std::fmt::Display for AuditSubject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AuditSubject::User { user_id } => write!(f, "user::{user_id}"),
-            AuditSubject::McpCreds {
+            AuditSubject::ExportedAgent {
                 mcp_creds_id,
                 user_id: _,
-            } => write!(f, "mcp_creds::{mcp_creds_id}"),
+            } => write!(f, "exported_agent::{mcp_creds_id}"),
+            AuditSubject::InternalAgent {
+                agent_id,
+                user_id: _,
+                mcp_creds_id: _,
+            } => write!(f, "internal_agent::{agent_id}"),
             AuditSubject::Anonymous => write!(f, "anonymous"),
         }
     }
@@ -62,10 +72,17 @@ impl From<&AuthContext> for AuditSubject {
     fn from(ctx: &AuthContext) -> Self {
         match ctx {
             AuthContext::User(user_id) => AuditSubject::User { user_id: *user_id },
-            AuthContext::McpCreds(mcp_creds_id, user_id) => AuditSubject::McpCreds {
+            AuthContext::ExportedAgent(user_id, mcp_creds_id) => AuditSubject::ExportedAgent {
                 mcp_creds_id: *mcp_creds_id,
                 user_id: *user_id,
             },
+            AuthContext::InternalAgent(user_id, agent_id, mcp_creds_id) => {
+                AuditSubject::InternalAgent {
+                    user_id: *user_id,
+                    agent_id: *agent_id,
+                    mcp_creds_id: *mcp_creds_id,
+                }
+            }
             AuthContext::Anonymous => AuditSubject::Anonymous,
         }
     }

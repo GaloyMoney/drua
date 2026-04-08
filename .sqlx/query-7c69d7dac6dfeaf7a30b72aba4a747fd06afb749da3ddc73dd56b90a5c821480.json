@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT token_hash, id FROM mcp_creds WHERE COALESCE(user_id = $1, $1 IS NULL) AND (COALESCE((token_hash, id) > ($4, $3), $3 IS NULL)) ORDER BY token_hash ASC, id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN mcp_cred_events e ON i.id = e.id ORDER BY i.token_hash asc, i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT owner_id, created_at, id FROM mcp_creds WHERE ((owner_id = $1) AND (COALESCE((created_at, id) > ($4, $3), $3 IS NULL))) ORDER BY created_at ASC, id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN mcp_cred_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -34,7 +34,7 @@
         "Uuid",
         "Int8",
         "Uuid",
-        "Text",
+        "Timestamptz",
         "Bool"
       ]
     },
@@ -46,5 +46,5 @@
       false
     ]
   },
-  "hash": "9b3ac9c4934331f9b0a040fbd5f192606b3b5667e484d515c00bb92366798beb"
+  "hash": "7c69d7dac6dfeaf7a30b72aba4a747fd06afb749da3ddc73dd56b90a5c821480"
 }

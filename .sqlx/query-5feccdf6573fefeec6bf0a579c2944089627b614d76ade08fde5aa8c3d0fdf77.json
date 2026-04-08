@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO mcp_creds (id, user_id, token_hash, created_at) VALUES ($1, $2, $3, COALESCE($4, NOW()))",
+  "query": "INSERT INTO mcp_creds (id, owner_id, token_hash, created_at) VALUES ($1, $2, $3, COALESCE($4, NOW()))",
   "describe": {
     "columns": [],
     "parameters": {
@@ -13,5 +13,5 @@
     },
     "nullable": []
   },
-  "hash": "416e7f054cb1dafa44c0765d0acce8b7f4139568a2f1ceb3cf3678aeccad8f37"
+  "hash": "5feccdf6573fefeec6bf0a579c2944089627b614d76ade08fde5aa8c3d0fdf77"
 }
