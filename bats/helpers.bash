@@ -66,10 +66,10 @@ create_test_agent() {
       '{"type":"initialized","id":"$user_id","github_id":"test-gh-user","email":null,"name":"Test User"}',
       NOW());
 
-    INSERT INTO mcp_creds (id, user_id, token_hash, created_at) VALUES ('$agent_id', '$user_id', '$token_hash', NOW());
+    INSERT INTO mcp_creds (id, owner_id, token_hash, created_at) VALUES ('$agent_id', '$user_id', '$token_hash', NOW());
     INSERT INTO mcp_cred_events (id, sequence, event_type, event, recorded_at)
     VALUES ('$agent_id', 0, 'initialized',
-      '{"type":"initialized","id":"$agent_id","user_id":"$user_id","name":"test-agent","token_hash":"$token_hash","scopes":[]}',
+      '{"type":"initialized","id":"$agent_id","owner":{"type":"user","user_id":"$user_id"},"name":"test-agent","token_hash":"$token_hash","scopes":[]}',
       NOW());
 SQL
 
