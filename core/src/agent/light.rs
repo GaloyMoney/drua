@@ -106,26 +106,7 @@ impl LightSession {
                 let query = input.get("query").and_then(|v| v.as_str());
                 let category = input.get("category").and_then(|v| v.as_str());
                 let results = self.catalog.search(query, category).await;
-                if results.is_empty() {
-                    return Ok("No tools found matching your query.".into());
-                }
-                let mut lines = Vec::new();
-                let mut current_category: Option<&str> = None;
-                for entry in &results {
-                    let cat = entry.category.as_str();
-                    if current_category != Some(cat) {
-                        if !lines.is_empty() {
-                            lines.push(String::new());
-                        }
-                        lines.push(format!("{cat}:"));
-                        current_category = Some(cat);
-                    }
-                    lines.push(format!(
-                        "  {:40} - {}",
-                        entry.prefixed_name, entry.brief_description
-                    ));
-                }
-                Ok(lines.join("\n"))
+                Ok(Catalog::format_search_results(&results))
             }
             "describe_tool" => {
                 let tool_name = input
@@ -137,22 +118,7 @@ impl LightSession {
                     .describe(tool_name)
                     .await
                     .ok_or_else(|| AgentError::SandboxExec(format!("Tool '{tool_name}' not found. Use search_tools to find available tools.")))?;
-                let tool = &entry.full_tool;
-                let description = tool
-                    .description
-                    .as_deref()
-                    .unwrap_or("No description available.");
-                let schema = serde_json::to_string_pretty(&tool.input_schema)
-                    .unwrap_or_else(|_| "{}".into());
-                Ok(format!(
-                    "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\nUse call_tool(\"{}\", {{...}}) to execute.",
-                    entry.prefixed_name,
-                    entry.upstream_name,
-                    entry.category,
-                    description,
-                    schema,
-                    entry.prefixed_name,
-                ))
+                Ok(Catalog::format_describe(&entry))
             }
             "call_tool" => {
                 let tool_name = input
@@ -321,7 +287,7 @@ pub(super) async fn run(
     let max_tokens = chat_config.max_tokens;
     let max_turns = chat_config.max_turns as usize;
 
-    let tools = meta_tool_definitions();
+    let tools = Catalog::meta_tool_definitions();
     let system = build_system_prompt(system_prompt, &catalog);
 
     let session = LightSession {
@@ -371,60 +337,6 @@ fn build_system_prompt(base: &str, catalog: &Catalog) -> String {
     } else {
         format!("{base}\n\n{instructions}")
     }
-}
-
-fn meta_tool_definitions() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({
-            "name": "search_tools",
-            "description": "Search for available tools across all upstream services. Returns tool names, brief descriptions, and categories. Use this first to find relevant tools before calling them.\n\nTip: Use describe_tool to get full parameter schemas before calling a tool.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (e.g., 'pipeline status', 'customer accounts', 'code review')"
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "Filter by service category (e.g., 'ci', 'observability', 'code-quality', or 'all')"
-                    }
-                }
-            }
-        }),
-        serde_json::json!({
-            "name": "describe_tool",
-            "description": "Get the full parameter schema and detailed description for a specific tool. Use after search_tools to understand how to call a tool.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "tool_name": {
-                        "type": "string",
-                        "description": "The tool name returned from search_tools (e.g., 'honeycomb_list_environments')"
-                    }
-                },
-                "required": ["tool_name"]
-            }
-        }),
-        serde_json::json!({
-            "name": "call_tool",
-            "description": "Execute an upstream tool by name with the provided arguments. Use describe_tool first to understand the required parameters.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "tool_name": {
-                        "type": "string",
-                        "description": "The prefixed tool name (e.g., 'honeycomb_list_environments')"
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "description": "Tool arguments matching the schema from describe_tool"
-                    }
-                },
-                "required": ["tool_name"]
-            }
-        }),
-    ]
 }
 
 fn call_result_to_text(result: &rmcp::model::CallToolResult) -> String {

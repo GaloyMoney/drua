@@ -144,32 +144,8 @@ impl McpGateway {
             .search(params.query.as_deref(), params.category.as_deref())
             .await;
 
-        if results.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No tools found matching your query.",
-            )]));
-        }
-
-        let mut lines = Vec::new();
-        let mut current_category: Option<&str> = None;
-        for entry in &results {
-            let cat = entry.category.as_str();
-            if current_category != Some(cat) {
-                if !lines.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.push(format!("{}:", cat));
-                current_category = Some(cat);
-            }
-            lines.push(format!(
-                "  {:40} - {}",
-                entry.prefixed_name, entry.brief_description
-            ));
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
+        let text = galoy_agents_core::toolset::Catalog::format_search_results(&results);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Get the full parameter schema and detailed description for a specific tool.
@@ -195,24 +171,7 @@ impl McpGateway {
             )
         })?;
 
-        let tool = &entry.full_tool;
-        let description = tool
-            .description
-            .as_deref()
-            .unwrap_or("No description available.");
-        let schema =
-            serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
-
-        let text = format!(
-            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\nUse call_tool(\"{}\", {{...}}) to execute.",
-            entry.prefixed_name,
-            entry.upstream_name,
-            entry.category,
-            description,
-            schema,
-            entry.prefixed_name,
-        );
-
+        let text = galoy_agents_core::toolset::Catalog::format_describe(&entry);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 

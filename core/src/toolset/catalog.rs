@@ -36,6 +36,106 @@ impl Catalog {
         }
     }
 
+    /// The 3 meta-tool definitions for progressive disclosure.
+    /// Used by both the MCP gateway and the light agent runtime.
+    pub fn meta_tool_definitions() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({
+                "name": "search_tools",
+                "description": "Search for available tools across all upstream services. Returns tool names, brief descriptions, and categories. Use this first to find relevant tools before calling them.\n\nTip: Use describe_tool to get full parameter schemas before calling a tool.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (e.g., 'pipeline status', 'customer accounts', 'code review')"
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Filter by service category (e.g., 'ci', 'observability', 'code-quality', or 'all')"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "describe_tool",
+                "description": "Get the full parameter schema and detailed description for a specific tool. Use after search_tools to understand how to call a tool.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "The tool name returned from search_tools (e.g., 'honeycomb_list_environments')"
+                        }
+                    },
+                    "required": ["tool_name"]
+                }
+            }),
+            serde_json::json!({
+                "name": "call_tool",
+                "description": "Execute an upstream tool by name with the provided arguments. Use describe_tool first to understand the required parameters.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "The prefixed tool name (e.g., 'honeycomb_list_environments')"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Tool arguments matching the schema from describe_tool"
+                        }
+                    },
+                    "required": ["tool_name"]
+                }
+            }),
+        ]
+    }
+
+    /// Format search results as text grouped by category.
+    pub fn format_search_results(results: &[CatalogEntry]) -> String {
+        if results.is_empty() {
+            return "No tools found matching your query.".to_string();
+        }
+        let mut lines = Vec::new();
+        let mut current_category: Option<&str> = None;
+        for entry in results {
+            let cat = entry.category.as_str();
+            if current_category != Some(cat) {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(format!("{cat}:"));
+                current_category = Some(cat);
+            }
+            lines.push(format!(
+                "  {:40} - {}",
+                entry.prefixed_name, entry.brief_description
+            ));
+        }
+        lines.join("\n")
+    }
+
+    /// Format a catalog entry as a detailed markdown description.
+    pub fn format_describe(entry: &CatalogEntry) -> String {
+        let tool = &entry.full_tool;
+        let description = tool
+            .description
+            .as_deref()
+            .unwrap_or("No description available.");
+        let schema =
+            serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
+        format!(
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            entry.prefixed_name,
+            entry.upstream_name,
+            entry.category,
+            description,
+            schema,
+            entry.prefixed_name,
+        )
+    }
+
     pub fn instructions(&self) -> String {
         let mut lines = vec![
             "Tools from upstream services are available via progressive disclosure:".to_string(),
