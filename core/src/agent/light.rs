@@ -256,16 +256,9 @@ pub(super) async fn run(
         return Err(AgentError::LightAgentNotConfigured);
     }
 
-    let model = chat_config
-        .model
-        .clone()
-        .unwrap_or_else(|| ChatConfig::DEFAULT_MODEL.to_string());
-    let max_tokens = chat_config
-        .max_tokens
-        .unwrap_or(ChatConfig::DEFAULT_MAX_TOKENS);
-    let max_turns = chat_config
-        .max_turns
-        .unwrap_or(ChatConfig::DEFAULT_MAX_TURNS) as usize;
+    let model = chat_config.model.clone();
+    let max_tokens = chat_config.max_tokens;
+    let max_turns = chat_config.max_turns as usize;
 
     let tools = build_tool_definitions(&catalog);
     let system = build_system_prompt(system_prompt, &catalog);
