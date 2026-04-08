@@ -113,11 +113,11 @@ impl LightSession {
                     .get("tool_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let entry = self
-                    .catalog
-                    .describe(tool_name)
-                    .await
-                    .ok_or_else(|| AgentError::SandboxExec(format!("Tool '{tool_name}' not found. Use search_tools to find available tools.")))?;
+                let entry = self.catalog.describe(tool_name).await.ok_or_else(|| {
+                    AgentError::SandboxExec(format!(
+                        "Tool '{tool_name}' not found. Use search_tools to find available tools."
+                    ))
+                })?;
                 Ok(Catalog::format_describe(&entry))
             }
             "call_tool" => {
