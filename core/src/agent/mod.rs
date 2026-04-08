@@ -30,6 +30,7 @@ pub struct Agents {
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
     harness_pool: harness_pool::HarnessPool,
     light_config: config::LightRuntimeConfig,
+    mcp_gateway_url: String,
     toolsets: Arc<ToolSets>,
     mcp_creds: McpCredentials,
     chat_history: ChatHistory,
@@ -54,11 +55,13 @@ impl Agents {
         } else {
             None
         };
+        let mcp_gateway_url = config.sandbox.mcp_gateway_url.clone();
         Ok(Self {
             repo,
             sandbox,
             harness_pool: harness_pool::HarnessPool::new(),
             light_config: config.light,
+            mcp_gateway_url,
             toolsets,
             mcp_creds,
             chat_history,
@@ -92,7 +95,7 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         let agent_name = name.into();
         let agent_id = AgentId::new();
-        let (_, token_hash) = crate::mcp_creds::token::generate_token();
+        let (raw_token, token_hash) = crate::mcp_creds::token::generate_token();
         let creds = self
             .mcp_creds
             .create_in_op(
@@ -111,6 +114,7 @@ impl Agents {
             .agent_type(agent_type)
             .name(agent_name)
             .mcp_creds_id(creds.id)
+            .mcp_token(raw_token)
             .build()
             .expect("Could not build new agent");
 
@@ -233,6 +237,21 @@ impl Agents {
         let disallowed_tools = agent.sandbox_config.disallowed_tools.clone();
         let agent_id = agent.id;
 
+        // Build MCP server config if gateway URL and token are available
+        let mcp_servers = if !self.mcp_gateway_url.is_empty() && !agent.mcp_token.is_empty() {
+            Some(serde_json::json!({
+                "galoy-agents": {
+                    "type": "http",
+                    "url": self.mcp_gateway_url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", agent.mcp_token)
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         tokio::spawn(async move {
             // Ensure sandbox is provisioned, streaming status to the UI
             let sandbox_name = match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
@@ -257,6 +276,7 @@ impl Agents {
                 model,
                 max_turns,
                 disallowed_tools,
+                mcp_servers,
             };
 
             if let Err(e) = pool.send_message(msg, tx.clone()).await {

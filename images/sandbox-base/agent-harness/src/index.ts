@@ -29,12 +29,20 @@ const CLI_JS_PATH = join(__dirname, "sdk", "cli.js");
 
 // ── Types ──────────────────────────────────────────────────────────────
 
+interface McpHttpServerConfig {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+}
+
 interface HarnessInput {
   prompt: string;
   session_id?: string;
   model?: string;
   max_turns?: number;
   disallowed_tools?: string[];
+  /** MCP server configurations keyed by server name. */
+  mcp_servers?: Record<string, McpHttpServerConfig>;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -76,6 +84,7 @@ async function handleMessage(input: HarnessInput): Promise<void> {
         resume: activeSessionId,
         disallowedTools: input.disallowed_tools,
         includePartialMessages: true,
+        mcpServers: input.mcp_servers,
       },
     });
 
