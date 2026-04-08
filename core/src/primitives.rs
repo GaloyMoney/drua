@@ -19,4 +19,14 @@ impl AgentType {
             AgentType::WorkspaceLead => RuntimeKind::Light,
         }
     }
+
+    pub fn system_prompt(&self) -> &'static str {
+        match self {
+            AgentType::WorkspaceLead => {
+                "You are the workspace lead agent. You coordinate tasks, answer questions, \
+                 and use the available tools to help the user accomplish their goals. \
+                 Be concise and action-oriented."
+            }
+        }
+    }
 }
