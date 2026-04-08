@@ -91,6 +91,17 @@ impl AgentType {
         }
     }
 
+    pub fn default_sandbox_config(&self) -> crate::agent::SandboxConfig {
+        match self {
+            AgentType::WorkspaceLead => crate::agent::SandboxConfig {
+                persistent_volume: false,
+                resource_cpu: "100m".to_string(),
+                resource_mem: "256Mi".to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
     pub fn system_prompt(&self) -> &'static str {
         match self {
             AgentType::WorkspaceLead => {

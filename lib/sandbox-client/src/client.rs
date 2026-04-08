@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod,
-    PodSecurityContext, Volume, VolumeMount, VolumeResourceRequirements,
+    PodSecurityContext, ResourceRequirements, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
@@ -24,6 +24,13 @@ pub struct PersistenceConfig {
     pub mount_path: String,
 }
 
+/// Per-agent resource requests/limits that override the template defaults.
+#[derive(Clone, Debug)]
+pub struct ResourceConfig {
+    pub cpu: String,
+    pub memory: String,
+}
+
 /// High-level client for managing Agent Sandbox resources.
 #[derive(Clone)]
 pub struct SandboxClient {
@@ -31,6 +38,7 @@ pub struct SandboxClient {
     namespace: String,
     template_name: String,
     persistence: Option<PersistenceConfig>,
+    resources: Option<ResourceConfig>,
 }
 
 /// Summary of a sandbox for API consumers.
@@ -50,12 +58,19 @@ impl SandboxClient {
             namespace,
             template_name,
             persistence: None,
+            resources: None,
         }
     }
 
     /// Enable persistent storage for directly-created sandboxes.
     pub fn with_persistence(mut self, config: PersistenceConfig) -> Self {
         self.persistence = Some(config);
+        self
+    }
+
+    /// Override resource requests/limits for the sandbox container.
+    pub fn with_resources(mut self, config: ResourceConfig) -> Self {
+        self.resources = Some(config);
         self
     }
 
@@ -351,6 +366,25 @@ impl SandboxClient {
                     .get_or_insert_with(PodSecurityContext::default);
                 if sc.fs_group.is_none() {
                     sc.fs_group = Some(1000);
+                }
+            }
+        }
+
+        // Override container resources if configured
+        if let Some(ref res) = self.resources {
+            if let Some(ref mut spec) = pod_template.spec {
+                if let Some(container) = spec.containers.first_mut() {
+                    container.resources = Some(ResourceRequirements {
+                        requests: Some(BTreeMap::from([
+                            ("cpu".to_string(), Quantity(res.cpu.clone())),
+                            ("memory".to_string(), Quantity(res.memory.clone())),
+                        ])),
+                        limits: Some(BTreeMap::from([
+                            ("cpu".to_string(), Quantity(res.cpu.clone())),
+                            ("memory".to_string(), Quantity(res.memory.clone())),
+                        ])),
+                        ..Default::default()
+                    });
                 }
             }
         }

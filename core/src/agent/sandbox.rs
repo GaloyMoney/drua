@@ -66,16 +66,21 @@ pub(super) fn configure_client(
     base: &sandbox_client::SandboxClient,
     config: &SandboxConfig,
 ) -> sandbox_client::SandboxClient {
-    let client = base.clone();
+    let mut client = base.clone();
     if config.persistent_volume {
-        client.with_persistence(sandbox_client::PersistenceConfig {
+        client = client.with_persistence(sandbox_client::PersistenceConfig {
             size: config.pvc_size.clone(),
             storage_class: String::new(),
             mount_path: "/workspace".to_string(),
-        })
-    } else {
-        client
+        });
     }
+    if !config.resource_cpu.is_empty() || !config.resource_mem.is_empty() {
+        client = client.with_resources(sandbox_client::ResourceConfig {
+            cpu: config.resource_cpu.clone(),
+            memory: config.resource_mem.clone(),
+        });
+    }
+    client
 }
 
 /// Ensure the agent has a running sandbox, creating one if needed.

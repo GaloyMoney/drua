@@ -112,6 +112,7 @@ impl Agents {
         let new_agent = NewAgent::builder()
             .id(agent_id)
             .workspace_id(workspace_id)
+            .sandbox_config(agent_type.default_sandbox_config())
             .agent_type(agent_type)
             .name(agent_name)
             .mcp_creds_id(creds.id)
