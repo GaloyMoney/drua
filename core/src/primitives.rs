@@ -67,7 +67,11 @@ pub enum AgentMessageEvent {
     /// Text response from the agent.
     Text { text: String },
     /// Agent is calling a tool.
-    ToolCall { name: String },
+    ToolCall {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        arguments: Option<serde_json::Value>,
+    },
     /// Tool call completed.
     ToolResult { name: String, is_error: bool },
     /// Agent turn completed.

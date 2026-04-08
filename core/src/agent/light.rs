@@ -178,7 +178,14 @@ impl LightSession {
                         assistant_content.push(serde_json::json!({
                             "type": "tool_use", "id": id, "name": name, "input": input
                         }));
-                        send(tx, AgentMessageEvent::ToolCall { name: name.clone() }).await?;
+                        send(
+                            tx,
+                            AgentMessageEvent::ToolCall {
+                                name: name.clone(),
+                                arguments: Some(input.clone()),
+                            },
+                        )
+                        .await?;
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
                 }

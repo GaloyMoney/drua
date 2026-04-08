@@ -106,7 +106,8 @@ async function sendMessage() {
             if (parsed.type === 'text') {
               appendMsg('msg-assistant', parsed.text);
             } else if (parsed.type === 'tool_call') {
-              appendMsg('msg-system', 'tool: ' + parsed.name);
+              const args = parsed.arguments ? ' ' + JSON.stringify(parsed.arguments) : '';
+              appendMsg('msg-system', 'tool: ' + parsed.name + args);
             } else if (parsed.type === 'tool_result') {
               appendMsg('msg-system', (parsed.is_error ? 'error: ' : 'ok: ') + parsed.name);
             } else if (parsed.type === 'done') {
