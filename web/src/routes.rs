@@ -263,25 +263,38 @@ async fn audit_entries(
 }
 
 async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSubjectView {
-    if let Some(creds_id_str) = subject.strip_prefix("mcp_creds::") {
+    if let Some(creds_id_str) = subject.strip_prefix("exported_agent::") {
         if let Ok(creds_id) = creds_id_str.parse::<uuid::Uuid>() {
             let creds_id = galoy_agents_core::primitives::McpCredsId::from(creds_id);
             if let Ok(creds) = app.mcp_creds().find_by_id(creds_id).await {
-                let user_name = app
-                    .users()
-                    .find_by_id(creds.user_id)
-                    .await
-                    .ok()
-                    .map(|u| {
-                        u.name
-                            .clone()
-                            .or_else(|| u.email.clone())
-                            .unwrap_or_else(|| u.github_id.clone())
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
+                let owner_name = if let Some(user_id) = creds.owner.user_id() {
+                    app.users()
+                        .find_by_id(user_id)
+                        .await
+                        .ok()
+                        .map(|u| {
+                            u.name
+                                .clone()
+                                .or_else(|| u.email.clone())
+                                .unwrap_or_else(|| u.github_id.clone())
+                        })
+                        .unwrap_or_else(|| "unknown".to_string())
+                } else {
+                    "agent".to_string()
+                };
                 return AuditSubjectView {
                     label: creds.name,
-                    owner: Some(user_name),
+                    owner: Some(owner_name),
+                };
+            }
+        }
+    } else if let Some(agent_id_str) = subject.strip_prefix("internal_agent::") {
+        if let Ok(agent_id) = agent_id_str.parse::<uuid::Uuid>() {
+            let agent_id = galoy_agents_core::primitives::AgentId::from(agent_id);
+            if let Ok(agent) = app.agents().find_by_id(agent_id).await {
+                return AuditSubjectView {
+                    label: agent.name,
+                    owner: Some("internal".to_string()),
                 };
             }
         }
@@ -810,7 +823,8 @@ async fn api_agent_message(
 ) -> Response {
     let user_id = match &auth {
         AuthContext::User(id) => *id,
-        AuthContext::McpCreds(_, id) => *id,
+        AuthContext::ExportedAgent(id, _) => *id,
+        AuthContext::InternalAgent(id, _, _) => *id,
         AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 

@@ -11,7 +11,7 @@ use crate::primitives::*;
 pub enum McpCredsEvent {
     Initialized {
         id: McpCredsId,
-        user_id: UserId,
+        owner: McpCredsOwner,
         name: String,
         token_hash: String,
         scopes: Vec<String>,
@@ -25,7 +25,8 @@ pub enum McpCredsEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct McpCreds {
     pub id: McpCredsId,
-    pub user_id: UserId,
+    pub owner: McpCredsOwner,
+    pub owner_id: McpCredsOwnerId,
     pub name: String,
     pub(crate) token_hash: String,
     pub scopes: Vec<String>,
@@ -77,14 +78,15 @@ impl TryFromEvents<McpCredsEvent> for McpCreds {
             match event {
                 McpCredsEvent::Initialized {
                     id,
-                    user_id,
+                    owner,
                     name,
                     token_hash,
                     scopes,
                 } => {
                     builder = builder
                         .id(*id)
-                        .user_id(*user_id)
+                        .owner(owner.clone())
+                        .owner_id(owner.id())
                         .name(name.clone())
                         .token_hash(token_hash.clone())
                         .scopes(scopes.clone());
@@ -100,10 +102,14 @@ impl TryFromEvents<McpCredsEvent> for McpCreds {
 }
 
 #[derive(Debug, Builder)]
+#[builder(pattern = "owned", build_fn(private, name = "build_inner"))]
 pub struct NewMcpCreds {
     #[builder(setter(into))]
     pub(super) id: McpCredsId,
-    pub(super) user_id: UserId,
+    pub(super) owner: McpCredsOwner,
+    /// Derived from `owner` — do not set directly.
+    #[builder(setter(skip), default = "McpCredsOwnerId::new()")]
+    pub(super) owner_id: McpCredsOwnerId,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
@@ -111,10 +117,18 @@ pub struct NewMcpCreds {
     pub(super) scopes: Vec<String>,
 }
 
+impl NewMcpCredsBuilder {
+    pub fn build(self) -> Result<NewMcpCreds, NewMcpCredsBuilderError> {
+        let mut inner = self.build_inner()?;
+        inner.owner_id = inner.owner.id();
+        Ok(inner)
+    }
+}
+
 impl NewMcpCreds {
     pub fn builder() -> NewMcpCredsBuilder {
         let mut builder = NewMcpCredsBuilder::default();
-        builder.id(McpCredsId::new());
+        builder = builder.id(McpCredsId::new());
         builder
     }
 }
@@ -125,7 +139,7 @@ impl IntoEvents<McpCredsEvent> for NewMcpCreds {
             self.id,
             [McpCredsEvent::Initialized {
                 id: self.id,
-                user_id: self.user_id,
+                owner: self.owner,
                 name: self.name,
                 token_hash: self.token_hash,
                 scopes: self.scopes,
@@ -138,14 +152,16 @@ impl IntoEvents<McpCredsEvent> for NewMcpCreds {
 mod tests {
     use es_entity::{Idempotent, IntoEvents as _, TryFromEvents as _};
 
-    use crate::primitives::{McpCredsId, UserId};
+    use crate::primitives::{McpCredsId, McpCredsOwner, UserId};
 
     use super::{McpCreds, NewMcpCreds};
 
     fn new_mcp_creds() -> McpCreds {
         let new = NewMcpCreds::builder()
             .id(McpCredsId::new())
-            .user_id(UserId::new())
+            .owner(McpCredsOwner::User {
+                user_id: UserId::new(),
+            })
             .name("test-creds")
             .token_hash("hash123")
             .scopes(vec!["read".to_string(), "write".to_string()])

@@ -55,11 +55,8 @@ pub enum AgentEvent {
         workspace_id: WorkspaceId,
         agent_type: AgentType,
         name: String,
-        #[serde(default)]
-        mcp_creds_id: Option<McpCredsId>,
-        #[serde(default)]
+        mcp_creds_id: McpCredsId,
         sandbox_config: SandboxConfig,
-        #[serde(default)]
         chat_config: ChatConfig,
     },
     SandboxProvisioned {},
@@ -83,8 +80,7 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_type: AgentType,
     pub name: String,
-    #[builder(setter(strip_option), default)]
-    pub mcp_creds_id: Option<McpCredsId>,
+    pub mcp_creds_id: McpCredsId,
     #[builder(default)]
     pub sandbox_config: SandboxConfig,
     #[builder(default)]
@@ -169,11 +165,9 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .workspace_id(*workspace_id)
                         .agent_type(*agent_type)
                         .name(name.clone())
+                        .mcp_creds_id(*mcp_creds_id)
                         .sandbox_config(sandbox_config.clone())
                         .chat_config(chat_config.clone());
-                    if let Some(creds_id) = mcp_creds_id {
-                        builder = builder.mcp_creds_id(*creds_id);
-                    }
                 }
                 AgentEvent::SandboxProvisioned {} => {
                     builder = builder.sandbox_state(SandboxState::Provisioning);
@@ -199,8 +193,7 @@ pub struct NewAgent {
     pub(super) agent_type: AgentType,
     #[builder(setter(into))]
     pub(super) name: String,
-    #[builder(setter(strip_option), default)]
-    pub(super) mcp_creds_id: Option<McpCredsId>,
+    pub(super) mcp_creds_id: McpCredsId,
     #[builder(default)]
     pub(super) sandbox_config: SandboxConfig,
     #[builder(default)]
@@ -236,7 +229,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
-    use crate::primitives::{AgentId, AgentType, WorkspaceId};
+    use crate::primitives::{AgentId, AgentType, McpCredsId, WorkspaceId};
 
     use super::{Agent, ChatConfig, NewAgent, SandboxConfig, SandboxState};
 
@@ -246,6 +239,7 @@ mod tests {
             .workspace_id(WorkspaceId::new())
             .agent_type(AgentType::WorkspaceLead)
             .name("workspace-lead")
+            .mcp_creds_id(McpCredsId::new())
             .sandbox_config(SandboxConfig {
                 persistent_volume: true,
                 ..Default::default()

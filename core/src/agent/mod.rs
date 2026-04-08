@@ -101,12 +101,13 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
         let agent_name = name.into();
+        let agent_id = AgentId::new();
         let (_, token_hash) = crate::mcp_creds::token::generate_token();
         let creds = self
             .mcp_creds
-            .create_for_user_in_op(
+            .create_in_op(
                 op,
-                user_id,
+                McpCredsOwner::Agent { agent_id },
                 format!("agent:{agent_name}"),
                 token_hash,
                 vec!["agent".to_string()],
@@ -114,6 +115,7 @@ impl Agents {
             .await?;
 
         let new_agent = NewAgent::builder()
+            .id(agent_id)
             .workspace_id(workspace_id)
             .agent_type(agent_type)
             .name(agent_name)
@@ -169,10 +171,7 @@ impl Agents {
 
         match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
-                let auth = match agent.mcp_creds_id {
-                    Some(creds_id) => AuthContext::McpCreds(creds_id, user_id),
-                    None => AuthContext::User(user_id),
-                };
+                let auth = AuthContext::InternalAgent(user_id, agent.id, agent.mcp_creds_id);
                 let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
                     prompt,
