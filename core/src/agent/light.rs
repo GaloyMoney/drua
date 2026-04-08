@@ -172,30 +172,13 @@ impl LightSession {
                 match block {
                     ApiContentBlock::Text { text } => {
                         assistant_content.push(serde_json::json!({"type": "text", "text": text}));
-                        let data = serde_json::json!({"type": "text", "text": text}).to_string();
-                        send(
-                            tx,
-                            AgentMessageEvent::Data {
-                                event_type: "text".into(),
-                                data,
-                            },
-                        )
-                        .await?;
+                        send(tx, AgentMessageEvent::Text { text: text.clone() }).await?;
                     }
                     ApiContentBlock::ToolUse { id, name, input } => {
                         assistant_content.push(serde_json::json!({
                             "type": "tool_use", "id": id, "name": name, "input": input
                         }));
-                        let data =
-                            serde_json::json!({"type": "tool_call", "name": name}).to_string();
-                        send(
-                            tx,
-                            AgentMessageEvent::Data {
-                                event_type: "tool_call".into(),
-                                data,
-                            },
-                        )
-                        .await?;
+                        send(tx, AgentMessageEvent::ToolCall { name: name.clone() }).await?;
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
                 }
@@ -207,18 +190,12 @@ impl LightSession {
 
             let stop = response.stop_reason.as_deref().unwrap_or("end_turn");
             if stop != "tool_use" || tool_uses.is_empty() {
-                let data = serde_json::json!({
-                    "type": "done",
-                    "total_input_tokens": total_input,
-                    "total_output_tokens": total_output,
-                    "turns": turn + 1,
-                })
-                .to_string();
                 send(
                     tx,
-                    AgentMessageEvent::Data {
-                        event_type: "done".into(),
-                        data,
+                    AgentMessageEvent::Done {
+                        turns: turn as u32 + 1,
+                        input_tokens: total_input,
+                        output_tokens: total_output,
                     },
                 )
                 .await?;
@@ -233,15 +210,11 @@ impl LightSession {
                     Ok(t) => (t.clone(), false),
                     Err(e) => (e.to_string(), true),
                 };
-                let data = serde_json::json!({
-                    "type": "tool_result", "name": name, "is_error": is_error
-                })
-                .to_string();
                 send(
                     tx,
-                    AgentMessageEvent::Data {
-                        event_type: "tool_result".into(),
-                        data,
+                    AgentMessageEvent::ToolResult {
+                        name: name.clone(),
+                        is_error,
                     },
                 )
                 .await?;

@@ -59,6 +59,27 @@ pub enum RuntimeKind {
     Sandbox,
 }
 
+/// An event emitted during an agent message exchange.
+/// Both the light agent and sandbox harness produce these same variants.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentMessageEvent {
+    /// Text response from the agent.
+    Text { text: String },
+    /// Agent is calling a tool.
+    ToolCall { name: String },
+    /// Tool call completed.
+    ToolResult { name: String, is_error: bool },
+    /// Agent turn completed.
+    Done {
+        turns: u32,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    /// An error occurred.
+    Error { message: String },
+}
+
 impl AgentType {
     pub fn runtime_kind(&self) -> RuntimeKind {
         match self {

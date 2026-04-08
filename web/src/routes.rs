@@ -848,14 +848,15 @@ async fn api_agent_message(
     tokio::spawn(async move {
         let mut rx = rx;
         while let Some(event) = rx.recv().await {
-            let sse_event = match event {
-                domain::agent::AgentMessageEvent::Data { event_type, data } => {
-                    Event::default().event(&event_type).data(data)
-                }
-                domain::agent::AgentMessageEvent::Error { message } => Event::default()
-                    .event("error")
-                    .data(serde_json::json!({"type":"error","message": message}).to_string()),
+            let event_name = match &event {
+                domain::agent::AgentMessageEvent::Text { .. } => "text",
+                domain::agent::AgentMessageEvent::ToolCall { .. } => "tool_call",
+                domain::agent::AgentMessageEvent::ToolResult { .. } => "tool_result",
+                domain::agent::AgentMessageEvent::Done { .. } => "done",
+                domain::agent::AgentMessageEvent::Error { .. } => "error",
             };
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            let sse_event = Event::default().event(event_name).data(data);
             if tx.send(Ok(sse_event)).await.is_err() {
                 break;
             }

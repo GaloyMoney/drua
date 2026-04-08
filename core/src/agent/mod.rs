@@ -20,15 +20,7 @@ use crate::mcp_creds::McpCredentials;
 use crate::primitives::*;
 use crate::toolset::ToolSets;
 
-/// An event emitted during an agent message exchange.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AgentMessageEvent {
-    /// Agent harness produced a line of output.
-    Data { event_type: String, data: String },
-    /// An error occurred.
-    Error { message: String },
-}
+pub use crate::primitives::AgentMessageEvent;
 
 #[derive(Clone)]
 pub struct Agents {

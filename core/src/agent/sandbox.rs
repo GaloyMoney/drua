@@ -54,20 +54,10 @@ pub(super) async fn relay_agent_message(
                         continue;
                     }
 
-                    let event_type = serde_json::from_str::<serde_json::Value>(&line_str)
-                        .ok()
-                        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
-                        .unwrap_or_else(|| "message".to_string());
-
-                    if tx
-                        .send(AgentMessageEvent::Data {
-                            event_type,
-                            data: line_str,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return Ok(());
+                    if let Some(event) = translate_harness_event(&line_str) {
+                        if tx.send(event).await.is_err() {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -82,16 +72,74 @@ pub(super) async fn relay_agent_message(
     if !buf.is_empty() {
         let line_str = String::from_utf8_lossy(&buf).trim().to_string();
         if !line_str.is_empty() {
-            let _ = tx
-                .send(AgentMessageEvent::Data {
-                    event_type: "message".to_string(),
-                    data: line_str,
-                })
-                .await;
+            if let Some(event) = translate_harness_event(&line_str) {
+                let _ = tx.send(event).await;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Translate a JSON-line from the agent harness (Claude Agent SDK) into a
+/// canonical [`AgentMessageEvent`].
+fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = v.get("type")?.as_str()?;
+
+    match event_type {
+        "assistant" => {
+            let text = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            if text.is_empty() {
+                None
+            } else {
+                Some(AgentMessageEvent::Text { text })
+            }
+        }
+        "result" => {
+            let turns = v
+                .get("num_turns")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as u32;
+            let input_tokens = v
+                .get("total_input_tokens")
+                .or_else(|| v.get("input_tokens"))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as u32;
+            let output_tokens = v
+                .get("total_output_tokens")
+                .or_else(|| v.get("output_tokens"))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as u32;
+            Some(AgentMessageEvent::Done {
+                turns,
+                input_tokens,
+                output_tokens,
+            })
+        }
+        "error" => {
+            let message = v
+                .get("message")
+                .or_else(|| v.get("details"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error")
+                .to_string();
+            Some(AgentMessageEvent::Error { message })
+        }
+        _ => None, // Ignore system, init, and other SDK-internal events
+    }
 }
 
 /// Clone the base sandbox client and apply agent-specific configuration.
