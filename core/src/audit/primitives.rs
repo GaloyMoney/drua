@@ -60,9 +60,9 @@ impl std::fmt::Display for AuditSubject {
             } => write!(f, "exported_agent::{mcp_creds_id}"),
             AuditSubject::InternalAgent {
                 agent_id,
-                user_id: _,
+                user_id,
                 mcp_creds_id: _,
-            } => write!(f, "internal_agent::{agent_id}"),
+            } => write!(f, "internal_agent::{agent_id}::{user_id}"),
             AuditSubject::Anonymous => write!(f, "anonymous"),
         }
     }

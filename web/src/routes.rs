@@ -288,13 +288,36 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
                 };
             }
         }
-    } else if let Some(agent_id_str) = subject.strip_prefix("internal_agent::") {
+    } else if let Some(rest) = subject.strip_prefix("internal_agent::") {
+        let parts: Vec<&str> = rest.splitn(2, "::").collect();
+        let agent_id_str = parts[0];
+        let user_id_str = parts.get(1).copied();
+
         if let Ok(agent_id) = agent_id_str.parse::<uuid::Uuid>() {
             let agent_id = galoy_agents_core::primitives::AgentId::from(agent_id);
             if let Ok(agent) = app.agents().find_by_id(agent_id).await {
+                let owner_name = if let Some(uid_str) = user_id_str {
+                    if let Ok(uid) = uid_str.parse::<uuid::Uuid>() {
+                        let user_id = galoy_agents_core::primitives::UserId::from(uid);
+                        app.users()
+                            .find_by_id(user_id)
+                            .await
+                            .map(|u| {
+                                u.name
+                                    .clone()
+                                    .or_else(|| u.email.clone())
+                                    .unwrap_or_else(|| u.github_id.clone())
+                            })
+                            .unwrap_or_else(|_| "unknown".to_string())
+                    } else {
+                        "unknown".to_string()
+                    }
+                } else {
+                    "unknown".to_string()
+                };
                 return AuditSubjectView {
                     label: agent.name,
-                    owner: Some("internal".to_string()),
+                    owner: Some(owner_name),
                 };
             }
         }
