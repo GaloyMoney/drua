@@ -499,7 +499,11 @@ impl SandboxClient {
         sandbox_name: &str,
         command: Vec<String>,
     ) -> Result<AttachedProcess, SandboxError> {
-        let pod_name = self.resolve_sandbox_pod(sandbox_name).await?;
+        let pod_name = if self.has_persistence() {
+            self.resolve_sandbox_pod(sandbox_name).await?
+        } else {
+            self.resolve_pod_name(sandbox_name).await?
+        };
 
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let ap = AttachParams {

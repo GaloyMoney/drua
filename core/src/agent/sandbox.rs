@@ -90,15 +90,23 @@ pub(super) async fn ensure_sandbox(
 
     match agent.sandbox_state {
         SandboxState::Ready | SandboxState::Provisioning => {
-            match client.get_sandbox(&sandbox_name).await {
+            let exists = if client.has_persistence() {
+                client.get_sandbox(&sandbox_name).await
+            } else {
+                client.get_claim(&sandbox_name).await
+            };
+            match exists {
                 Ok(_) if agent.sandbox_state == SandboxState::Ready => {
                     return Ok(sandbox_name);
                 }
                 Ok(_) => {
                     // Provisioning — wait for ready
-                    client
-                        .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
-                        .await?;
+                    let timeout = std::time::Duration::from_secs(120);
+                    if client.has_persistence() {
+                        client.wait_sandbox_ready(&sandbox_name, timeout).await?;
+                    } else {
+                        client.wait_until_ready(&sandbox_name, timeout).await?;
+                    }
                     if agent.sandbox_ready().did_execute() {
                         repo.update(agent).await?;
                     }
@@ -120,22 +128,45 @@ pub(super) async fn ensure_sandbox(
         SandboxState::None => {}
     }
 
-    // Try to create; if already exists, just wait for ready
-    match client.create_sandbox(&sandbox_name).await {
-        Ok(_) => {}
-        Err(sandbox_client::SandboxError::Kube(e)) if e.to_string().contains("already exists") => {
-            tracing::info!(sandbox = %sandbox_name, "Sandbox already exists, waiting for ready");
+    if client.has_persistence() {
+        // Direct Sandbox creation — supports PVC mounts
+        match client.create_sandbox(&sandbox_name).await {
+            Ok(_) => {}
+            Err(sandbox_client::SandboxError::Kube(e))
+                if e.to_string().contains("already exists") =>
+            {
+                tracing::info!(sandbox = %sandbox_name, "Sandbox already exists, waiting for ready");
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => return Err(e.into()),
-    }
 
-    if agent.sandbox_provisioned().did_execute() {
-        repo.update(agent).await?;
-    }
+        if agent.sandbox_provisioned().did_execute() {
+            repo.update(agent).await?;
+        }
 
-    client
-        .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
-        .await?;
+        client
+            .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
+            .await?;
+    } else {
+        // Claim-based creation — uses warm pool for fast startup
+        match client.create_claim(&sandbox_name).await {
+            Ok(_) => {}
+            Err(sandbox_client::SandboxError::Kube(e))
+                if e.to_string().contains("already exists") =>
+            {
+                tracing::info!(sandbox = %sandbox_name, "Claim already exists, waiting for ready");
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        if agent.sandbox_provisioned().did_execute() {
+            repo.update(agent).await?;
+        }
+
+        client
+            .wait_until_ready(&sandbox_name, std::time::Duration::from_secs(120))
+            .await?;
+    }
 
     if agent.sandbox_ready().did_execute() {
         repo.update(agent).await?;
