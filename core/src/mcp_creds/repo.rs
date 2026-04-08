@@ -11,7 +11,12 @@ use super::entity::*;
     entity = "McpCreds",
     events_tbl = "mcp_cred_events",
     columns(
-        owner_id(ty = "McpCredsOwnerId", list_for(by(created_at))),
+        owner_id(
+            ty = "McpCredsOwnerId",
+            create(accessor = "owner.id()"),
+            update(persist = false),
+            list_for(by(created_at))
+        ),
         token_hash(ty = "String", list_by)
     )
 )]
