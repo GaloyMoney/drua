@@ -47,15 +47,6 @@ impl Agents {
                 config.sandbox.template_name.clone(),
             )
             .await?;
-            let client = if let Some(ref p) = config.sandbox.persistence {
-                client.with_persistence(sandbox_client::PersistenceConfig {
-                    size: p.size.clone(),
-                    storage_class: p.storage_class.clone(),
-                    mount_path: p.mount_path.clone(),
-                })
-            } else {
-                client
-            };
             Some(Arc::new(client))
         } else {
             None
