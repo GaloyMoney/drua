@@ -59,6 +59,7 @@ async function handleMessage(input: HarnessInput): Promise<void> {
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         pathToClaudeCodeExecutable: CLI_JS_PATH,
+        executable: process.execPath,
         cwd: CWD,
         model,
         maxTurns,
