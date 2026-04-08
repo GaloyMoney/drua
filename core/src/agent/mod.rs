@@ -1,6 +1,7 @@
 pub mod config;
 mod entity;
 pub mod error;
+mod harness_pool;
 mod light;
 pub(crate) mod repo;
 mod sandbox;
@@ -26,6 +27,7 @@ pub use crate::primitives::AgentMessageEvent;
 pub struct Agents {
     repo: AgentRepo,
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
+    harness_pool: harness_pool::HarnessPool,
     light_config: config::LightRuntimeConfig,
     toolsets: Arc<ToolSets>,
     mcp_creds: McpCredentials,
@@ -61,6 +63,7 @@ impl Agents {
         Ok(Self {
             repo,
             sandbox,
+            harness_pool: harness_pool::HarnessPool::new(),
             light_config: config.light,
             toolsets,
             mcp_creds,
@@ -179,6 +182,10 @@ impl Agents {
     }
 
     /// Sandbox-specific send_message path.
+    ///
+    /// Uses the [`HarnessPool`](harness_pool::HarnessPool) to reuse an
+    /// existing exec session when possible, avoiding the 1-3 s harness
+    /// startup cost on subsequent messages.
     async fn send_message_sandbox(
         &self,
         mut agent: Agent,
@@ -199,18 +206,19 @@ impl Agents {
         let client = Arc::new(client);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
+        let pool = self.harness_pool.clone();
+        let msg = harness_pool::HarnessMessage {
+            agent_id: agent.id,
+            sandbox_name: sandbox_name.clone(),
+            client,
+            prompt,
+            session_id,
+            model,
+            max_turns,
+        };
+
         tokio::spawn(async move {
-            if let Err(e) = sandbox::relay_agent_message(
-                client,
-                &sandbox_name,
-                prompt,
-                session_id,
-                model,
-                max_turns,
-                tx.clone(),
-            )
-            .await
-            {
+            if let Err(e) = pool.send_message(msg, tx.clone()).await {
                 tracing::error!(error = %e, sandbox = %sandbox_name, "Agent message relay failed");
                 let _ = tx
                     .send(AgentMessageEvent::Error {
