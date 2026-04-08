@@ -46,6 +46,15 @@ function emitError(message: string, details?: string): void {
   emit({ type: "error", message, details });
 }
 
+// ── Session tracking ──────────────────────────────────────────────────
+//
+// Claude Code's --resume flag requires an existing on-disk session.
+// On the first message there is no session yet, so we start fresh and
+// capture the session_id from the result event.  Subsequent messages
+// resume that session to maintain conversation continuity.
+
+let activeSessionId: string | undefined;
+
 // ── Main loop ──────────────────────────────────────────────────────────
 
 async function handleMessage(input: HarnessInput): Promise<void> {
@@ -63,13 +72,18 @@ async function handleMessage(input: HarnessInput): Promise<void> {
         cwd: CWD,
         model,
         maxTurns,
-        resume: input.session_id,
+        resume: activeSessionId,
         includePartialMessages: true,
       },
     });
 
     for await (const message of result) {
-      emit(message as unknown as Record<string, unknown>);
+      const event = message as unknown as Record<string, unknown>;
+      // Capture session_id from result so subsequent messages can resume
+      if (event.type === "result" && typeof event.session_id === "string") {
+        activeSessionId = event.session_id;
+      }
+      emit(event);
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
