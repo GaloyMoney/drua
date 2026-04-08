@@ -1,8 +1,9 @@
--- Wipe agent tables (schema changed, no prod data yet).
+-- Wipe agent and workspace tables (schema changed, no prod data yet).
 -- Migrate mcp_creds: rename user_id → owner_id, convert event JSON
 -- from flat user_id to typed owner enum so existing credentials survive.
 
 TRUNCATE TABLE agent_events, agents;
+TRUNCATE TABLE workspace_events, workspaces CASCADE;
 
 -- Rewrite Initialized events: { "user_id": "<uuid>" } → { "owner": { "type": "user", "user_id": "<uuid>" } }
 UPDATE mcp_cred_events
