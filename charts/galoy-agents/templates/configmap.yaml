@@ -19,11 +19,6 @@ data:
         - {{ . | quote }}
       {{- end }}
     {{- end }}
-    agents:
-      light:
-        model: {{ .Values.galoyAgents.config.agents.light.model | quote }}
-        max_tokens: {{ .Values.galoyAgents.config.agents.light.maxTokens }}
-        max_turns: {{ .Values.galoyAgents.config.agents.light.maxTurns }}
     toolsets:
       report:
         enabled: {{ .Values.galoyAgents.config.report.enabled }}

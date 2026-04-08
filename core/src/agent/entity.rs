@@ -29,12 +29,21 @@ fn default_pvc_size() -> String {
 /// Configuration for agent chat behavior (LLM interaction).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatConfig {
-    /// Default LLM model for the agent harness (e.g., "claude-sonnet-4-6").
+    /// LLM model (e.g., "claude-sonnet-4-6").
     #[serde(default)]
     pub model: Option<String>,
-    /// Default max turns per conversation exchange.
+    /// Max tokens per API response.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Max turns per conversation exchange.
     #[serde(default)]
     pub max_turns: Option<u32>,
+}
+
+impl ChatConfig {
+    pub const DEFAULT_MODEL: &'static str = "claude-sonnet-4-20250514";
+    pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+    pub const DEFAULT_MAX_TURNS: u32 = 25;
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +242,7 @@ mod tests {
             .chat_config(ChatConfig {
                 model: Some("claude-sonnet-4-6".to_string()),
                 max_turns: Some(10),
+                ..Default::default()
             })
             .build()
             .unwrap();

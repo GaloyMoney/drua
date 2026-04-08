@@ -40,11 +40,6 @@ galoyAgents:
       enabled: false
       url: ""
       team: ""
-    agents:
-      light:
-        model: "claude-sonnet-4-20250514"
-        maxTokens: 4096
-        maxTurns: 25
     mcpUpstreams: []
     # - name: honeycomb
     #   url: https://mcp.honeycomb.io/mcp

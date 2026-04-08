@@ -258,11 +258,13 @@ pub(super) async fn run(
     let model = chat_config
         .model
         .clone()
-        .unwrap_or_else(|| config.model.clone());
+        .unwrap_or_else(|| ChatConfig::DEFAULT_MODEL.to_string());
+    let max_tokens = chat_config
+        .max_tokens
+        .unwrap_or(ChatConfig::DEFAULT_MAX_TOKENS);
     let max_turns = chat_config
         .max_turns
-        .map(|t| t as usize)
-        .unwrap_or(config.max_turns);
+        .unwrap_or(ChatConfig::DEFAULT_MAX_TURNS) as usize;
 
     let tools = build_tool_definitions(&catalog);
     let system = build_system_prompt(&catalog);
@@ -271,7 +273,7 @@ pub(super) async fn run(
         client: AnthropicClient::new(config.api_key.clone()),
         catalog,
         model,
-        max_tokens: config.max_tokens,
+        max_tokens,
         max_turns,
         tools,
         system,
