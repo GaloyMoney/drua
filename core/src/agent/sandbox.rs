@@ -49,12 +49,12 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
             })
         }
         "error" => {
-            let message = v
-                .get("message")
-                .or_else(|| v.get("details"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error")
-                .to_string();
+            let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+            let details = v.get("details").and_then(|d| d.as_str());
+            let message = match details {
+                Some(d) => format!("{msg}: {d}"),
+                None => msg.to_string(),
+            };
             Some(AgentMessageEvent::Error { message })
         }
         _ => None, // Ignore system, init, and other SDK-internal events
