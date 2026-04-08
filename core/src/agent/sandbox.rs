@@ -32,14 +32,15 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
         }
         "result" => {
             let turns = v.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+            let usage = v.get("usage");
             let input_tokens = v
                 .get("total_input_tokens")
-                .or_else(|| v.get("input_tokens"))
+                .or_else(|| usage.and_then(|u| u.get("input_tokens")))
                 .and_then(|n| n.as_u64())
                 .unwrap_or(0) as u32;
             let output_tokens = v
                 .get("total_output_tokens")
-                .or_else(|| v.get("output_tokens"))
+                .or_else(|| usage.and_then(|u| u.get("output_tokens")))
                 .and_then(|n| n.as_u64())
                 .unwrap_or(0) as u32;
             Some(AgentMessageEvent::Done {

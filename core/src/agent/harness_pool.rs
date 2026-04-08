@@ -141,6 +141,11 @@ impl HarnessPool {
                     flush_partial_line(&mut guard.read_buf, &tx).await;
                     drop(guard);
                     self.remove(agent_id).await;
+                    let _ = tx
+                        .send(AgentMessageEvent::Error {
+                            message: "Agent process exited unexpectedly".to_string(),
+                        })
+                        .await;
                     return Ok(());
                 }
                 Ok(n) => {
