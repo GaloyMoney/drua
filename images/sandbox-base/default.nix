@@ -103,6 +103,8 @@ pkgs.dockerTools.buildLayeredImage {
   fakeRootCommands = ''
     mkdir -p ./home/agent
     chown 1000:1000 ./home/agent
+    mkdir -p ./workspace
+    chown 1000:1000 ./workspace
     mkdir -p ./tmp
     chmod 1777 ./tmp
   '';
