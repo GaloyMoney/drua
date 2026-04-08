@@ -15,8 +15,10 @@ pub use entity::{Agent, ChatConfig, SandboxConfig, SandboxState};
 pub use error::*;
 use repo::*;
 
+use crate::auth::AuthContext;
+use crate::mcp_creds::McpCredentials;
 use crate::primitives::*;
-use crate::toolset::Catalog;
+use crate::toolset::ToolSets;
 
 /// An event emitted during an agent message exchange.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -33,14 +35,16 @@ pub struct Agents {
     repo: AgentRepo,
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
     light_config: config::LightRuntimeConfig,
-    catalog: Catalog,
+    toolsets: Arc<ToolSets>,
+    mcp_creds: McpCredentials,
 }
 
 impl Agents {
     pub async fn init(
         pool: &sqlx::PgPool,
         config: AgentConfig,
-        catalog: Catalog,
+        toolsets: Arc<ToolSets>,
+        mcp_creds: McpCredentials,
     ) -> Result<Self, AgentError> {
         let repo = AgentRepo::new(pool);
         let sandbox = if config.sandbox.enabled {
@@ -66,7 +70,8 @@ impl Agents {
             repo,
             sandbox,
             light_config: config.light,
-            catalog,
+            toolsets,
+            mcp_creds,
         })
     }
 
@@ -75,11 +80,12 @@ impl Agents {
         &self,
         workspace_id: WorkspaceId,
         agent_type: AgentType,
+        user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
         let mut op = self.repo.begin_op().await?;
         let agent = self
-            .create_in_op(&mut op, workspace_id, agent_type, name)
+            .create_in_op(&mut op, workspace_id, agent_type, user_id, name)
             .await?;
         op.commit().await?;
         Ok(agent)
@@ -91,12 +97,27 @@ impl Agents {
         op: &mut es_entity::DbOp<'_>,
         workspace_id: WorkspaceId,
         agent_type: AgentType,
+        user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
+        let agent_name = name.into();
+        let (_, token_hash) = crate::mcp_creds::token::generate_token();
+        let creds = self
+            .mcp_creds
+            .create_for_user_in_op(
+                op,
+                user_id,
+                format!("agent:{agent_name}"),
+                token_hash,
+                vec!["agent".to_string()],
+            )
+            .await?;
+
         let new_agent = NewAgent::builder()
             .workspace_id(workspace_id)
             .agent_type(agent_type)
-            .name(name)
+            .name(agent_name)
+            .mcp_creds_id(creds.id)
             .build()
             .expect("Could not build new agent");
 
@@ -141,18 +162,24 @@ impl Agents {
     pub async fn send_message(
         &self,
         id: AgentId,
+        user_id: UserId,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
         match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
+                let auth = match agent.mcp_creds_id {
+                    Some(creds_id) => AuthContext::McpCreds(creds_id, user_id),
+                    None => AuthContext::User(user_id),
+                };
+                let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
                     prompt,
                     &self.light_config,
                     &agent.chat_config,
                     agent.agent_type.system_prompt(),
-                    self.catalog.clone(),
+                    catalog,
                 )
                 .await
             }

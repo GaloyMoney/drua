@@ -678,12 +678,18 @@ async fn workspace_create(
     session: Session,
     Form(form): Form<WorkspaceForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
 
     let description = form.description.filter(|d| !d.is_empty());
-    match state.app.workspaces().create(&form.name, description).await {
+    match state
+        .app
+        .workspaces()
+        .create(user_id, &form.name, description)
+        .await
+    {
         Ok(_) => Redirect::to("/workspaces").into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to create workspace");
@@ -790,15 +796,6 @@ pub fn api_router() -> Router<AppState> {
     Router::new().route("/api/v1/agents/{id}/message", post(api_agent_message))
 }
 
-macro_rules! require_auth {
-    ($auth:expr) => {
-        match $auth {
-            AuthContext::McpCreds(_, _) | AuthContext::User(_) => {}
-            AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-        }
-    };
-}
-
 #[derive(Deserialize)]
 struct AgentMessageRequest {
     prompt: String,
@@ -811,10 +808,19 @@ async fn api_agent_message(
     Path(id): Path<uuid::Uuid>,
     Json(body): Json<AgentMessageRequest>,
 ) -> Response {
-    require_auth!(auth);
+    let user_id = match &auth {
+        AuthContext::User(id) => *id,
+        AuthContext::McpCreds(_, id) => *id,
+        AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
 
     let agent_id = AgentId::from(id);
-    let rx = match state.app.agents().send_message(agent_id, body.prompt).await {
+    let rx = match state
+        .app
+        .agents()
+        .send_message(agent_id, user_id, body.prompt)
+        .await
+    {
         Ok(rx) => rx,
         Err(e) => {
             tracing::error!(error = %e, "Failed to send message to agent");

@@ -14,6 +14,8 @@ pub enum AgentError {
     Find(#[from] AgentFindError),
     #[error("AgentError - Query: {0}")]
     Query(#[from] AgentQueryError),
+    #[error("AgentError - McpCreds: {0}")]
+    McpCreds(#[from] crate::mcp_creds::McpCredsError),
     #[error("AgentError - Sandbox: {0}")]
     Sandbox(#[from] sandbox_client::SandboxError),
     #[error("Sandbox runtime is not configured. Enable sandbox in the server configuration to chat with agents.")]
