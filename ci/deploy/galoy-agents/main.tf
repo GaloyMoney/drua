@@ -187,6 +187,7 @@ resource "helm_release" "galoy_agents" {
     templatefile("${path.module}/prod-values.yml.tmpl", {
       image_digest              = var.image_digest
       sandbox_base_image_digest = var.sandbox_base_image_digest
+      secret_checksum           = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
     })
   ]
 

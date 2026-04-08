@@ -31,6 +31,12 @@ spec:
       {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.galoyAgents.secrets.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.galoyAgents.secretChecksum }}
+        checksum/external-secret: {{ .Values.galoyAgents.secretChecksum | quote }}
+        {{- end }}
     spec:
       {{- if .Values.sandbox.enabled }}
       serviceAccountName: {{ template "galoyAgents.fullname" . }}-sandbox
