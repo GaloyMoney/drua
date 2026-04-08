@@ -73,7 +73,7 @@ impl Default for ChatConfig {
 
 impl ChatConfig {
     fn default_model() -> String {
-        "claude-sonnet-4-20250514".to_string()
+        "claude-haiku-4-5-20251001".to_string()
     }
 
     fn default_max_tokens() -> u32 {
