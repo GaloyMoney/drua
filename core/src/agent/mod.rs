@@ -201,8 +201,8 @@ impl Agents {
         let sandbox_name = sandbox::ensure_sandbox(&client, &mut agent, &self.repo).await?;
 
         let session_id = Some(agent.id.to_string());
-        let model = agent.chat_config.model.clone();
-        let max_turns = agent.chat_config.max_turns;
+        let model = Some(agent.chat_config.model.clone());
+        let max_turns = Some(agent.chat_config.max_turns);
 
         let client = Arc::new(client);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);

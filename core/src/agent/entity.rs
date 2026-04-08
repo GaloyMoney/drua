@@ -6,44 +6,83 @@ use es_entity::*;
 use crate::primitives::*;
 
 /// Configuration for an agent's sandbox environment (infrastructure).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Enable persistent volume for the sandbox workspace.
     #[serde(default)]
     pub persistent_volume: bool,
     /// PVC size (e.g., "10Gi"). Only used when persistent_volume is true.
-    #[serde(default = "default_pvc_size")]
+    #[serde(default = "SandboxConfig::default_pvc_size")]
     pub pvc_size: String,
     /// CPU resource request/limit (e.g., "500m", "1").
-    #[serde(default)]
-    pub resource_cpu: Option<String>,
+    #[serde(default = "SandboxConfig::default_resource_cpu")]
+    pub resource_cpu: String,
     /// Memory resource request/limit (e.g., "512Mi", "2Gi").
-    #[serde(default)]
-    pub resource_mem: Option<String>,
+    #[serde(default = "SandboxConfig::default_resource_mem")]
+    pub resource_mem: String,
 }
 
-fn default_pvc_size() -> String {
-    "10Gi".to_string()
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            persistent_volume: false,
+            pvc_size: Self::default_pvc_size(),
+            resource_cpu: Self::default_resource_cpu(),
+            resource_mem: Self::default_resource_mem(),
+        }
+    }
+}
+
+impl SandboxConfig {
+    fn default_pvc_size() -> String {
+        "10Gi".to_string()
+    }
+
+    fn default_resource_cpu() -> String {
+        "500m".to_string()
+    }
+
+    fn default_resource_mem() -> String {
+        "512Mi".to_string()
+    }
 }
 
 /// Configuration for agent chat behavior (LLM interaction).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatConfig {
     /// LLM model (e.g., "claude-sonnet-4-6").
-    #[serde(default)]
-    pub model: Option<String>,
+    #[serde(default = "ChatConfig::default_model")]
+    pub model: String,
     /// Max tokens per API response.
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
+    #[serde(default = "ChatConfig::default_max_tokens")]
+    pub max_tokens: u32,
     /// Max turns per conversation exchange.
-    #[serde(default)]
-    pub max_turns: Option<u32>,
+    #[serde(default = "ChatConfig::default_max_turns")]
+    pub max_turns: u32,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            model: Self::default_model(),
+            max_tokens: Self::default_max_tokens(),
+            max_turns: Self::default_max_turns(),
+        }
+    }
 }
 
 impl ChatConfig {
-    pub const DEFAULT_MODEL: &'static str = "claude-sonnet-4-20250514";
-    pub const DEFAULT_MAX_TOKENS: u32 = 4096;
-    pub const DEFAULT_MAX_TURNS: u32 = 25;
+    fn default_model() -> String {
+        "claude-sonnet-4-20250514".to_string()
+    }
+
+    fn default_max_tokens() -> u32 {
+        4096
+    }
+
+    fn default_max_turns() -> u32 {
+        25
+    }
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -245,8 +284,8 @@ mod tests {
                 ..Default::default()
             })
             .chat_config(ChatConfig {
-                model: Some("claude-sonnet-4-6".to_string()),
-                max_turns: Some(10),
+                model: "claude-sonnet-4-6".to_string(),
+                max_turns: 10,
                 ..Default::default()
             })
             .build()
@@ -263,10 +302,7 @@ mod tests {
         assert_eq!(agent.sandbox_state, SandboxState::None);
         assert!(agent.sandbox_name().starts_with("agent-"));
         assert!(agent.sandbox_config.persistent_volume);
-        assert_eq!(
-            agent.chat_config.model,
-            Some("claude-sonnet-4-6".to_string())
-        );
-        assert_eq!(agent.chat_config.max_turns, Some(10));
+        assert_eq!(agent.chat_config.model, "claude-sonnet-4-6");
+        assert_eq!(agent.chat_config.max_turns, 10);
     }
 }
