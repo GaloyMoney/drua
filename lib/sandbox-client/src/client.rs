@@ -62,7 +62,7 @@ impl SandboxClient {
         }
     }
 
-    /// Enable persistent storage for directly-created sandboxes.
+    /// Enable persistent storage for sandboxes.
     pub fn with_persistence(mut self, config: PersistenceConfig) -> Self {
         self.persistence = Some(config);
         self
@@ -72,11 +72,6 @@ impl SandboxClient {
     pub fn with_resources(mut self, config: ResourceConfig) -> Self {
         self.resources = Some(config);
         self
-    }
-
-    /// Whether persistent storage is configured for sandboxes.
-    pub fn has_persistence(&self) -> bool {
-        self.persistence.is_some()
     }
 
     /// The namespace this client manages sandboxes in.
@@ -93,171 +88,8 @@ impl SandboxClient {
         Ok(Self::new(client, namespace, template_name))
     }
 
-    /// Create a SandboxClaim that allocates a sandbox from the warm pool.
-    #[instrument(name = "sandbox_client.create_claim", skip_all, fields(%claim_name))]
-    pub async fn create_claim(&self, claim_name: &str) -> Result<SandboxClaim, SandboxError> {
-        let claims: Api<SandboxClaim> = Api::namespaced(self.client.clone(), &self.namespace);
-
-        let claim = SandboxClaim::new(
-            claim_name,
-            SandboxClaimSpec {
-                sandbox_template_ref: TemplateRef {
-                    name: self.template_name.clone(),
-                },
-                lifecycle: None,
-            },
-        );
-
-        let created = claims.create(&PostParams::default(), &claim).await?;
-        tracing::info!(claim = %claim_name, "Sandbox claim created");
-        Ok(created)
-    }
-
-    /// Delete a SandboxClaim, releasing the sandbox back.
-    #[instrument(name = "sandbox_client.delete_claim", skip_all, fields(%claim_name))]
-    pub async fn delete_claim(&self, claim_name: &str) -> Result<(), SandboxError> {
-        let claims: Api<SandboxClaim> = Api::namespaced(self.client.clone(), &self.namespace);
-        claims.delete(claim_name, &DeleteParams::default()).await?;
-        tracing::info!(claim = %claim_name, "Sandbox claim deleted");
-        Ok(())
-    }
-
-    /// List all SandboxClaims in the namespace.
-    #[instrument(name = "sandbox_client.list_claims", skip_all)]
-    pub async fn list_claims(&self) -> Result<Vec<SandboxSummary>, SandboxError> {
-        let claims: Api<SandboxClaim> = Api::namespaced(self.client.clone(), &self.namespace);
-        let list = claims.list(&ListParams::default()).await?;
-
-        let summaries = list.items.iter().map(Self::summary_from_claim).collect();
-
-        Ok(summaries)
-    }
-
-    /// Get a single SandboxClaim by name.
-    #[instrument(name = "sandbox_client.get_claim", skip_all, fields(%claim_name))]
-    pub async fn get_claim(&self, claim_name: &str) -> Result<SandboxSummary, SandboxError> {
-        let claims: Api<SandboxClaim> = Api::namespaced(self.client.clone(), &self.namespace);
-        let claim = claims.get(claim_name).await.map_err(|e| match &e {
-            kube::Error::Api(resp) if resp.code == 404 => {
-                SandboxError::NotFound(claim_name.to_string())
-            }
-            _ => SandboxError::Kube(e),
-        })?;
-
-        Ok(Self::summary_from_claim(&claim))
-    }
-
-    /// Poll a SandboxClaim until it becomes ready or the timeout expires.
-    #[instrument(name = "sandbox_client.wait_until_ready", skip_all, fields(%claim_name))]
-    pub async fn wait_until_ready(
-        &self,
-        claim_name: &str,
-        timeout: Duration,
-    ) -> Result<SandboxSummary, SandboxError> {
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            let summary = self.get_claim(claim_name).await?;
-            if summary.ready {
-                return Ok(summary);
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(SandboxError::Timeout(claim_name.to_string()));
-            }
-
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    /// Resolve the running pod name for a sandbox claim.
-    ///
-    /// Follows the chain: claim → sandbox_name → Sandbox CR label_selector → Pod list.
-    /// Resolve the pod name for a claim-based sandbox.
-    #[instrument(name = "sandbox_client.resolve_pod_name", skip_all, fields(%claim_name))]
-    pub async fn resolve_pod_name(&self, claim_name: &str) -> Result<String, SandboxError> {
-        let summary = self.get_claim(claim_name).await?;
-        if !summary.ready {
-            return Err(SandboxError::NotReady(claim_name.to_string()));
-        }
-
-        let sandbox_name = summary
-            .sandbox_name
-            .ok_or_else(|| SandboxError::NoPod(claim_name.to_string()))?;
-
-        self.resolve_pod_for_sandbox(&sandbox_name).await
-    }
-
-    /// Resolve the pod name for a directly-created sandbox.
-    #[instrument(name = "sandbox_client.resolve_pod_for_sandbox", skip_all, fields(%sandbox_name))]
-    pub async fn resolve_pod_for_sandbox(
-        &self,
-        sandbox_name: &str,
-    ) -> Result<String, SandboxError> {
-        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
-        let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
-            kube::Error::Api(resp) if resp.code == 404 => {
-                SandboxError::NotFound(sandbox_name.to_string())
-            }
-            _ => SandboxError::Kube(e),
-        })?;
-
-        let label_selector = sandbox
-            .status
-            .as_ref()
-            .and_then(|s| s.label_selector.clone())
-            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))?;
-
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let pod_list = pods
-            .list(&ListParams::default().labels(&label_selector))
-            .await?;
-
-        let pod_name = pod_list
-            .items
-            .iter()
-            .find(|pod| {
-                pod.status
-                    .as_ref()
-                    .and_then(|s| s.phase.as_deref())
-                    .map(|p| p == "Running")
-                    .unwrap_or(false)
-            })
-            .and_then(|pod| pod.metadata.name.clone())
-            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))?;
-
-        Ok(pod_name)
-    }
-
-    /// Exec into the sandbox pod associated with a claim.
-    #[instrument(name = "sandbox_client.exec_in_sandbox", skip_all, fields(%claim_name))]
-    pub async fn exec_in_sandbox(
-        &self,
-        claim_name: &str,
-        command: Vec<String>,
-    ) -> Result<AttachedProcess, SandboxError> {
-        let pod_name = if self.has_persistence() {
-            self.resolve_pod_for_sandbox(claim_name).await?
-        } else {
-            self.resolve_pod_name(claim_name).await?
-        };
-
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let attached = pods
-            .exec(&pod_name, &command, &AttachParams::interactive_tty())
-            .await?;
-
-        tracing::info!(
-            claim = %claim_name,
-            pod = %pod_name,
-            "Exec session started"
-        );
-
-        Ok(attached)
-    }
-
     // -----------------------------------------------------------------------
-    // Direct Sandbox management (bypasses SandboxClaim / warm pool)
+    // Sandbox management
     // -----------------------------------------------------------------------
 
     /// Read the SandboxTemplate to get the pod template.
@@ -322,12 +154,11 @@ impl SandboxClient {
         Ok(pvc_name)
     }
 
-    /// Create a Sandbox directly with optional persistent storage.
+    /// Create a Sandbox with persistent storage.
     ///
-    /// When persistence is configured, creates a standalone PVC (if it doesn't
-    /// already exist) and mounts it into the pod. The PVC lifecycle is
-    /// independent of the Sandbox — it survives sandbox deletion and is
-    /// reused on recreation with the same name.
+    /// Creates a standalone PVC (if it doesn't already exist) and mounts it
+    /// into the pod. The PVC lifecycle is independent of the Sandbox — it
+    /// survives sandbox deletion and is reused on recreation with the same name.
     #[instrument(name = "sandbox_client.create_sandbox", skip_all, fields(%name))]
     pub async fn create_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
         let template = self.read_template().await?;
@@ -406,7 +237,7 @@ impl SandboxClient {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         sandboxes.create(&PostParams::default(), &sandbox).await?;
 
-        tracing::info!(sandbox = %name, "Sandbox created directly");
+        tracing::info!(sandbox = %name, "Sandbox created");
         Ok(SandboxSummary {
             name: name.to_string(),
             sandbox_name: Some(name.to_string()),
@@ -415,7 +246,7 @@ impl SandboxClient {
         })
     }
 
-    /// Delete a directly-created Sandbox. The PVC is retained for recreation.
+    /// Delete a Sandbox. The PVC is retained for recreation.
     #[instrument(name = "sandbox_client.delete_sandbox", skip_all, fields(%name))]
     pub async fn delete_sandbox(&self, name: &str) -> Result<(), SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -500,7 +331,7 @@ impl SandboxClient {
             .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))
     }
 
-    /// Exec into a directly-created Sandbox pod.
+    /// Exec into a Sandbox pod with TTY.
     #[instrument(name = "sandbox_client.exec_sandbox", skip_all, fields(%sandbox_name))]
     pub async fn exec_sandbox(
         &self,
@@ -517,27 +348,22 @@ impl SandboxClient {
         tracing::info!(
             sandbox = %sandbox_name,
             pod = %pod_name,
-            "Exec session started (direct)"
+            "Exec session started"
         );
         Ok(attached)
     }
 
     /// Exec into a Sandbox pod without TTY allocation.
     ///
-    /// Unlike [`exec_sandbox`](Self::exec_sandbox), this uses raw stdin/stdout
-    /// without a pseudo-terminal.  Suitable for programmatic communication
-    /// (e.g. JSON-lines) where TTY escape codes would corrupt the data stream.
+    /// Uses raw stdin/stdout without a pseudo-terminal. Suitable for
+    /// programmatic communication (e.g. JSON-lines).
     #[instrument(name = "sandbox_client.exec_sandbox_raw", skip_all, fields(%sandbox_name))]
     pub async fn exec_sandbox_raw(
         &self,
         sandbox_name: &str,
         command: Vec<String>,
     ) -> Result<AttachedProcess, SandboxError> {
-        let pod_name = if self.has_persistence() {
-            self.resolve_sandbox_pod(sandbox_name).await?
-        } else {
-            self.resolve_pod_name(sandbox_name).await?
-        };
+        let pod_name = self.resolve_sandbox_pod(sandbox_name).await?;
 
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let ap = AttachParams {
@@ -552,7 +378,7 @@ impl SandboxClient {
         tracing::info!(
             sandbox = %sandbox_name,
             pod = %pod_name,
-            "Raw exec session started (direct)"
+            "Raw exec session started"
         );
         Ok(attached)
     }
@@ -599,21 +425,6 @@ impl SandboxClient {
     pub async fn debug_status(&self) -> Result<serde_json::Value, SandboxError> {
         use k8s_openapi::api::core::v1::Event;
 
-        // List all sandbox claims
-        let claims: Api<SandboxClaim> = Api::namespaced(self.client.clone(), &self.namespace);
-        let claim_list = claims.list(&ListParams::default()).await?;
-        let claim_summaries: Vec<serde_json::Value> = claim_list
-            .items
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "name": c.metadata.name,
-                    "status": c.status,
-                    "spec": c.spec,
-                })
-            })
-            .collect();
-
         // List all sandboxes
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox_list = sandboxes.list(&ListParams::default()).await?;
@@ -625,21 +436,6 @@ impl SandboxClient {
                     "name": s.metadata.name,
                     "status": s.status,
                     "replicas": s.spec.replicas,
-                })
-            })
-            .collect();
-
-        // List warm pools
-        let pools: Api<SandboxWarmPool> = Api::namespaced(self.client.clone(), &self.namespace);
-        let pool_list = pools.list(&ListParams::default()).await?;
-        let pool_summaries: Vec<serde_json::Value> = pool_list
-            .items
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "name": p.metadata.name,
-                    "spec": p.spec,
-                    "status": p.status,
                 })
             })
             .collect();
@@ -692,51 +488,10 @@ impl SandboxClient {
         Ok(serde_json::json!({
             "namespace": self.namespace,
             "template_name": self.template_name,
-            "claims": claim_summaries,
             "sandboxes": sandbox_summaries,
-            "warm_pools": pool_summaries,
             "templates": template_names,
             "pods": pod_summaries,
             "recent_events": recent_events,
         }))
-    }
-
-    fn summary_from_claim(claim: &SandboxClaim) -> SandboxSummary {
-        let name = claim
-            .metadata
-            .name
-            .clone()
-            .unwrap_or_else(|| "<unknown>".into());
-        let status = claim.status.as_ref();
-        let sandbox_name = status.and_then(|s| s.sandbox.as_ref().map(|r| r.name.clone()));
-        let ready = status
-            .map(|s| {
-                s.conditions.iter().any(|c| {
-                    c.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t == "Ready")
-                        .unwrap_or(false)
-                        && c.get("status")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s == "True")
-                            .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-
-        let phase = if ready {
-            "Ready".to_string()
-        } else if sandbox_name.is_some() {
-            "Provisioning".to_string()
-        } else {
-            "Pending".to_string()
-        };
-
-        SandboxSummary {
-            name,
-            sandbox_name,
-            phase,
-            ready,
-        }
     }
 }

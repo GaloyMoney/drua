@@ -82,6 +82,8 @@ pub enum AgentMessageEvent {
     },
     /// An error occurred.
     Error { message: String },
+    /// Infrastructure status update (e.g. sandbox provisioning).
+    Service { message: String },
 }
 
 impl AgentType {
@@ -94,7 +96,6 @@ impl AgentType {
     pub fn default_sandbox_config(&self) -> crate::agent::SandboxConfig {
         match self {
             AgentType::WorkspaceLead => crate::agent::SandboxConfig {
-                persistent_volume: false,
                 resource_cpu: "100m".to_string(),
                 resource_mem: "256Mi".to_string(),
                 ..Default::default()

@@ -214,7 +214,7 @@ impl Agents {
     /// startup cost on subsequent messages.
     async fn send_message_sandbox(
         &self,
-        mut agent: Agent,
+        agent: Agent,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let base_client = self
@@ -223,27 +223,42 @@ impl Agents {
             .ok_or(AgentError::SandboxNotConfigured)?;
 
         let client = sandbox::configure_client(base_client, &agent.sandbox_config);
-        let sandbox_name = sandbox::ensure_sandbox(&client, &mut agent, &self.repo).await?;
-
-        let session_id = Some(agent.id.to_string());
-        let model = Some(agent.chat_config.model.clone());
-        let max_turns = Some(agent.chat_config.max_turns);
-
-        let client = Arc::new(client);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
         let pool = self.harness_pool.clone();
-        let msg = harness_pool::HarnessMessage {
-            agent_id: agent.id,
-            sandbox_name: sandbox_name.clone(),
-            client,
-            prompt,
-            session_id,
-            model,
-            max_turns,
-        };
+        let repo = self.repo.clone();
+        let session_id = Some(agent.id.to_string());
+        let model = Some(agent.chat_config.model.clone());
+        let max_turns = Some(agent.chat_config.max_turns);
+        let disallowed_tools = agent.sandbox_config.disallowed_tools.clone();
+        let agent_id = agent.id;
 
         tokio::spawn(async move {
+            // Ensure sandbox is provisioned, streaming status to the UI
+            let sandbox_name = match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
+                Ok(name) => name,
+                Err(e) => {
+                    tracing::error!(error = %e, "Sandbox provisioning failed");
+                    let _ = tx
+                        .send(AgentMessageEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            };
+
+            let msg = harness_pool::HarnessMessage {
+                agent_id,
+                sandbox_name: sandbox_name.clone(),
+                client: Arc::new(client),
+                prompt,
+                session_id,
+                model,
+                max_turns,
+                disallowed_tools,
+            };
+
             if let Err(e) = pool.send_message(msg, tx.clone()).await {
                 tracing::error!(error = %e, sandbox = %sandbox_name, "Agent message relay failed");
                 let _ = tx
@@ -269,6 +284,14 @@ impl Agents {
 
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                // Service events are ephemeral — forward to SSE but don't persist
+                if matches!(event, AgentMessageEvent::Service { .. }) {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
                 let (role, content, metadata) = event_to_message(&event);
 
                 if let Err(e) = chat_history
@@ -357,5 +380,8 @@ fn event_to_message(
             serde_json::json!(message),
             serde_json::json!({}),
         ),
+        AgentMessageEvent::Service { .. } => {
+            unreachable!("service events are handled before persistence")
+        }
     }
 }

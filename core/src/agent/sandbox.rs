@@ -65,18 +65,18 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
 }
 
 /// Clone the base sandbox client and apply agent-specific configuration.
+///
+/// All sandboxes get a persistent volume for session history.
 pub(super) fn configure_client(
     base: &sandbox_client::SandboxClient,
     config: &SandboxConfig,
 ) -> sandbox_client::SandboxClient {
     let mut client = base.clone();
-    if config.persistent_volume {
-        client = client.with_persistence(sandbox_client::PersistenceConfig {
-            size: config.pvc_size.clone(),
-            storage_class: String::new(),
-            mount_path: "/workspace".to_string(),
-        });
-    }
+    client = client.with_persistence(sandbox_client::PersistenceConfig {
+        size: config.pvc_size.clone(),
+        storage_class: String::new(),
+        mount_path: "/workspace".to_string(),
+    });
     if !config.resource_cpu.is_empty() || !config.resource_mem.is_empty() {
         client = client.with_resources(sandbox_client::ResourceConfig {
             cpu: config.resource_cpu.clone(),
@@ -86,37 +86,41 @@ pub(super) fn configure_client(
     client
 }
 
+/// Send a service status message to the UI (best-effort, non-blocking).
+async fn emit_status(
+    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
+    message: impl Into<String>,
+) {
+    let _ = tx
+        .send(AgentMessageEvent::Service {
+            message: message.into(),
+        })
+        .await;
+}
+
 /// Ensure the agent has a running sandbox, creating one if needed.
-/// If the entity thinks a sandbox exists but it was deleted externally
-/// (e.g. namespace recreation), reset state and recreate.
+/// Emits [`AgentMessageEvent::Service`] messages through `tx` so the UI
+/// can show provisioning progress.
 pub(super) async fn ensure_sandbox(
     client: &sandbox_client::SandboxClient,
-    agent: &mut Agent,
+    mut agent: Agent,
     repo: &AgentRepo,
+    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
 ) -> Result<String, AgentError> {
     let sandbox_name = agent.sandbox_name();
 
     match agent.sandbox_state {
         SandboxState::Ready | SandboxState::Provisioning => {
-            let exists = if client.has_persistence() {
-                client.get_sandbox(&sandbox_name).await
-            } else {
-                client.get_claim(&sandbox_name).await
-            };
-            match exists {
+            match client.get_sandbox(&sandbox_name).await {
                 Ok(_) if agent.sandbox_state == SandboxState::Ready => {
                     return Ok(sandbox_name);
                 }
                 Ok(_) => {
-                    // Provisioning — wait for ready
+                    emit_status(tx, "Waiting for sandbox to be ready…").await;
                     let timeout = std::time::Duration::from_secs(120);
-                    if client.has_persistence() {
-                        client.wait_sandbox_ready(&sandbox_name, timeout).await?;
-                    } else {
-                        client.wait_until_ready(&sandbox_name, timeout).await?;
-                    }
+                    client.wait_sandbox_ready(&sandbox_name, timeout).await?;
                     if agent.sandbox_ready().did_execute() {
-                        repo.update(agent).await?;
+                        repo.update(&mut agent).await?;
                     }
                     return Ok(sandbox_name);
                 }
@@ -125,59 +129,39 @@ pub(super) async fn ensure_sandbox(
                         sandbox = %sandbox_name,
                         "Sandbox missing from cluster, resetting state"
                     );
+                    emit_status(tx, "Recreating sandbox…").await;
                     if agent.sandbox_lost().did_execute() {
-                        repo.update(agent).await?;
+                        repo.update(&mut agent).await?;
                     }
                     // Fall through to creation below
                 }
                 Err(e) => return Err(e.into()),
             }
         }
-        SandboxState::None => {}
+        SandboxState::None => {
+            emit_status(tx, "Creating sandbox…").await;
+        }
     }
 
-    if client.has_persistence() {
-        // Direct Sandbox creation — supports PVC mounts
-        match client.create_sandbox(&sandbox_name).await {
-            Ok(_) => {}
-            Err(sandbox_client::SandboxError::Kube(e))
-                if e.to_string().contains("already exists") =>
-            {
-                tracing::info!(sandbox = %sandbox_name, "Sandbox already exists, waiting for ready");
-            }
-            Err(e) => return Err(e.into()),
+    match client.create_sandbox(&sandbox_name).await {
+        Ok(_) => {}
+        Err(sandbox_client::SandboxError::Kube(e)) if e.to_string().contains("already exists") => {
+            tracing::info!(sandbox = %sandbox_name, "Sandbox already exists, waiting for ready");
         }
-
-        if agent.sandbox_provisioned().did_execute() {
-            repo.update(agent).await?;
-        }
-
-        client
-            .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
-            .await?;
-    } else {
-        // Claim-based creation — uses warm pool for fast startup
-        match client.create_claim(&sandbox_name).await {
-            Ok(_) => {}
-            Err(sandbox_client::SandboxError::Kube(e))
-                if e.to_string().contains("already exists") =>
-            {
-                tracing::info!(sandbox = %sandbox_name, "Claim already exists, waiting for ready");
-            }
-            Err(e) => return Err(e.into()),
-        }
-
-        if agent.sandbox_provisioned().did_execute() {
-            repo.update(agent).await?;
-        }
-
-        client
-            .wait_until_ready(&sandbox_name, std::time::Duration::from_secs(120))
-            .await?;
+        Err(e) => return Err(e.into()),
     }
+
+    if agent.sandbox_provisioned().did_execute() {
+        repo.update(&mut agent).await?;
+    }
+
+    emit_status(tx, "Waiting for sandbox to be ready…").await;
+    client
+        .wait_sandbox_ready(&sandbox_name, std::time::Duration::from_secs(120))
+        .await?;
 
     if agent.sandbox_ready().did_execute() {
-        repo.update(agent).await?;
+        repo.update(&mut agent).await?;
     }
 
     Ok(sandbox_name)

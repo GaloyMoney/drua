@@ -115,6 +115,8 @@ async function sendMessage() {
               appendMsg('msg-result', 'Done — ' + (parsed.turns || 0) + ' turns, ' + tokens + ' tokens');
             } else if (parsed.type === 'error') {
               appendMsg('msg-error', parsed.message || JSON.stringify(parsed));
+            } else if (parsed.type === 'service') {
+              appendMsg('msg-system', parsed.message);
             }
           } catch {
             appendMsg('msg-assistant', data);

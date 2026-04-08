@@ -43,6 +43,7 @@ pub(super) struct HarnessMessage {
     pub session_id: Option<String>,
     pub model: Option<String>,
     pub max_turns: Option<u32>,
+    pub disallowed_tools: Vec<String>,
 }
 
 /// Pool of active harness exec sessions keyed by [`AgentId`].
@@ -89,6 +90,7 @@ impl HarnessPool {
             "session_id": msg.session_id,
             "model": msg.model,
             "max_turns": msg.max_turns,
+            "disallowed_tools": msg.disallowed_tools,
         });
         let payload = format!("{}\n", input_line);
 

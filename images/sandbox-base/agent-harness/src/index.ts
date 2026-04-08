@@ -34,6 +34,7 @@ interface HarnessInput {
   session_id?: string;
   model?: string;
   max_turns?: number;
+  disallowed_tools?: string[];
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ async function handleMessage(input: HarnessInput): Promise<void> {
         model,
         maxTurns,
         resume: activeSessionId,
+        disallowedTools: input.disallowed_tools,
         includePartialMessages: true,
       },
     });

@@ -57,9 +57,7 @@ data:
       enabled: {{ .Values.sandbox.enabled }}
       namespace: {{ include "galoyAgents.sandboxNamespace" . | quote }}
       template_name: {{ .Values.sandbox.templateName | quote }}
-    {{- if .Values.sandbox.persistence.enabled }}
       persistence:
         size: {{ .Values.sandbox.persistence.size | quote }}
         storage_class: {{ .Values.sandbox.persistence.storageClassName | quote }}
         mount_path: {{ .Values.sandbox.persistence.mountPath | quote }}
-    {{- end }}

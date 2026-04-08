@@ -20,12 +20,6 @@ metadata:
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
 rules:
-- apiGroups: ["extensions.agents.x-k8s.io"]
-  resources: ["sandboxclaims"]
-  verbs: ["get", "list", "watch", "create", "delete"]
-- apiGroups: ["extensions.agents.x-k8s.io"]
-  resources: ["sandboxclaims/status"]
-  verbs: ["get"]
 - apiGroups: ["agents.x-k8s.io"]
   resources: ["sandboxes"]
   verbs: ["get", "list", "watch", "create", "delete"]
@@ -45,11 +39,8 @@ rules:
   resources: ["events"]
   verbs: ["get", "list"]
 - apiGroups: ["extensions.agents.x-k8s.io"]
-  resources: ["sandboxwarmpools", "sandboxtemplates"]
+  resources: ["sandboxtemplates"]
   verbs: ["get", "list"]
-- apiGroups: ["extensions.agents.x-k8s.io"]
-  resources: ["sandboxwarmpools/status"]
-  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

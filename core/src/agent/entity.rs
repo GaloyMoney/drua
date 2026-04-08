@@ -8,10 +8,7 @@ use crate::primitives::*;
 /// Configuration for an agent's sandbox environment (infrastructure).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// Enable persistent volume for the sandbox workspace.
-    #[serde(default)]
-    pub persistent_volume: bool,
-    /// PVC size (e.g., "10Gi"). Only used when persistent_volume is true.
+    /// PVC size (e.g., "10Gi").
     #[serde(default = "SandboxConfig::default_pvc_size")]
     pub pvc_size: String,
     /// CPU resource request/limit (e.g., "500m", "1").
@@ -20,15 +17,19 @@ pub struct SandboxConfig {
     /// Memory resource request/limit (e.g., "512Mi", "2Gi").
     #[serde(default = "SandboxConfig::default_resource_mem")]
     pub resource_mem: String,
+    /// Built-in tools to disallow in the sandbox (e.g., ["Bash", "Edit"]).
+    /// When empty, all tools are available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            persistent_volume: false,
             pvc_size: Self::default_pvc_size(),
             resource_cpu: Self::default_resource_cpu(),
             resource_mem: Self::default_resource_mem(),
+            disallowed_tools: Vec::new(),
         }
     }
 }
@@ -277,10 +278,7 @@ mod tests {
             .agent_type(AgentType::WorkspaceLead)
             .name("workspace-lead")
             .mcp_creds_id(McpCredsId::new())
-            .sandbox_config(SandboxConfig {
-                persistent_volume: true,
-                ..Default::default()
-            })
+            .sandbox_config(SandboxConfig::default())
             .chat_config(ChatConfig {
                 model: "claude-sonnet-4-6".to_string(),
                 max_turns: 10,
@@ -299,7 +297,6 @@ mod tests {
         assert_eq!(agent.agent_type, AgentType::WorkspaceLead);
         assert_eq!(agent.sandbox_state, SandboxState::None);
         assert!(agent.sandbox_name().starts_with("agent-"));
-        assert!(agent.sandbox_config.persistent_volume);
         assert_eq!(agent.chat_config.model, "claude-sonnet-4-6");
         assert_eq!(agent.chat_config.max_turns, 10);
     }

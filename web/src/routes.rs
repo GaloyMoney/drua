@@ -877,6 +877,7 @@ async fn api_agent_message(
                 domain::agent::AgentMessageEvent::ToolResult { .. } => "tool_result",
                 domain::agent::AgentMessageEvent::Done { .. } => "done",
                 domain::agent::AgentMessageEvent::Error { .. } => "error",
+                domain::agent::AgentMessageEvent::Service { .. } => "service",
             };
             let data = serde_json::to_string(&event).unwrap_or_default();
             let sse_event = Event::default().event(event_name).data(data);

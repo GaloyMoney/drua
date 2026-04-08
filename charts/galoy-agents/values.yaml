@@ -123,13 +123,9 @@ sandbox:
   # - name: NIX_CONFIG
   #   value: "extra-substituters = https://galoy-agents.cachix.org\nextra-trusted-public-keys = galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY="
   persistence:
-    enabled: false
     mountPath: /workspace
     size: 10Gi
     storageClassName: standard-rwo
-  warmPool:
-    enabled: true
-    minReady: 2
 postgresql:
   enabled: true
   image:
