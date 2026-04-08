@@ -26,7 +26,6 @@ pub enum McpCredsEvent {
 pub struct McpCreds {
     pub id: McpCredsId,
     pub owner: McpCredsOwner,
-    pub owner_id: McpCredsOwnerId,
     pub name: String,
     pub(crate) token_hash: String,
     pub scopes: Vec<String>,
@@ -86,7 +85,6 @@ impl TryFromEvents<McpCredsEvent> for McpCreds {
                     builder = builder
                         .id(*id)
                         .owner(owner.clone())
-                        .owner_id(owner.id())
                         .name(name.clone())
                         .token_hash(token_hash.clone())
                         .scopes(scopes.clone());
@@ -102,27 +100,16 @@ impl TryFromEvents<McpCredsEvent> for McpCreds {
 }
 
 #[derive(Debug, Builder)]
-#[builder(pattern = "owned", build_fn(private, name = "build_inner"))]
+#[builder(pattern = "owned")]
 pub struct NewMcpCreds {
     #[builder(setter(into))]
     pub(super) id: McpCredsId,
     pub(super) owner: McpCredsOwner,
-    /// Derived from `owner` — do not set directly.
-    #[builder(setter(skip), default = "McpCredsOwnerId::new()")]
-    pub(super) owner_id: McpCredsOwnerId,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
     pub(crate) token_hash: String,
     pub(super) scopes: Vec<String>,
-}
-
-impl NewMcpCredsBuilder {
-    pub fn build(self) -> Result<NewMcpCreds, NewMcpCredsBuilderError> {
-        let mut inner = self.build_inner()?;
-        inner.owner_id = inner.owner.id();
-        Ok(inner)
-    }
 }
 
 impl NewMcpCreds {

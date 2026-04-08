@@ -1,4 +1,14 @@
-es_entity::entity_id! { UserId, McpCredsId, McpCredsOwnerId, ReportId, WorkspaceId, AgentId }
+es_entity::entity_id! {
+    UserId,
+    McpCredsId,
+    McpCredsOwnerId,
+    ReportId,
+    WorkspaceId,
+    AgentId;
+
+    UserId => McpCredsOwnerId,
+    AgentId => McpCredsOwnerId
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -18,8 +28,8 @@ pub enum McpCredsOwner {
 impl McpCredsOwner {
     pub fn id(&self) -> McpCredsOwnerId {
         match self {
-            McpCredsOwner::User { user_id } => McpCredsOwnerId::from(uuid::Uuid::from(*user_id)),
-            McpCredsOwner::Agent { agent_id } => McpCredsOwnerId::from(uuid::Uuid::from(*agent_id)),
+            McpCredsOwner::User { user_id } => McpCredsOwnerId::from(*user_id),
+            McpCredsOwner::Agent { agent_id } => McpCredsOwnerId::from(*agent_id),
         }
     }
 

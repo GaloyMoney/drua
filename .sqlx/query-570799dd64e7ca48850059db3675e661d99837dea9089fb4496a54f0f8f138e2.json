@@ -1,16 +1,15 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE mcp_creds SET owner_id = $2, token_hash = $3 WHERE id = $1",
+  "query": "UPDATE mcp_creds SET token_hash = $2 WHERE id = $1",
   "describe": {
     "columns": [],
     "parameters": {
       "Left": [
-        "Uuid",
         "Uuid",
         "Varchar"
       ]
     },
     "nullable": []
   },
-  "hash": "b9982a0f4ccdb097a9ffdd3ac1c21a8ffe93157dce104ca037fc08313c24dcf4"
+  "hash": "570799dd64e7ca48850059db3675e661d99837dea9089fb4496a54f0f8f138e2"
 }
