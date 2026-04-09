@@ -100,8 +100,8 @@ impl AgentType {
     pub fn default_sandbox_config(&self) -> crate::agent::SandboxConfig {
         match self {
             AgentType::WorkspaceLead => crate::agent::SandboxConfig {
-                resource_cpu: "100m".to_string(),
-                resource_mem: "256Mi".to_string(),
+                resource_cpu: "500m".to_string(),
+                resource_mem: "512Mi".to_string(),
                 ..Default::default()
             },
         }
