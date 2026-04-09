@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * Agent Harness — thin HTTP wrapper around @anthropic-ai/claude-agent-sdk
+ * Agent Harness — persistent Claude Code subprocess with HTTP interface
+ *
+ * Bypasses the Claude Agent SDK's per-message process spawning by keeping
+ * a single cli.js process alive.  Uses stdin/stdout stream-json protocol.
  *
  * Endpoints:
  *   POST /message  — JSON body: { "prompt": "...", "session_id": "...", ... }
- *                    Response: SSE stream of SDK events
+ *                    Response: SSE stream of Claude Code events
  *   GET  /health   — 200 OK with JSON status
  *
  * Environment:
@@ -13,10 +16,12 @@
  *   HARNESS_PORT      — optional (default 3000)
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface, type Interface } from "node:readline";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -25,10 +30,10 @@ const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_MAX_TURNS = 10;
 const PORT = parseInt(process.env.HARNESS_PORT ?? "3000", 10);
 
-// Resolve the SDK's cli.js — placed alongside the bundle by the Nix build.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const CLI_JS_PATH = join(__dirname, "sdk", "cli.js");
+const SESSION_FILE = join(CWD, ".claude", ".harness-session-id");
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -67,12 +72,176 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-// ── Session tracking ──────────────────────────────────────────────────
+// ── Session persistence ──────────────────────────────────────────────
 
+function loadSessionId(): string | undefined {
+  try {
+    if (existsSync(SESSION_FILE)) {
+      return readFileSync(SESSION_FILE, "utf-8").trim() || undefined;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+function saveSessionId(id: string): void {
+  try {
+    mkdirSync(dirname(SESSION_FILE), { recursive: true });
+    writeFileSync(SESSION_FILE, id);
+  } catch (err) {
+    console.error("Failed to save session ID:", err);
+  }
+}
+
+// ── MCP settings ─────────────────────────────────────────────────────
+
+function writeMcpSettings(
+  mcpServers: Record<string, McpHttpServerConfig>,
+): void {
+  const settingsDir = join(CWD, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const settingsPath = join(settingsDir, "settings.json");
+
+  let existing: Record<string, unknown> = {};
+  try {
+    if (existsSync(settingsPath)) {
+      existing = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    }
+  } catch {
+    /* start fresh */
+  }
+  existing.mcpServers = mcpServers;
+  writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+}
+
+// ── Persistent CLI subprocess ────────────────────────────────────────
+
+let cliProcess: ChildProcess | null = null;
+let stdoutRL: Interface | null = null;
 let activeSessionId: string | undefined;
-
-/** Guard against concurrent message processing. */
 let busy = false;
+
+/** Callback for the in-flight message — receives each event. */
+let onEvent: ((event: Record<string, unknown>) => void) | null = null;
+/** Called when a terminal event (result/error) arrives. */
+let onComplete: (() => void) | null = null;
+
+interface SpawnConfig {
+  model: string;
+  maxTurns: number;
+  mcpServers?: Record<string, McpHttpServerConfig>;
+  resume?: string;
+}
+
+function spawnCli(config: SpawnConfig): ChildProcess {
+  // Write MCP settings before spawning so cli.js picks them up
+  if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+    writeMcpSettings(config.mcpServers);
+  }
+
+  const args = [
+    CLI_JS_PATH,
+    "--output-format",
+    "stream-json",
+    "--input-format",
+    "stream-json",
+    "--model",
+    config.model,
+    "--max-turns",
+    String(config.maxTurns),
+    "--dangerously-skip-permissions",
+  ];
+
+  if (config.resume) {
+    args.push("--resume", config.resume);
+  }
+
+  console.log(`Spawning cli.js (resume=${config.resume ?? "none"})`);
+
+  const proc = spawn(process.execPath, args, {
+    cwd: CWD,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      DISABLE_AUTOUPDATER: "1",
+    },
+  });
+
+  proc.stderr?.on("data", (data: Buffer) => {
+    process.stderr.write(`[cli] ${data.toString()}`);
+  });
+
+  proc.on("exit", (code, signal) => {
+    console.error(`cli.js exited: code=${code} signal=${signal}`);
+    cliProcess = null;
+    stdoutRL?.close();
+    stdoutRL = null;
+
+    // If a message was in flight, signal failure
+    if (onComplete) {
+      onEvent?.({
+        type: "error",
+        message: "cli_crashed",
+        details: `Process exited: code=${code} signal=${signal}`,
+      });
+      onComplete();
+    }
+  });
+
+  // Parse stdout as newline-delimited JSON (stream-json output)
+  if (proc.stdout) {
+    const rl = createInterface({ input: proc.stdout, crlfDelay: Infinity });
+    stdoutRL = rl;
+
+    rl.on("line", (line) => {
+      if (!line.trim()) return;
+
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        return; // skip non-JSON lines (e.g. startup banners)
+      }
+
+      // Capture session_id from result events
+      if (event.type === "result" && typeof event.session_id === "string") {
+        activeSessionId = event.session_id;
+        saveSessionId(event.session_id);
+      }
+
+      // Forward to the in-flight message handler
+      onEvent?.(event);
+
+      // Terminal events mark end of a message cycle
+      if (event.type === "result" || event.type === "error") {
+        onComplete?.();
+      }
+    });
+  }
+
+  return proc;
+}
+
+/** Ensure a cli.js process is running, spawning or reusing as needed. */
+function ensureCli(input: HarnessInput): ChildProcess {
+  if (cliProcess && cliProcess.exitCode === null) {
+    return cliProcess;
+  }
+
+  const model = input.model ?? DEFAULT_MODEL;
+  const maxTurns = input.max_turns ?? DEFAULT_MAX_TURNS;
+  const resume = activeSessionId ?? loadSessionId();
+
+  cliProcess = spawnCli({
+    model,
+    maxTurns,
+    mcpServers: input.mcp_servers,
+    resume: resume,
+  });
+
+  return cliProcess;
+}
 
 // ── Core message handler ──────────────────────────────────────────────
 
@@ -80,39 +249,29 @@ async function handleMessage(
   input: HarnessInput,
   emit: (event: Record<string, unknown>) => void,
 ): Promise<void> {
-  const model = input.model ?? DEFAULT_MODEL;
-  const maxTurns = input.max_turns ?? DEFAULT_MAX_TURNS;
+  const proc = ensureCli(input);
 
-  try {
-    const result = query({
-      prompt: input.prompt,
-      options: {
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        pathToClaudeCodeExecutable: CLI_JS_PATH,
-        executable: process.execPath,
-        cwd: CWD,
-        model,
-        maxTurns,
-        resume: activeSessionId,
-        disallowedTools: input.disallowed_tools,
-        includePartialMessages: true,
-        mcpServers: input.mcp_servers,
-      },
+  if (!proc.stdin || !proc.stdin.writable) {
+    emit({
+      type: "error",
+      message: "cli_error",
+      details: "stdin not writable",
     });
-
-    for await (const message of result) {
-      const event = message as unknown as Record<string, unknown>;
-      // Capture session_id from result so subsequent messages can resume
-      if (event.type === "result" && typeof event.session_id === "string") {
-        activeSessionId = event.session_id;
-      }
-      emit(event);
-    }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    emit({ type: "error", message: "query_failed", details: msg });
+    return;
   }
+
+  return new Promise<void>((resolve) => {
+    onEvent = emit;
+    onComplete = () => {
+      onEvent = null;
+      onComplete = null;
+      resolve();
+    };
+
+    // Write user message as JSON line to cli.js stdin
+    const msg = JSON.stringify({ type: "user", content: input.prompt });
+    proc.stdin!.write(msg + "\n");
+  });
 }
 
 // ── HTTP request handler ──────────────────────────────────────────────
@@ -129,6 +288,7 @@ async function handleRequest(
         status: "ok",
         session_id: activeSessionId ?? null,
         busy,
+        cli_alive: cliProcess !== null && cliProcess.exitCode === null,
       }),
     );
     return;
@@ -190,9 +350,7 @@ async function handleRequest(
 // ── Server bootstrap ──────────────────────────────────────────────────
 
 if (!process.env.ANTHROPIC_API_KEY) {
-  console.error(
-    "ANTHROPIC_API_KEY environment variable is required",
-  );
+  console.error("ANTHROPIC_API_KEY environment variable is required");
   process.exit(1);
 }
 
@@ -207,5 +365,5 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`agent-harness listening on 0.0.0.0:${PORT}`);
+  console.log(`agent-harness listening on 0.0.0.0:${PORT} (SDK bypass mode)`);
 });

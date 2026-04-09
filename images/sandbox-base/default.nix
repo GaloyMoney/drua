@@ -29,8 +29,9 @@ let
   '';
 
   # Agent harness — pre-built at image build time (zero runtime downloads).
-  # Uses buildNpmPackage for reproducible npm ci, then esbuild to produce a
-  # single-file ESM bundle that can run directly with `node`.
+  # Bypasses the Claude Agent SDK: the harness spawns cli.js directly as a
+  # persistent subprocess (stdin/stdout stream-json) instead of using the
+  # SDK's query() which spawns a new process per message (~25s in gVisor).
   agentHarness = pkgs.buildNpmPackage {
     pname = "agent-harness";
     version = "0.1.0";
@@ -58,9 +59,8 @@ let
       mkdir -p $out/lib
       cp dist/index.js $out/lib/index.js
 
-      # The SDK's query() spawns cli.js as a child process — it cannot be
-      # bundled by esbuild.  Copy the SDK runtime files so cli.js is
-      # reachable at $out/lib/sdk/cli.js.
+      # cli.js is the Claude Code CLI binary — spawned as a persistent
+      # subprocess by the harness.  It cannot be bundled by esbuild.
       mkdir -p $out/lib/sdk
       cp node_modules/@anthropic-ai/claude-agent-sdk/cli.js $out/lib/sdk/
       cp node_modules/@anthropic-ai/claude-agent-sdk/*.wasm  $out/lib/sdk/ 2>/dev/null || true
