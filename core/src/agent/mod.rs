@@ -292,6 +292,25 @@ impl Agents {
                 }
             };
 
+            // Wait for the harness HTTP server to be healthy before sending
+            let _ = tx
+                .send(AgentMessageEvent::Service {
+                    message: "Connecting to agent…".to_string(),
+                })
+                .await;
+            if let Err(e) = harness
+                .wait_healthy(&service_fqdn, std::time::Duration::from_secs(60))
+                .await
+            {
+                tracing::error!(error = %e, "Harness health check failed");
+                let _ = tx
+                    .send(AgentMessageEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
+
             let mut input = serde_json::json!({
                 "prompt": prompt,
                 "session_id": session_id,

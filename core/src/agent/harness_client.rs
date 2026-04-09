@@ -29,6 +29,37 @@ impl HarnessClient {
         }
     }
 
+    /// Wait for the harness HTTP server to become healthy.
+    #[instrument(name = "harness_client.wait_healthy", skip_all, fields(%service_fqdn))]
+    pub(super) async fn wait_healthy(
+        &self,
+        service_fqdn: &str,
+        timeout: Duration,
+    ) -> Result<(), AgentError> {
+        let url = format!("http://{service_fqdn}:{HARNESS_PORT}/health");
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            match self
+                .http
+                .get(&url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                _ => {}
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(AgentError::SandboxExec(
+                    "Harness health check timed out".to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
     /// Send a message to the harness and stream SSE events back through `tx`.
     #[instrument(name = "harness_client.send_message", skip_all, fields(%service_fqdn))]
     pub(super) async fn send_message(
