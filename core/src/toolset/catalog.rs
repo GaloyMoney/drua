@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
@@ -19,8 +19,11 @@ pub struct CatalogEntry {
 
 /// Shared catalog of tool sets. Use [`Catalog::with_auth`] to create a
 /// request-scoped handle that records audit entries automatically.
+///
+/// Toolsets are stored as `Arc<dyn ToolSet>` so they can be cloned out
+/// from behind the `RwLock` without holding the lock across `.await`.
 pub struct Catalog {
-    pub(super) sets: Arc<Vec<Box<dyn ToolSet>>>,
+    pub(super) sets: Arc<RwLock<Vec<Arc<dyn ToolSet>>>>,
     pub(super) audit: Option<Arc<Audit>>,
     pub(super) auth: Option<AuthContext>,
 }
@@ -34,6 +37,11 @@ impl Catalog {
             audit: self.audit.clone(),
             auth: Some(auth.clone()),
         }
+    }
+
+    /// Acquire a read lock on the toolset registry.
+    fn read_sets(&self) -> std::sync::RwLockReadGuard<'_, Vec<Arc<dyn ToolSet>>> {
+        self.sets.read().expect("toolset lock poisoned")
     }
 
     /// The 3 meta-tool definitions for progressive disclosure.
@@ -137,6 +145,7 @@ impl Catalog {
     }
 
     pub fn instructions(&self) -> String {
+        let sets = self.read_sets();
         let mut lines = vec![
             "Tools from upstream services are available via progressive disclosure:".to_string(),
             "1. search_tools — discover tools by keyword or category".to_string(),
@@ -145,7 +154,10 @@ impl Catalog {
             String::new(),
             "Available toolsets:".to_string(),
         ];
-        for set in self.sets.iter() {
+        for set in sets.iter() {
+            if !self.caller_has_required_scopes(set.as_ref()) {
+                continue;
+            }
             let cat = set.category();
             let desc = set.category_description();
             let tool_count = set.tools().len();
@@ -161,8 +173,12 @@ impl Catalog {
     }
 
     pub fn entries(&self) -> Vec<CatalogEntry> {
+        let sets = self.read_sets();
         let mut entries = Vec::new();
-        for set in self.sets.iter() {
+        for set in sets.iter() {
+            if !self.caller_has_required_scopes(set.as_ref()) {
+                continue;
+            }
             for tool in set.tools() {
                 let desc = &tool.description;
                 let brief = desc
@@ -257,16 +273,39 @@ impl Catalog {
         result
     }
 
-    fn find_set<'a>(&'a self, prefixed_name: &'a str) -> Option<(&'a dyn ToolSet, &'a str)> {
-        for set in self.sets.iter() {
+    /// Find the toolset and stripped tool name for a prefixed tool name.
+    /// Returns an `Arc` clone so the lock is not held across `.await`.
+    fn find_set(&self, prefixed_name: &str) -> Option<(Arc<dyn ToolSet>, String)> {
+        let sets = self.read_sets();
+        for set in sets.iter() {
+            if !self.caller_has_required_scopes(set.as_ref()) {
+                continue;
+            }
             let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
                 if set.tools().iter().any(|t| t.name == tool_name) {
-                    return Some((set.as_ref(), tool_name));
+                    return Some((Arc::clone(set), tool_name.to_string()));
                 }
             }
         }
         None
+    }
+
+    /// Check whether the current caller has all scopes required by a toolset.
+    fn caller_has_required_scopes(&self, set: &dyn ToolSet) -> bool {
+        let required = set.required_scopes();
+        if required.is_empty() {
+            return true;
+        }
+        match &self.auth {
+            Some(auth) => {
+                let caller_scopes = auth.scopes();
+                required
+                    .iter()
+                    .all(|req| caller_scopes.iter().any(|s| s.as_str() == *req))
+            }
+            None => false,
+        }
     }
 
     pub async fn call(
@@ -279,7 +318,9 @@ impl Catalog {
             .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
 
         let start = std::time::Instant::now();
-        let result = set.call(tool_name, arguments.clone()).await;
+        let result = set
+            .call(&tool_name, arguments.clone(), self.auth.as_ref())
+            .await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
         let (outcome, tokens_returned) = match &result {
@@ -429,14 +470,15 @@ mod tests {
             &self,
             _tool_name: &str,
             _arguments: Option<JsonObject>,
+            _auth: Option<&AuthContext>,
         ) -> Result<CallToolResult, ToolSetsError> {
             unimplemented!()
         }
     }
 
-    fn test_catalog(sets: Vec<Box<dyn ToolSet>>) -> Catalog {
+    fn test_catalog(sets: Vec<Arc<dyn ToolSet>>) -> Catalog {
         Catalog {
-            sets: Arc::new(sets),
+            sets: Arc::new(RwLock::new(sets)),
             audit: None,
             auth: None,
         }
@@ -444,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_ranks_by_keyword_hits() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tools(vec![
+        let catalog = test_catalog(vec![Arc::new(StubToolSet::with_tools(vec![
             ("get_pipeline_status", "Get pipeline build status"),
             ("list_pipelines", "List CI pipelines"),
             ("search_code", "Semantic search over indexed codebases"),
@@ -460,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_individual_keywords_match_across_name() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+        let catalog = test_catalog(vec![Arc::new(StubToolSet::with_tool(
             "get_pipeline_status",
             "Returns the current status of a CI pipeline",
         ))]);
@@ -473,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_normalizes_underscores_and_hyphens() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+        let catalog = test_catalog(vec![Arc::new(StubToolSet::with_tool(
             "search_code",
             "Semantic search over indexed codebases",
         ))]);
@@ -488,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_single_keyword_matches() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tools(vec![
+        let catalog = test_catalog(vec![Arc::new(StubToolSet::with_tools(vec![
             ("list_pipelines", "List CI pipelines"),
             ("get_build_log", "Get build output"),
         ]))]);
@@ -500,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_no_match_returns_empty() {
-        let catalog = test_catalog(vec![Box::new(StubToolSet::with_tool(
+        let catalog = test_catalog(vec![Arc::new(StubToolSet::with_tool(
             "search_code",
             "Semantic search over indexed codebases",
         ))]);
@@ -515,5 +557,132 @@ mod tests {
         assert_eq!(normalize("list-pipelines"), "list pipelines");
         assert_eq!(normalize("Search_Code"), "search code");
         assert_eq!(normalize("no changes"), "no changes");
+    }
+
+    // ── Scope-filtering tests ─────────────────────────────────────────
+
+    struct ScopedStubToolSet {
+        entries: Vec<ToolSetEntry>,
+        scopes: Vec<&'static str>,
+    }
+
+    impl ScopedStubToolSet {
+        fn new(name: &str, description: &str, scopes: Vec<&'static str>) -> Self {
+            let tool = Tool::new(
+                name.to_string(),
+                description.to_string(),
+                JsonObject::default(),
+            );
+            Self {
+                entries: vec![ToolSetEntry {
+                    name: name.to_string(),
+                    description: tool,
+                }],
+                scopes,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolSet for ScopedStubToolSet {
+        fn name(&self) -> &str {
+            "scoped"
+        }
+        fn category(&self) -> &str {
+            "admin"
+        }
+        fn category_description(&self) -> &str {
+            "Admin tools"
+        }
+        fn tools(&self) -> &[ToolSetEntry] {
+            &self.entries
+        }
+        fn required_scopes(&self) -> &[&str] {
+            &self.scopes
+        }
+        async fn call(
+            &self,
+            _tool_name: &str,
+            _arguments: Option<JsonObject>,
+            _auth: Option<&AuthContext>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            Ok(CallToolResult::success(vec![]))
+        }
+    }
+
+    use crate::primitives::{McpCredsId, UserId};
+
+    fn admin_auth() -> AuthContext {
+        AuthContext::ExportedAgent(UserId::new(), McpCredsId::new(), vec!["admin".to_string()])
+    }
+
+    fn unprivileged_auth() -> AuthContext {
+        AuthContext::ExportedAgent(UserId::new(), McpCredsId::new(), vec![])
+    }
+
+    #[tokio::test]
+    async fn scoped_toolset_visible_with_matching_scope() {
+        let catalog = test_catalog(vec![Arc::new(ScopedStubToolSet::new(
+            "list_workspaces",
+            "List all workspaces",
+            vec!["admin"],
+        ))]);
+        let catalog = catalog.with_auth(&admin_auth());
+
+        let entries = catalog.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tool_name, "list_workspaces");
+    }
+
+    #[tokio::test]
+    async fn scoped_toolset_hidden_without_scope() {
+        let catalog = test_catalog(vec![Arc::new(ScopedStubToolSet::new(
+            "list_workspaces",
+            "List all workspaces",
+            vec!["admin"],
+        ))]);
+        let catalog = catalog.with_auth(&unprivileged_auth());
+
+        let entries = catalog.entries();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scoped_toolset_hidden_without_auth() {
+        let catalog = test_catalog(vec![Arc::new(ScopedStubToolSet::new(
+            "list_workspaces",
+            "List all workspaces",
+            vec!["admin"],
+        ))]);
+
+        // No auth at all
+        let entries = catalog.entries();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_respects_scopes() {
+        let catalog = test_catalog(vec![
+            Arc::new(StubToolSet::with_tool(
+                "list_pipelines",
+                "List CI pipelines",
+            )),
+            Arc::new(ScopedStubToolSet::new(
+                "list_workspaces",
+                "List all workspaces",
+                vec!["admin"],
+            )),
+        ]);
+
+        // Unprivileged: only sees pipelines
+        let catalog_unpriv = catalog.with_auth(&unprivileged_auth());
+        let results = catalog_unpriv.search(Some("list"), None).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_name, "list_pipelines");
+
+        // Admin: sees both
+        let catalog_admin = catalog.with_auth(&admin_auth());
+        let results = catalog_admin.search(Some("list"), None).await;
+        assert_eq!(results.len(), 2);
     }
 }

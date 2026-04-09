@@ -20,4 +20,8 @@ pub enum ToolSetsError {
     CodeAssistant(String),
     #[error("ToolSetsError - Report: {0}")]
     Report(String),
+    #[error("ToolSetsError - Admin: {0}")]
+    Admin(String),
+    #[error("ToolSetsError - Unauthorized")]
+    Unauthorized,
 }
