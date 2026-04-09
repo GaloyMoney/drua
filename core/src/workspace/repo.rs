@@ -9,7 +9,7 @@ use super::entity::*;
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "Workspace",
-    columns(name(ty = "String")),
+    columns(name(ty = "String", list_by)),
     delete = "soft_without_queries"
 )]
 pub struct WorkspaceRepo {
@@ -23,13 +23,24 @@ impl WorkspaceRepo {
     }
 
     pub async fn list_all(&self) -> Result<Vec<Workspace>, WorkspaceQueryError> {
-        let (entities, _) = es_query!(
-            entity = Workspace,
-            "SELECT id, created_at FROM workspaces WHERE NOT deleted ORDER BY created_at DESC LIMIT $1",
-            101_i64,
-        )
-        .fetch_n(&self.pool, 100)
-        .await?;
-        Ok(entities)
+        const PAGE_SIZE: usize = 100;
+        let mut all = Vec::new();
+        let mut query = PaginatedQueryArgs {
+            first: PAGE_SIZE,
+            after: None,
+        };
+
+        loop {
+            let mut result = self
+                .list_by_created_at(query, ListDirection::Descending)
+                .await?;
+            all.append(&mut result.entities);
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+
+        Ok(all)
     }
 }
