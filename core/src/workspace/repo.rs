@@ -34,7 +34,7 @@ impl WorkspaceRepo {
             let mut result = self
                 .list_by_created_at(query, ListDirection::Descending)
                 .await?;
-            all.append(&mut result.entities);
+            all.extend(result.entities.drain(..).filter(|ws| !ws.is_archived()));
             match result.into_next_query() {
                 Some(next) => query = next,
                 None => break,
