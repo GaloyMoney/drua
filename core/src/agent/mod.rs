@@ -221,6 +221,29 @@ impl Agents {
         Ok(self.wrap_with_persistence(rx, conversation_id))
     }
 
+    /// Destroy an agent's sandbox (best-effort). Marks the agent as having
+    /// lost its sandbox and deletes the underlying K8s sandbox resource.
+    #[instrument(name = "domain.agent.destroy_sandbox", skip(self))]
+    pub async fn destroy_sandbox(
+        &self,
+        id: impl Into<AgentId> + std::fmt::Debug,
+    ) -> Result<(), AgentError> {
+        let client = match &self.sandbox {
+            Some(c) => c,
+            None => return Ok(()), // sandboxes not configured, nothing to do
+        };
+        let mut agent = self.repo.find_by_id(id.into()).await?;
+        let sandbox_name = agent.sandbox_name();
+
+        if agent.sandbox_lost().did_execute() {
+            self.repo.update(&mut agent).await?;
+        }
+        if let Err(e) = client.delete_sandbox(&sandbox_name).await {
+            tracing::warn!(sandbox = %sandbox_name, error = %e, "Failed to delete sandbox");
+        }
+        Ok(())
+    }
+
     /// Expose chat_history for query access (e.g., from web layer).
     pub fn chat_history(&self) -> &ChatHistory {
         &self.chat_history

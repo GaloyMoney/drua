@@ -20,6 +20,14 @@
         <td style="display: flex; gap: 0.5rem;">
           <a href="/workspaces/{{ ws.id }}/chat">Chat</a>
           <a href="/workspaces/{{ ws.id }}">Edit</a>
+          <button
+            hx-post="/workspaces/{{ ws.id }}/delete"
+            hx-confirm="Are you sure you want to delete this workspace?"
+            class="secondary outline"
+            style="padding: 0.25rem 0.5rem; margin: 0; font-size: 0.85em;"
+          >
+            Delete
+          </button>
         </td>
       </tr>
       {% endfor %}

@@ -56,6 +56,7 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces", post(workspace_create))
         .route("/workspaces/{id}", get(workspace_detail))
         .route("/workspaces/{id}", post(workspace_update))
+        .route("/workspaces/{id}/delete", post(workspace_delete))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -784,6 +785,40 @@ async fn workspace_update(
         Ok(_) => Redirect::to("/workspaces").into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to update workspace");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.workspace_delete", skip_all)]
+async fn workspace_delete(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    match state.app.workspaces().delete(workspace_id).await {
+        Ok(_) => {
+            // If called via HTMX, redirect client-side using HX-Redirect
+            if headers.contains_key("hx-request") {
+                return (
+                    [(
+                        axum::http::header::HeaderName::from_static("hx-redirect"),
+                        "/workspaces".parse::<axum::http::HeaderValue>().unwrap(),
+                    )],
+                    "",
+                )
+                    .into_response();
+            }
+            Redirect::to("/workspaces").into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to delete workspace");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

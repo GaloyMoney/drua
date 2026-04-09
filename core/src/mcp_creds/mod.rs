@@ -88,6 +88,22 @@ impl McpCredentials {
         Ok(creds)
     }
 
+    #[instrument(name = "domain.mcp_creds.revoke_in_op", skip(self, op))]
+    pub async fn revoke_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        id: impl Into<McpCredsId> + std::fmt::Debug,
+    ) -> Result<McpCreds, McpCredsError> {
+        let id = id.into();
+        let mut creds = self.repo.find_by_id(id).await?;
+
+        if creds.revoke().did_execute() {
+            self.repo.update_in_op(op, &mut creds).await?;
+        }
+
+        Ok(creds)
+    }
+
     #[instrument(name = "domain.mcp_creds.list_for_user", skip(self))]
     pub async fn list_for_user(
         &self,
