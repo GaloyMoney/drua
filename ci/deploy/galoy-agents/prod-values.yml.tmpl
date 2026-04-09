@@ -83,14 +83,13 @@ sandbox:
     digest: "${sandbox_base_image_digest}"
     tag: ""
   persistence:
-    enabled: true
     mountPath: /workspace
     size: 10Gi
     storageClassName: standard-rwo
   anthropicApiKeySecret: anthropic-api-key
-  warmPool:
-    enabled: true
-    minReady: 1
+
+kubernetesMcpServer:
+  enabled: true
 
 postgresql:
   enabled: false
