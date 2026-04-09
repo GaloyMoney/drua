@@ -71,8 +71,7 @@ spec:
       - name: agent-sandbox-controller
         image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.2.1
         args:
-        - "--leader-elect=true"
-        - "--extensions"
+        - --leader-elect=true
         ports:
         - name: metrics
           containerPort: 8080

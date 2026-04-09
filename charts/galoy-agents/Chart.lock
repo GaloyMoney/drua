@@ -2,5 +2,8 @@ dependencies:
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
   version: 16.4.13
-digest: sha256:75c7675e6773a15d9613712ee8093ab433471ff5a0b9a29c62efc81e964ee509
-generated: "2026-03-23T23:35:52.44472+01:00"
+- name: kubernetes-mcp-server
+  repository: file://charts/kubernetes-mcp-server
+  version: 0.1.0
+digest: sha256:6b6444c2734a1ced54d58cb3e4108d2367533a0c579bc27dbd12779d895bc289
+generated: "2026-04-09T22:52:17.578799+02:00"
