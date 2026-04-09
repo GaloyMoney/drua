@@ -43,10 +43,14 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
                 .or_else(|| usage.and_then(|u| u.get("output_tokens")))
                 .and_then(|n| n.as_u64())
                 .unwrap_or(0) as u32;
+            let duration_ms = v.get("duration_ms").and_then(|n| n.as_u64());
+            let cost_usd = v.get("total_cost_usd").and_then(|n| n.as_f64());
             Some(AgentMessageEvent::Done {
                 turns,
                 input_tokens,
                 output_tokens,
+                duration_ms,
+                cost_usd,
             })
         }
         "error" => {
@@ -115,7 +119,22 @@ pub(super) async fn ensure_sandbox(
         SandboxState::Ready | SandboxState::Provisioning => {
             match client.get_sandbox(&sandbox_name).await {
                 Ok(_) if agent.sandbox_state == SandboxState::Ready => {
-                    return Ok(sandbox_name);
+                    // Check if the sandbox image is up-to-date with the template
+                    match client.is_sandbox_current(&sandbox_name).await {
+                        Ok(true) => return Ok(sandbox_name),
+                        Ok(false) => {
+                            emit_status(tx, "Updating sandbox image…").await;
+                            let _ = client.delete_sandbox(&sandbox_name).await;
+                            if agent.sandbox_lost().did_execute() {
+                                repo.update(&mut agent).await?;
+                            }
+                            // Fall through to creation below
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to check sandbox image, continuing");
+                            return Ok(sandbox_name);
+                        }
+                    }
                 }
                 Ok(_) => {
                     emit_status(tx, "Waiting for sandbox to be ready…").await;

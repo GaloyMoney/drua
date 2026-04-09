@@ -246,6 +246,45 @@ impl SandboxClient {
         })
     }
 
+    /// Check if a sandbox's container image matches the current template.
+    ///
+    /// Returns `true` if the sandbox is up-to-date, `false` if it needs recreation.
+    #[instrument(name = "sandbox_client.is_sandbox_current", skip_all, fields(%name))]
+    pub async fn is_sandbox_current(&self, name: &str) -> Result<bool, SandboxError> {
+        let template = self.read_template().await?;
+        let template_image = template
+            .spec
+            .pod_template
+            .spec
+            .as_ref()
+            .and_then(|s| s.containers.first())
+            .and_then(|c| c.image.as_deref());
+
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        let sandbox = sandboxes.get(name).await.map_err(|e| match &e {
+            kube::Error::Api(resp) if resp.code == 404 => SandboxError::NotFound(name.to_string()),
+            _ => SandboxError::Kube(e),
+        })?;
+        let sandbox_image = sandbox
+            .spec
+            .pod_template
+            .spec
+            .as_ref()
+            .and_then(|s| s.containers.first())
+            .and_then(|c| c.image.as_deref());
+
+        let current = template_image == sandbox_image;
+        if !current {
+            tracing::info!(
+                sandbox = %name,
+                template_image = ?template_image,
+                sandbox_image = ?sandbox_image,
+                "Sandbox image is stale"
+            );
+        }
+        Ok(current)
+    }
+
     /// Delete a Sandbox. The PVC is retained for recreation.
     #[instrument(name = "sandbox_client.delete_sandbox", skip_all, fields(%name))]
     pub async fn delete_sandbox(&self, name: &str) -> Result<(), SandboxError> {

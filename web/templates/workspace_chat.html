@@ -112,7 +112,10 @@ async function sendMessage() {
               appendMsg('msg-system', (parsed.is_error ? 'error: ' : 'ok: ') + parsed.name);
             } else if (parsed.type === 'done') {
               const tokens = (parsed.input_tokens || 0) + (parsed.output_tokens || 0);
-              appendMsg('msg-result', 'Done — ' + (parsed.turns || 0) + ' turns, ' + tokens + ' tokens');
+              const parts = [(parsed.turns || 0) + ' turns', tokens + ' tokens'];
+              if (parsed.duration_ms) parts.push((parsed.duration_ms / 1000).toFixed(1) + 's');
+              if (parsed.cost_usd) parts.push('$' + parsed.cost_usd.toFixed(4));
+              appendMsg('msg-result', 'Done — ' + parts.join(', '));
             } else if (parsed.type === 'error') {
               appendMsg('msg-error', parsed.message || JSON.stringify(parsed));
             } else if (parsed.type === 'service') {

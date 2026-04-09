@@ -351,6 +351,7 @@ impl Agents {
                         turns,
                         input_tokens,
                         output_tokens,
+                        ..
                     } => {
                         let total_tokens = (*input_tokens as i64) + (*output_tokens as i64);
                         let _ = chat_history
@@ -410,6 +411,8 @@ fn event_to_message(
             turns,
             input_tokens,
             output_tokens,
+            duration_ms,
+            cost_usd,
         } => (
             MessageRole::Done,
             serde_json::json!(null),
@@ -417,6 +420,8 @@ fn event_to_message(
                 "turns": turns,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "duration_ms": duration_ms,
+                "cost_usd": cost_usd,
             }),
         ),
         AgentMessageEvent::Error { message } => (

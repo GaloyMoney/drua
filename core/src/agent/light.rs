@@ -203,6 +203,8 @@ impl LightSession {
                         turns: turn as u32 + 1,
                         input_tokens: total_input,
                         output_tokens: total_output,
+                        duration_ms: None,
+                        cost_usd: None,
                     },
                 )
                 .await?;

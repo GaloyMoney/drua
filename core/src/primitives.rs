@@ -79,6 +79,10 @@ pub enum AgentMessageEvent {
         turns: u32,
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
     },
     /// An error occurred.
     Error { message: String },
