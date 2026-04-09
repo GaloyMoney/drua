@@ -3,8 +3,8 @@ use super::error::AgentError;
 use super::repo::AgentRepo;
 use super::AgentMessageEvent;
 
-/// Translate a JSON-line from the agent harness (Claude Agent SDK) into a
-/// canonical [`AgentMessageEvent`].
+/// Translate a JSON-line from the agent harness (Claude Code stream-json)
+/// into a canonical [`AgentMessageEvent`].
 pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let event_type = v.get("type")?.as_str()?;

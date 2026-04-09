@@ -271,6 +271,9 @@ impl Agents {
     /// Provisions the sandbox if needed, resolves its service FQDN, then
     /// sends the message via HTTP POST to the harness and streams SSE
     /// events back through the channel.
+    ///
+    /// Uses a per-agent cache to skip expensive K8s API calls (image check,
+    /// FQDN resolution, health probe) on the warm path.
     async fn send_message_sandbox(
         &self,
         agent: Agent,
