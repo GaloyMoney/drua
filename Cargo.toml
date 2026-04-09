@@ -98,6 +98,11 @@ ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "
 ndarray = "0.16"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 
-# Logging
+# Logging / Telemetry
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-opentelemetry = "0.32.1"
+opentelemetry = "0.31.0"
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-semantic-conventions = { version = "0.31.0", features = ["semconv_experimental"] }

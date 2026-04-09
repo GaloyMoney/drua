@@ -1,4 +1,5 @@
 mod config;
+mod tracing_init;
 
 use clap::Parser;
 
@@ -35,12 +36,9 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("Failed to install default CryptoProvider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    tracing_init::init_tracer(tracing_init::TracingConfig {
+        service_name: "galoy-agents".to_string(),
+    })?;
 
     let cli = Cli::parse();
     let allowed_teams: Vec<String> = cli
@@ -112,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
+
+    if let Err(e) = tracing_init::shutdown_tracer() {
+        eprintln!("Error shutting down tracer: {e}");
+    }
 
     Ok(())
 }
