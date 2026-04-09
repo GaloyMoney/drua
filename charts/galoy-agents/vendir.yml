@@ -11,3 +11,12 @@ directories:
             - manifest.yaml
             - extensions.yaml
           disableAutoChecksumValidation: true
+  - path: charts/kubernetes-mcp-server
+    contents:
+      - path: .
+        git:
+          url: https://github.com/containers/kubernetes-mcp-server
+          ref: v0.0.60
+        includePaths:
+          - charts/kubernetes-mcp-server/**
+        newRootPath: charts/kubernetes-mcp-server

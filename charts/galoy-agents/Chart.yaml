@@ -9,3 +9,7 @@ dependencies:
     version: 16.4.13
     repository: https://charts.bitnami.com/bitnami
     condition: postgresql.enabled
+  - name: kubernetes-mcp-server
+    version: 0.1.0
+    repository: file://charts/kubernetes-mcp-server
+    condition: kubernetes-mcp-server.enabled

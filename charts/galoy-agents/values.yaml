@@ -82,12 +82,17 @@ galoyAgents:
     gcsBucket: galoy-agents-models
     gcsCreds: ""
     initImage: google/cloud-sdk:slim
-kubernetesMcpServer:
+kubernetes-mcp-server:
   enabled: false
   image:
-    repository: ghcr.io/containers/kubernetes-mcp-server
-    tag: v0.0.60
-  replicas: 1
+    registry: ghcr.io
+    repository: containers/kubernetes-mcp-server
+    version: v0.0.60
+  replicaCount: 1
+  ingress:
+    enabled: false
+  service:
+    port: 3001
   resources:
     requests:
       cpu: 50m
@@ -95,11 +100,52 @@ kubernetesMcpServer:
     limits:
       cpu: 200m
       memory: 256Mi
-  service:
-    port: 3001
+  metrics:
+    serviceMonitor:
+      enabled: false
+    prometheusRule:
+      enabled: false
+  extraArgs:
+    - "--read-only"
+    - "--toolsets=core"
+  rbac:
+    create: true
+    extraClusterRoles:
+      - name: readonly
+        rules:
+          - apiGroups: [""]
+            resources: [pods, pods/log, services, events, namespaces, nodes, endpoints, persistentvolumeclaims, replicationcontrollers]
+            verbs: [get, list, watch]
+          - apiGroups: [""]
+            resources: [nodes/proxy]
+            verbs: [get]
+          - apiGroups: [apps]
+            resources: [deployments, statefulsets, daemonsets, replicasets]
+            verbs: [get, list, watch]
+          - apiGroups: [batch]
+            resources: [jobs, cronjobs]
+            verbs: [get, list, watch]
+          - apiGroups: [networking.k8s.io]
+            resources: [ingresses, networkpolicies]
+            verbs: [get, list, watch]
+          - apiGroups: [autoscaling]
+            resources: [horizontalpodautoscalers]
+            verbs: [get, list, watch]
+          - apiGroups: [metrics.k8s.io]
+            resources: [pods, nodes]
+            verbs: [get, list]
+          - apiGroups: [agents.x-k8s.io]
+            resources: [sandboxes]
+            verbs: [get, list, watch]
+    extraClusterRoleBindings:
+      - name: readonly
+        roleRef:
+          name: readonly
   config:
-    logLevel: 2
-    deniedResources:
+    port: "{{ .Values.service.port }}"
+    read_only: true
+    toolsets: ["core"]
+    denied_resources:
       - group: ""
         version: v1
         kind: Secret
