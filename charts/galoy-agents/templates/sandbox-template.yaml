@@ -32,7 +32,17 @@ spec:
         {{- else }}
         image: {{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}
         {{- end }}
-        command: ["sleep", "infinity"]
+        command: ["agent-harness"]
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 2
+          periodSeconds: 5
         resources:
           {{- toYaml .Values.sandbox.resources | nindent 10 }}
         env:

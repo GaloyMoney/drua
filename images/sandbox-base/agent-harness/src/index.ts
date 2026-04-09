@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Agent Harness — thin wrapper around @anthropic-ai/claude-agent-sdk
+ * Agent Harness — thin HTTP wrapper around @anthropic-ai/claude-agent-sdk
  *
- * Protocol:
- *   stdin  (JSON-lines): { "prompt": "...", "session_id": "...", "model": "...", "max_turns": 10 }
- *   stdout (JSON-lines): SDK events — { "type": "assistant"|"result"|"system"|... , ... }
+ * Endpoints:
+ *   POST /message  — JSON body: { "prompt": "...", "session_id": "...", ... }
+ *                    Response: SSE stream of SDK events
+ *   GET  /health   — 200 OK with JSON status
  *
  * Environment:
  *   ANTHROPIC_API_KEY — required
+ *   HARNESS_PORT      — optional (default 3000)
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { createInterface } from "node:readline";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +23,7 @@ import { fileURLToPath } from "node:url";
 const CWD = "/workspace";
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_MAX_TURNS = 10;
+const PORT = parseInt(process.env.HARNESS_PORT ?? "3000", 10);
 
 // Resolve the SDK's cli.js — placed alongside the bundle by the Nix build.
 const __filename = fileURLToPath(import.meta.url);
@@ -47,26 +50,36 @@ interface HarnessInput {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-function emit(event: Record<string, unknown>): void {
-  process.stdout.write(JSON.stringify(event) + "\n");
+function sendSSE(
+  res: ServerResponse,
+  event: Record<string, unknown>,
+): void {
+  const eventType = (event.type as string) ?? "message";
+  res.write(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`);
 }
 
-function emitError(message: string, details?: string): void {
-  emit({ type: "error", message, details });
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
 }
 
 // ── Session tracking ──────────────────────────────────────────────────
-//
-// Claude Code's --resume flag requires an existing on-disk session.
-// On the first message there is no session yet, so we start fresh and
-// capture the session_id from the result event.  Subsequent messages
-// resume that session to maintain conversation continuity.
 
 let activeSessionId: string | undefined;
 
-// ── Main loop ──────────────────────────────────────────────────────────
+/** Guard against concurrent message processing. */
+let busy = false;
 
-async function handleMessage(input: HarnessInput): Promise<void> {
+// ── Core message handler ──────────────────────────────────────────────
+
+async function handleMessage(
+  input: HarnessInput,
+  emit: (event: Record<string, unknown>) => void,
+): Promise<void> {
   const model = input.model ?? DEFAULT_MODEL;
   const maxTurns = input.max_turns ?? DEFAULT_MAX_TURNS;
 
@@ -98,40 +111,101 @@ async function handleMessage(input: HarnessInput): Promise<void> {
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    emitError("query_failed", msg);
+    emit({ type: "error", message: "query_failed", details: msg });
   }
 }
 
-async function main(): Promise<void> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    emitError("missing_api_key", "ANTHROPIC_API_KEY environment variable is required");
-    process.exit(1);
+// ── HTTP request handler ──────────────────────────────────────────────
+
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  // Health check
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        status: "ok",
+        session_id: activeSessionId ?? null,
+        busy,
+      }),
+    );
+    return;
   }
 
-  const rl = createInterface({ input: process.stdin });
+  // Message endpoint
+  if (req.method === "POST" && req.url === "/message") {
+    if (busy) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "already processing a message" }));
+      return;
+    }
 
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+    let body: string;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "failed to read request body" }));
+      return;
+    }
 
     let input: HarnessInput;
     try {
-      input = JSON.parse(trimmed) as HarnessInput;
+      input = JSON.parse(body) as HarnessInput;
     } catch {
-      emitError("invalid_json", `Failed to parse: ${trimmed}`);
-      continue;
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid JSON" }));
+      return;
     }
 
     if (!input.prompt) {
-      emitError("missing_prompt", "Input must have a 'prompt' field");
-      continue;
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "missing prompt" }));
+      return;
     }
 
-    await handleMessage(input);
+    // SSE response headers
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+
+    busy = true;
+    try {
+      await handleMessage(input, (event) => sendSSE(res, event));
+    } finally {
+      busy = false;
+    }
+    res.end();
+    return;
   }
+
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "not found" }));
 }
 
-main().catch((err) => {
-  emitError("harness_crash", String(err));
+// ── Server bootstrap ──────────────────────────────────────────────────
+
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error(
+    "ANTHROPIC_API_KEY environment variable is required",
+  );
   process.exit(1);
+}
+
+const server = createServer((req, res) => {
+  handleRequest(req, res).catch((err) => {
+    console.error("Unhandled error in request handler:", err);
+    if (!res.headersSent) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+    }
+    res.end(JSON.stringify({ error: String(err) }));
+  });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`agent-harness listening on 0.0.0.0:${PORT}`);
 });

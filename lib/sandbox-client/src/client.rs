@@ -353,34 +353,26 @@ impl SandboxClient {
         Ok(attached)
     }
 
-    /// Exec into a Sandbox pod without TTY allocation.
+    /// Read the cluster-internal service FQDN for a Sandbox.
     ///
-    /// Uses raw stdin/stdout without a pseudo-terminal. Suitable for
-    /// programmatic communication (e.g. JSON-lines).
-    #[instrument(name = "sandbox_client.exec_sandbox_raw", skip_all, fields(%sandbox_name))]
-    pub async fn exec_sandbox_raw(
-        &self,
-        sandbox_name: &str,
-        command: Vec<String>,
-    ) -> Result<AttachedProcess, SandboxError> {
-        let pod_name = self.resolve_sandbox_pod(sandbox_name).await?;
+    /// The sandbox controller creates a headless Service for every Sandbox
+    /// and records its DNS name in `status.serviceFQDN`.  This is how the
+    /// galoy-agents server reaches the harness HTTP server inside the pod.
+    #[instrument(name = "sandbox_client.get_service_fqdn", skip_all, fields(%sandbox_name))]
+    pub async fn get_service_fqdn(&self, sandbox_name: &str) -> Result<String, SandboxError> {
+        let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
+        let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
+            kube::Error::Api(resp) if resp.code == 404 => {
+                SandboxError::NotFound(sandbox_name.to_string())
+            }
+            _ => SandboxError::Kube(e),
+        })?;
 
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let ap = AttachParams {
-            stdin: true,
-            stdout: true,
-            stderr: true,
-            tty: false,
-            ..Default::default()
-        };
-        let attached = pods.exec(&pod_name, &command, &ap).await?;
-
-        tracing::info!(
-            sandbox = %sandbox_name,
-            pod = %pod_name,
-            "Raw exec session started"
-        );
-        Ok(attached)
+        sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.service_fqdn.clone())
+            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))
     }
 
     fn summary_from_sandbox(sandbox: &Sandbox) -> SandboxSummary {

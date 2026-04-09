@@ -9,4 +9,3 @@ mod types;
 
 pub use client::{PersistenceConfig, ResourceConfig, SandboxClient, SandboxSummary};
 pub use error::SandboxError;
-pub use kube::api::AttachedProcess;
