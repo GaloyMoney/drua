@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT created_at, id FROM workspaces WHERE (COALESCE((created_at, id) > ($3, $2), $2 IS NULL)) ORDER BY created_at ASC, id ASC LIMIT $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN workspace_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM workspaces WHERE (COALESCE(id < $2, true)) AND deleted = FALSE ORDER BY id DESC LIMIT $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $3 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN workspace_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -33,7 +33,6 @@
       "Left": [
         "Int8",
         "Uuid",
-        "Timestamptz",
         "Bool"
       ]
     },
@@ -45,5 +44,5 @@
       false
     ]
   },
-  "hash": "f37cb88744c731aea0f498255f9ea620bef2967736638932253226a6641a81b5"
+  "hash": "e3a089870675e7485c30e4670785e77967a849748e0e39ac8fd7dde6845ac983"
 }

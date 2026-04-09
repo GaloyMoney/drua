@@ -106,6 +106,10 @@ impl Workspaces {
         let id = id.into();
         let mut workspace = self.repo.find_by_id(id).await?;
 
+        if !workspace.archive().did_execute() {
+            return Ok(workspace);
+        }
+
         // Cascade: revoke MCP creds and tear down sandboxes for all agents
         let agent_list = self.agents.list_for_workspace(id).await?;
         for agent in &agent_list {
@@ -129,8 +133,10 @@ impl Workspaces {
             }
         }
 
-        let _ = workspace.archive();
         self.repo.update_in_op(op, &mut workspace).await?;
+        self.repo
+            .delete_in_op(op, self.repo.find_by_id(id).await?)
+            .await?;
         Ok(workspace)
     }
 }
