@@ -20,7 +20,7 @@ use audit::Audit;
 use code_assistant::CodeAssistant;
 use mcp_creds::McpCredentials;
 use report::Reports;
-use toolset::{ToolSets, ToolSetsError};
+use toolset::{AdminToolSet, ToolSets, ToolSetsError};
 use user::Users;
 use workspace::Workspaces;
 
@@ -91,6 +91,11 @@ impl App {
             )
             .await?,
         );
+        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
+
+        // Register admin toolset after agents/workspaces to break circular dep
+        toolsets.register(AdminToolSet::new(workspaces.clone(), Arc::clone(&agents)));
+
         Ok(Self {
             users: Users::new(pool),
             mcp_creds,
@@ -99,7 +104,7 @@ impl App {
             code_assistant,
             reports,
             toolsets,
-            workspaces: Workspaces::new(pool, agents),
+            workspaces,
         })
     }
 

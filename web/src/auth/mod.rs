@@ -67,7 +67,7 @@ async fn resolve_auth_context(
         if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
             if !creds.is_revoked() {
                 if let Some(user_id) = creds.owner.user_id() {
-                    return AuthContext::ExportedAgent(user_id, creds.id);
+                    return AuthContext::ExportedAgent(user_id, creds.id, creds.scopes.clone());
                 }
                 // Agent-owned creds cannot be used as external bearer tokens
             }

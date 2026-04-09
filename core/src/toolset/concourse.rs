@@ -3,6 +3,8 @@ use std::sync::Arc;
 use concourse_client::ConcourseClient;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
+use crate::auth::AuthContext;
+
 use super::{ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct ConcourseToolSet {
@@ -134,6 +136,7 @@ impl ToolSet for ConcourseToolSet {
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
+        _auth: Option<&AuthContext>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let args = arguments.unwrap_or_default();
         match tool_name {

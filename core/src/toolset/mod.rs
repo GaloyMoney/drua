@@ -1,3 +1,4 @@
+pub mod admin;
 mod catalog;
 pub mod code_assistant;
 pub mod concourse;
@@ -7,6 +8,7 @@ pub mod report;
 mod traits;
 mod upstream;
 
+pub use admin::AdminToolSet;
 pub use catalog::{Catalog, CatalogEntry};
 pub use code_assistant::CodeAssistantToolSet;
 pub use concourse::ConcourseToolSet;
@@ -16,14 +18,15 @@ pub use report::ReportToolSet;
 pub use traits::*;
 pub use upstream::*;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::audit::Audit;
 use crate::code_assistant::CodeAssistant;
 use crate::report::Reports;
 
 pub struct ToolSets {
-    catalog: Catalog,
+    sets: Arc<RwLock<Vec<Arc<dyn ToolSet>>>>,
+    audit: Option<Arc<Audit>>,
 }
 
 impl ToolSets {
@@ -34,7 +37,7 @@ impl ToolSets {
         reports: Option<Arc<Reports>>,
         audit: Option<Arc<Audit>>,
     ) -> Result<Self, ToolSetsError> {
-        let mut sets: Vec<Box<dyn ToolSet>> = Vec::new();
+        let mut sets: Vec<Arc<dyn ToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
             if upstream.auth_header.is_empty() {
@@ -49,7 +52,7 @@ impl ToolSets {
                         tools = ts.tools().len(),
                         "MCP upstream toolset initialized"
                     );
-                    sets.push(Box::new(ts));
+                    sets.push(Arc::new(ts));
                 }
                 Err(e) => {
                     tracing::warn!(name = %upstream.name, error = %e, "Failed to initialize MCP upstream, skipping");
@@ -67,30 +70,45 @@ impl ToolSets {
                 config.concourse.username.clone(),
                 config.concourse.password.clone(),
             )?;
-            sets.push(Box::new(ConcourseToolSet::new(client)));
+            sets.push(Arc::new(ConcourseToolSet::new(client)));
             tracing::info!(url = %config.concourse.url, "Concourse toolset initialized");
         }
 
         if let Some(ca) = code_assistant {
-            sets.push(Box::new(CodeAssistantToolSet::new(ca)));
+            sets.push(Arc::new(CodeAssistantToolSet::new(ca)));
             tracing::info!("Code assistant toolset initialized");
         }
 
         if let Some(rpt) = reports {
-            sets.push(Box::new(ReportToolSet::new(rpt)));
+            sets.push(Arc::new(ReportToolSet::new(rpt)));
             tracing::info!("Report toolset initialized");
         }
 
         Ok(Self {
-            catalog: Catalog {
-                sets: Arc::new(sets),
-                audit,
-                auth: None,
-            },
+            sets: Arc::new(RwLock::new(sets)),
+            audit,
         })
     }
 
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
+    /// Register a toolset after initialization (e.g. for breaking circular deps).
+    pub fn register(&self, toolset: impl ToolSet + 'static) {
+        let toolset: Arc<dyn ToolSet> = Arc::new(toolset);
+        let mut sets = self.sets.write().expect("toolset lock poisoned");
+        tracing::info!(
+            name = toolset.name(),
+            category = toolset.category(),
+            tools = toolset.tools().len(),
+            "Late-registered toolset"
+        );
+        sets.push(toolset);
+    }
+
+    /// Build a catalog handle that shares the toolset registry.
+    pub fn catalog(&self) -> Catalog {
+        Catalog {
+            sets: Arc::clone(&self.sets),
+            audit: self.audit.clone(),
+            auth: None,
+        }
     }
 }

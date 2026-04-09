@@ -72,11 +72,11 @@ impl From<&AuthContext> for AuditSubject {
     fn from(ctx: &AuthContext) -> Self {
         match ctx {
             AuthContext::User(user_id) => AuditSubject::User { user_id: *user_id },
-            AuthContext::ExportedAgent(user_id, mcp_creds_id) => AuditSubject::ExportedAgent {
+            AuthContext::ExportedAgent(user_id, mcp_creds_id, _) => AuditSubject::ExportedAgent {
                 mcp_creds_id: *mcp_creds_id,
                 user_id: *user_id,
             },
-            AuthContext::InternalAgent(user_id, agent_id, mcp_creds_id) => {
+            AuthContext::InternalAgent(user_id, agent_id, mcp_creds_id, _) => {
                 AuditSubject::InternalAgent {
                     user_id: *user_id,
                     agent_id: *agent_id,

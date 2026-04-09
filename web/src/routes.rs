@@ -113,6 +113,8 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
 #[derive(serde::Deserialize)]
 pub struct CreateMcpCredsForm {
     name: String,
+    #[serde(default)]
+    admin: Option<String>,
 }
 
 fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
@@ -147,10 +149,16 @@ async fn create_mcp_creds(
 
     let (raw_token, token_hash) = generate_token();
 
+    let scopes = if form.admin.as_deref() == Some("true") {
+        vec!["admin".to_string()]
+    } else {
+        vec![]
+    };
+
     match state
         .app
         .mcp_creds()
-        .create_for_user(user_id, &form.name, token_hash, vec![])
+        .create_for_user(user_id, &form.name, token_hash, scopes)
         .await
     {
         Ok(_) => {
@@ -846,8 +854,8 @@ async fn api_agent_message(
 ) -> Response {
     let user_id = match &auth {
         AuthContext::User(id) => *id,
-        AuthContext::ExportedAgent(id, _) => *id,
-        AuthContext::InternalAgent(id, _, _) => *id,
+        AuthContext::ExportedAgent(id, _, _) => *id,
+        AuthContext::InternalAgent(id, _, _, _) => *id,
         AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 

@@ -38,7 +38,7 @@ impl McpGateway {
 
     fn require_auth(parts: &http::request::Parts) -> Result<&AuthContext, ErrorData> {
         match parts.extensions.get::<AuthContext>() {
-            Some(auth @ AuthContext::ExportedAgent(_, _)) => Ok(auth),
+            Some(auth @ AuthContext::ExportedAgent(_, _, _)) => Ok(auth),
             _ => Err(ErrorData::new(
                 ErrorCode::INVALID_REQUEST,
                 "Authentication required: provide a valid Bearer token",
@@ -47,7 +47,7 @@ impl McpGateway {
         }
     }
 
-    fn catalog(&self) -> &galoy_agents_core::toolset::Catalog {
+    fn catalog(&self) -> galoy_agents_core::toolset::Catalog {
         self.app.toolsets().catalog()
     }
 }

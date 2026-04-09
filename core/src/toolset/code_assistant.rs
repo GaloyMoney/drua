@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crate::code_assistant::{CodeAssistant, SearchCodeParams};
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
+use crate::auth::AuthContext;
+
 use super::{ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct CodeAssistantToolSet {
@@ -76,6 +78,7 @@ impl ToolSet for CodeAssistantToolSet {
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
+        _auth: Option<&AuthContext>,
     ) -> Result<CallToolResult, ToolSetsError> {
         match tool_name {
             "search_code" => {
