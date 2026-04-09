@@ -1,7 +1,7 @@
 pub mod config;
 mod entity;
 pub mod error;
-mod harness_pool;
+mod harness_client;
 mod light;
 pub(crate) mod repo;
 mod sandbox;
@@ -28,7 +28,7 @@ pub use crate::primitives::AgentMessageEvent;
 pub struct Agents {
     repo: AgentRepo,
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
-    harness_pool: harness_pool::HarnessPool,
+    harness_client: harness_client::HarnessClient,
     light_config: config::LightRuntimeConfig,
     mcp_gateway_url: String,
     default_storage_class: String,
@@ -66,7 +66,7 @@ impl Agents {
         Ok(Self {
             repo,
             sandbox,
-            harness_pool: harness_pool::HarnessPool::new(),
+            harness_client: harness_client::HarnessClient::new(),
             light_config: config.light,
             mcp_gateway_url,
             default_storage_class,
@@ -221,9 +221,9 @@ impl Agents {
 
     /// Sandbox-specific send_message path.
     ///
-    /// Uses the [`HarnessPool`](harness_pool::HarnessPool) to reuse an
-    /// existing exec session when possible, avoiding the 1-3 s harness
-    /// startup cost on subsequent messages.
+    /// Provisions the sandbox if needed, resolves its service FQDN, then
+    /// sends the message via HTTP POST to the harness and streams SSE
+    /// events back through the channel.
     async fn send_message_sandbox(
         &self,
         agent: Agent,
@@ -241,13 +241,12 @@ impl Agents {
         );
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
-        let pool = self.harness_pool.clone();
+        let harness = self.harness_client.clone();
         let repo = self.repo.clone();
         let session_id = Some(agent.id.to_string());
         let model = Some(agent.chat_config.model.clone());
         let max_turns = Some(agent.chat_config.max_turns);
         let disallowed_tools = agent.sandbox_config.disallowed_tools.clone();
-        let agent_id = agent.id;
 
         // Build MCP server config if gateway URL and token are available
         let mcp_servers = if !self.mcp_gateway_url.is_empty() && !agent.mcp_token.is_empty() {
@@ -279,19 +278,32 @@ impl Agents {
                 }
             };
 
-            let msg = harness_pool::HarnessMessage {
-                agent_id,
-                sandbox_name: sandbox_name.clone(),
-                client: Arc::new(client),
-                prompt,
-                session_id,
-                model,
-                max_turns,
-                disallowed_tools,
-                mcp_servers,
+            // Resolve the harness HTTP endpoint from the Sandbox CRD status
+            let service_fqdn = match client.get_service_fqdn(&sandbox_name).await {
+                Ok(fqdn) => fqdn,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to resolve sandbox service FQDN");
+                    let _ = tx
+                        .send(AgentMessageEvent::Error {
+                            message: format!("Failed to resolve sandbox service: {e}"),
+                        })
+                        .await;
+                    return;
+                }
             };
 
-            if let Err(e) = pool.send_message(msg, tx.clone()).await {
+            let mut input = serde_json::json!({
+                "prompt": prompt,
+                "session_id": session_id,
+                "model": model,
+                "max_turns": max_turns,
+                "disallowed_tools": disallowed_tools,
+            });
+            if let Some(mcp) = mcp_servers {
+                input["mcp_servers"] = mcp;
+            }
+
+            if let Err(e) = harness.send_message(&service_fqdn, input, tx.clone()).await {
                 tracing::error!(error = %e, sandbox = %sandbox_name, "Agent message relay failed");
                 let _ = tx
                     .send(AgentMessageEvent::Error {
