@@ -23,6 +23,20 @@
   </div>
 </form>
 
+<hr>
+<details>
+  <summary>Danger Zone</summary>
+  <p>Deleting a workspace will archive it and revoke MCP credentials for all its agents.</p>
+  <button
+    hx-post="/workspaces/{{ workspace.id }}/delete"
+    hx-confirm="Are you sure you want to delete this workspace? This will revoke all agent credentials."
+    class="secondary outline"
+    style="color: var(--pico-color-red-500, #c62828);"
+  >
+    Delete Workspace
+  </button>
+</details>
+
 <footer>
   <small>Created: {{ workspace.created_at }} | ID: <code>{{ workspace.id }}</code></small>
 </footer>

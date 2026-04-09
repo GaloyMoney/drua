@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,9 @@ pub enum WorkspaceEvent {
         name: String,
         description: Option<String>,
     },
+    Archived {
+        archived_at: DateTime<Utc>,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -27,6 +31,8 @@ pub struct Workspace {
     pub name: String,
     #[builder(setter(strip_option), default)]
     pub description: Option<String>,
+    #[builder(setter(strip_option), default)]
+    pub archived_at: Option<DateTime<Utc>>,
     events: EntityEvents<WorkspaceEvent>,
 }
 
@@ -37,12 +43,25 @@ impl Workspace {
             .expect("entity_first_persisted_at not found")
     }
 
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
+    }
+
     pub(super) fn update(&mut self, name: impl Into<String>, description: Option<String>) {
         let name = name.into();
         self.name = name.clone();
         self.description = description.clone();
         self.events
             .push(WorkspaceEvent::Updated { name, description });
+    }
+
+    pub(super) fn archive(&mut self) -> Idempotent<()> {
+        idempotency_guard!(self.events.iter_all(), already_applied: WorkspaceEvent::Archived { .. });
+
+        let archived_at = Utc::now();
+        self.archived_at = Some(archived_at);
+        self.events.push(WorkspaceEvent::Archived { archived_at });
+        Idempotent::Executed(())
     }
 }
 
@@ -73,6 +92,9 @@ impl TryFromEvents<WorkspaceEvent> for Workspace {
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
                     }
+                }
+                WorkspaceEvent::Archived { archived_at } => {
+                    builder = builder.archived_at(*archived_at);
                 }
             }
         }
@@ -136,6 +158,15 @@ mod tests {
         let ws = new_workspace();
         assert_eq!(ws.name, "test-workspace");
         assert_eq!(ws.description, Some("A test workspace".to_string()));
+    }
+
+    #[test]
+    fn workspace_archive() {
+        let mut ws = new_workspace();
+        assert!(!ws.is_archived());
+        let _ = ws.archive();
+        assert!(ws.is_archived());
+        assert!(ws.archived_at.is_some());
     }
 
     #[test]

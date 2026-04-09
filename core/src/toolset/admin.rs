@@ -61,6 +61,17 @@ impl AdminToolSet {
                 }),
             ),
             tool_entry(
+                "delete_workspace",
+                "Archive (soft-delete) a workspace and revoke MCP credentials for all its agents.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": {"type": "string", "description": "The workspace UUID to delete"}
+                    },
+                    "required": ["workspace_id"]
+                }),
+            ),
+            tool_entry(
                 "list_agents",
                 "List agents in a workspace. Returns agent IDs, names, types, and status.",
                 serde_json::json!({
@@ -126,6 +137,7 @@ impl AdminToolSet {
                     "id": ws.id.to_string(),
                     "name": ws.name,
                     "description": ws.description,
+                    "archived": ws.is_archived(),
                     "created_at": ws.created_at().to_rfc3339(),
                 })
             })
@@ -176,6 +188,7 @@ impl AdminToolSet {
             "id": ws.id.to_string(),
             "name": ws.name,
             "description": ws.description,
+            "archived": ws.is_archived(),
             "created_at": ws.created_at().to_rfc3339(),
         });
         Ok(CallToolResult::success(vec![Content::text(
@@ -203,6 +216,27 @@ impl AdminToolSet {
             "id": ws.id.to_string(),
             "name": ws.name,
             "description": ws.description,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    #[instrument(name = "toolset.admin.delete_workspace", skip_all)]
+    async fn handle_delete_workspace(
+        &self,
+        args: &JsonObject,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let workspace_id = parse_uuid_arg(args, "workspace_id")?;
+        let ws = self
+            .workspaces
+            .delete(WorkspaceId::from(workspace_id))
+            .await
+            .map_err(|e| ToolSetsError::Admin(e.to_string()))?;
+        let result = serde_json::json!({
+            "id": ws.id.to_string(),
+            "name": ws.name,
+            "archived": ws.is_archived(),
         });
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
@@ -332,6 +366,7 @@ impl ToolSet for AdminToolSet {
             "create_workspace" => self.handle_create_workspace(&args, auth).await,
             "get_workspace" => self.handle_get_workspace(&args).await,
             "update_workspace" => self.handle_update_workspace(&args).await,
+            "delete_workspace" => self.handle_delete_workspace(&args).await,
             "list_agents" => self.handle_list_agents(&args).await,
             "get_agent" => self.handle_get_agent(&args).await,
             "send_agent_message" => self.handle_send_agent_message(&args, auth).await,
