@@ -6,8 +6,11 @@ mod light;
 pub(crate) mod repo;
 mod sandbox;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::instrument;
 
 pub use config::AgentConfig;
@@ -24,6 +27,18 @@ use crate::toolset::ToolSets;
 
 pub use crate::primitives::AgentMessageEvent;
 
+/// Cached sandbox metadata to avoid redundant K8s API calls on every message.
+struct SandboxCacheEntry {
+    service_fqdn: String,
+    image_checked_at: Instant,
+    last_healthy_at: Instant,
+}
+
+/// How long to trust the image-currency check before re-checking.
+const IMAGE_CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// How long to trust the health check before re-checking.
+const HEALTH_CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct Agents {
     repo: AgentRepo,
@@ -35,6 +50,7 @@ pub struct Agents {
     toolsets: Arc<ToolSets>,
     mcp_creds: McpCredentials,
     chat_history: ChatHistory,
+    sandbox_cache: Arc<Mutex<HashMap<AgentId, SandboxCacheEntry>>>,
 }
 
 impl Agents {
@@ -72,6 +88,7 @@ impl Agents {
             default_storage_class,
             toolsets,
             mcp_creds,
+            sandbox_cache: Arc::new(Mutex::new(HashMap::new())),
             chat_history,
         })
     }
@@ -277,6 +294,8 @@ impl Agents {
         let model = Some(agent.chat_config.model.clone());
         let max_turns = Some(agent.chat_config.max_turns);
         let disallowed_tools = agent.sandbox_config.disallowed_tools.clone();
+        let sandbox_cache = Arc::clone(&self.sandbox_cache);
+        let agent_id = agent.id;
 
         // Build MCP server config if gateway URL and token are available
         let mcp_servers = if !self.mcp_gateway_url.is_empty() && !agent.mcp_token.is_empty() {
@@ -294,11 +313,102 @@ impl Agents {
         };
 
         tokio::spawn(async move {
-            // Ensure sandbox is provisioned, streaming status to the UI
-            let sandbox_name = match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
-                Ok(name) => name,
-                Err(e) => {
-                    tracing::error!(error = %e, "Sandbox provisioning failed");
+            // Check cache for a previously resolved sandbox
+            let cached = {
+                let cache = sandbox_cache.lock().await;
+                cache.get(&agent_id).map(|e| {
+                    (
+                        e.service_fqdn.clone(),
+                        e.image_checked_at,
+                        e.last_healthy_at,
+                    )
+                })
+            };
+
+            let service_fqdn = if let Some((fqdn, image_checked_at, last_healthy_at)) = cached {
+                // Fast path: skip image check if recently verified
+                if image_checked_at.elapsed() > IMAGE_CHECK_TTL {
+                    // Re-check image currency periodically
+                    match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // Sandbox was stale — evict cache and retry
+                            sandbox_cache.lock().await.remove(&agent_id);
+                            tracing::warn!(error = %e, "Cached sandbox stale, evicted");
+                            let _ = tx
+                                .send(AgentMessageEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                    // Update image check timestamp
+                    if let Some(entry) = sandbox_cache.lock().await.get_mut(&agent_id) {
+                        entry.image_checked_at = Instant::now();
+                    }
+                }
+
+                // Skip health check if recently healthy
+                if last_healthy_at.elapsed() > HEALTH_CHECK_TTL {
+                    if let Err(e) = harness
+                        .wait_healthy(&fqdn, std::time::Duration::from_secs(30))
+                        .await
+                    {
+                        // Health check failed — evict cache
+                        sandbox_cache.lock().await.remove(&agent_id);
+                        tracing::warn!(error = %e, "Cached harness unhealthy, evicted");
+                        let _ = tx
+                            .send(AgentMessageEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+                    if let Some(entry) = sandbox_cache.lock().await.get_mut(&agent_id) {
+                        entry.last_healthy_at = Instant::now();
+                    }
+                }
+
+                fqdn
+            } else {
+                // Cold path: full provisioning flow
+                let sandbox_name = match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Sandbox provisioning failed");
+                        let _ = tx
+                            .send(AgentMessageEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+                };
+
+                let fqdn = match client.get_service_fqdn(&sandbox_name).await {
+                    Ok(fqdn) => fqdn,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to resolve sandbox service FQDN");
+                        let _ = tx
+                            .send(AgentMessageEvent::Error {
+                                message: format!("Failed to resolve sandbox service: {e}"),
+                            })
+                            .await;
+                        return;
+                    }
+                };
+
+                let _ = tx
+                    .send(AgentMessageEvent::Service {
+                        message: "Connecting to agent…".to_string(),
+                    })
+                    .await;
+                if let Err(e) = harness
+                    .wait_healthy(&fqdn, std::time::Duration::from_secs(60))
+                    .await
+                {
+                    tracing::error!(error = %e, "Harness health check failed");
                     let _ = tx
                         .send(AgentMessageEvent::Error {
                             message: e.to_string(),
@@ -306,40 +416,19 @@ impl Agents {
                         .await;
                     return;
                 }
-            };
 
-            // Resolve the harness HTTP endpoint from the Sandbox CRD status
-            let service_fqdn = match client.get_service_fqdn(&sandbox_name).await {
-                Ok(fqdn) => fqdn,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to resolve sandbox service FQDN");
-                    let _ = tx
-                        .send(AgentMessageEvent::Error {
-                            message: format!("Failed to resolve sandbox service: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-            };
+                // Populate cache
+                sandbox_cache.lock().await.insert(
+                    agent_id,
+                    SandboxCacheEntry {
+                        service_fqdn: fqdn.clone(),
+                        image_checked_at: Instant::now(),
+                        last_healthy_at: Instant::now(),
+                    },
+                );
 
-            // Wait for the harness HTTP server to be healthy before sending
-            let _ = tx
-                .send(AgentMessageEvent::Service {
-                    message: "Connecting to agent…".to_string(),
-                })
-                .await;
-            if let Err(e) = harness
-                .wait_healthy(&service_fqdn, std::time::Duration::from_secs(60))
-                .await
-            {
-                tracing::error!(error = %e, "Harness health check failed");
-                let _ = tx
-                    .send(AgentMessageEvent::Error {
-                        message: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
+                fqdn
+            };
 
             let mut input = serde_json::json!({
                 "prompt": prompt,
@@ -353,12 +442,19 @@ impl Agents {
             }
 
             if let Err(e) = harness.send_message(&service_fqdn, input, tx.clone()).await {
-                tracing::error!(error = %e, sandbox = %sandbox_name, "Agent message relay failed");
+                tracing::error!(error = %e, "Agent message relay failed");
+                // Evict cache on send failure
+                sandbox_cache.lock().await.remove(&agent_id);
                 let _ = tx
                     .send(AgentMessageEvent::Error {
                         message: e.to_string(),
                     })
                     .await;
+            } else {
+                // Update last healthy timestamp on success
+                if let Some(entry) = sandbox_cache.lock().await.get_mut(&agent_id) {
+                    entry.last_healthy_at = Instant::now();
+                }
             }
         });
 
