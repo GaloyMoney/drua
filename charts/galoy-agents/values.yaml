@@ -82,6 +82,27 @@ galoyAgents:
     gcsBucket: galoy-agents-models
     gcsCreds: ""
     initImage: google/cloud-sdk:slim
+kubernetesMcpServer:
+  enabled: false
+  image:
+    repository: ghcr.io/containers/kubernetes-mcp-server
+    tag: v0.0.60
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  service:
+    port: 3001
+  config:
+    logLevel: 2
+    deniedResources:
+      - group: ""
+        version: v1
+        kind: Secret
 sandbox:
   enabled: false
   ## Namespace where sandbox CRs and pods are created.

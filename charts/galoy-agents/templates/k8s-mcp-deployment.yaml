@@ -1,0 +1,58 @@
+{{- if .Values.kubernetesMcpServer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+      release: {{ .Release.Name }}
+  replicas: {{ .Values.kubernetesMcpServer.replicas }}
+  template:
+    metadata:
+      labels:
+        app: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+        chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+        release: "{{ .Release.Name }}"
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/k8s-mcp-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+      containers:
+      - name: kubernetes-mcp-server
+        image: "{{ .Values.kubernetesMcpServer.image.repository }}:{{ .Values.kubernetesMcpServer.image.tag }}"
+        args:
+          - --port={{ .Values.kubernetesMcpServer.service.port }}
+          - --read-only
+          - --toolsets=core
+          - --cluster-provider=in-cluster
+          - --config=/etc/kubernetes-mcp-server/config.toml
+          - --log-level={{ .Values.kubernetesMcpServer.config.logLevel }}
+        ports:
+        - name: mcp
+          containerPort: {{ .Values.kubernetesMcpServer.service.port }}
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/kubernetes-mcp-server
+          readOnly: true
+        resources:
+        {{- toYaml .Values.kubernetesMcpServer.resources | nindent 10 }}
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+      volumes:
+      - name: config
+        configMap:
+          name: {{ template "galoyAgents.fullname" . }}-k8s-mcp-config
+{{- end }}

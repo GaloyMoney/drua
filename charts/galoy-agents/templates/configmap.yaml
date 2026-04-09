@@ -28,7 +28,7 @@ data:
         enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
         url: {{ .Values.galoyAgents.config.concourse.url | quote }}
         team: {{ .Values.galoyAgents.config.concourse.team | quote }}
-      {{- if .Values.galoyAgents.config.mcpUpstreams }}
+      {{- if or .Values.galoyAgents.config.mcpUpstreams (and .Values.kubernetesMcpServer .Values.kubernetesMcpServer.enabled) }}
       mcp_upstreams:
       {{- range .Values.galoyAgents.config.mcpUpstreams }}
         - name: {{ .name | quote }}
@@ -51,6 +51,33 @@ data:
             - {{ . | quote }}
           {{- end }}
           {{- end }}
+          {{- if .requiredScopes }}
+          required_scopes:
+          {{- range .requiredScopes }}
+            - {{ . | quote }}
+          {{- end }}
+          {{- end }}
+      {{- end }}
+      {{- if and .Values.kubernetesMcpServer .Values.kubernetesMcpServer.enabled }}
+        - name: "kubernetes"
+          url: "http://{{ template "galoyAgents.fullname" . }}-k8s-mcp:{{ .Values.kubernetesMcpServer.service.port }}/mcp"
+          tool_prefix: "k8s"
+          category: "infrastructure"
+          category_description: "Kubernetes cluster operations — pods, logs, events, deployments"
+          required_scopes:
+            - "admin"
+          allowed_tools:
+            - "events_list"
+            - "namespaces_list"
+            - "nodes_top"
+            - "nodes_stats_summary"
+            - "pods_list"
+            - "pods_list_in_namespace"
+            - "pods_get"
+            - "pods_top"
+            - "pods_log"
+            - "resources_list"
+            - "resources_get"
       {{- end }}
       {{- end }}
     sandbox:

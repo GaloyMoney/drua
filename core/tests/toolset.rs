@@ -23,6 +23,7 @@ async fn init_toolsets() {
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
             tool_prefix: None,
             allowed_tools: None,
+            required_scopes: None,
         }],
     };
     let toolsets = ToolSets::init(config, None, None, None).await.unwrap();

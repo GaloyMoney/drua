@@ -172,6 +172,18 @@ impl Catalog {
         lines.join("\n")
     }
 
+    /// Check whether the current auth context satisfies a toolset's required scopes.
+    fn caller_has_required_scopes(&self, set: &dyn ToolSet) -> bool {
+        let required = set.required_scopes();
+        if required.is_empty() {
+            return true;
+        }
+        match &self.auth {
+            Some(auth) => required.iter().all(|scope| auth.has_scope(scope)),
+            None => false,
+        }
+    }
+
     pub fn entries(&self) -> Vec<CatalogEntry> {
         let sets = self.read_sets();
         let mut entries = Vec::new();
@@ -289,23 +301,6 @@ impl Catalog {
             }
         }
         None
-    }
-
-    /// Check whether the current caller has all scopes required by a toolset.
-    fn caller_has_required_scopes(&self, set: &dyn ToolSet) -> bool {
-        let required = set.required_scopes();
-        if required.is_empty() {
-            return true;
-        }
-        match &self.auth {
-            Some(auth) => {
-                let caller_scopes = auth.scopes();
-                required
-                    .iter()
-                    .all(|req| caller_scopes.iter().any(|s| s.as_str() == *req))
-            }
-            None => false,
-        }
     }
 
     pub async fn call(

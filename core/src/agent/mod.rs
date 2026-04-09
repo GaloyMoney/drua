@@ -196,12 +196,14 @@ impl Agents {
 
         let rx = match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
-                let auth = AuthContext::InternalAgent(
-                    user_id,
-                    agent.id,
-                    agent.mcp_creds_id,
-                    vec!["agent".to_string()],
-                );
+                let scopes = self
+                    .mcp_creds
+                    .find_by_id(agent.mcp_creds_id)
+                    .await
+                    .map(|c| c.scopes.clone())
+                    .unwrap_or_default();
+                let auth =
+                    AuthContext::InternalAgent(user_id, agent.id, agent.mcp_creds_id, scopes);
                 let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
                     prompt,

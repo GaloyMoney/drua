@@ -43,6 +43,9 @@ pub struct McpUpstreamConfig {
     /// Optional whitelist of tool names to expose from this upstream.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Scopes required to access this upstream. Empty means unrestricted.
+    #[serde(default)]
+    pub required_scopes: Option<Vec<String>>,
 }
 
 fn default_auth_header_name() -> String {
