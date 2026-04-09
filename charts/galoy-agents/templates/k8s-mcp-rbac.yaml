@@ -1,0 +1,65 @@
+{{- if .Values.kubernetesMcpServer.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-k8s-mcp-readonly
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - events
+      - namespaces
+      - nodes
+      - endpoints
+      - persistentvolumeclaims
+      - replicationcontrollers
+    verbs: ["get", "list", "watch"]
+  # Node metrics (for nodes_top, nodes_stats_summary)
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  # Workload resources
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Batch resources
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  # Networking
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  # Autoscaling
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  # Metrics (for pods_top, nodes_top)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-k8s-mcp-readonly
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ template "galoyAgents.fullname" . }}-k8s-mcp-readonly
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -1,0 +1,22 @@
+{{- if .Values.kubernetesMcpServer.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "galoyAgents.fullname" . }}-k8s-mcp-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}-k8s-mcp
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+data:
+  config.toml: |-
+    read_only = true
+    toolsets = ["core"]
+    {{- range .Values.kubernetesMcpServer.config.deniedResources }}
+
+    [[denied_resources]]
+    group = {{ .group | quote }}
+    version = {{ .version | quote }}
+    kind = {{ .kind | quote }}
+    {{- end }}
+{{- end }}

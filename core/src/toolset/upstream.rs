@@ -19,6 +19,7 @@ pub struct UpstreamToolSet {
     tool_prefix: String,
     category: String,
     category_description: String,
+    required_scopes: Vec<&'static str>,
     tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,
 }
@@ -28,12 +29,14 @@ impl UpstreamToolSet {
         upstream: &McpUpstreamConfig,
     ) -> Result<UpstreamToolSet, ToolSetsError> {
         let mut headers = HashMap::new();
-        headers.insert(
-            HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
-                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
-            HeaderValue::from_str(&upstream.auth_header)
-                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
-        );
+        if !upstream.auth_header.is_empty() {
+            headers.insert(
+                HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
+                    .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
+                HeaderValue::from_str(&upstream.auth_header)
+                    .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
+            );
+        }
 
         let transport_config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str())
             .custom_headers(headers);
@@ -68,6 +71,13 @@ impl UpstreamToolSet {
             tool_prefix,
             category: upstream.category.clone().unwrap_or_default(),
             category_description: upstream.category_description.clone().unwrap_or_default(),
+            required_scopes: upstream
+                .required_scopes
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|s| &*Box::leak(s.clone().into_boxed_str()))
+                .collect(),
             tools,
             client,
         })
@@ -94,6 +104,10 @@ impl ToolSet for UpstreamToolSet {
 
     fn category_description(&self) -> &str {
         &self.category_description
+    }
+
+    fn required_scopes(&self) -> &[&str] {
+        &self.required_scopes
     }
 
     fn tools(&self) -> &[ToolSetEntry] {

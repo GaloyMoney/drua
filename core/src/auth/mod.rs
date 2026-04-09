@@ -33,8 +33,14 @@ impl AuthContext {
         }
     }
 
-    /// Check whether this context carries the given scope.
+    /// Check whether this auth context carries the given scope.
+    /// Users (session-based) implicitly have all scopes.
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes().iter().any(|s| s == scope)
+        match self {
+            AuthContext::User(_) => true,
+            AuthContext::ExportedAgent(_, _, scopes) => scopes.iter().any(|s| s == scope),
+            AuthContext::InternalAgent(_, _, _, scopes) => scopes.iter().any(|s| s == scope),
+            AuthContext::Anonymous => false,
+        }
     }
 }

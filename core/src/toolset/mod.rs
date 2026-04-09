@@ -40,10 +40,6 @@ impl ToolSets {
         let mut sets: Vec<Arc<dyn ToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            if upstream.auth_header.is_empty() {
-                tracing::warn!(name = %upstream.name, "Skipping upstream — no auth header set");
-                continue;
-            }
             match UpstreamToolSet::init(upstream).await {
                 Ok(ts) => {
                     tracing::info!(
