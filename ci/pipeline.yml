@@ -4,18 +4,16 @@
 #@ )
 
 groups:
-- name: galoy-agents-bin
+- name: galoy-agents
   jobs:
   - check-code
   - test-bats
+  - test-harness
   - build-edge-image
+  - build-sandbox-base-image
   - deploy-to-prod
   - train-classifier
   - build-code-assistant-index
-- name: sandbox-base
-  jobs:
-  - test-harness
-  - build-sandbox-base-image
 
 jobs:
 - name: check-code
