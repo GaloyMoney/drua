@@ -66,10 +66,27 @@ async fn resolve_auth_context(
         let token_hash = hash_token(&raw_token);
         if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
             if !creds.is_revoked() {
-                if let Some(user_id) = creds.owner.user_id() {
-                    return AuthContext::ExportedAgent(user_id, creds.id, creds.scopes.clone());
+                match &creds.owner {
+                    galoy_agents_core::primitives::McpCredsOwner::User { user_id } => {
+                        return AuthContext::ExportedAgent(
+                            *user_id,
+                            creds.id,
+                            creds.scopes.clone(),
+                        );
+                    }
+                    galoy_agents_core::primitives::McpCredsOwner::Agent { agent_id } => {
+                        // Sandbox agents calling back to the MCP gateway.
+                        // Use agent_id as a synthetic user_id (both are UUID wrappers).
+                        let synthetic_user_id = galoy_agents_core::primitives::UserId::from(
+                            uuid::Uuid::from(*agent_id),
+                        );
+                        return AuthContext::ExportedAgent(
+                            synthetic_user_id,
+                            creds.id,
+                            creds.scopes.clone(),
+                        );
+                    }
                 }
-                // Agent-owned creds cannot be used as external bearer tokens
             }
         }
     }
