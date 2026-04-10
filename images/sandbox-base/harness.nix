@@ -32,11 +32,6 @@ pkgs.buildNpmPackage {
     cp node_modules/@anthropic-ai/claude-agent-sdk/cli.js $out/lib/sdk/
     cp node_modules/@anthropic-ai/claude-agent-sdk/*.wasm  $out/lib/sdk/ 2>/dev/null || true
     cp -r node_modules/@anthropic-ai/claude-agent-sdk/vendor $out/lib/sdk/ 2>/dev/null || true
-
-    # Install test fixtures for integration tests
-    mkdir -p $out/test
-    cp test/mock-cli.mjs $out/test/
-    cp test/test-harness.sh $out/test/
     runHook postInstall
   '';
 }
