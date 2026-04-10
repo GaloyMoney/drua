@@ -2,7 +2,9 @@ REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 HARNESS_PID_FILE="$BATS_FILE_TMPDIR/harness.pid"
 HARNESS_LOG="$BATS_FILE_TMPDIR/harness.log"
 HARNESS_PORT="${HARNESS_PORT:-3123}"
-HARNESS_WORK="$BATS_FILE_TMPDIR/workspace"
+# Keep workspace OUTSIDE BATS_FILE_TMPDIR so bats' own temp-dir cleanup
+# is not blocked by files written by the CLI subprocess.
+HARNESS_WORK="/tmp/harness-workspace-$$"
 
 # AGENT_HARNESS_BIN is set by the nix wrapper (points at the built bundle).
 # Fallback for local dev: build with esbuild first.
@@ -44,20 +46,17 @@ stop_harness() {
   if [ -f "$HARNESS_PID_FILE" ]; then
     local pid
     pid=$(cat "$HARNESS_PID_FILE")
+    # Kill harness + CLI child processes, then force-kill stragglers
+    pkill -TERM -P "$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
-    # Wait for process to die so file handles are released before bats
-    # tries to clean up BATS_FILE_TMPDIR.
-    for _i in $(seq 1 20); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-    done
+    sleep 1
+    pkill -KILL -P "$pid" 2>/dev/null || true
+    kill -9 "$pid" 2>/dev/null || true
     rm -f "$HARNESS_PID_FILE"
   fi
 
-  # Clean up all harness artifacts before bats removes BATS_FILE_TMPDIR.
-  # Claude Code writes files into the workspace during tests; leftover
-  # contents cause bats' own temp-dir cleanup to fail.
-  rm -rf "$HARNESS_WORK" "$HARNESS_LOG"
+  # Best-effort cleanup of workspace (CLI may still be dying)
+  rm -rf "$HARNESS_WORK" 2>/dev/null || true
 }
 
 harness_url() {
