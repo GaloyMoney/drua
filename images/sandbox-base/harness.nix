@@ -1,0 +1,42 @@
+{ pkgs }:
+pkgs.buildNpmPackage {
+  pname = "agent-harness";
+  version = "0.1.0";
+  src = ./agent-harness;
+  npmDepsHash = "sha256-y1jTok6cf0uWMK6S64H7QMswLTpmLOh8Xo2Bl8EzHVU=";
+
+  nativeBuildInputs = [ pkgs.esbuild ];
+
+  # Skip the default `npm run build`; we bundle with esbuild instead.
+  dontNpmBuild = true;
+
+  buildPhase = ''
+    runHook preBuild
+    esbuild src/index.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --format=esm \
+      --outfile=dist/index.js
+    runHook postBuild
+  '';
+
+  installPhase = ''
+    runHook preInstall
+    mkdir -p $out/lib
+    cp dist/index.js $out/lib/index.js
+
+    # cli.js is the Claude Code CLI binary — spawned as a persistent
+    # subprocess by the harness.  It cannot be bundled by esbuild.
+    mkdir -p $out/lib/sdk
+    cp node_modules/@anthropic-ai/claude-agent-sdk/cli.js $out/lib/sdk/
+    cp node_modules/@anthropic-ai/claude-agent-sdk/*.wasm  $out/lib/sdk/ 2>/dev/null || true
+    cp -r node_modules/@anthropic-ai/claude-agent-sdk/vendor $out/lib/sdk/ 2>/dev/null || true
+
+    # Install test fixtures for integration tests
+    mkdir -p $out/test
+    cp test/mock-cli.mjs $out/test/
+    cp test/test-harness.sh $out/test/
+    runHook postInstall
+  '';
+}

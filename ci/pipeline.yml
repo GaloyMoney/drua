@@ -14,6 +14,7 @@ groups:
   - build-code-assistant-index
 - name: sandbox-base
   jobs:
+  - test-harness
   - build-sandbox-base-image
 
 jobs:
@@ -300,11 +301,38 @@ jobs:
       repository: repo-updated
       rebase: true
 
+- name: test-harness
+  serial: true
+  plan:
+  - get: repo-sandbox-image
+    trigger: true
+  - task: harness-integration-test
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo-sandbox-image
+        path: repo
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix build .#checks.x86_64-linux.harness-test
+
 - name: build-sandbox-base-image
   serial: true
   plan:
   - get: repo-sandbox-image
     trigger: true
+    passed: [test-harness]
   - task: build-image
     config:
       platform: linux

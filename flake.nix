@@ -123,6 +123,7 @@
 
           exec bats bats/*.bats
         '';
+        agentHarness = import ./images/sandbox-base/harness.nix { inherit pkgs; };
       in
       {
         checks = {
@@ -137,6 +138,20 @@
             inherit cargoArtifacts;
             cargoNextestExtraArgs = "--no-tests=pass";
           });
+
+          harness-test = pkgs.runCommand "harness-test" {
+            nativeBuildInputs = [ pkgs.nodejs_22 pkgs.curl pkgs.jq ];
+          } ''
+            export ANTHROPIC_API_KEY=mock-test-key
+            export HARNESS_PORT=3123
+            export HARNESS_CLI_PATH="${agentHarness}/test/mock-cli.mjs"
+            export HARNESS_CWD="$(mktemp -d)"
+            export HARNESS_JS="${agentHarness}/lib/index.js"
+
+            bash ${agentHarness}/test/test-harness.sh
+
+            touch $out
+          '';
         };
 
         packages.galoy-agents-unwrapped = galoy-agents;
