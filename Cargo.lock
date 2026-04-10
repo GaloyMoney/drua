@@ -1551,6 +1551,8 @@ dependencies = [
  "axum-extra",
  "chrono",
  "galoy-agents-core",
+ "k8s-openapi",
+ "kube",
  "oauth2",
  "reqwest 0.12.28",
  "serde",
