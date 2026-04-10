@@ -145,11 +145,6 @@ interface SpawnConfig {
 }
 
 function spawnCli(config: SpawnConfig): ChildProcess {
-  // Write MCP settings before spawning so cli.js picks them up
-  if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
-    writeMcpSettings(config.mcpServers);
-  }
-
   const args = [
     CLI_JS_PATH,
     "--output-format",
@@ -167,6 +162,11 @@ function spawnCli(config: SpawnConfig): ChildProcess {
 
   if (config.resume) {
     args.push("--resume", config.resume);
+  }
+
+  // Pass MCP server config via CLI flag (same as the SDK does)
+  if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+    args.push("--mcp-config", JSON.stringify({ mcpServers: config.mcpServers }));
   }
 
   // Track spawn config for change detection
