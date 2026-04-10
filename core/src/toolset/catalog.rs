@@ -16,6 +16,7 @@ pub struct CatalogEntry {
     pub category: String,
     pub brief_description: String,
     pub full_tool: Tool,
+    pub default_output_filter: Option<OutputFilter>,
 }
 
 /// Shared catalog of tool sets. Use [`Catalog::with_auth`] to create a
@@ -160,13 +161,21 @@ impl Catalog {
             .unwrap_or("No description available.");
         let schema =
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
+        let filter_desc = match &entry.default_output_filter {
+            Some(f) => format!("tool default: {}", f.describe()),
+            None => format!(
+                "global default: {}",
+                OutputFilter::global_default().describe()
+            ),
+        };
         format!(
-            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
             entry.prefixed_name,
             entry.upstream_name,
             entry.category,
             description,
             schema,
+            filter_desc,
             entry.prefixed_name,
         )
     }
@@ -232,6 +241,7 @@ impl Catalog {
                     category: set.category().to_string(),
                     brief_description: brief,
                     full_tool: desc.clone(),
+                    default_output_filter: tool.default_output_filter.clone(),
                 });
             }
         }
@@ -312,9 +322,13 @@ impl Catalog {
         result
     }
 
-    /// Find the toolset and stripped tool name for a prefixed tool name.
-    /// Returns an `Arc` clone so the lock is not held across `.await`.
-    fn find_set(&self, prefixed_name: &str) -> Option<(Arc<dyn ToolSet>, String)> {
+    /// Find the toolset, stripped tool name, and default output filter for a
+    /// prefixed tool name. Returns an `Arc` clone so the lock is not held
+    /// across `.await`.
+    fn find_set(
+        &self,
+        prefixed_name: &str,
+    ) -> Option<(Arc<dyn ToolSet>, String, Option<OutputFilter>)> {
         let sets = self.read_sets();
         for set in sets.iter() {
             if !self.caller_has_required_scopes(set.as_ref()) {
@@ -322,8 +336,12 @@ impl Catalog {
             }
             let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if set.tools().iter().any(|t| t.name == tool_name) {
-                    return Some((Arc::clone(set), tool_name.to_string()));
+                if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
+                    return Some((
+                        Arc::clone(set),
+                        tool_name.to_string(),
+                        entry.default_output_filter.clone(),
+                    ));
                 }
             }
         }
@@ -344,7 +362,7 @@ impl Catalog {
         arguments: Option<JsonObject>,
         output_filter: Option<OutputFilter>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let (set, tool_name) = self
+        let (set, tool_name, tool_default_filter) = self
             .find_set(prefixed_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
 
@@ -354,8 +372,10 @@ impl Catalog {
             .await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // Apply output filter (caller-provided or global default)
-        let filter = output_filter.unwrap_or_else(OutputFilter::global_default);
+        // Priority: caller-provided > tool-specific default > global default
+        let filter = output_filter
+            .or(tool_default_filter)
+            .unwrap_or_else(OutputFilter::global_default);
         let result = result.and_then(|r| filter.apply(r));
 
         let (outcome, tokens_returned) = match &result {
@@ -480,6 +500,7 @@ mod tests {
                         ToolSetEntry {
                             name: name.to_string(),
                             description: tool,
+                            default_output_filter: None,
                         }
                     })
                     .collect(),
@@ -612,6 +633,7 @@ mod tests {
                 entries: vec![ToolSetEntry {
                     name: name.to_string(),
                     description: tool,
+                    default_output_filter: None,
                 }],
                 scopes,
             }

@@ -11,7 +11,7 @@ const DEFAULT_TAIL: usize = 1000;
 /// Processing order: grep -> head -> tail.
 /// When no filter is provided by the caller, [`OutputFilter::global_default`]
 /// is used to cap output at [`DEFAULT_TAIL`] lines.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct OutputFilter {
     /// Regex pattern to filter output lines (only matching lines returned).
     pub grep: Option<String>,
@@ -33,6 +33,31 @@ impl OutputFilter {
         Self {
             tail: Some(DEFAULT_TAIL),
             ..Default::default()
+        }
+    }
+
+    /// Format the active filter fields as human-readable text for `describe_tool`.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref grep) = self.grep {
+            parts.push(format!("grep: {grep}"));
+        }
+        if self.invert_match == Some(true) {
+            parts.push("invert_match: true".to_string());
+        }
+        if let Some(ctx) = self.context_lines {
+            parts.push(format!("context_lines: {ctx}"));
+        }
+        if let Some(n) = self.head {
+            parts.push(format!("head: {n}"));
+        }
+        if let Some(n) = self.tail {
+            parts.push(format!("tail: {n}"));
+        }
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(", ")
         }
     }
 

@@ -235,6 +235,7 @@ fn tool_entry(name: &str, description: &str, schema: serde_json::Value) -> ToolS
     ToolSetEntry {
         name: name.to_string(),
         description: tool,
+        default_output_filter: None,
     }
 }
 

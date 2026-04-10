@@ -5,7 +5,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
 use crate::auth::AuthContext;
 
-use super::filter::filter_lines;
+use super::filter::OutputFilter;
 use super::{ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct ConcourseToolSet {
@@ -44,19 +44,19 @@ impl ConcourseToolSet {
                     "required": ["pipeline", "job"]
                 }),
             ),
-            tool_entry(
+            tool_entry_with_filter(
                 "get_build_logs",
-                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Supports server-side grep filtering to reduce output size.",
+                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Output filtering (grep, tail, head) is handled by call_tool's output_filter parameter; default: tail 150 lines.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "build_id": {"type": "integer", "description": "The numeric build ID"},
-                        "tail": {"type": "integer", "description": "Number of lines to return from the end of the log (default: 150)"},
-                        "grep_pattern": {"type": "string", "description": "Regex pattern to filter log lines (only matching lines are returned). Applied before tail."},
-                        "invert_match": {"type": "boolean", "description": "When true, exclude lines matching grep_pattern instead of including them (like grep -v). Default: false"},
-                        "context_lines": {"type": "integer", "description": "Number of lines to show before and after each match (like grep -C). Only used with grep_pattern."}
+                        "build_id": {"type": "integer", "description": "The numeric build ID"}
                     },
                     "required": ["build_id"]
+                }),
+                Some(OutputFilter {
+                    tail: Some(150),
+                    ..Default::default()
                 }),
             ),
             tool_entry(
@@ -204,46 +204,13 @@ impl ToolSet for ConcourseToolSet {
             }
             "get_build_logs" => {
                 let build_id = int_arg(&args, "build_id")?;
-                let tail = args.get("tail").and_then(|v| v.as_i64()).unwrap_or(150) as usize;
-                let grep_pattern = args.get("grep_pattern").and_then(|v| v.as_str());
-                let invert_match = args
-                    .get("invert_match")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let context_lines = args
-                    .get("context_lines")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n.max(0) as usize);
-
                 let logs = self.client.get_build_logs(build_id).await?;
                 if logs.is_empty() {
                     return Ok(CallToolResult::success(vec![Content::text(
                         "No log output available for this build.",
                     )]));
                 }
-
-                let lines: Vec<&str> = logs.lines().collect();
-
-                // Apply grep filter if provided
-                let filtered: Vec<&str> = if let Some(pattern) = grep_pattern {
-                    let re = regex::Regex::new(pattern).map_err(|e| {
-                        ToolSetsError::InvalidArgument(format!("invalid grep_pattern regex: {e}"))
-                    })?;
-                    filter_lines(&lines, &re, invert_match, context_lines)
-                } else {
-                    lines
-                };
-
-                let output = if filtered.len() > tail {
-                    let skipped = filtered.len() - tail;
-                    format!(
-                        "... ({skipped} lines omitted, showing last {tail})\n{}",
-                        filtered[filtered.len() - tail..].join("\n")
-                    )
-                } else {
-                    filtered.join("\n")
-                };
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![Content::text(logs)]))
             }
             "trigger_build" => {
                 let pipeline = str_arg(&args, "pipeline")?;
@@ -319,6 +286,15 @@ impl ToolSet for ConcourseToolSet {
 }
 
 fn tool_entry(name: &str, description: &str, schema: serde_json::Value) -> ToolSetEntry {
+    tool_entry_with_filter(name, description, schema, None)
+}
+
+fn tool_entry_with_filter(
+    name: &str,
+    description: &str,
+    schema: serde_json::Value,
+    default_output_filter: Option<OutputFilter>,
+) -> ToolSetEntry {
     let input_schema: JsonObject = match schema {
         serde_json::Value::Object(m) => m,
         _ => Default::default(),
@@ -330,6 +306,7 @@ fn tool_entry(name: &str, description: &str, schema: serde_json::Value) -> ToolS
     ToolSetEntry {
         name: name.to_string(),
         description: tool,
+        default_output_filter,
     }
 }
 
