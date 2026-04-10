@@ -283,6 +283,15 @@ function spawnCli(config: SpawnConfig): ChildProcess {
 
       // Terminal events mark end of a message cycle
       if (event.type === "result" || event.type === "error") {
+        // Claude Code doesn't accept another prompt after a result in
+        // stream-json mode.  Kill the process so ensureCli respawns
+        // with --resume on the next message.
+        if (cliProcess === proc && proc.exitCode === null) {
+          cliProcess = null;
+          stdoutRL?.close();
+          stdoutRL = null;
+          proc.kill("SIGTERM");
+        }
         onComplete?.();
       }
     });
