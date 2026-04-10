@@ -989,7 +989,7 @@ async fn api_agent_message(
     let user_id = match &auth {
         AuthContext::User(id) => *id,
         AuthContext::ExportedAgent(id, _, _) => *id,
-        AuthContext::InternalAgent(id, _, _, _) => *id,
+        AuthContext::Agent(_, _, _) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
         AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 

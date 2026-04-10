@@ -8,8 +8,8 @@ pub enum AuthContext {
     User(UserId),
     /// Authenticated via bearer token issued to a user (exported agent credential).
     ExportedAgent(UserId, McpCredsId, Vec<String>),
-    /// Internal light-agent dispatch — the agent acts on behalf of the user.
-    InternalAgent(UserId, AgentId, McpCredsId, Vec<String>),
+    /// Agent acting within its workspace (SA token auth or internal light-agent dispatch).
+    Agent(WorkspaceId, AgentId, Vec<String>),
     /// No authentication provided.
     Anonymous,
 }
@@ -19,7 +19,7 @@ impl AuthContext {
         match self {
             AuthContext::User(user_id) => Ok(*user_id),
             AuthContext::ExportedAgent(_, _, _) => Err("ExportedAgent auth not allowed here"),
-            AuthContext::InternalAgent(_, _, _, _) => Err("InternalAgent auth not allowed here"),
+            AuthContext::Agent(_, _, _) => Err("Agent auth not allowed here"),
             AuthContext::Anonymous => Err("Authentication required"),
         }
     }
@@ -27,8 +27,7 @@ impl AuthContext {
     /// Return the scopes associated with this auth context.
     pub fn scopes(&self) -> &[String] {
         match self {
-            AuthContext::ExportedAgent(_, _, scopes) => scopes,
-            AuthContext::InternalAgent(_, _, _, scopes) => scopes,
+            AuthContext::ExportedAgent(_, _, scopes) | AuthContext::Agent(_, _, scopes) => scopes,
             _ => &[],
         }
     }
@@ -38,8 +37,9 @@ impl AuthContext {
     pub fn has_scope(&self, scope: &str) -> bool {
         match self {
             AuthContext::User(_) => true,
-            AuthContext::ExportedAgent(_, _, scopes) => scopes.iter().any(|s| s == scope),
-            AuthContext::InternalAgent(_, _, _, scopes) => scopes.iter().any(|s| s == scope),
+            AuthContext::ExportedAgent(_, _, scopes) | AuthContext::Agent(_, _, scopes) => {
+                scopes.iter().any(|s| s == scope)
+            }
             AuthContext::Anonymous => false,
         }
     }

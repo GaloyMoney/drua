@@ -117,7 +117,7 @@ impl AdminToolSet {
     fn extract_user_id(auth: Option<&AuthContext>) -> Result<UserId, ToolSetsError> {
         match auth {
             Some(AuthContext::ExportedAgent(user_id, _, _)) => Ok(*user_id),
-            Some(AuthContext::InternalAgent(user_id, _, _, _)) => Ok(*user_id),
+            Some(AuthContext::Agent(_, _, _)) => Err(ToolSetsError::Unauthorized),
             Some(AuthContext::User(user_id)) => Ok(*user_id),
             _ => Err(ToolSetsError::Unauthorized),
         }

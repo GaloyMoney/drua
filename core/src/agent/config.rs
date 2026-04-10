@@ -18,9 +18,6 @@ pub struct SandboxClientConfig {
     pub template_name: String,
     #[serde(default)]
     pub persistence: Option<PersistenceConfig>,
-    /// MCP gateway URL that sandbox agents connect to (e.g. "http://galoy-agents:4200/mcp").
-    #[serde(default)]
-    pub mcp_gateway_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

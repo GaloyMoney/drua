@@ -42,6 +42,11 @@ const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_MAX_TURNS = 10;
 const PORT = parseInt(process.env.HARNESS_PORT ?? "3000", 10);
 
+/** Path to the projected ServiceAccount token (audience-scoped, auto-rotated by kubelet). */
+const SA_TOKEN_PATH = "/var/run/secrets/galoy-agents/token";
+/** MCP gateway URL injected via pod env var. */
+const MCP_GATEWAY_URL = process.env.MCP_GATEWAY_URL;
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const CLI_JS_PATH = process.env.HARNESS_CLI_PATH ?? join(__dirname, "sdk", "cli.js");
@@ -61,8 +66,6 @@ interface HarnessInput {
   model?: string;
   max_turns?: number;
   disallowed_tools?: string[];
-  /** MCP server configurations keyed by server name. */
-  mcp_servers?: Record<string, McpHttpServerConfig>;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -125,6 +128,31 @@ function writeMcpSettings(
   }
   existing.mcpServers = mcpServers;
   writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+}
+
+// ── SA token MCP config ──────────────────────────────────────────────
+
+/**
+ * Build MCP server config by reading the projected ServiceAccount token
+ * from the mounted file. Re-reads on every call so kubelet-rotated tokens
+ * are picked up automatically.
+ */
+function getMcpServersFromSaToken(): Record<string, McpHttpServerConfig> | undefined {
+  if (!MCP_GATEWAY_URL) return undefined;
+  try {
+    const token = readFileSync(SA_TOKEN_PATH, "utf-8").trim();
+    if (!token) return undefined;
+    return {
+      "galoy-agents": {
+        type: "http",
+        url: MCP_GATEWAY_URL,
+        headers: { "Authorization": `Bearer ${token}` },
+      },
+    };
+  } catch {
+    // Token file not mounted (e.g. local dev) — run without MCP
+    return undefined;
+  }
 }
 
 // ── Persistent CLI subprocess ────────────────────────────────────────
@@ -352,9 +380,11 @@ function spawnCli(config: SpawnConfig): ChildProcess {
 function ensureCli(input: HarnessInput): ChildProcess {
   const model = input.model ?? DEFAULT_MODEL;
   const maxTurns = input.max_turns ?? DEFAULT_MAX_TURNS;
-  const currentMcpHash = mcpHash(input.mcp_servers);
+  // Read MCP config from SA token file (re-reads for rotation)
+  const mcpServers = getMcpServersFromSaToken();
+  const currentMcpHash = mcpHash(mcpServers);
 
-  // Kill existing process if config changed (model or MCP servers)
+  // Kill existing process if config changed (model or MCP servers / rotated token)
   if (cliProcess && cliProcess.exitCode === null) {
     if (model !== lastSpawnModel || currentMcpHash !== lastSpawnMcpHash) {
       console.log(
@@ -374,7 +404,7 @@ function ensureCli(input: HarnessInput): ChildProcess {
   cliProcess = spawnCli({
     model,
     maxTurns,
-    mcpServers: input.mcp_servers,
+    mcpServers,
     resume: resume,
   });
 

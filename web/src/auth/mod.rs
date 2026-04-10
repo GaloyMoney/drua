@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 mod oauth;
+pub mod sa_token;
 pub mod session_store;
 
 use axum::{extract::Request, middleware::Next, response::Response, routing::get, Router};
@@ -63,6 +64,7 @@ async fn resolve_auth_context(
 
     // 1. Check Authorization: Bearer header
     if let Some(raw_token) = bearer_token {
+        // 1a. Hash-based lookup (user-created MCP credentials + legacy agent tokens)
         let token_hash = hash_token(&raw_token);
         if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
             if !creds.is_revoked() {
@@ -75,8 +77,6 @@ async fn resolve_auth_context(
                         );
                     }
                     galoy_agents_core::primitives::McpCredsOwner::Agent { agent_id } => {
-                        // Sandbox agents calling back to the MCP gateway.
-                        // Use agent_id as a synthetic user_id (both are UUID wrappers).
                         let synthetic_user_id = galoy_agents_core::primitives::UserId::from(
                             uuid::Uuid::from(*agent_id),
                         );
@@ -84,6 +84,21 @@ async fn resolve_auth_context(
                             synthetic_user_id,
                             creds.id,
                             creds.scopes.clone(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 1b. SA token validation (sandbox pods with projected ServiceAccount tokens)
+        if sa_token::looks_like_jwt(&raw_token) {
+            if let Some(ref validator) = state.sa_token_validator {
+                if let Ok(agent_id) = validator.validate(&raw_token).await {
+                    if let Ok(agent) = state.app.agents().find_by_id(agent_id).await {
+                        return AuthContext::Agent(
+                            agent.workspace_id,
+                            agent.id,
+                            vec!["agent".to_string()],
                         );
                     }
                 }
