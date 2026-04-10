@@ -42,14 +42,22 @@ stop_harness() {
   fi
 
   if [ -f "$HARNESS_PID_FILE" ]; then
-    kill "$(cat "$HARNESS_PID_FILE")" 2>/dev/null || true
+    local pid
+    pid=$(cat "$HARNESS_PID_FILE")
+    kill "$pid" 2>/dev/null || true
+    # Wait for process to die so file handles are released before bats
+    # tries to clean up BATS_FILE_TMPDIR.
+    for _i in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
     rm -f "$HARNESS_PID_FILE"
   fi
 
-  # Clean up workspace before bats removes BATS_FILE_TMPDIR.
-  # Claude Code writes files here during tests; leftover contents cause
-  # bats' own temp-dir cleanup to fail with "Directory not empty".
-  rm -rf "$HARNESS_WORK"
+  # Clean up all harness artifacts before bats removes BATS_FILE_TMPDIR.
+  # Claude Code writes files into the workspace during tests; leftover
+  # contents cause bats' own temp-dir cleanup to fail.
+  rm -rf "$HARNESS_WORK" "$HARNESS_LOG"
 }
 
 harness_url() {
