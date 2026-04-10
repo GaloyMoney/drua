@@ -123,6 +123,13 @@ let activeSessionId: string | undefined;
 let busy = false;
 let previousCostUsd = 0;
 
+/**
+ * When true, stdout events are suppressed (not forwarded to the caller).
+ * Set on --resume spawn to absorb replayed session history; cleared just
+ * before writing the first new user message to stdin.
+ */
+let replayMode = false;
+
 /** Config used for the last spawn — used to detect config changes. */
 let lastSpawnModel: string | undefined;
 let lastSpawnMcpHash: string | undefined;
@@ -173,6 +180,11 @@ function spawnCli(config: SpawnConfig): ChildProcess {
   lastSpawnModel = config.model;
   lastSpawnMcpHash = mcpHash(config.mcpServers);
 
+  // Suppress replayed history when resuming an existing session
+  if (config.resume) {
+    replayMode = true;
+  }
+
   console.log(`Spawning cli.js (resume=${config.resume ?? "none"}, model=${config.model})`);
 
   const proc = spawn(process.execPath, args, {
@@ -219,6 +231,22 @@ function spawnCli(config: SpawnConfig): ChildProcess {
         event = JSON.parse(line);
       } catch {
         return; // skip non-JSON lines (e.g. startup banners)
+      }
+
+      // While replaying a resumed session, absorb events silently.
+      // We still capture session_id and cost baseline from replayed results
+      // so the first real turn has correct deltas.
+      if (replayMode) {
+        if (event.type === "result") {
+          if (typeof event.session_id === "string") {
+            activeSessionId = event.session_id;
+            saveSessionId(event.session_id);
+          }
+          if (typeof event.total_cost_usd === "number") {
+            previousCostUsd = event.total_cost_usd;
+          }
+        }
+        return;
       }
 
       // Capture session_id and convert cumulative cost to per-message delta
@@ -295,6 +323,14 @@ async function handleMessage(
       details: "stdin not writable",
     });
     return;
+  }
+
+  // Drain any buffered replay events before opening the forwarding gate.
+  // setImmediate fires after pending I/O callbacks (readline "line" events),
+  // so all replayed lines are consumed while replayMode is still true.
+  if (replayMode) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    replayMode = false;
   }
 
   return new Promise<void>((resolve) => {
@@ -411,4 +447,14 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`agent-harness listening on 0.0.0.0:${PORT} (SDK bypass mode)`);
+
+  // Eagerly spawn cli.js so it warms up while waiting for the first request.
+  // Uses default config; ensureCli() will respawn if the first message
+  // specifies a different model or MCP servers.
+  const existingSession = loadSessionId();
+  cliProcess = spawnCli({
+    model: DEFAULT_MODEL,
+    maxTurns: DEFAULT_MAX_TURNS,
+    resume: existingSession,
+  });
 });
