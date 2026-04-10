@@ -195,7 +195,23 @@
                 pkgs.nodejs_22
                 pkgs.git
                 pkgs.cacert
+                pkgs.shadow
               ]}:$PATH"
+
+              # Claude Code CLI refuses --dangerously-skip-permissions as root.
+              # Drop to a non-root user when running in CI.
+              if [ "$(id -u)" = "0" ]; then
+                useradd -m testuser 2>/dev/null || true
+                exec su testuser -s /bin/sh -c "
+                  ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+                  AGENT_HARNESS_BIN=$AGENT_HARNESS_BIN \
+                  TERM=$TERM \
+                  PATH=$PATH \
+                  HOME=/home/testuser \
+                  bats bats/harness.bats
+                "
+              fi
+
               exec bats bats/harness.bats
             '';
           in "${wrapped}/bin/run-harness-bats";
