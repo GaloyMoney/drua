@@ -193,6 +193,8 @@
                 pkgs.gawk
                 pkgs.gnugrep
                 pkgs.nodejs_22
+                pkgs.git
+                pkgs.cacert
               ]}:$PATH"
               exec bats bats/harness.bats
             '';
