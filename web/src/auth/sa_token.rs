@@ -8,8 +8,6 @@ use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenRe
 use kube::api::PostParams;
 use tracing::instrument;
 
-use galoy_agents_core::primitives::AgentId;
-
 use super::error::AuthError;
 
 /// Validates K8s ServiceAccount tokens and resolves them to agent identities.
@@ -35,8 +33,10 @@ impl SaTokenValidator {
     ///
     /// On success, returns the `AgentId` parsed from the bound pod name
     /// (format: `agent-{id_prefix}`).
+    /// Validate and return the pod name prefix (agent ID prefix) rather than
+    /// a fabricated UUID. The caller must do a prefix-based agent lookup.
     #[instrument(name = "web.auth.sa_token.validate", skip_all)]
-    pub async fn validate(&self, raw_token: &str) -> Result<AgentId, AuthError> {
+    pub async fn validate(&self, raw_token: &str) -> Result<String, AuthError> {
         let review = TokenReview {
             spec: TokenReviewSpec {
                 token: Some(raw_token.to_string()),
@@ -60,7 +60,13 @@ impl SaTokenValidator {
         }
 
         let pod_name = extract_pod_name(&status)?;
-        parse_agent_id_from_pod_name(&pod_name)
+        let prefix = pod_name
+            .strip_prefix("agent-")
+            .ok_or(AuthError::InvalidToken)?;
+        if prefix.len() < 8 {
+            return Err(AuthError::InvalidToken);
+        }
+        Ok(prefix.to_string())
     }
 }
 
@@ -75,33 +81,6 @@ fn extract_pod_name(status: &TokenReviewStatus) -> Result<String, AuthError> {
         .get("authentication.kubernetes.io/pod-name")
         .ok_or(AuthError::InvalidToken)?;
     pod_names.first().cloned().ok_or(AuthError::InvalidToken)
-}
-
-/// Parse agent ID from a deterministic pod name (format: `agent-{id[..8]}`).
-///
-/// Sandbox pods use `agent-{first 8 chars of agent UUID}` as their name.
-/// We search for the agent by ID prefix via the agent repo.
-fn parse_agent_id_from_pod_name(pod_name: &str) -> Result<AgentId, AuthError> {
-    let prefix = pod_name
-        .strip_prefix("agent-")
-        .ok_or(AuthError::InvalidToken)?;
-
-    // The pod name contains only the first 8 chars of the UUID.
-    // We need to find the full agent by prefix. For now, we construct a UUID
-    // by zero-padding the prefix — the caller will look up the actual agent.
-    //
-    // Agent sandbox_name() produces: agent-{id[..8]}
-    // where id is a UUID like "abc12345-6789-..."
-    // So prefix is "abc12345" — the first 8 hex chars of the UUID.
-    if prefix.len() < 8 {
-        return Err(AuthError::InvalidToken);
-    }
-
-    // Reconstruct a plausible UUID from the 8-char prefix for lookup.
-    // The agent repo will do a prefix-match or exact-match.
-    let padded = format!("{prefix}-0000-0000-0000-000000000000");
-    let uuid = uuid::Uuid::parse_str(&padded).map_err(|_| AuthError::InvalidToken)?;
-    Ok(AgentId::from(uuid))
 }
 
 /// Quick heuristic: SA tokens are JWTs (three dot-separated base64 segments).
@@ -122,17 +101,5 @@ mod tests {
         assert!(!looks_like_jwt("abc123plaintoken"));
         assert!(!looks_like_jwt("a.b"));
         assert!(!looks_like_jwt("a..c"));
-    }
-
-    #[test]
-    fn parse_pod_name_extracts_agent_id() {
-        let result = parse_agent_id_from_pod_name("agent-abc12345");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn parse_pod_name_rejects_invalid() {
-        assert!(parse_agent_id_from_pod_name("not-an-agent").is_err());
-        assert!(parse_agent_id_from_pod_name("agent-ab").is_err());
     }
 }

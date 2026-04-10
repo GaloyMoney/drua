@@ -93,8 +93,8 @@ async fn resolve_auth_context(
         // 1b. SA token validation (sandbox pods with projected ServiceAccount tokens)
         if sa_token::looks_like_jwt(&raw_token) {
             if let Some(ref validator) = state.sa_token_validator {
-                if let Ok(agent_id) = validator.validate(&raw_token).await {
-                    if let Ok(agent) = state.app.agents().find_by_id(agent_id).await {
+                if let Ok(id_prefix) = validator.validate(&raw_token).await {
+                    if let Ok(agent) = state.app.agents().find_by_id_prefix(&id_prefix).await {
                         return AuthContext::Agent(
                             agent.workspace_id,
                             agent.id,
