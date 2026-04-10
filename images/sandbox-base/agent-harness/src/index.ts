@@ -214,6 +214,11 @@ function spawnCli(config: SpawnConfig): ChildProcess {
   proc.on("exit", (code, signal) => {
     const stderr = stderrChunks.join("").trim();
     console.error(`cli.js exited: code=${code} signal=${signal}${stderr ? `\n${stderr}` : ""}`);
+    // Only act if this is still the active process (avoids clobbering a replacement
+    // when ensureCli kills the old process and spawns a new one)
+    if (cliProcess !== proc) {
+      return;
+    }
     cliProcess = null;
     stdoutRL?.close();
     stdoutRL = null;
