@@ -121,6 +121,7 @@ let cliProcess: ChildProcess | null = null;
 let stdoutRL: Interface | null = null;
 let activeSessionId: string | undefined;
 let busy = false;
+let previousCostUsd = 0;
 
 /** Callback for the in-flight message — receives each event. */
 let onEvent: ((event: Record<string, unknown>) => void) | null = null;
@@ -205,10 +206,17 @@ function spawnCli(config: SpawnConfig): ChildProcess {
         return; // skip non-JSON lines (e.g. startup banners)
       }
 
-      // Capture session_id from result events
-      if (event.type === "result" && typeof event.session_id === "string") {
-        activeSessionId = event.session_id;
-        saveSessionId(event.session_id);
+      // Capture session_id and convert cumulative cost to per-message delta
+      if (event.type === "result") {
+        if (typeof event.session_id === "string") {
+          activeSessionId = event.session_id;
+          saveSessionId(event.session_id);
+        }
+        if (typeof event.total_cost_usd === "number") {
+          const cumulativeCost = event.total_cost_usd;
+          event.total_cost_usd = Math.max(0, cumulativeCost - previousCostUsd);
+          previousCostUsd = cumulativeCost;
+        }
       }
 
       // Forward to the in-flight message handler
