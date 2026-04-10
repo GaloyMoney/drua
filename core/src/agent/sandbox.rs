@@ -5,30 +5,62 @@ use super::AgentMessageEvent;
 
 /// Translate a JSON-line from the agent harness (Claude Code stream-json)
 /// into a canonical [`AgentMessageEvent`].
-pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let event_type = v.get("type")?.as_str()?;
+pub(super) fn translate_harness_event(line: &str) -> Vec<AgentMessageEvent> {
+    let v = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let event_type = match v.get("type").and_then(|t| t.as_str()) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
 
     match event_type {
         "assistant" => {
-            let text = v
+            let mut events = Vec::new();
+            if let Some(blocks) = v
                 .get("message")
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_array())
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .unwrap_or_default();
-            if text.is_empty() {
-                None
-            } else {
-                Some(AgentMessageEvent::Text { text })
+            {
+                for block in blocks {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    events.push(AgentMessageEvent::Text {
+                                        text: text.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let arguments = block.get("input").cloned();
+                            events.push(AgentMessageEvent::ToolCall { name, arguments });
+                        }
+                        Some("tool_result") => {
+                            let name = block
+                                .get("name")
+                                .or_else(|| block.get("tool_use_id"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let is_error = block
+                                .get("is_error")
+                                .and_then(|e| e.as_bool())
+                                .unwrap_or(false);
+                            events.push(AgentMessageEvent::ToolResult { name, is_error });
+                        }
+                        _ => {}
+                    }
+                }
             }
+            events
         }
         "result" => {
             let turns = v.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
@@ -45,33 +77,13 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
                 .unwrap_or(0) as u32;
             let duration_ms = v.get("duration_ms").and_then(|n| n.as_u64());
             let cost_usd = v.get("total_cost_usd").and_then(|n| n.as_f64());
-            Some(AgentMessageEvent::Done {
+            vec![AgentMessageEvent::Done {
                 turns,
                 input_tokens,
                 output_tokens,
                 duration_ms,
                 cost_usd,
-            })
-        }
-        "tool_use" => {
-            let name = v
-                .get("tool_name")
-                .or_else(|| v.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let arguments = v.get("input").or(v.get("arguments")).cloned();
-            Some(AgentMessageEvent::ToolCall { name, arguments })
-        }
-        "tool_result" => {
-            let name = v
-                .get("tool_name")
-                .or_else(|| v.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-            Some(AgentMessageEvent::ToolResult { name, is_error })
+            }]
         }
         "error" => {
             let msg = v
@@ -83,9 +95,9 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
                 Some(d) => format!("{msg}: {d}"),
                 None => msg.to_string(),
             };
-            Some(AgentMessageEvent::Error { message })
+            vec![AgentMessageEvent::Error { message }]
         }
-        _ => None, // Ignore system, init, and other SDK-internal events
+        _ => Vec::new(), // Ignore system, init, stream_event, and other internal events
     }
 }
 

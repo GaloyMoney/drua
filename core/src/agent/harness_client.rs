@@ -105,7 +105,8 @@ impl HarnessClient {
 
                 if let Some(data_line) = event_block.lines().find(|l| l.starts_with("data: ")) {
                     let json_str = &data_line["data: ".len()..];
-                    if let Some(event) = translate_harness_event(json_str) {
+                    let events = translate_harness_event(json_str);
+                    for event in events {
                         let is_terminal = matches!(
                             event,
                             AgentMessageEvent::Done { .. } | AgentMessageEvent::Error { .. }
