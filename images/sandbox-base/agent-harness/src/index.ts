@@ -180,6 +180,7 @@ function spawnCli(config: SpawnConfig): ChildProcess {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
+      HOME: CWD, // Store session data on the PVC, not ephemeral $HOME
       DISABLE_AUTOUPDATER: "1",
     },
   });
