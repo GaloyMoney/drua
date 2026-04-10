@@ -53,6 +53,26 @@ pub(super) fn translate_harness_event(line: &str) -> Option<AgentMessageEvent> {
                 cost_usd,
             })
         }
+        "tool_use" => {
+            let name = v
+                .get("tool_name")
+                .or_else(|| v.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let arguments = v.get("input").or(v.get("arguments")).cloned();
+            Some(AgentMessageEvent::ToolCall { name, arguments })
+        }
+        "tool_result" => {
+            let name = v
+                .get("tool_name")
+                .or_else(|| v.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+            Some(AgentMessageEvent::ToolResult { name, is_error })
+        }
         "error" => {
             let msg = v
                 .get("message")
