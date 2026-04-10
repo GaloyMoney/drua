@@ -44,6 +44,9 @@ teardown_file() {
 # ── Second message (session persistence) ─────────────────────────────
 
 @test "harness: second message reuses session and returns cost delta" {
+  # Wait for the first message to finish — the harness rejects with 409 while busy.
+  wait_not_busy
+
   # The CLI may need to resume the session from the first message, so allow
   # extra time for the replay + new turn.
   SSE=$(harness_send_message '{"prompt":"Reply with only the word PING. Nothing else.","max_turns":3}' 180)
@@ -64,6 +67,8 @@ teardown_file() {
 # ── MCP availability ─────────────────────────────────────────────────
 
 @test "harness: message with mcp_servers config does not crash harness" {
+  wait_not_busy
+
   # Pass an MCP server config — the harness should respawn the CLI with
   # --mcp-config.  The MCP server URL is a dummy; Claude Code may fail
   # to connect or produce an error, but the harness itself must not crash
