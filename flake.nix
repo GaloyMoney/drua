@@ -203,14 +203,19 @@
               if [ "$(id -u)" = "0" ]; then
                 useradd -m testuser 2>/dev/null || true
                 chown -R testuser: . 2>/dev/null || true
-                exec ${pkgs.util-linux.login}/bin/su testuser -s /bin/sh -c "
-                  ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-                  AGENT_HARNESS_BIN=$AGENT_HARNESS_BIN \
-                  TERM=$TERM \
-                  PATH=$PATH \
-                  HOME=/home/testuser \
+                TESTUSER_UID=$(id -u testuser)
+                TESTUSER_GID=$(id -g testuser)
+                exec ${pkgs.util-linux}/bin/setpriv \
+                  --reuid="$TESTUSER_UID" \
+                  --regid="$TESTUSER_GID" \
+                  --init-groups \
+                  env \
+                    ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+                    AGENT_HARNESS_BIN="$AGENT_HARNESS_BIN" \
+                    TERM="$TERM" \
+                    PATH="$PATH" \
+                    HOME=/home/testuser \
                   bats bats/harness.bats
-                "
               fi
 
               exec bats bats/harness.bats
