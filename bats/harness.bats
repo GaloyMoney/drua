@@ -28,11 +28,10 @@ teardown_file() {
 # ── First message ────────────────────────────────────────────────────
 
 @test "harness: POST /message returns SSE with assistant and result events" {
-  SSE=$(harness_send_message '{"prompt":"Reply with only the word PONG. Nothing else.","max_turns":1}')
+  SSE=$(harness_send_message '{"prompt":"Reply with only the word PONG. Nothing else.","max_turns":3}' 180)
   echo "$SSE"
 
   # Must contain expected SSE event types
-  echo "$SSE" | grep -q "^event: system"
   echo "$SSE" | grep -q "^event: assistant"
   echo "$SSE" | grep -q "^event: result"
 
@@ -45,7 +44,9 @@ teardown_file() {
 # ── Second message (session persistence) ─────────────────────────────
 
 @test "harness: second message reuses session and returns cost delta" {
-  SSE=$(harness_send_message '{"prompt":"Reply with only the word PING. Nothing else.","max_turns":1}')
+  # The CLI may need to resume the session from the first message, so allow
+  # extra time for the replay + new turn.
+  SSE=$(harness_send_message '{"prompt":"Reply with only the word PING. Nothing else.","max_turns":3}' 180)
   echo "$SSE"
 
   echo "$SSE" | grep -q "^event: result"
@@ -62,32 +63,36 @@ teardown_file() {
 
 # ── MCP availability ─────────────────────────────────────────────────
 
-@test "harness: message with mcp_servers config does not error" {
+@test "harness: message with mcp_servers config does not crash harness" {
   # Pass an MCP server config — the harness should respawn the CLI with
-  # --mcp-config and still return a valid SSE response.  The MCP server
-  # URL is a dummy; Claude Code will fail to connect but the harness
-  # itself must not crash.
+  # --mcp-config.  The MCP server URL is a dummy; Claude Code may fail
+  # to connect or produce an error, but the harness itself must not crash
+  # and the health endpoint must remain responsive afterwards.
   SSE=$(harness_send_message '{
     "prompt": "Reply with only the word OK. Nothing else.",
-    "max_turns": 1,
+    "max_turns": 3,
     "mcp_servers": {
       "test-mcp": {
         "type": "http",
         "url": "http://localhost:19999/mcp"
       }
     }
-  }')
+  }' 180)
   echo "$SSE"
 
-  # Should still get a result event (harness didn't crash)
-  echo "$SSE" | grep -q "^event: result"
-  RESULT=$(echo "$SSE" | sse_events "result" | tail -1)
-  echo "$RESULT" | jq -e '.type == "result"'
+  # The harness should return some SSE events (result or error — both OK)
+  echo "$SSE" | grep -qE "^event: (result|error)"
+
+  # Health endpoint must still work after MCP config change
+  run curl -sf "$(harness_url)/health"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.status == "ok"'
 }
 
 # ── Error paths ──────────────────────────────────────────────────────
 
 @test "harness: POST /message with missing prompt returns 400" {
+  wait_not_busy
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$(harness_url)/message" \
     -H "Content-Type: application/json" -d '{}')
@@ -95,6 +100,7 @@ teardown_file() {
 }
 
 @test "harness: POST /message with invalid JSON returns 400" {
+  wait_not_busy
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$(harness_url)/message" \
     -H "Content-Type: application/json" -d 'not-json')

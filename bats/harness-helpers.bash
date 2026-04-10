@@ -64,6 +64,20 @@ harness_send_message() {
     -d "$body"
 }
 
+# Wait until the harness is no longer busy (up to 30s).
+wait_not_busy() {
+  for _i in $(seq 1 60); do
+    local health
+    health=$(curl -sf "$(harness_url)/health" 2>/dev/null) || true
+    if echo "$health" | jq -e '.busy == false' > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "Harness still busy after 30s"
+  return 1
+}
+
 # Extract all SSE data lines for a given event type from an SSE response.
 # Usage: echo "$SSE" | sse_events "result"
 sse_events() {
