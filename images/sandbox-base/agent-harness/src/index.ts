@@ -216,7 +216,20 @@ function spawnCli(config: SpawnConfig): ChildProcess {
 
       // Terminal events mark end of a message cycle
       if (event.type === "result" || event.type === "error") {
-        onComplete?.();
+        const completeFn = onComplete;
+        onEvent = null;
+        onComplete = null;
+
+        // Claude Code stops reading stdin after a result — kill and
+        // respawn with --resume on the next message.
+        if (proc.exitCode === null) {
+          proc.kill("SIGTERM");
+        }
+        cliProcess = null;
+        stdoutRL?.close();
+        stdoutRL = null;
+
+        completeFn?.();
       }
     });
   }
