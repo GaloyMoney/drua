@@ -199,12 +199,21 @@ function spawnCli(config: SpawnConfig): ChildProcess {
     },
   });
 
+  // Buffer stderr so we can include it in crash error events
+  const stderrChunks: string[] = [];
   proc.stderr?.on("data", (data: Buffer) => {
-    process.stderr.write(`[cli] ${data.toString()}`);
+    const text = data.toString();
+    process.stderr.write(`[cli] ${text}`);
+    stderrChunks.push(text);
+    // Keep only last 4KB to avoid unbounded growth
+    while (stderrChunks.join("").length > 4096 && stderrChunks.length > 1) {
+      stderrChunks.shift();
+    }
   });
 
   proc.on("exit", (code, signal) => {
-    console.error(`cli.js exited: code=${code} signal=${signal}`);
+    const stderr = stderrChunks.join("").trim();
+    console.error(`cli.js exited: code=${code} signal=${signal}${stderr ? `\n${stderr}` : ""}`);
     cliProcess = null;
     stdoutRL?.close();
     stdoutRL = null;
@@ -214,7 +223,7 @@ function spawnCli(config: SpawnConfig): ChildProcess {
       onEvent?.({
         type: "error",
         message: "cli_crashed",
-        details: `Process exited: code=${code} signal=${signal}`,
+        details: `Process exited: code=${code} signal=${signal}${stderr ? ` | stderr: ${stderr.slice(-1024)}` : ""}`,
       });
       onComplete();
     }
