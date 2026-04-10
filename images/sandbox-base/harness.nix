@@ -17,6 +17,8 @@ pkgs.buildNpmPackage {
       --platform=node \
       --target=node22 \
       --format=esm \
+      --external:perf_hooks \
+      --external:diagnostics_channel \
       --outfile=dist/index.js
     runHook postBuild
   '';
