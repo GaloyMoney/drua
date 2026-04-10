@@ -316,6 +316,7 @@ jobs:
       params:
         CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
         CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+        ANTHROPIC_API_KEY: #@ data.values.deploy_anthropic_api_key
       run:
         path: sh
         args:
@@ -325,7 +326,7 @@ jobs:
             cd repo
             cachix use $CACHIX_CACHE_NAME
             cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix build .#checks.x86_64-linux.harness-test
+              nix run .#harness-bats
 
 - name: build-sandbox-base-image
   serial: true
@@ -405,6 +406,8 @@ resources:
     private_key: #@ data.values.github_private_key
     paths:
     - images/sandbox-base/
+    - bats/harness.bats
+    - bats/harness-helpers.bash
 
 - name: repo-labels
   type: git

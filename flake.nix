@@ -138,20 +138,6 @@
             inherit cargoArtifacts;
             cargoNextestExtraArgs = "--no-tests=pass";
           });
-
-          harness-test = pkgs.runCommand "harness-test" {
-            nativeBuildInputs = [ pkgs.nodejs_22 pkgs.curl pkgs.jq ];
-          } ''
-            export ANTHROPIC_API_KEY=mock-test-key
-            export HARNESS_PORT=3123
-            export HARNESS_CLI_PATH="${agentHarness}/test/mock-cli.mjs"
-            export HARNESS_CWD="$(mktemp -d)"
-            export HARNESS_JS="${agentHarness}/lib/index.js"
-
-            bash ${agentHarness}/test/test-harness.sh
-
-            touch $out
-          '';
         };
 
         packages.galoy-agents-unwrapped = galoy-agents;
@@ -187,6 +173,30 @@
               exec bats-runner
             '';
           in "${wrapped}/bin/run-bats";
+        };
+
+        apps.harness-bats = {
+          type = "app";
+          program = let
+            agentHarnessWrapper = pkgs.writeShellScriptBin "agent-harness" ''
+              exec ${pkgs.nodejs_22}/bin/node ${agentHarness}/lib/index.js "$@"
+            '';
+            wrapped = pkgs.writeShellScriptBin "run-harness-bats" ''
+              set -euo pipefail
+              export TERM="''${TERM:-dumb}"
+              export AGENT_HARNESS_BIN="${agentHarnessWrapper}/bin/agent-harness"
+              export PATH="${pkgs.lib.makeBinPath [
+                pkgs.bats
+                pkgs.jq
+                pkgs.curl
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.nodejs_22
+              ]}:$PATH"
+              exec bats bats/harness.bats
+            '';
+          in "${wrapped}/bin/run-harness-bats";
         };
 
         apps.prep-code-assistant = {
