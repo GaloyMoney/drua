@@ -82,9 +82,11 @@ struct CallToolParams {
     /// Tool arguments matching the schema from describe_tool
     #[serde(default, deserialize_with = "deserialize_arguments")]
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Optional post-processing filter applied to tool output
+    /// Optional post-processing filter applied to tool output. Reduces output
+    /// size to save tokens. By default, output is capped at 1000 lines
+    /// (some tools override this, e.g. build logs default to tail 150).
     #[serde(default)]
-    #[schemars(skip)]
+    #[schemars(schema_with = "output_filter_schema")]
     output_filter: Option<galoy_agents_core::toolset::OutputFilter>,
 }
 
@@ -119,6 +121,45 @@ where
             "arguments must be a JSON object or a JSON string containing an object",
         )),
     }
+}
+
+/// Manual schemars 1.x schema for `Option<OutputFilter>`.
+///
+/// rmcp re-exports schemars 1.x while the workspace uses 0.8, so we cannot
+/// derive `JsonSchema` on `OutputFilter` for both versions. This function
+/// provides the schema inline so the MCP tool definition exposes
+/// `output_filter` to clients.
+fn output_filter_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let string_schema = generator.subschema_for::<String>();
+    let int_schema = generator.subschema_for::<usize>();
+    let bool_schema = generator.subschema_for::<bool>();
+
+    schemars::json_schema!({
+        "type": "object",
+        "description": "Optional post-processing filter applied to tool output. Reduces output size to save tokens.",
+        "properties": {
+            "grep": {
+                "description": "Regex pattern to filter output lines (only matching lines returned)",
+                "allOf": [string_schema]
+            },
+            "invert_match": {
+                "description": "Exclude matching lines instead of including them (grep -v). Default: false",
+                "allOf": [bool_schema]
+            },
+            "context_lines": {
+                "description": "Lines of context around grep matches (grep -C). Only used with grep",
+                "allOf": [int_schema]
+            },
+            "head": {
+                "description": "Return only the first N lines",
+                "allOf": [int_schema]
+            },
+            "tail": {
+                "description": "Return only the last N lines",
+                "allOf": [int_schema]
+            }
+        }
+    })
 }
 
 #[tool_router]
