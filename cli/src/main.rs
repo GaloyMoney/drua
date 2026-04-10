@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
                         mount_path: p.mount_path.clone(),
                     }
                 }),
+                mcp_gateway_url: config.server.mcp_endpoint.clone(),
             },
             light: galoy_agents_core::agent::config::LightRuntimeConfig {
                 api_key: config.anthropic_api_key.clone(),
@@ -94,20 +95,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(app.clone());
 
-    let mut app_state = galoy_agents_web::AppState::new(
+    let app_state = galoy_agents_web::AppState::new(
         app,
         oauth_client,
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
     );
-
-    // Initialize SA token validator for sandbox pod authentication (in-cluster only)
-    if let Some(validator) =
-        galoy_agents_web::auth::sa_token::SaTokenValidator::try_from_env("galoy-agents-mcp").await
-    {
-        tracing::info!("SA token validator initialized (in-cluster)");
-        app_state = app_state.with_sa_token_validator(validator);
-    }
 
     let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);
 

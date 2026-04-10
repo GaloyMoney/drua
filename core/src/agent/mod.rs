@@ -45,6 +45,7 @@ pub struct Agents {
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
     harness_client: harness_client::HarnessClient,
     light_config: config::LightRuntimeConfig,
+    mcp_gateway_url: String,
     default_storage_class: String,
     toolsets: Arc<ToolSets>,
     mcp_creds: McpCredentials,
@@ -71,6 +72,7 @@ impl Agents {
         } else {
             None
         };
+        let mcp_gateway_url = config.sandbox.mcp_gateway_url.clone();
         let default_storage_class = config
             .sandbox
             .persistence
@@ -82,6 +84,7 @@ impl Agents {
             sandbox,
             harness_client: harness_client::HarnessClient::new(),
             light_config: config.light,
+            mcp_gateway_url,
             default_storage_class,
             toolsets,
             mcp_creds,
@@ -117,7 +120,7 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         let agent_name = name.into();
         let agent_id = AgentId::new();
-        let (_, token_hash) = crate::mcp_creds::token::generate_token();
+        let (raw_token, token_hash) = crate::mcp_creds::token::generate_token();
         let creds = self
             .mcp_creds
             .create_in_op(
@@ -136,6 +139,7 @@ impl Agents {
             .agent_type(agent_type)
             .name(agent_name)
             .mcp_creds_id(creds.id)
+            .mcp_token(raw_token)
             .build()
             .expect("Could not build new agent");
 
@@ -296,6 +300,21 @@ impl Agents {
         let sandbox_cache = Arc::clone(&self.sandbox_cache);
         let agent_id = agent.id;
 
+        // Build MCP server config if gateway URL and token are available
+        let mcp_servers = if !self.mcp_gateway_url.is_empty() && !agent.mcp_token.is_empty() {
+            Some(serde_json::json!({
+                "galoy-agents": {
+                    "type": "http",
+                    "url": self.mcp_gateway_url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", agent.mcp_token)
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         tokio::spawn(async move {
             // Check cache for a previously resolved sandbox
             let cached = {
@@ -414,13 +433,16 @@ impl Agents {
                 fqdn
             };
 
-            let input = serde_json::json!({
+            let mut input = serde_json::json!({
                 "prompt": prompt,
                 "session_id": session_id,
                 "model": model,
                 "max_turns": max_turns,
                 "disallowed_tools": disallowed_tools,
             });
+            if let Some(mcp) = mcp_servers {
+                input["mcp_servers"] = mcp;
+            }
 
             if let Err(e) = harness.send_message(&service_fqdn, input, tx.clone()).await {
                 tracing::error!(error = %e, "Agent message relay failed");

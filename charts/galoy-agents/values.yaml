@@ -165,11 +165,8 @@ sandbox:
   installController: true
   templateName: agent-sandbox
   runtimeClassName: gvisor
+  automountServiceAccountToken: false
   networkPolicyManagement: Managed
-  ## MCP gateway URL for sandbox pods (e.g. "http://galoy-agents.galoy-agents.svc.cluster.local:5254/mcp")
-  mcpGatewayUrl: ""
-  ## Audience claim for the projected SA token (must match gateway validation)
-  saTokenAudience: "galoy-agents-mcp"
   image:
     repository: us.gcr.io/galoyorg/sandbox-base
     digest: ""

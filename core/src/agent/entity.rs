@@ -97,6 +97,8 @@ pub enum AgentEvent {
         agent_type: AgentType,
         name: String,
         mcp_creds_id: McpCredsId,
+        /// Raw MCP token for authenticating to the MCP gateway.
+        mcp_token: String,
         sandbox_config: SandboxConfig,
         chat_config: ChatConfig,
     },
@@ -122,6 +124,8 @@ pub struct Agent {
     pub agent_type: AgentType,
     pub name: String,
     pub mcp_creds_id: McpCredsId,
+    /// Raw MCP token for authenticating to the MCP gateway.
+    pub mcp_token: String,
     pub sandbox_config: SandboxConfig,
     pub chat_config: ChatConfig,
     pub sandbox_state: SandboxState,
@@ -195,6 +199,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                     agent_type,
                     name,
                     mcp_creds_id,
+                    mcp_token,
                     sandbox_config,
                     chat_config,
                 } => {
@@ -204,6 +209,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .agent_type(*agent_type)
                         .name(name.clone())
                         .mcp_creds_id(*mcp_creds_id)
+                        .mcp_token(mcp_token.clone())
                         .sandbox_config(sandbox_config.clone())
                         .chat_config(chat_config.clone())
                         .sandbox_state(SandboxState::None);
@@ -233,6 +239,8 @@ pub struct NewAgent {
     #[builder(setter(into))]
     pub(super) name: String,
     pub(super) mcp_creds_id: McpCredsId,
+    #[builder(setter(into))]
+    pub(super) mcp_token: String,
     #[builder(default)]
     pub(super) sandbox_config: SandboxConfig,
     #[builder(default)]
@@ -257,6 +265,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 agent_type: self.agent_type,
                 name: self.name,
                 mcp_creds_id: self.mcp_creds_id,
+                mcp_token: self.mcp_token,
                 sandbox_config: self.sandbox_config,
                 chat_config: self.chat_config,
             }],
@@ -279,6 +288,7 @@ mod tests {
             .agent_type(AgentType::WorkspaceLead)
             .name("workspace-lead")
             .mcp_creds_id(McpCredsId::new())
+            .mcp_token("test-token-abc123")
             .sandbox_config(SandboxConfig::default())
             .chat_config(ChatConfig {
                 model: "claude-sonnet-4-6".to_string(),

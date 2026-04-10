@@ -10,7 +10,6 @@ use galoy_agents_core as domain;
 use domain::App;
 
 use auth::config::OAuthClient;
-use auth::sa_token::SaTokenValidator;
 use domain::code_assistant::CodeAssistant;
 
 /// Unified application state shared by all routes and middleware.
@@ -21,8 +20,6 @@ pub struct AppState {
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
     pub code_assistant: Option<CodeAssistant>,
-    /// Optional SA token validator — present when running in-cluster.
-    pub sa_token_validator: Option<SaTokenValidator>,
 }
 
 impl AppState {
@@ -39,14 +36,7 @@ impl AppState {
             mcp_endpoint,
             github_allowed_teams,
             code_assistant,
-            sa_token_validator: None,
         }
-    }
-
-    /// Set the SA token validator (typically initialized from in-cluster config).
-    pub fn with_sa_token_validator(mut self, validator: SaTokenValidator) -> Self {
-        self.sa_token_validator = Some(validator);
-        self
     }
 }
 
