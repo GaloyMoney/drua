@@ -50,6 +50,10 @@ spec:
         - name: {{ .name }}
           value: {{ .value | quote }}
         {{- end }}
+        {{- if .Values.galoyAgents.tracing }}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | replace ":4317" ":4318" | quote }}
+        {{- end }}
         {{- if .Values.sandbox.anthropicApiKeySecret }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
