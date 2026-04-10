@@ -57,6 +57,8 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/{id}", get(workspace_detail))
         .route("/workspaces/{id}", post(workspace_update))
         .route("/workspaces/{id}/delete", post(workspace_delete))
+        .route("/agents/{id}/config", get(agent_config_panel))
+        .route("/agents/{id}/config", post(agent_config_update))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -668,6 +670,16 @@ async fn reports_detail(
 // Workspaces
 // ---------------------------------------------------------------------------
 
+fn agent_to_config_view(agent: &domain::agent::Agent) -> AgentConfigView {
+    AgentConfigView {
+        model: agent.chat_config.model.clone(),
+        max_tokens: agent.chat_config.max_tokens,
+        max_turns: agent.chat_config.max_turns,
+        resource_cpu: agent.sandbox_config.resource_cpu.clone(),
+        resource_mem: agent.sandbox_config.resource_mem.clone(),
+    }
+}
+
 fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
     WorkspaceView {
         id: ws.id.to_string(),
@@ -865,6 +877,93 @@ async fn workspace_chat(
         agent_id,
     }
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Agent Config
+// ---------------------------------------------------------------------------
+
+#[instrument(name = "web.agent_config_panel", skip_all)]
+async fn agent_config_panel(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let agent_id = AgentId::from(id);
+    let agent = match state.app.agents().find_by_id(agent_id).await {
+        Ok(a) => a,
+        Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+
+    AgentConfigPanelTemplate {
+        agent_id: agent.id.to_string(),
+        config: agent_to_config_view(&agent),
+        saved: false,
+    }
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct AgentConfigForm {
+    model: String,
+    max_tokens: u32,
+    max_turns: u32,
+    resource_cpu: String,
+    resource_mem: String,
+}
+
+#[instrument(name = "web.agent_config_update", skip_all)]
+async fn agent_config_update(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<AgentConfigForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let agent_id = AgentId::from(id);
+
+    // Fetch current agent to preserve non-editable sandbox fields
+    let current = match state.app.agents().find_by_id(agent_id).await {
+        Ok(a) => a,
+        Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let chat_config = domain::agent::ChatConfig {
+        model: form.model,
+        max_tokens: form.max_tokens,
+        max_turns: form.max_turns,
+    };
+    let sandbox_config = domain::agent::SandboxConfig {
+        resource_cpu: form.resource_cpu,
+        resource_mem: form.resource_mem,
+        pvc_size: current.sandbox_config.pvc_size.clone(),
+        disallowed_tools: current.sandbox_config.disallowed_tools.clone(),
+    };
+
+    match state
+        .app
+        .agents()
+        .update_config(agent_id, chat_config, sandbox_config)
+        .await
+    {
+        Ok(agent) => AgentConfigPanelTemplate {
+            agent_id: agent.id.to_string(),
+            config: agent_to_config_view(&agent),
+            saved: true,
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to update agent config");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

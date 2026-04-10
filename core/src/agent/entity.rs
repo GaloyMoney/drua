@@ -6,7 +6,7 @@ use es_entity::*;
 use crate::primitives::*;
 
 /// Configuration for an agent's sandbox environment (infrastructure).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// PVC size (e.g., "10Gi").
     #[serde(default = "SandboxConfig::default_pvc_size")]
@@ -49,7 +49,7 @@ impl SandboxConfig {
 }
 
 /// Configuration for agent chat behavior (LLM interaction).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatConfig {
     /// LLM model (e.g., "claude-sonnet-4-6").
     #[serde(default = "ChatConfig::default_model")]
@@ -102,6 +102,12 @@ pub enum AgentEvent {
         sandbox_config: SandboxConfig,
         chat_config: ChatConfig,
     },
+    ChatConfigUpdated {
+        chat_config: ChatConfig,
+    },
+    SandboxConfigUpdated {
+        sandbox_config: SandboxConfig,
+    },
     SandboxProvisioned {},
     SandboxReady {},
     SandboxLost {},
@@ -142,6 +148,36 @@ impl Agent {
     /// Deterministic sandbox name derived from the agent ID.
     pub fn sandbox_name(&self) -> String {
         format!("agent-{}", &self.id.to_string()[..8])
+    }
+
+    pub(super) fn update_chat_config(&mut self, new_config: ChatConfig) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentEvent::ChatConfigUpdated { chat_config }
+                if *chat_config == new_config,
+            resets_on: AgentEvent::ChatConfigUpdated { .. }
+        );
+
+        self.chat_config = new_config.clone();
+        self.events.push(AgentEvent::ChatConfigUpdated {
+            chat_config: new_config,
+        });
+        Idempotent::Executed(())
+    }
+
+    pub(super) fn update_sandbox_config(&mut self, new_config: SandboxConfig) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentEvent::SandboxConfigUpdated { sandbox_config }
+                if *sandbox_config == new_config,
+            resets_on: AgentEvent::SandboxConfigUpdated { .. }
+        );
+
+        self.sandbox_config = new_config.clone();
+        self.events.push(AgentEvent::SandboxConfigUpdated {
+            sandbox_config: new_config,
+        });
+        Idempotent::Executed(())
     }
 
     pub(super) fn sandbox_provisioned(&mut self) -> Idempotent<()> {
@@ -213,6 +249,12 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .sandbox_config(sandbox_config.clone())
                         .chat_config(chat_config.clone())
                         .sandbox_state(SandboxState::None);
+                }
+                AgentEvent::ChatConfigUpdated { chat_config } => {
+                    builder = builder.chat_config(chat_config.clone());
+                }
+                AgentEvent::SandboxConfigUpdated { sandbox_config } => {
+                    builder = builder.sandbox_config(sandbox_config.clone());
                 }
                 AgentEvent::SandboxProvisioned {} => {
                     builder = builder.sandbox_state(SandboxState::Provisioning);
@@ -310,5 +352,40 @@ mod tests {
         assert!(agent.sandbox_name().starts_with("agent-"));
         assert_eq!(agent.chat_config.model, "claude-sonnet-4-6");
         assert_eq!(agent.chat_config.max_turns, 10);
+    }
+
+    #[test]
+    fn agent_update_chat_config() {
+        let mut agent = new_agent();
+        let new_config = ChatConfig {
+            model: "claude-opus-4-6".to_string(),
+            max_tokens: 8192,
+            max_turns: 50,
+        };
+        assert!(agent.update_chat_config(new_config.clone()).did_execute());
+        assert_eq!(agent.chat_config.model, "claude-opus-4-6");
+        assert_eq!(agent.chat_config.max_tokens, 8192);
+        assert_eq!(agent.chat_config.max_turns, 50);
+
+        // Idempotent: same config again should be a no-op
+        assert!(!agent.update_chat_config(new_config).did_execute());
+    }
+
+    #[test]
+    fn agent_update_sandbox_config() {
+        let mut agent = new_agent();
+        let new_config = SandboxConfig {
+            resource_cpu: "2".to_string(),
+            resource_mem: "2Gi".to_string(),
+            ..Default::default()
+        };
+        assert!(agent
+            .update_sandbox_config(new_config.clone())
+            .did_execute());
+        assert_eq!(agent.sandbox_config.resource_cpu, "2");
+        assert_eq!(agent.sandbox_config.resource_mem, "2Gi");
+
+        // Idempotent: same config again should be a no-op
+        assert!(!agent.update_sandbox_config(new_config).did_execute());
     }
 }

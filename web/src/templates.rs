@@ -186,3 +186,19 @@ pub struct WorkspaceChatTemplate {
     pub workspace: WorkspaceView,
     pub agent_id: String,
 }
+
+pub struct AgentConfigView {
+    pub model: String,
+    pub max_tokens: u32,
+    pub max_turns: u32,
+    pub resource_cpu: String,
+    pub resource_mem: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "agent_config_panel.html")]
+pub struct AgentConfigPanelTemplate {
+    pub agent_id: String,
+    pub config: AgentConfigView,
+    pub saved: bool,
+}
