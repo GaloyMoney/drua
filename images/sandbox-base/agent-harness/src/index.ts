@@ -123,6 +123,15 @@ let activeSessionId: string | undefined;
 let busy = false;
 let previousCostUsd = 0;
 
+/** Config used for the last spawn — used to detect config changes. */
+let lastSpawnModel: string | undefined;
+let lastSpawnMcpHash: string | undefined;
+
+function mcpHash(servers?: Record<string, McpHttpServerConfig>): string {
+  if (!servers || Object.keys(servers).length === 0) return "";
+  return JSON.stringify(servers);
+}
+
 /** Callback for the in-flight message — receives each event. */
 let onEvent: ((event: Record<string, unknown>) => void) | null = null;
 /** Called when a terminal event (result/error) arrives. */
@@ -159,7 +168,11 @@ function spawnCli(config: SpawnConfig): ChildProcess {
     args.push("--resume", config.resume);
   }
 
-  console.log(`Spawning cli.js (resume=${config.resume ?? "none"})`);
+  // Track spawn config for change detection
+  lastSpawnModel = config.model;
+  lastSpawnMcpHash = mcpHash(config.mcpServers);
+
+  console.log(`Spawning cli.js (resume=${config.resume ?? "none"}, model=${config.model})`);
 
   const proc = spawn(process.execPath, args, {
     cwd: CWD,
@@ -247,12 +260,25 @@ function spawnCli(config: SpawnConfig): ChildProcess {
 
 /** Ensure a cli.js process is running, spawning or reusing as needed. */
 function ensureCli(input: HarnessInput): ChildProcess {
-  if (cliProcess && cliProcess.exitCode === null) {
-    return cliProcess;
-  }
-
   const model = input.model ?? DEFAULT_MODEL;
   const maxTurns = input.max_turns ?? DEFAULT_MAX_TURNS;
+  const currentMcpHash = mcpHash(input.mcp_servers);
+
+  // Kill existing process if config changed (model or MCP servers)
+  if (cliProcess && cliProcess.exitCode === null) {
+    if (model !== lastSpawnModel || currentMcpHash !== lastSpawnMcpHash) {
+      console.log(
+        `Config changed (model: ${lastSpawnModel}->${model}, mcp: ${lastSpawnMcpHash !== currentMcpHash}), respawning`,
+      );
+      cliProcess.kill("SIGTERM");
+      cliProcess = null;
+      stdoutRL?.close();
+      stdoutRL = null;
+    } else {
+      return cliProcess;
+    }
+  }
+
   const resume = activeSessionId ?? loadSessionId();
 
   cliProcess = spawnCli({
