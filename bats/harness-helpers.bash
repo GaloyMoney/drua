@@ -45,6 +45,11 @@ stop_harness() {
     kill "$(cat "$HARNESS_PID_FILE")" 2>/dev/null || true
     rm -f "$HARNESS_PID_FILE"
   fi
+
+  # Clean up workspace before bats removes BATS_FILE_TMPDIR.
+  # Claude Code writes files here during tests; leftover contents cause
+  # bats' own temp-dir cleanup to fail with "Directory not empty".
+  rm -rf "$HARNESS_WORK"
 }
 
 harness_url() {
