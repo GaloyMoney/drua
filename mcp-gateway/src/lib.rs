@@ -82,6 +82,10 @@ struct CallToolParams {
     /// Tool arguments matching the schema from describe_tool
     #[serde(default, deserialize_with = "deserialize_arguments")]
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Optional post-processing filter applied to tool output
+    #[serde(default)]
+    #[schemars(skip)]
+    output_filter: Option<galoy_agents_core::toolset::OutputFilter>,
 }
 
 /// Deserialize `arguments` from either a JSON object or a stringified JSON object.
@@ -188,7 +192,7 @@ impl McpGateway {
         let catalog = self.catalog().with_auth(auth);
 
         catalog
-            .call(&params.tool_name, params.arguments)
+            .call_with_filter(&params.tool_name, params.arguments, params.output_filter)
             .await
             .map_err(|e| {
                 ErrorData::new(
@@ -279,5 +283,31 @@ mod tests {
         });
         let result = serde_json::from_value::<CallToolParams>(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_tool_params_accepts_output_filter() {
+        let json = serde_json::json!({
+            "tool_name": "concourse_get_build_logs",
+            "arguments": {"build_id": 123},
+            "output_filter": {
+                "grep": "error",
+                "tail": 50
+            }
+        });
+        let params: CallToolParams = serde_json::from_value(json).unwrap();
+        let filter = params.output_filter.unwrap();
+        assert_eq!(filter.grep.as_deref(), Some("error"));
+        assert_eq!(filter.tail, Some(50));
+        assert!(filter.head.is_none());
+    }
+
+    #[test]
+    fn call_tool_params_accepts_missing_output_filter() {
+        let json = serde_json::json!({
+            "tool_name": "some_tool"
+        });
+        let params: CallToolParams = serde_json::from_value(json).unwrap();
+        assert!(params.output_filter.is_none());
     }
 }

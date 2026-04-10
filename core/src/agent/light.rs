@@ -128,9 +128,12 @@ impl LightSession {
                 let args: Option<rmcp::model::JsonObject> = input
                     .get("arguments")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let output_filter = input
+                    .get("output_filter")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
                 let result = self
                     .catalog
-                    .call(tool_name, args)
+                    .call_with_filter(tool_name, args, output_filter)
                     .await
                     .map_err(|e| AgentError::SandboxExec(e.to_string()))?;
                 Ok(call_result_to_text(&result))
