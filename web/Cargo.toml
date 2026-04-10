@@ -8,6 +8,8 @@ edition.workspace = true
 [dependencies]
 galoy-agents-core = { path = "../core" }
 anyhow = "1"
+k8s-openapi = { version = "0.25", features = ["v1_33"] }
+kube = { version = "1", features = ["client"] }
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 async-trait = "0.1"
