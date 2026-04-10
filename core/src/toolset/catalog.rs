@@ -6,6 +6,7 @@ use crate::audit::{Audit, InteractionOutcome};
 use crate::auth::AuthContext;
 
 use super::error::ToolSetsError;
+use super::filter::OutputFilter;
 use super::traits::ToolSet;
 
 pub struct CatalogEntry {
@@ -92,6 +93,32 @@ impl Catalog {
                         "arguments": {
                             "type": "object",
                             "description": "Tool arguments matching the schema from describe_tool"
+                        },
+                        "output_filter": {
+                            "type": "object",
+                            "description": "Optional post-processing filter applied to tool output. Reduces output size to save tokens. By default, output is capped at 1000 lines.",
+                            "properties": {
+                                "grep": {
+                                    "type": "string",
+                                    "description": "Regex pattern to filter output lines (only matching lines returned)"
+                                },
+                                "invert_match": {
+                                    "type": "boolean",
+                                    "description": "Exclude matching lines instead of including them (grep -v). Default: false"
+                                },
+                                "context_lines": {
+                                    "type": "integer",
+                                    "description": "Lines of context around grep matches (grep -C). Only used with grep"
+                                },
+                                "head": {
+                                    "type": "integer",
+                                    "description": "Return only the first N lines"
+                                },
+                                "tail": {
+                                    "type": "integer",
+                                    "description": "Return only the last N lines"
+                                }
+                            }
                         }
                     },
                     "required": ["tool_name"]
@@ -308,6 +335,15 @@ impl Catalog {
         prefixed_name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        self.call_with_filter(prefixed_name, arguments, None).await
+    }
+
+    pub async fn call_with_filter(
+        &self,
+        prefixed_name: &str,
+        arguments: Option<JsonObject>,
+        output_filter: Option<OutputFilter>,
+    ) -> Result<CallToolResult, ToolSetsError> {
         let (set, tool_name) = self
             .find_set(prefixed_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
@@ -317,6 +353,10 @@ impl Catalog {
             .call(&tool_name, arguments.clone(), self.auth.as_ref())
             .await;
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Apply output filter (caller-provided or global default)
+        let filter = output_filter.unwrap_or_else(OutputFilter::global_default);
+        let result = result.and_then(|r| filter.apply(r));
 
         let (outcome, tokens_returned) = match &result {
             Ok(call_result) => {

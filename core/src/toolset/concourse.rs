@@ -5,6 +5,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
 use crate::auth::AuthContext;
 
+use super::filter::filter_lines;
 use super::{ToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct ConcourseToolSet {
@@ -351,57 +352,6 @@ fn int_arg(args: &JsonObject, key: &str) -> Result<i64, ToolSetsError> {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
         .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-/// Filter log lines by regex pattern with optional context lines.
-///
-/// When `invert` is false, returns lines that match the pattern (grep).
-/// When `invert` is true, returns lines that do NOT match (grep -v).
-/// When `context` is Some(n), includes n lines before/after each match (grep -C).
-fn filter_lines<'a>(
-    lines: &[&'a str],
-    re: &regex::Regex,
-    invert: bool,
-    context: Option<usize>,
-) -> Vec<&'a str> {
-    if context.is_none() || invert {
-        // Simple filter: no context lines, or inverted match (context + invert is unusual, skip context)
-        return lines
-            .iter()
-            .filter(|line| re.is_match(line) != invert)
-            .copied()
-            .collect();
-    }
-
-    let ctx = context.unwrap_or(0);
-    let mut included = vec![false; lines.len()];
-
-    for (i, line) in lines.iter().enumerate() {
-        if re.is_match(line) {
-            let start = i.saturating_sub(ctx);
-            let end = (i + ctx + 1).min(lines.len());
-            for flag in &mut included[start..end] {
-                *flag = true;
-            }
-        }
-    }
-
-    // Collect included lines, inserting "--" separators between non-contiguous groups
-    let mut result = Vec::new();
-    let mut prev_included = false;
-    for (i, line) in lines.iter().enumerate() {
-        if included[i] {
-            if !prev_included && !result.is_empty() {
-                result.push("--");
-            }
-            result.push(line);
-            prev_included = true;
-        } else {
-            prev_included = false;
-        }
-    }
-
-    result
 }
 
 fn extract_get_steps(plan: &[serde_json::Value], out: &mut Vec<serde_json::Value>) {
