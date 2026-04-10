@@ -408,6 +408,7 @@ resources:
     - images/sandbox-base/
     - bats/harness.bats
     - bats/harness-helpers.bash
+    - flake.nix
 
 - name: repo-labels
   type: git
