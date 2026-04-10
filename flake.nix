@@ -196,7 +196,6 @@
                 pkgs.git
                 pkgs.cacert
                 pkgs.shadow
-                pkgs.util-linux
               ]}:$PATH"
 
               # Claude Code CLI refuses --dangerously-skip-permissions as root.
@@ -204,7 +203,7 @@
               if [ "$(id -u)" = "0" ]; then
                 useradd -m testuser 2>/dev/null || true
                 chown -R testuser: . 2>/dev/null || true
-                exec su testuser -s /bin/sh -c "
+                exec ${pkgs.util-linux.login}/bin/su testuser -s /bin/sh -c "
                   ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
                   AGENT_HARNESS_BIN=$AGENT_HARNESS_BIN \
                   TERM=$TERM \
