@@ -1,9 +1,24 @@
 use std::convert::Infallible;
 
+use axum::{extract::Request, middleware::Next, response::Response};
+use opentelemetry::global;
+use opentelemetry_http::HeaderExtractor;
 use tower_sessions::{cookie::SameSite, SessionManagerLayer};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::auth::session_store::PgSessionStore;
 use crate::AppState;
+
+/// Extract W3C traceparent from incoming HTTP headers and attach to
+/// the current tracing span. This connects ingress → server spans
+/// in the distributed trace.
+async fn trace_context_middleware(request: Request, next: Next) -> Response {
+    let parent_cx = global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    });
+    let _ = tracing::Span::current().set_parent(parent_cx);
+    next.run(request).await
+}
 
 pub struct ServerConfig {
     pub host: String,
@@ -38,6 +53,7 @@ where
 
     crate::router()
         .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn(trace_context_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
         .layer(axum::Extension(app_state.clone()))
         .layer(session_layer)

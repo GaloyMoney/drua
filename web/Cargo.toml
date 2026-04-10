@@ -29,5 +29,8 @@ tower-service = "0.3"
 tokio = { version = "1", features = ["net"] }
 tokio-stream = "0.1"
 tower-sessions = "0.15"
+opentelemetry = "0.31"
+opentelemetry-http = "0.31"
 tracing = "0.1"
+tracing-opentelemetry = "0.32"
 uuid = { version = "1", features = ["v4"] }
