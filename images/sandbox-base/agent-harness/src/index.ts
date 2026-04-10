@@ -161,7 +161,8 @@ function spawnCli(config: SpawnConfig): ChildProcess {
     config.model,
     "--max-turns",
     String(config.maxTurns),
-    "--dangerously-skip-permissions",
+    "--permission-mode", "bypassPermissions",
+    "--allow-dangerously-skip-permissions",
   ];
 
   if (config.resume) {
