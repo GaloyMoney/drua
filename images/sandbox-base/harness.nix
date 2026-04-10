@@ -17,8 +17,7 @@ pkgs.buildNpmPackage {
       --platform=node \
       --target=node22 \
       --format=esm \
-      --external:perf_hooks \
-      --external:diagnostics_channel \
+      --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
       --outfile=dist/index.js
     runHook postBuild
   '';
