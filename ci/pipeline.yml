@@ -325,8 +325,12 @@ jobs:
             set -euo pipefail
             cd repo
             cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run .#harness-bats
+
+            # Claude Code CLI refuses --dangerously-skip-permissions as root.
+            # Drop to a non-root user for the actual test run.
+            useradd -m testuser
+            chown -R testuser: .
+            su testuser -c "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY cachix watch-exec $CACHIX_CACHE_NAME -- nix run .#harness-bats"
 
 - name: build-sandbox-base-image
   serial: true
