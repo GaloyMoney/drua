@@ -175,6 +175,25 @@ impl Agents {
         Ok(result.entities)
     }
 
+    /// Update the chat and sandbox configuration for an agent.
+    ///
+    /// Takes effect on the next message — does not affect in-flight conversations.
+    #[instrument(name = "domain.agent.update_config", skip(self))]
+    pub async fn update_config(
+        &self,
+        id: AgentId,
+        chat_config: ChatConfig,
+        sandbox_config: SandboxConfig,
+    ) -> Result<Agent, AgentError> {
+        let mut agent = self.repo.find_by_id(id).await?;
+        let chat_changed = agent.update_chat_config(chat_config).did_execute();
+        let sandbox_changed = agent.update_sandbox_config(sandbox_config).did_execute();
+        if chat_changed || sandbox_changed {
+            self.repo.update(&mut agent).await?;
+        }
+        Ok(agent)
+    }
+
     /// Send a message to an agent, dispatching to the appropriate runtime
     /// based on the agent's type.
     ///

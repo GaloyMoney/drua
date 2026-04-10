@@ -1,0 +1,53 @@
+<div id="config-panel">
+  {% if saved %}
+  <div role="alert" style="padding: 0.5rem 1rem; margin-bottom: 1rem; background: var(--pico-ins-color); color: white; border-radius: var(--pico-border-radius); font-size: 0.85rem;">
+    Config saved — takes effect on next message.
+  </div>
+  {% endif %}
+  <form
+    hx-post="/agents/{{ agent_id }}/config"
+    hx-target="#config-panel"
+    hx-swap="outerHTML"
+  >
+    <label>
+      Model
+      <select name="model">
+        <option value="claude-haiku-4-5-20251001" {% if config.model == "claude-haiku-4-5-20251001" %}selected{% endif %}>Claude Haiku 4.5</option>
+        <option value="claude-sonnet-4-6-20250514" {% if config.model == "claude-sonnet-4-6-20250514" %}selected{% endif %}>Claude Sonnet 4.6</option>
+        <option value="claude-opus-4-6-20250514" {% if config.model == "claude-opus-4-6-20250514" %}selected{% endif %}>Claude Opus 4.6</option>
+      </select>
+    </label>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+      <label>
+        Max tokens
+        <input type="number" name="max_tokens" min="256" max="65536" value="{{ config.max_tokens }}">
+      </label>
+      <label>
+        Max turns
+        <input type="number" name="max_turns" min="1" max="200" value="{{ config.max_turns }}">
+      </label>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+      <label>
+        CPU
+        <select name="resource_cpu">
+          <option value="500m" {% if config.resource_cpu == "500m" %}selected{% endif %}>0.5 CPU</option>
+          <option value="1" {% if config.resource_cpu == "1" %}selected{% endif %}>1 CPU</option>
+          <option value="2" {% if config.resource_cpu == "2" %}selected{% endif %}>2 CPU</option>
+        </select>
+      </label>
+      <label>
+        RAM
+        <select name="resource_mem">
+          <option value="512Mi" {% if config.resource_mem == "512Mi" %}selected{% endif %}>512 Mi</option>
+          <option value="1Gi" {% if config.resource_mem == "1Gi" %}selected{% endif %}>1 Gi</option>
+          <option value="2Gi" {% if config.resource_mem == "2Gi" %}selected{% endif %}>2 Gi</option>
+        </select>
+      </label>
+    </div>
+
+    <button type="submit" style="width: 100%;">Save</button>
+  </form>
+</div>
