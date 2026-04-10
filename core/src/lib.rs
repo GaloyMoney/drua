@@ -82,16 +82,8 @@ impl App {
         .await?;
         let toolsets = Arc::new(toolsets);
         let mcp_creds = McpCredentials::new(pool);
-        let agents = Arc::new(
-            Agents::init(
-                pool,
-                config.agents,
-                Arc::clone(&toolsets),
-                mcp_creds.clone(),
-            )
-            .await?,
-        );
-        let workspaces = Workspaces::new(pool, Arc::clone(&agents), mcp_creds.clone());
+        let agents = Arc::new(Agents::init(pool, config.agents, Arc::clone(&toolsets)).await?);
+        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
         // Register admin toolset after agents/workspaces to break circular dep
         toolsets.register(AdminToolSet::new(workspaces.clone(), Arc::clone(&agents)));

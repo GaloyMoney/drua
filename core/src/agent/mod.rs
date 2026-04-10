@@ -21,7 +21,6 @@ use repo::*;
 
 use crate::auth::AuthContext;
 use crate::chat_history::{ChatHistory, ConversationId, ConversationStatus, MessageRole};
-use crate::mcp_creds::McpCredentials;
 use crate::primitives::*;
 use crate::toolset::ToolSets;
 
@@ -45,10 +44,8 @@ pub struct Agents {
     sandbox: Option<Arc<sandbox_client::SandboxClient>>,
     harness_client: harness_client::HarnessClient,
     light_config: config::LightRuntimeConfig,
-    mcp_gateway_url: String,
     default_storage_class: String,
     toolsets: Arc<ToolSets>,
-    mcp_creds: McpCredentials,
     chat_history: ChatHistory,
     sandbox_cache: Arc<Mutex<HashMap<AgentId, SandboxCacheEntry>>>,
 }
@@ -58,7 +55,6 @@ impl Agents {
         pool: &sqlx::PgPool,
         config: AgentConfig,
         toolsets: Arc<ToolSets>,
-        mcp_creds: McpCredentials,
     ) -> Result<Self, AgentError> {
         let repo = AgentRepo::new(pool);
         let chat_history = ChatHistory::new(pool);
@@ -72,7 +68,6 @@ impl Agents {
         } else {
             None
         };
-        let mcp_gateway_url = config.sandbox.mcp_gateway_url.clone();
         let default_storage_class = config
             .sandbox
             .persistence
@@ -84,10 +79,8 @@ impl Agents {
             sandbox,
             harness_client: harness_client::HarnessClient::new(),
             light_config: config.light,
-            mcp_gateway_url,
             default_storage_class,
             toolsets,
-            mcp_creds,
             sandbox_cache: Arc::new(Mutex::new(HashMap::new())),
             chat_history,
         })
@@ -120,17 +113,6 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         let agent_name = name.into();
         let agent_id = AgentId::new();
-        let (raw_token, token_hash) = crate::mcp_creds::token::generate_token();
-        let creds = self
-            .mcp_creds
-            .create_in_op(
-                op,
-                McpCredsOwner::Agent { agent_id },
-                format!("agent:{agent_name}"),
-                token_hash,
-                vec!["agent".to_string()],
-            )
-            .await?;
 
         let new_agent = NewAgent::builder()
             .id(agent_id)
@@ -138,8 +120,6 @@ impl Agents {
             .sandbox_config(agent_type.default_sandbox_config())
             .agent_type(agent_type)
             .name(agent_name)
-            .mcp_creds_id(creds.id)
-            .mcp_token(raw_token)
             .build()
             .expect("Could not build new agent");
 
@@ -239,14 +219,7 @@ impl Agents {
 
         let rx = match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
-                let scopes = self
-                    .mcp_creds
-                    .find_by_id(agent.mcp_creds_id)
-                    .await
-                    .map(|c| c.scopes.clone())
-                    .unwrap_or_default();
-                let auth =
-                    AuthContext::InternalAgent(user_id, agent.id, agent.mcp_creds_id, scopes);
+                let auth = AuthContext::Agent(agent.workspace_id, agent.id, Vec::new());
                 let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
                     prompt,
@@ -325,21 +298,6 @@ impl Agents {
         let disallowed_tools = agent.sandbox_config.disallowed_tools.clone();
         let sandbox_cache = Arc::clone(&self.sandbox_cache);
         let agent_id = agent.id;
-
-        // Build MCP server config if gateway URL and token are available
-        let mcp_servers = if !self.mcp_gateway_url.is_empty() && !agent.mcp_token.is_empty() {
-            Some(serde_json::json!({
-                "galoy-agents": {
-                    "type": "http",
-                    "url": self.mcp_gateway_url,
-                    "headers": {
-                        "Authorization": format!("Bearer {}", agent.mcp_token)
-                    }
-                }
-            }))
-        } else {
-            None
-        };
 
         tokio::spawn(async move {
             // Check cache for a previously resolved sandbox
@@ -459,16 +417,13 @@ impl Agents {
                 fqdn
             };
 
-            let mut input = serde_json::json!({
+            let input = serde_json::json!({
                 "prompt": prompt,
                 "session_id": session_id,
                 "model": model,
                 "max_turns": max_turns,
                 "disallowed_tools": disallowed_tools,
             });
-            if let Some(mcp) = mcp_servers {
-                input["mcp_servers"] = mcp;
-            }
 
             if let Err(e) = harness.send_message(&service_fqdn, input, tx.clone()).await {
                 tracing::error!(error = %e, "Agent message relay failed");

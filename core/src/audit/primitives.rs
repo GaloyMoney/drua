@@ -42,10 +42,9 @@ pub enum AuditSubject {
         mcp_creds_id: McpCredsId,
         user_id: UserId,
     },
-    InternalAgent {
-        user_id: UserId,
+    Agent {
+        workspace_id: WorkspaceId,
         agent_id: AgentId,
-        mcp_creds_id: McpCredsId,
     },
     Anonymous,
 }
@@ -58,11 +57,10 @@ impl std::fmt::Display for AuditSubject {
                 mcp_creds_id,
                 user_id: _,
             } => write!(f, "exported_agent::{mcp_creds_id}"),
-            AuditSubject::InternalAgent {
+            AuditSubject::Agent {
+                workspace_id,
                 agent_id,
-                user_id,
-                mcp_creds_id: _,
-            } => write!(f, "internal_agent::{agent_id}::{user_id}"),
+            } => write!(f, "agent::{agent_id}::ws:{workspace_id}"),
             AuditSubject::Anonymous => write!(f, "anonymous"),
         }
     }
@@ -76,13 +74,10 @@ impl From<&AuthContext> for AuditSubject {
                 mcp_creds_id: *mcp_creds_id,
                 user_id: *user_id,
             },
-            AuthContext::InternalAgent(user_id, agent_id, mcp_creds_id, _) => {
-                AuditSubject::InternalAgent {
-                    user_id: *user_id,
-                    agent_id: *agent_id,
-                    mcp_creds_id: *mcp_creds_id,
-                }
-            }
+            AuthContext::Agent(workspace_id, agent_id, _) => AuditSubject::Agent {
+                workspace_id: *workspace_id,
+                agent_id: *agent_id,
+            },
             AuthContext::Anonymous => AuditSubject::Anonymous,
         }
     }

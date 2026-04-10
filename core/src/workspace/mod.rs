@@ -12,24 +12,18 @@ pub use error::*;
 use repo::*;
 
 use crate::agent::Agents;
-use crate::mcp_creds::McpCredentials;
 use crate::primitives::*;
 
 #[derive(Clone)]
 pub struct Workspaces {
     repo: WorkspaceRepo,
     agents: Arc<Agents>,
-    mcp_creds: McpCredentials,
 }
 
 impl Workspaces {
-    pub fn new(pool: &sqlx::PgPool, agents: Arc<Agents>, mcp_creds: McpCredentials) -> Self {
+    pub fn new(pool: &sqlx::PgPool, agents: Arc<Agents>) -> Self {
         let repo = WorkspaceRepo::new(pool);
-        Self {
-            repo,
-            agents,
-            mcp_creds,
-        }
+        Self { repo, agents }
     }
 
     #[instrument(name = "domain.workspace.create", skip(self))]
@@ -110,19 +104,9 @@ impl Workspaces {
             return Ok(workspace);
         }
 
-        // Cascade: revoke MCP creds and tear down sandboxes for all agents
+        // Cascade: tear down sandboxes for all agents
         let agent_list = self.agents.list_for_workspace(id).await?;
         for agent in &agent_list {
-            // Revoke gateway credentials so the agent can no longer call MCP
-            if let Err(e) = self.mcp_creds.revoke_in_op(op, agent.mcp_creds_id).await {
-                tracing::warn!(
-                    agent_id = %agent.id,
-                    creds_id = %agent.mcp_creds_id,
-                    error = %e,
-                    "Failed to revoke agent MCP creds during workspace delete"
-                );
-            }
-
             // Request sandbox teardown (best-effort, non-blocking)
             if let Err(e) = self.agents.destroy_sandbox(agent.id).await {
                 tracing::warn!(

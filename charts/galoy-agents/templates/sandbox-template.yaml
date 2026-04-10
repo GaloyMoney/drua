@@ -22,9 +22,7 @@ spec:
         effect: NoSchedule
       nodeSelector:
         {{- toYaml .Values.sandbox.nodeSelector | nindent 8 }}
-      {{- if not .Values.sandbox.automountServiceAccountToken }}
       automountServiceAccountToken: false
-      {{- end }}
       containers:
       - name: sandbox
         {{- if .Values.sandbox.image.digest }}
@@ -61,6 +59,22 @@ spec:
               name: {{ .Values.sandbox.anthropicApiKeySecret }}
               key: "api-key"
         {{- end }}
+        {{- if .Values.sandbox.mcpGatewayUrl }}
+        - name: MCP_GATEWAY_URL
+          value: {{ .Values.sandbox.mcpGatewayUrl | quote }}
+        {{- end }}
+        volumeMounts:
+        - name: mcp-token
+          mountPath: /var/run/secrets/galoy-agents
+          readOnly: true
+      volumes:
+      - name: mcp-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-mcp" }}
+              expirationSeconds: 3600
+              path: token
       dnsConfig:
         nameservers:
         - "8.8.8.8"
