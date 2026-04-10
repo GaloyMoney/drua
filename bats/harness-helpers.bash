@@ -11,6 +11,9 @@ AGENT_HARNESS_BIN="${AGENT_HARNESS_BIN:-node $REPO_ROOT/images/sandbox-base/agen
 start_harness() {
   mkdir -p "$HARNESS_WORK"
 
+  # Initialise workspace as a git repo — Claude Code expects this.
+  git -C "$HARNESS_WORK" init -q 2>/dev/null || true
+
   export HARNESS_PORT
   export HARNESS_CWD="$HARNESS_WORK"
 
@@ -31,6 +34,13 @@ start_harness() {
 }
 
 stop_harness() {
+  # Always dump the harness log for debugging CI failures
+  if [ -f "$HARNESS_LOG" ]; then
+    echo "=== harness log ==="
+    cat "$HARNESS_LOG"
+    echo "=== end harness log ==="
+  fi
+
   if [ -f "$HARNESS_PID_FILE" ]; then
     kill "$(cat "$HARNESS_PID_FILE")" 2>/dev/null || true
     rm -f "$HARNESS_PID_FILE"
