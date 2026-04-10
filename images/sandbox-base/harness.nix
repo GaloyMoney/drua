@@ -3,7 +3,7 @@ pkgs.buildNpmPackage {
   pname = "agent-harness";
   version = "0.1.0";
   src = ./agent-harness;
-  npmDepsHash = "sha256-y1jTok6cf0uWMK6S64H7QMswLTpmLOh8Xo2Bl8EzHVU=";
+  npmDepsHash = "sha256-am0pOrbtqzZwpGmTRJDCcLXVTHo5m7uFCJYDDbq7ZfE=";
 
   nativeBuildInputs = [ pkgs.esbuild ];
 

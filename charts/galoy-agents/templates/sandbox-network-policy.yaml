@@ -52,7 +52,17 @@ spec:
         matchLabels:
           app: {{ template "galoyAgents.fullname" . }}
           release: {{ .Release.Name }}
-  # 3. Internet — all non-RFC1918 destinations (via NAT gateway)
+  # 3. OTel collector — allow trace export (OTLP HTTP/protobuf)
+  {{- if .Values.sandbox.otelCollectorNamespace }}
+  - ports:
+    - protocol: TCP
+      port: 4318
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.sandbox.otelCollectorNamespace }}
+  {{- end }}
+  # 4. Internet — all non-RFC1918 destinations (via NAT gateway)
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0

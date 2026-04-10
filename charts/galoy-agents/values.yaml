@@ -184,6 +184,9 @@ sandbox:
   nodeSelector:
     sandbox.gke.io/runtime: gvisor
   env: []
+  ## Namespace of the OTel collector for trace export.
+  ## When set, adds an egress rule allowing port 4318 (OTLP HTTP).
+  otelCollectorNamespace: ""
   anthropicApiKeySecret: ""
   ## Example: Override or supplement nix cache config at runtime
   # env:

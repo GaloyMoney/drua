@@ -25,6 +25,16 @@ import { fileURLToPath } from "node:url";
 import { createInterface, type Interface } from "node:readline";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 
+import {
+  initTracing,
+  shutdownTracing,
+  getTracer,
+  context as otelContext,
+  propagation,
+  SpanStatusCode,
+  type Span,
+} from "./tracing.js";
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 const CWD = process.env.HARNESS_CWD ?? "/workspace";
@@ -133,6 +143,13 @@ let spawnedAt = Date.now();
  */
 let replayMode = false;
 
+/** OTel span tracking for replay mode event counting. */
+let replaySpan: Span | null = null;
+let replayEventCount = 0;
+
+/** OTel span tracking for time from spawn to first stdout event. */
+let initWaitSpan: Span | null = null;
+
 /** Config used for the last spawn — used to detect config changes. */
 let lastSpawnModel: string | undefined;
 let lastSpawnMcpHash: string | undefined;
@@ -155,6 +172,15 @@ interface SpawnConfig {
 }
 
 function spawnCli(config: SpawnConfig): ChildProcess {
+  const tracer = getTracer();
+  const spawnSpan = tracer.startSpan("harness.cli.spawn", {
+    attributes: {
+      "cli.model": config.model,
+      "cli.resume": config.resume ?? "none",
+      "cli.has_mcp": !!(config.mcpServers && Object.keys(config.mcpServers).length),
+    },
+  });
+
   const args = [
     CLI_JS_PATH,
     "--output-format",
@@ -187,9 +213,15 @@ function spawnCli(config: SpawnConfig): ChildProcess {
   // Suppress replayed history when resuming an existing session
   if (config.resume) {
     replayMode = true;
+    replaySpan = tracer.startSpan("harness.cli.replay");
+    replayEventCount = 0;
   }
 
+  // Track time from spawn to first stdout event
+  initWaitSpan = tracer.startSpan("harness.cli.init_wait");
+
   console.log(`Spawning cli.js (resume=${config.resume ?? "none"}, model=${config.model})`);
+  spawnSpan.end();
 
   const proc = spawn(process.execPath, args, {
     cwd: CWD,
@@ -256,10 +288,28 @@ function spawnCli(config: SpawnConfig): ChildProcess {
         return; // skip non-JSON lines (e.g. startup banners)
       }
 
+      // End init_wait span on first stdout event from the CLI
+      if (initWaitSpan) {
+        initWaitSpan.end();
+        initWaitSpan = null;
+      }
+
+      // Emit a per-event span for latency analysis
+      const eventType = (event.type as string) ?? "unknown";
+      const eventSpan = getTracer().startSpan("harness.cli.event", {
+        attributes: {
+          "event.type": eventType,
+          "event.subtype": (event.subtype as string) ?? "",
+          "event.ms_since_spawn": Date.now() - spawnedAt,
+        },
+      });
+      eventSpan.end();
+
       // While replaying a resumed session, absorb events silently.
       // We still capture session_id and cost baseline from replayed results
       // so the first real turn has correct deltas.
       if (replayMode) {
+        replayEventCount++;
         if (event.type === "result") {
           if (typeof event.session_id === "string") {
             activeSessionId = event.session_id;
@@ -354,6 +404,11 @@ async function handleMessage(
   if (replayMode) {
     await new Promise<void>((resolve) => setImmediate(resolve));
     replayMode = false;
+    if (replaySpan) {
+      replaySpan.setAttribute("replay.event_count", replayEventCount);
+      replaySpan.end();
+      replaySpan = null;
+    }
   }
 
   return new Promise<void>((resolve) => {
@@ -437,12 +492,42 @@ async function handleRequest(
       Connection: "keep-alive",
     });
 
-    busy = true;
-    try {
-      await handleMessage(input, (event) => sendSSE(res, event));
-    } finally {
-      busy = false;
-    }
+    // Extract W3C traceparent from incoming request headers and create
+    // a root span that joins the distributed trace from the Rust server.
+    const parentCtx = propagation.extract(otelContext.active(), req.headers);
+    const tracer = getTracer();
+
+    await otelContext.with(parentCtx, async () => {
+      await tracer.startActiveSpan(
+        "harness.message",
+        {
+          attributes: {
+            "harness.model": input.model ?? DEFAULT_MODEL,
+            "harness.prompt_length": input.prompt.length,
+            "harness.has_mcp_servers": !!(
+              input.mcp_servers &&
+              Object.keys(input.mcp_servers).length
+            ),
+          },
+        },
+        async (span: Span) => {
+          busy = true;
+          try {
+            await handleMessage(input, (event) => sendSSE(res, event));
+            span.setStatus({ code: SpanStatusCode.OK });
+          } catch (err) {
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: String(err),
+            });
+            throw err;
+          } finally {
+            busy = false;
+            span.end();
+          }
+        },
+      );
+    });
     res.end();
     return;
   }
@@ -458,6 +543,9 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
+// Initialize OpenTelemetry before starting the server
+initTracing();
+
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
     console.error("Unhandled error in request handler:", err);
@@ -471,3 +559,12 @@ const server = createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`agent-harness listening on 0.0.0.0:${PORT} (SDK bypass mode)`);
 });
+
+// Flush spans on graceful shutdown
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, async () => {
+    console.log(`Received ${sig}, shutting down...`);
+    await shutdownTracing();
+    process.exit(0);
+  });
+}

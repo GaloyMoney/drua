@@ -1,6 +1,9 @@
 use std::time::Duration;
 
+use opentelemetry::global;
+use opentelemetry_http::HeaderInjector;
 use tracing::instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::error::AgentError;
 use super::sandbox::translate_harness_event;
@@ -70,9 +73,18 @@ impl HarnessClient {
     ) -> Result<(), AgentError> {
         let url = format!("http://{service_fqdn}:{HARNESS_PORT}/message");
 
+        // Inject W3C traceparent from the current tracing span so the
+        // harness can create child spans that join the distributed trace.
+        let cx = tracing::Span::current().context();
+        let mut headers = reqwest::header::HeaderMap::new();
+        global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&cx, &mut HeaderInjector(&mut headers));
+        });
+
         let mut response = self
             .http
             .post(&url)
+            .headers(headers)
             .json(&input)
             .send()
             .await
