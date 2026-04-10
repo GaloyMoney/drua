@@ -32,42 +32,7 @@ let
   # Bypasses the Claude Agent SDK: the harness spawns cli.js directly as a
   # persistent subprocess (stdin/stdout stream-json) instead of using the
   # SDK's query() which spawns a new process per message (~25s in gVisor).
-  agentHarness = pkgs.buildNpmPackage {
-    pname = "agent-harness";
-    version = "0.1.0";
-    src = ./agent-harness;
-    npmDepsHash = "sha256-y1jTok6cf0uWMK6S64H7QMswLTpmLOh8Xo2Bl8EzHVU=";
-
-    nativeBuildInputs = [ pkgs.esbuild ];
-
-    # Skip the default `npm run build`; we bundle with esbuild instead.
-    dontNpmBuild = true;
-
-    buildPhase = ''
-      runHook preBuild
-      esbuild src/index.ts \
-        --bundle \
-        --platform=node \
-        --target=node22 \
-        --format=esm \
-        --outfile=dist/index.js
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out/lib
-      cp dist/index.js $out/lib/index.js
-
-      # cli.js is the Claude Code CLI binary — spawned as a persistent
-      # subprocess by the harness.  It cannot be bundled by esbuild.
-      mkdir -p $out/lib/sdk
-      cp node_modules/@anthropic-ai/claude-agent-sdk/cli.js $out/lib/sdk/
-      cp node_modules/@anthropic-ai/claude-agent-sdk/*.wasm  $out/lib/sdk/ 2>/dev/null || true
-      cp -r node_modules/@anthropic-ai/claude-agent-sdk/vendor $out/lib/sdk/ 2>/dev/null || true
-      runHook postInstall
-    '';
-  };
+  agentHarness = import ./harness.nix { inherit pkgs; };
 
   # Thin wrapper — just exec node with the pre-built bundle.
   agentHarnessWrapper = pkgs.writeShellScriptBin "agent-harness" ''

@@ -14,6 +14,8 @@
  * Environment:
  *   ANTHROPIC_API_KEY — required
  *   HARNESS_PORT      — optional (default 3000)
+ *   HARNESS_CLI_PATH  — optional (default: bundled cli.js)
+ *   HARNESS_CWD       — optional (default: /workspace)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -25,14 +27,14 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const CWD = "/workspace";
+const CWD = process.env.HARNESS_CWD ?? "/workspace";
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_MAX_TURNS = 10;
 const PORT = parseInt(process.env.HARNESS_PORT ?? "3000", 10);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const CLI_JS_PATH = join(__dirname, "sdk", "cli.js");
+const CLI_JS_PATH = process.env.HARNESS_CLI_PATH ?? join(__dirname, "sdk", "cli.js");
 const SESSION_FILE = join(CWD, ".claude", ".harness-session-id");
 
 // ── Types ──────────────────────────────────────────────────────────────
