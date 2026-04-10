@@ -178,6 +178,8 @@ impl Agents {
     /// Update the chat and sandbox configuration for an agent.
     ///
     /// Takes effect on the next message — does not affect in-flight conversations.
+    /// When sandbox resource config changes, the running sandbox is destroyed so
+    /// the next message triggers re-provisioning with the new resources.
     #[instrument(name = "domain.agent.update_config", skip(self))]
     pub async fn update_config(
         &self,
@@ -190,6 +192,11 @@ impl Agents {
         let sandbox_changed = agent.update_sandbox_config(sandbox_config).did_execute();
         if chat_changed || sandbox_changed {
             self.repo.update(&mut agent).await?;
+        }
+        // Destroy running sandbox so the next message re-provisions with new config
+        if sandbox_changed {
+            self.sandbox_cache.lock().await.remove(&id);
+            self.destroy_sandbox(id).await?;
         }
         Ok(agent)
     }
