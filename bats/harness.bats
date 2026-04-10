@@ -27,8 +27,8 @@ teardown_file() {
 
 # ── First message ────────────────────────────────────────────────────
 
-@test "harness: POST /message returns SSE with assistant and result events" {
-  SSE=$(harness_send_message '{"prompt":"Reply with only the word PONG. Nothing else.","max_turns":3}' 180)
+@test "harness: first message returns SSE with assistant and result events" {
+  SSE=$(harness_send_message '{"prompt":"Remember the secret word BANANA. Reply with only: Remembered BANANA.","max_turns":3}' 180)
   echo "$SSE"
 
   # Must contain expected SSE event types
@@ -41,15 +41,12 @@ teardown_file() {
   echo "$RESULT" | jq -e 'has("session_id")'
 }
 
-# ── Second message (session persistence) ─────────────────────────────
+# ── Second message (same CLI process) ────────────────────────────────
 
-@test "harness: second message reuses session and returns cost delta" {
-  # Wait for the first message to finish — the harness rejects with 409 while busy.
+@test "harness: second message to running CLI succeeds" {
   wait_not_busy
 
-  # The CLI may need to resume the session from the first message, so allow
-  # extra time for the replay + new turn.
-  SSE=$(harness_send_message '{"prompt":"Reply with only the word PING. Nothing else.","max_turns":3}' 180)
+  SSE=$(harness_send_message '{"prompt":"Remember the secret word CHERRY. Reply with only: Remembered CHERRY.","max_turns":3}' 180)
   echo "$SSE"
 
   echo "$SSE" | grep -q "^event: result"
@@ -57,11 +54,37 @@ teardown_file() {
   RESULT=$(echo "$SSE" | sse_events "result" | tail -1)
   echo "$RESULT" | jq -e '.type == "result"'
 
-  # Health should now show a session_id
+  # Health should show a session_id and live CLI
   HEALTH=$(curl -sf "$(harness_url)/health")
   echo "$HEALTH"
   echo "$HEALTH" | jq -e '.session_id != null'
   echo "$HEALTH" | jq -e '.cli_alive == true'
+}
+
+# ── Session resume after restart ─────────────────────────────────────
+
+@test "harness: restarted CLI resumes session and recalls previous messages" {
+  wait_not_busy
+
+  # Kill the CLI subprocess — next message will spawn with --resume
+  harness_restart
+
+  # Verify CLI is gone but session is preserved
+  HEALTH=$(curl -sf "$(harness_url)/health")
+  echo "$HEALTH"
+  echo "$HEALTH" | jq -e '.cli_alive == false'
+  echo "$HEALTH" | jq -e '.session_id != null'
+
+  # Ask about previously remembered words — proves session resume works.
+  # Give extra time: --resume replays the full conversation before processing.
+  SSE=$(harness_send_message '{"prompt":"What were the two secret words I asked you to remember earlier? Reply with ONLY those two words, nothing else.","max_turns":3}' 300)
+  echo "$SSE"
+
+  echo "$SSE" | grep -q "^event: result"
+
+  # The assistant response must mention both words from prior messages
+  echo "$SSE" | grep -iq "BANANA"
+  echo "$SSE" | grep -iq "CHERRY"
 }
 
 # ── MCP availability ─────────────────────────────────────────────────

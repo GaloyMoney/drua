@@ -83,6 +83,11 @@ wait_not_busy() {
   return 1
 }
 
+# Kill the CLI subprocess so the next message triggers a --resume spawn.
+harness_restart() {
+  curl -sf -X POST "$(harness_url)/restart"
+}
+
 # Extract all SSE data lines for a given event type from an SSE response.
 # Usage: echo "$SSE" | sse_events "result"
 sse_events() {
@@ -91,4 +96,17 @@ sse_events() {
     /^event: / { current = substr($0, 8) }
     /^data: / && current == type { print substr($0, 7) }
   '
+}
+
+# Dump tail of harness log on test failure (bats captures per-test teardown output).
+teardown() {
+  # shellcheck disable=SC2154
+  if [ -n "${BATS_TEST_COMPLETED:-}" ]; then
+    return
+  fi
+  if [ -f "$HARNESS_LOG" ]; then
+    echo "=== harness log (last 60 lines) ==="
+    tail -60 "$HARNESS_LOG"
+    echo "=== end harness log ==="
+  fi
 }

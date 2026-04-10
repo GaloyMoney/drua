@@ -398,6 +398,24 @@ async function handleRequest(
     return;
   }
 
+  // Restart endpoint — kill CLI process so the next message triggers --resume
+  if (req.method === "POST" && req.url === "/restart") {
+    if (busy) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "cannot restart while busy" }));
+      return;
+    }
+    if (cliProcess && cliProcess.exitCode === null) {
+      cliProcess.kill("SIGTERM");
+      cliProcess = null;
+      stdoutRL?.close();
+      stdoutRL = null;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "restarted" }));
+    return;
+  }
+
   // Message endpoint
   if (req.method === "POST" && req.url === "/message") {
     if (busy) {
