@@ -2,11 +2,15 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::auth::AuthContext;
 
+use super::filter::OutputFilter;
 use super::ToolSetsError;
 
 pub struct ToolSetEntry {
     pub name: String,
     pub description: Tool,
+    /// Optional default output filter for this tool (e.g. tail:150 for build logs).
+    /// When set, this is used as the fallback before the global default.
+    pub default_output_filter: Option<OutputFilter>,
 }
 
 #[async_trait::async_trait]
