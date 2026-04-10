@@ -124,6 +124,7 @@ let stdoutRL: Interface | null = null;
 let activeSessionId: string | undefined;
 let busy = false;
 let previousCostUsd = 0;
+let spawnedAt = Date.now();
 
 /**
  * When true, stdout events are suppressed (not forwarded to the caller).
@@ -181,6 +182,7 @@ function spawnCli(config: SpawnConfig): ChildProcess {
   // Track spawn config for change detection
   lastSpawnModel = config.model;
   lastSpawnMcpHash = mcpHash(config.mcpServers);
+  spawnedAt = Date.now();
 
   // Suppress replayed history when resuming an existing session
   if (config.resume) {
@@ -245,6 +247,11 @@ function spawnCli(config: SpawnConfig): ChildProcess {
       let event: Record<string, unknown>;
       try {
         event = JSON.parse(line);
+        // Log event type + timing for latency debugging
+        const eventType = event.type as string;
+        if (eventType && !["stream_event"].includes(eventType)) {
+          console.log(`[event] ${eventType}${event.subtype ? `.${event.subtype}` : ""} +${Date.now() - spawnedAt}ms`);
+        }
       } catch {
         return; // skip non-JSON lines (e.g. startup banners)
       }
