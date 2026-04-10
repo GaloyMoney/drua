@@ -63,21 +63,27 @@ teardown_file() {
 
 # ── MCP availability ─────────────────────────────────────────────────
 
-@test "harness: message ignores unknown fields without crashing" {
-  # Harness should gracefully ignore unknown fields in the input JSON.
-  # MCP config is now read from projected SA token file, not from the
-  # message payload.
+@test "harness: message with mcp_servers config does not crash harness" {
+  # Pass an MCP server config — the harness should respawn the CLI with
+  # --mcp-config.  The MCP server URL is a dummy; Claude Code may fail
+  # to connect or produce an error, but the harness itself must not crash
+  # and the health endpoint must remain responsive afterwards.
   SSE=$(harness_send_message '{
     "prompt": "Reply with only the word OK. Nothing else.",
     "max_turns": 3,
-    "unknown_field": "should be ignored"
+    "mcp_servers": {
+      "test-mcp": {
+        "type": "http",
+        "url": "http://localhost:19999/mcp"
+      }
+    }
   }' 180)
   echo "$SSE"
 
   # The harness should return some SSE events (result or error — both OK)
   echo "$SSE" | grep -qE "^event: (result|error)"
 
-  # Health endpoint must still work
+  # Health endpoint must still work after MCP config change
   run curl -sf "$(harness_url)/health"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.status == "ok"'
