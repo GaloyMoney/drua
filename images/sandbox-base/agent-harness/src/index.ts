@@ -463,14 +463,4 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`agent-harness listening on 0.0.0.0:${PORT} (SDK bypass mode)`);
-
-  // Eagerly spawn cli.js so it warms up while waiting for the first request.
-  // Uses default config; ensureCli() will respawn if the first message
-  // specifies a different model or MCP servers.
-  const existingSession = loadSessionId();
-  cliProcess = spawnCli({
-    model: DEFAULT_MODEL,
-    maxTurns: DEFAULT_MAX_TURNS,
-    resume: existingSession,
-  });
 });
