@@ -270,7 +270,15 @@ async function handleMessage(
     };
 
     // Write user message as JSON line to cli.js stdin
-    const msg = JSON.stringify({ type: "user", content: input.prompt });
+    const msg = JSON.stringify({
+      type: "user",
+      session_id: "",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: input.prompt }],
+      },
+      parent_tool_use_id: null,
+    });
     proc.stdin!.write(msg + "\n");
   });
 }
