@@ -146,6 +146,7 @@ function spawnCli(config: SpawnConfig): ChildProcess {
     "stream-json",
     "--input-format",
     "stream-json",
+    "--verbose",
     "--model",
     config.model,
     "--max-turns",
