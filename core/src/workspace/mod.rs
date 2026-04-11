@@ -104,15 +104,14 @@ impl Workspaces {
             return Ok(workspace);
         }
 
-        // Cascade: tear down sandboxes for all agents
+        // Cascade: soft-delete agents (which also destroys their sandboxes)
         let agent_list = self.agents.list_for_workspace(id).await?;
         for agent in &agent_list {
-            // Request sandbox teardown (best-effort, non-blocking)
-            if let Err(e) = self.agents.destroy_sandbox(agent.id).await {
+            if let Err(e) = self.agents.delete_in_op(op, agent.id).await {
                 tracing::warn!(
                     agent_id = %agent.id,
                     error = %e,
-                    "Failed to destroy agent sandbox during workspace delete"
+                    "Failed to delete agent during workspace delete"
                 );
             }
         }

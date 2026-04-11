@@ -244,6 +244,23 @@ impl Agents {
         Ok(self.wrap_with_persistence(rx, conversation_id))
     }
 
+    /// Soft-delete an agent and destroy its sandbox.
+    #[instrument(name = "domain.agent.delete_in_op", skip(self, op))]
+    pub async fn delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        id: impl Into<AgentId> + std::fmt::Debug,
+    ) -> Result<(), AgentError> {
+        let id = id.into();
+        // Best-effort sandbox teardown before deleting the entity
+        if let Err(e) = self.destroy_sandbox(id).await {
+            tracing::warn!(agent_id = %id, error = %e, "Failed to destroy sandbox during agent delete");
+        }
+        let agent = self.repo.find_by_id(id).await?;
+        self.repo.delete_in_op(op, agent).await?;
+        Ok(())
+    }
+
     /// Destroy an agent's sandbox (best-effort). Marks the agent as having
     /// lost its sandbox and deletes the underlying K8s sandbox resource.
     #[instrument(name = "domain.agent.destroy_sandbox", skip(self))]
