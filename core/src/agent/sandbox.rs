@@ -48,21 +48,35 @@ pub(super) fn translate_harness_event(line: &str) -> Vec<AgentMessageEvent> {
                             let arguments = block.get("input").cloned();
                             events.push(AgentMessageEvent::ToolCall { name, arguments });
                         }
-                        Some("tool_result") => {
-                            let name = block
-                                .get("name")
-                                .or_else(|| block.get("tool_use_id"))
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let is_error = block
-                                .get("is_error")
-                                .and_then(|e| e.as_bool())
-                                .unwrap_or(false);
-                            events.push(AgentMessageEvent::ToolResult { name, is_error });
-                        }
+                        // tool_result blocks don't appear in assistant events;
+                        // they arrive as "user" events (see below).
                         _ => {}
                     }
+                }
+            }
+            events
+        }
+        "user" => {
+            let mut events = Vec::new();
+            if let Some(blocks) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    let name = block
+                        .get("tool_use_id")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let is_error = block
+                        .get("is_error")
+                        .and_then(|e| e.as_bool())
+                        .unwrap_or(false);
+                    events.push(AgentMessageEvent::ToolResult { name, is_error });
                 }
             }
             events
@@ -202,32 +216,8 @@ pub(super) fn translate_to_session_events(
                                 raw_event: None,
                             });
                         }
-                        Some("tool_result") => {
-                            let tool_use_id = block
-                                .get("tool_use_id")
-                                .and_then(|id| id.as_str())
-                                .map(String::from);
-                            let name = block.get("name").and_then(|n| n.as_str()).map(String::from);
-                            let is_error = block
-                                .get("is_error")
-                                .and_then(|e| e.as_bool())
-                                .unwrap_or(false);
-                            let output = block
-                                .get("content")
-                                .cloned()
-                                .unwrap_or(serde_json::json!(null));
-                            events.push(NewSessionEvent {
-                                event_type: SessionEventType::ToolResult,
-                                tool_name: name,
-                                tool_use_id,
-                                content: serde_json::json!({
-                                    "output": output,
-                                    "is_error": is_error,
-                                }),
-                                metadata: serde_json::json!({}),
-                                raw_event: None,
-                            });
-                        }
+                        // Note: assistant events do NOT contain tool_result blocks.
+                        // Tool results arrive as separate "user" events (handled below).
                         Some("thinking") => {
                             if let Some(text) = block.get("thinking").and_then(|t| t.as_str()) {
                                 events.push(NewSessionEvent {
@@ -245,6 +235,50 @@ pub(super) fn translate_to_session_events(
                 }
             }
             // Store raw on the first event of the batch (it covers the whole turn)
+            if let Some(first) = events.first_mut() {
+                first.raw_event = raw;
+            }
+            events
+        }
+        // User events carry tool_result blocks — the full output of each
+        // tool execution fed back to the model.
+        "user" => {
+            let mut events = Vec::new();
+            if let Some(blocks) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    let tool_use_id = block
+                        .get("tool_use_id")
+                        .and_then(|id| id.as_str())
+                        .map(String::from);
+                    let is_error = block
+                        .get("is_error")
+                        .and_then(|e| e.as_bool())
+                        .unwrap_or(false);
+                    // `content` can be a string or an array of content blocks
+                    let output = block
+                        .get("content")
+                        .cloned()
+                        .unwrap_or(serde_json::json!(null));
+                    events.push(NewSessionEvent {
+                        event_type: SessionEventType::ToolResult,
+                        tool_name: None,
+                        tool_use_id,
+                        content: serde_json::json!({
+                            "output": output,
+                            "is_error": is_error,
+                        }),
+                        metadata: serde_json::json!({}),
+                        raw_event: None,
+                    });
+                }
+            }
             if let Some(first) = events.first_mut() {
                 first.raw_event = raw;
             }
