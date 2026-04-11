@@ -62,6 +62,21 @@ async fn main() -> anyhow::Result<()> {
     let pool = sqlx::PgPool::connect(&config.db.pg_con).await?;
     sqlx::migrate!("../core/migrations").run(&pool).await?;
 
+    let github_app_config = config.github_app.as_ref().and_then(|gh| {
+        if gh.client_id.is_empty()
+            || gh.installation_id.is_empty()
+            || gh.private_key_path.is_empty()
+        {
+            None
+        } else {
+            Some(galoy_agents_core::github_app::GitHubAppConfig {
+                client_id: gh.client_id.clone(),
+                installation_id: gh.installation_id.clone(),
+                private_key_path: gh.private_key_path.clone(),
+            })
+        }
+    });
+
     let app_config = galoy_agents_core::AppConfig {
         agents: galoy_agents_core::agent::AgentConfig {
             sandbox: galoy_agents_core::agent::config::SandboxClientConfig {
@@ -82,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         },
         toolsets: config.toolsets.clone(),
         encryption: Default::default(),
+        github_app: github_app_config,
     };
 
     let app = galoy_agents_core::App::init(&pool, app_config).await?;
