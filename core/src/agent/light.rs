@@ -2,6 +2,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
+use crate::session::{NewSessionEvent, SessionEventType, SessionId, SessionStats, Sessions};
 use crate::toolset::Catalog;
 
 use super::config::LightRuntimeConfig;
@@ -92,6 +93,8 @@ struct LightSession {
     max_turns: usize,
     tools: Vec<serde_json::Value>,
     system: String,
+    sessions: Sessions,
+    session_id: SessionId,
 }
 
 impl LightSession {
@@ -144,11 +147,40 @@ impl LightSession {
         }
     }
 
+    /// Record a session event, logging any persistence errors without failing.
+    async fn record(&self, event: NewSessionEvent) {
+        if let Err(e) = self.sessions.record_event(self.session_id, event).await {
+            tracing::warn!(error = %e, "Failed to persist session event");
+        }
+    }
+
     async fn run(
         &self,
         prompt: &str,
         tx: &mpsc::Sender<AgentMessageEvent>,
     ) -> Result<(), AgentError> {
+        // Record the system prompt once at session start
+        self.record(NewSessionEvent {
+            event_type: SessionEventType::System,
+            role: Some("system".to_string()),
+            tool_name: None,
+            tool_use_id: None,
+            content: serde_json::json!({ "text": &self.system }),
+            metadata: serde_json::json!({ "model": &self.model }),
+        })
+        .await;
+
+        // Record the user's prompt
+        self.record(NewSessionEvent {
+            event_type: SessionEventType::User,
+            role: Some("user".to_string()),
+            tool_name: None,
+            tool_use_id: None,
+            content: serde_json::json!({ "text": prompt }),
+            metadata: serde_json::json!({}),
+        })
+        .await;
+
         let mut messages: Vec<serde_json::Value> =
             vec![serde_json::json!({ "role": "user", "content": prompt })];
 
@@ -176,6 +208,21 @@ impl LightSession {
                     ApiContentBlock::Text { text } => {
                         assistant_content.push(serde_json::json!({"type": "text", "text": text}));
                         send(tx, AgentMessageEvent::Text { text: text.clone() }).await?;
+
+                        // Persist assistant text event
+                        self.record(NewSessionEvent {
+                            event_type: SessionEventType::Assistant,
+                            role: Some("assistant".to_string()),
+                            tool_name: None,
+                            tool_use_id: None,
+                            content: serde_json::json!({ "text": text }),
+                            metadata: serde_json::json!({
+                                "turn": turn,
+                                "input_tokens": response.usage.input_tokens,
+                                "output_tokens": response.usage.output_tokens,
+                            }),
+                        })
+                        .await;
                     }
                     ApiContentBlock::ToolUse { id, name, input } => {
                         assistant_content.push(serde_json::json!({
@@ -189,6 +236,18 @@ impl LightSession {
                             },
                         )
                         .await?;
+
+                        // Persist tool_call event with full input
+                        self.record(NewSessionEvent {
+                            event_type: SessionEventType::ToolCall,
+                            role: Some("assistant".to_string()),
+                            tool_name: Some(name.clone()),
+                            tool_use_id: Some(id.clone()),
+                            content: serde_json::json!({ "input": input }),
+                            metadata: serde_json::json!({}),
+                        })
+                        .await;
+
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
                 }
@@ -200,6 +259,16 @@ impl LightSession {
 
             let stop = response.stop_reason.as_deref().unwrap_or("end_turn");
             if stop != "tool_use" || tool_uses.is_empty() {
+                // Session complete — record stats and finalize
+                let stats = SessionStats {
+                    total_turns: turn as u32 + 1,
+                    total_input_tokens: total_input,
+                    total_output_tokens: total_output,
+                };
+                if let Err(e) = self.sessions.complete_session(self.session_id, stats).await {
+                    tracing::warn!(error = %e, "Failed to complete session");
+                }
+
                 send(
                     tx,
                     AgentMessageEvent::Done {
@@ -230,6 +299,18 @@ impl LightSession {
                     },
                 )
                 .await?;
+
+                // Persist tool_result with full output and correlation ID
+                self.record(NewSessionEvent {
+                    event_type: SessionEventType::ToolResult,
+                    role: Some("user".to_string()),
+                    tool_name: Some(name.clone()),
+                    tool_use_id: Some(id.clone()),
+                    content: serde_json::json!({ "output": &text, "is_error": is_error }),
+                    metadata: serde_json::json!({}),
+                })
+                .await;
+
                 let mut result_json = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": id,
@@ -255,7 +336,8 @@ impl LightSession {
 /// Run the light (in-process) agentic loop.
 ///
 /// Returns a channel receiver that streams `AgentMessageEvent`s, matching the
-/// same interface used by the sandbox runtime.
+/// same interface used by the sandbox runtime. Rich session events are
+/// persisted to the sessions/session_events tables.
 #[instrument(name = "agent.light.run", skip_all)]
 pub(super) async fn run(
     prompt: String,
@@ -263,6 +345,8 @@ pub(super) async fn run(
     chat_config: &ChatConfig,
     system_prompt: &str,
     catalog: Catalog,
+    sessions: Sessions,
+    session_id: SessionId,
 ) -> Result<mpsc::Receiver<AgentMessageEvent>, AgentError> {
     if config.api_key.is_empty() {
         return Err(AgentError::LightAgentNotConfigured);
@@ -283,6 +367,8 @@ pub(super) async fn run(
         max_turns,
         tools,
         system,
+        sessions: sessions.clone(),
+        session_id,
     };
 
     let (tx, rx) = mpsc::channel::<AgentMessageEvent>(64);
@@ -290,6 +376,10 @@ pub(super) async fn run(
     tokio::spawn(async move {
         if let Err(e) = session.run(&prompt, &tx).await {
             tracing::error!(error = %e, "Light agent loop failed");
+            // Record the error in the session
+            if let Err(se) = sessions.fail_session(session_id, &e.to_string()).await {
+                tracing::warn!(error = %se, "Failed to mark session as failed");
+            }
             let _ = tx
                 .send(AgentMessageEvent::Error {
                     message: e.to_string(),

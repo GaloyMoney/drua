@@ -22,6 +22,7 @@ use repo::*;
 use crate::auth::AuthContext;
 use crate::chat_history::{ChatHistory, ConversationId, ConversationStatus, MessageRole};
 use crate::primitives::*;
+use crate::session::Sessions;
 use crate::toolset::ToolSets;
 
 pub use crate::primitives::AgentMessageEvent;
@@ -47,6 +48,7 @@ pub struct Agents {
     default_storage_class: String,
     toolsets: Arc<ToolSets>,
     chat_history: ChatHistory,
+    sessions: Sessions,
     sandbox_cache: Arc<Mutex<HashMap<AgentId, SandboxCacheEntry>>>,
 }
 
@@ -58,6 +60,7 @@ impl Agents {
     ) -> Result<Self, AgentError> {
         let repo = AgentRepo::new(pool);
         let chat_history = ChatHistory::new(pool);
+        let sessions = Sessions::new(pool);
         let sandbox = if config.sandbox.enabled {
             let client = sandbox_client::SandboxClient::try_from_env(
                 config.sandbox.namespace.clone(),
@@ -83,6 +86,7 @@ impl Agents {
             toolsets,
             sandbox_cache: Arc::new(Mutex::new(HashMap::new())),
             chat_history,
+            sessions,
         })
     }
 
@@ -219,6 +223,17 @@ impl Agents {
 
         let rx = match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
+                // Create a rich session for the light agent
+                let session = self
+                    .sessions
+                    .create_session(
+                        agent.id,
+                        agent.workspace_id,
+                        Some(agent.chat_config.model.clone()),
+                    )
+                    .await
+                    .map_err(AgentError::Session)?;
+
                 let auth = AuthContext::Agent(agent.workspace_id, agent.id, Vec::new());
                 let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
@@ -227,6 +242,8 @@ impl Agents {
                     &agent.chat_config,
                     agent.agent_type.system_prompt(),
                     catalog,
+                    self.sessions.clone(),
+                    session.id,
                 )
                 .await?
             }
@@ -280,6 +297,11 @@ impl Agents {
     /// Expose chat_history for query access (e.g., from web layer).
     pub fn chat_history(&self) -> &ChatHistory {
         &self.chat_history
+    }
+
+    /// Expose sessions for query access (e.g., from web layer).
+    pub fn sessions(&self) -> &Sessions {
+        &self.sessions
     }
 
     /// Sandbox-specific send_message path.
