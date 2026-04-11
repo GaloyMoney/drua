@@ -116,6 +116,11 @@ spec:
         - name: code-assistant-data
           mountPath: /data/code-assistant
         {{- end }}
+        {{- if .Values.galoyAgents.githubApp.enabled }}
+        - name: github-app-key
+          mountPath: /secrets/github-app
+          readOnly: true
+        {{- end }}
         env:
         - name: GALOY_AGENTS_CONFIG
           value: "/config/galoy-agents.yml"
@@ -157,6 +162,10 @@ spec:
               name: {{ template "galoyAgents.fullname" . }}
               key: "anthropic-api-key"
               optional: true
+        {{- if .Values.galoyAgents.githubApp.enabled }}
+        - name: GITHUB_APP_PRIVATE_KEY_PATH
+          value: "/secrets/github-app/{{ .Values.galoyAgents.githubApp.privateKeySecretKey }}"
+        {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:
@@ -175,4 +184,12 @@ spec:
       {{- if .Values.galoyAgents.codeAssistant.indexHash }}
       - name: code-assistant-data
         emptyDir: {}
+      {{- end }}
+      {{- if .Values.galoyAgents.githubApp.enabled }}
+      - name: github-app-key
+        secret:
+          secretName: {{ .Values.galoyAgents.githubApp.privateKeySecret }}
+          items:
+            - key: {{ .Values.galoyAgents.githubApp.privateKeySecretKey }}
+              path: {{ .Values.galoyAgents.githubApp.privateKeySecretKey }}
       {{- end }}

@@ -98,10 +98,10 @@ impl App {
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
 
-        // Optionally initialize GitHub App token provider from env vars.
+        // Optionally initialize GitHub App token provider from AppConfig.
         // If not configured, agents simply won't get a github-token secret.
-        let github_app = match github_app::GitHubAppConfig::from_env() {
-            Some(gh_config) => match GitHubAppTokenProvider::new(&gh_config) {
+        let github_app = match config.github_app {
+            Some(ref gh_config) => match GitHubAppTokenProvider::new(gh_config) {
                 Ok(provider) => {
                     tracing::info!("GitHub App token provider initialized");
                     Some(provider)

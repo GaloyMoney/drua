@@ -18,8 +18,25 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub toolsets: ToolSetsConfig,
+    #[serde(default)]
+    pub github_app: Option<GitHubAppCliConfig>,
     #[serde(skip)]
     pub anthropic_api_key: String,
+}
+
+/// GitHub App config from the YAML config file.
+/// The `private_key_path` field is `#[serde(skip)]` because it's a secret
+/// loaded from an env var / K8s secret mount — never baked into the config file.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubAppCliConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub installation_id: String,
+    /// Filesystem path to the PEM private key (loaded from env: GITHUB_APP_PRIVATE_KEY_PATH).
+    #[serde(skip)]
+    pub private_key_path: String,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -153,6 +170,13 @@ impl Config {
             let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
             if let Ok(val) = std::env::var(&env_key) {
                 upstream.auth_header = val;
+            }
+        }
+
+        // GitHub App private key path from env (K8s secret mount)
+        if let Some(ref mut gh) = config.github_app {
+            if let Ok(val) = std::env::var("GITHUB_APP_PRIVATE_KEY_PATH") {
+                gh.private_key_path = val;
             }
         }
 

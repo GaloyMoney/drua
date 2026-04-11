@@ -82,6 +82,11 @@ data:
             - "resources_get"
       {{- end }}
       {{- end }}
+    {{- if .Values.galoyAgents.githubApp.enabled }}
+    github_app:
+      client_id: {{ .Values.galoyAgents.githubApp.clientId | quote }}
+      installation_id: {{ .Values.galoyAgents.githubApp.installationId | quote }}
+    {{- end }}
     sandbox:
       enabled: {{ .Values.sandbox.enabled }}
       namespace: {{ include "galoyAgents.sandboxNamespace" . | quote }}
