@@ -196,7 +196,8 @@ pub(super) async fn ensure_sandbox(
         }
     }
 
-    match client.create_sandbox(&sandbox_name).await {
+    let extra_env = vec![("AGENT_ID".to_string(), agent.id.to_string())];
+    match client.create_sandbox(&sandbox_name, extra_env).await {
         Ok(_) => {}
         Err(sandbox_client::SandboxError::Kube(e)) if e.to_string().contains("already exists") => {
             tracing::info!(sandbox = %sandbox_name, "Sandbox already exists, waiting for ready");

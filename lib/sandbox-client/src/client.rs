@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{
-    PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod,
-    PodSecurityContext, ResourceRequirements, Volume, VolumeMount, VolumeResourceRequirements,
+    EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
+    Pod, PodSecurityContext, ResourceRequirements, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
@@ -160,9 +161,29 @@ impl SandboxClient {
     /// into the pod. The PVC lifecycle is independent of the Sandbox — it
     /// survives sandbox deletion and is reused on recreation with the same name.
     #[instrument(name = "sandbox_client.create_sandbox", skip_all, fields(%name))]
-    pub async fn create_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
+    pub async fn create_sandbox(
+        &self,
+        name: &str,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<SandboxSummary, SandboxError> {
         let template = self.read_template().await?;
         let mut pod_template = template.spec.pod_template;
+
+        // Inject extra environment variables into the first container
+        if !extra_env.is_empty() {
+            if let Some(ref mut spec) = pod_template.spec {
+                if let Some(container) = spec.containers.first_mut() {
+                    let env = container.env.get_or_insert_with(Vec::new);
+                    for (k, v) in extra_env {
+                        env.push(EnvVar {
+                            name: k,
+                            value: Some(v),
+                            value_from: None,
+                        });
+                    }
+                }
+            }
+        }
 
         if let Some(ref persistence) = self.persistence {
             let pvc_name = self.ensure_pvc(name, persistence).await?;
