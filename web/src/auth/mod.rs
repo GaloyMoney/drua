@@ -43,13 +43,28 @@ pub async fn auth_middleware(mut request: Request, next: Next) -> Response {
 }
 
 fn extract_bearer_token(request: &Request) -> Option<String> {
-    let header_value = request
+    // 1. Check Authorization: Bearer header
+    if let Some(header_value) = request
         .headers()
-        .get(axum::http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
-    let raw_token = header_value.strip_prefix("Bearer ")?;
-    Some(raw_token.to_string())
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(raw_token) = header_value.strip_prefix("Bearer ") {
+            return Some(raw_token.to_string());
+        }
+    }
+
+    // 2. Fallback: check ?token= query parameter (for MCP clients that
+    //    don't support custom headers in server config)
+    request.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .map(|t| {
+                t.replace("%2B", "+")
+                    .replace("%2F", "/")
+                    .replace("%3D", "=")
+            })
+    })
 }
 
 async fn resolve_auth_context(

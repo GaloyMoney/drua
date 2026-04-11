@@ -142,11 +142,13 @@ function getMcpServersFromSaToken(): Record<string, McpHttpServerConfig> | undef
   try {
     const token = readFileSync(SA_TOKEN_PATH, "utf-8").trim();
     if (!token) return undefined;
+    // Claude Code's MCP HTTP client doesn't forward custom headers from
+    // the config.  Pass the token as a URL query parameter instead.
+    const sep = MCP_GATEWAY_URL.includes("?") ? "&" : "?";
     return {
       "galoy-agents": {
         type: "http",
-        url: MCP_GATEWAY_URL,
-        headers: { "Authorization": `Bearer ${token}` },
+        url: `${MCP_GATEWAY_URL}${sep}token=${encodeURIComponent(token)}`,
       },
     };
   } catch {
