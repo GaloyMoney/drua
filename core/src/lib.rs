@@ -99,18 +99,19 @@ impl App {
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
 
         // Optionally initialize GitHub App token provider from AppConfig.
-        // If not configured, agents simply won't get a github-token secret.
+        // If configured, verify it works by generating a token — crash on failure
+        // so broken config is caught immediately rather than silently skipped.
         let github_app = match config.github_app {
-            Some(ref gh_config) => match GitHubAppTokenProvider::new(gh_config) {
-                Ok(provider) => {
-                    tracing::info!("GitHub App token provider initialized");
-                    Some(provider)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "GitHub App configured but failed to initialize — skipping");
-                    None
-                }
-            },
+            Some(ref gh_config) => {
+                let provider = GitHubAppTokenProvider::new(gh_config)
+                    .map_err(|e| AppError::GitHubApp(format!("failed to initialize: {e}")))?;
+                provider
+                    .generate_token()
+                    .await
+                    .map_err(|e| AppError::GitHubApp(format!("startup token check failed: {e}")))?;
+                tracing::info!("GitHub App token provider initialized and verified");
+                Some(provider)
+            }
             None => {
                 tracing::info!("GitHub App not configured — token auto-provisioning disabled");
                 None
@@ -182,4 +183,6 @@ pub enum AppError {
     Embedder(String),
     #[error("AppError - CodeAssistant: {0}")]
     CodeAssistant(String),
+    #[error("AppError - GitHubApp: {0}")]
+    GitHubApp(String),
 }
