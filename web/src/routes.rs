@@ -867,8 +867,8 @@ fn secret_to_view(s: &domain::workspace_secret::WorkspaceSecret) -> WorkspaceSec
         id: s.id.to_string(),
         workspace_id: s.workspace_id.to_string(),
         name: s.name.clone(),
-        secret_type: s.secret_type.clone(),
-        updated_at: s.updated_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        secret_type: s.secret_type.to_string(),
+        updated_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
     }
 }
 
@@ -1216,7 +1216,7 @@ async fn api_agent_secrets(
     match state
         .app
         .workspace_secrets()
-        .list_with_values(workspace_id)
+        .list_decrypted(workspace_id)
         .await
     {
         Ok(secrets) => {
@@ -1225,8 +1225,8 @@ async fn api_agent_secrets(
                 .map(|s| {
                     serde_json::json!({
                         "name": s.name,
-                        "secret_type": s.secret_type,
-                        "value": s.encrypted_value,
+                        "secret_type": s.secret_type.as_str(),
+                        "value": s.value,
                     })
                 })
                 .collect();

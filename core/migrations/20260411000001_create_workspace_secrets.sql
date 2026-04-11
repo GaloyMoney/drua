@@ -1,15 +1,23 @@
--- Workspace secrets: flat SQL table (not event-sourced) for user-provisioned secrets.
--- Follows the same pattern as conversations — direct insert/query.
+-- Workspace secrets: event-sourced entity for user-provisioned secrets.
+-- Follows the same pattern as workspaces — es-entity with events table.
 
-CREATE TABLE workspace_secrets (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE IF NOT EXISTS workspace_secrets (
+    id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL REFERENCES workspaces(id),
-    name VARCHAR(255) NOT NULL,
-    secret_type VARCHAR(50) NOT NULL,
-    encrypted_value TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    name VARCHAR NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE(workspace_id, name)
 );
 
 CREATE INDEX idx_workspace_secrets_workspace_id ON workspace_secrets(workspace_id);
+
+CREATE TABLE IF NOT EXISTS workspace_secret_events (
+    id UUID NOT NULL REFERENCES workspace_secrets(id),
+    sequence INT NOT NULL,
+    event_type VARCHAR NOT NULL,
+    event JSONB NOT NULL,
+    context JSONB DEFAULT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    UNIQUE(id, sequence)
+);
