@@ -36,7 +36,7 @@ impl WorkspaceSecrets {
         }
     }
 
-    /// Create a new secret (or update if name already exists in workspace).
+    /// Create a new secret. Fails if a secret with the same name already exists in the workspace.
     #[instrument(name = "workspace_secret.create", skip_all)]
     pub async fn create(
         &self,
@@ -46,16 +46,6 @@ impl WorkspaceSecrets {
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
         let encrypted_value = self.encryption_key.encrypt_string(value);
-
-        // Check if secret with this name already exists — update if so
-        let existing = self.list_all_for_workspace(workspace_id).await?;
-        let existing = existing.into_iter().find(|s| s.name == name);
-
-        if let Some(mut secret) = existing {
-            secret.update_value(encrypted_value);
-            self.repo.update(&mut secret).await?;
-            return Ok(secret);
-        }
 
         let new = NewWorkspaceSecret::builder()
             .workspace_id(workspace_id)
@@ -115,8 +105,9 @@ impl WorkspaceSecrets {
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
         let mut secret = self.repo.find_by_id(id).await?;
         let encrypted_value = self.encryption_key.encrypt_string(value);
-        secret.update_value(encrypted_value);
-        self.repo.update(&mut secret).await?;
+        if secret.update_value(encrypted_value).did_execute() {
+            self.repo.update(&mut secret).await?;
+        }
         Ok(secret)
     }
 
