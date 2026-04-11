@@ -248,7 +248,8 @@ function spawnCli(config: SpawnConfig): ChildProcess {
   // Track time from spawn to first stdout event
   initWaitSpan = tracer.startSpan("harness.cli.init_wait");
 
-  console.log(`Spawning cli.js (resume=${config.resume ?? "none"}, model=${config.model})`);
+  const mcpNames = config.mcpServers ? Object.keys(config.mcpServers).join(",") : "none";
+  console.log(`Spawning cli.js (resume=${config.resume ?? "none"}, model=${config.model}, mcp=[${mcpNames}])`);
   spawnSpan.end();
 
   const proc = spawn(process.execPath, args, {
