@@ -4,6 +4,7 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::audit::{Audit, InteractionOutcome};
 use crate::auth::AuthContext;
+use crate::session::{NewSessionEvent, SessionEventType, SessionId, Sessions};
 
 use super::error::ToolSetsError;
 use super::filter::OutputFilter;
@@ -28,6 +29,8 @@ pub struct Catalog {
     pub(super) sets: Arc<RwLock<Vec<Arc<dyn ToolSet>>>>,
     pub(super) audit: Option<Arc<Audit>>,
     pub(super) auth: Option<AuthContext>,
+    pub(super) sessions: Option<Sessions>,
+    pub(super) session_id: Option<SessionId>,
 }
 
 impl Catalog {
@@ -38,6 +41,25 @@ impl Catalog {
             sets: Arc::clone(&self.sets),
             audit: self.audit.clone(),
             auth: Some(auth.clone()),
+            sessions: self.sessions.clone(),
+            session_id: self.session_id,
+        }
+    }
+
+    /// Attach a session to the catalog so that tool calls are recorded as
+    /// session events alongside audit entries. Cheap — only clones `Arc`s.
+    ///
+    /// Used by the **light runtime** only.  For the sandbox runtime, tool
+    /// calls are captured by the harness SSE stream (Claude Code emits
+    /// `tool_use` / `tool_result` content blocks that
+    /// `translate_to_session_events` records).
+    pub fn with_session(&self, session_id: SessionId, sessions: &Sessions) -> Self {
+        Self {
+            sets: Arc::clone(&self.sets),
+            audit: self.audit.clone(),
+            auth: self.auth.clone(),
+            sessions: Some(sessions.clone()),
+            session_id: Some(session_id),
         }
     }
 
@@ -366,6 +388,21 @@ impl Catalog {
             .find_set(prefixed_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
 
+        let args_value = arguments
+            .as_ref()
+            .map(|a| serde_json::Value::Object(a.clone()));
+
+        // Record tool_call session event *before* execution
+        self.record_session_event(NewSessionEvent {
+            event_type: SessionEventType::ToolCall,
+            tool_name: Some(prefixed_name.to_string()),
+            tool_use_id: None,
+            content: serde_json::json!({ "input": args_value }),
+            metadata: serde_json::json!({}),
+            raw_event: None,
+        })
+        .await;
+
         let start = std::time::Instant::now();
         let result = set
             .call(&tool_name, arguments.clone(), self.auth.as_ref())
@@ -378,19 +415,38 @@ impl Catalog {
             .unwrap_or_else(OutputFilter::global_default);
         let result = result.and_then(|r| filter.apply(r));
 
-        let (outcome, tokens_returned) = match &result {
+        let (outcome, tokens_returned, is_error) = match &result {
             Ok(call_result) => {
                 let tokens = estimate_tokens(call_result);
-                (InteractionOutcome::Success, Some(tokens))
+                (InteractionOutcome::Success, Some(tokens), false)
             }
             Err(e) => (
                 InteractionOutcome::Error {
                     message: e.to_string(),
                 },
                 None,
+                true,
             ),
         };
-        let args_value = arguments.map(serde_json::Value::Object);
+
+        // Record tool_result session event *after* execution
+        let output_text = match &result {
+            Ok(r) => call_result_to_text(r),
+            Err(e) => e.to_string(),
+        };
+        self.record_session_event(NewSessionEvent {
+            event_type: SessionEventType::ToolResult,
+            tool_name: Some(prefixed_name.to_string()),
+            tool_use_id: None,
+            content: serde_json::json!({
+                "output": output_text,
+                "is_error": is_error,
+            }),
+            metadata: serde_json::json!({ "duration_ms": duration_ms }),
+            raw_event: None,
+        })
+        .await;
+
         self.record_audit(
             prefixed_name,
             serde_json::json!({
@@ -432,6 +488,29 @@ impl Catalog {
             }
         }
     }
+
+    /// Fire-and-forget session event recording. Only records when a session
+    /// is attached to the catalog (i.e. via [`with_session`]).
+    async fn record_session_event(&self, event: NewSessionEvent) {
+        if let (Some(sessions), Some(session_id)) = (&self.sessions, &self.session_id) {
+            if let Err(e) = sessions.record_event(*session_id, event).await {
+                tracing::warn!(error = %e, "Failed to record session event from catalog");
+            }
+        }
+    }
+}
+
+/// Extract text content from a CallToolResult.
+fn call_result_to_text(result: &CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Estimate token count from a CallToolResult's text content (~4 chars per token).
@@ -537,6 +616,8 @@ mod tests {
             sets: Arc::new(RwLock::new(sets)),
             audit: None,
             auth: None,
+            sessions: None,
+            session_id: None,
         }
     }
 

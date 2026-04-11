@@ -238,24 +238,36 @@ impl Agents {
         // Session event channel for rich event capture from sandbox harness
         let (session_tx, session_rx) = tokio::sync::mpsc::channel::<NewSessionEvent>(128);
 
-        let rx = match agent.agent_type.runtime_kind() {
+        let (rx, record_from_agent_events) = match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
+                // Light runtime: catalog records tool events directly via
+                // with_session(), and we record text/done/error from agent events.
                 let auth = AuthContext::Agent(agent.workspace_id, agent.id, Vec::new());
-                let catalog = self.toolsets.catalog().with_auth(&auth);
-                light::run(
+                let catalog = self
+                    .toolsets
+                    .catalog()
+                    .with_auth(&auth)
+                    .with_session(session_id, &self.sessions);
+                let rx = light::run(
                     prompt,
                     &self.light_config,
                     &agent.chat_config,
                     agent.agent_type.system_prompt(),
                     catalog,
                 )
-                .await?
+                .await?;
+                (rx, true)
             }
-            RuntimeKind::Sandbox => self.send_message_sandbox(agent, prompt, session_tx).await?,
+            RuntimeKind::Sandbox => {
+                // Sandbox runtime: harness sends rich events via session_tx.
+                // Don't also record from agent events (would be duplicates).
+                let rx = self.send_message_sandbox(agent, prompt, session_tx).await?;
+                (rx, false)
+            }
         };
 
         // Wrap receiver with session recording
-        Ok(self.wrap_with_session_recording(rx, session_rx, session_id))
+        Ok(self.wrap_with_session_recording(rx, session_rx, session_id, record_from_agent_events))
     }
 
     /// Soft-delete an agent and destroy its sandbox.
@@ -490,17 +502,21 @@ impl Agents {
     /// Wrap an event receiver with a session recording tap.
     ///
     /// Two tasks run concurrently:
-    /// 1. **Agent event forwarder**: intercepts `AgentMessageEvent`s, generates
-    ///    session events from the light runtime path (where no raw harness JSON
-    ///    is available), handles Done/Error for session finalization, and
-    ///    forwards to the SSE caller.
-    /// 2. **Session event recorder**: drains `NewSessionEvent`s produced by the
-    ///    harness client and persists them to the database.
+    /// 1. **Session event recorder**: drains `NewSessionEvent`s produced by the
+    ///    harness client (sandbox path) and persists them to the database.
+    /// 2. **Agent event forwarder**: intercepts `AgentMessageEvent`s, optionally
+    ///    generates session events for the light runtime path, handles
+    ///    Done/Error for session finalization, and forwards to the SSE caller.
+    ///
+    /// `record_from_agent_events` controls whether Task 2 generates session
+    /// events from `AgentMessageEvent`s.  Set to `true` for the light runtime
+    /// (no harness raw JSON) and `false` for sandbox (events come from Task 1).
     fn wrap_with_session_recording(
         &self,
         mut rx: tokio::sync::mpsc::Receiver<AgentMessageEvent>,
         mut session_rx: tokio::sync::mpsc::Receiver<NewSessionEvent>,
         session_id: SessionId,
+        record_from_agent_events: bool,
     ) -> tokio::sync::mpsc::Receiver<AgentMessageEvent> {
         let (tx, new_rx) = tokio::sync::mpsc::channel(64);
         let sessions = self.sessions.clone();
@@ -515,8 +531,8 @@ impl Agents {
             }
         });
 
-        // Task 2: Forward agent events to SSE, record light-path events,
-        //         and finalize the session on Done/Error
+        // Task 2: Forward agent events to SSE, optionally record light-path
+        //         events, and finalize the session on Done/Error
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 // Service events are ephemeral — forward to SSE but don't persist
@@ -527,12 +543,15 @@ impl Agents {
                     continue;
                 }
 
-                // For the light runtime path, generate session events from
-                // AgentMessageEvents (since there is no harness raw JSON)
-                let session_event = agent_event_to_session_event(&event);
-                if let Some(se) = session_event {
-                    if let Err(e) = sessions.record_event(session_id, se).await {
-                        tracing::warn!(error = %e, "Failed to persist session event (light)");
+                // For the light runtime path, record text/done/error events
+                // directly.  Tool events (ToolCall/ToolResult) are NOT recorded
+                // here — the Catalog records them with full input/output.
+                if record_from_agent_events {
+                    let session_event = agent_event_to_session_event(&event);
+                    if let Some(se) = session_event {
+                        if let Err(e) = sessions.record_event(session_id, se).await {
+                            tracing::warn!(error = %e, "Failed to persist session event (light)");
+                        }
                     }
                 }
 
@@ -579,6 +598,9 @@ impl Agents {
 
 /// Convert an `AgentMessageEvent` into a `NewSessionEvent` for the light
 /// runtime path where no raw harness JSON is available.
+///
+/// **Tool events are skipped** — the `Catalog` records those directly with
+/// full input/output when a session is attached via `with_session()`.
 fn agent_event_to_session_event(event: &AgentMessageEvent) -> Option<NewSessionEvent> {
     match event {
         AgentMessageEvent::Text { text } => Some(NewSessionEvent {
@@ -589,22 +611,8 @@ fn agent_event_to_session_event(event: &AgentMessageEvent) -> Option<NewSessionE
             metadata: serde_json::json!({}),
             raw_event: None,
         }),
-        AgentMessageEvent::ToolCall { name, arguments } => Some(NewSessionEvent {
-            event_type: SessionEventType::ToolCall,
-            tool_name: Some(name.clone()),
-            tool_use_id: None,
-            content: serde_json::json!({ "input": arguments }),
-            metadata: serde_json::json!({}),
-            raw_event: None,
-        }),
-        AgentMessageEvent::ToolResult { name, is_error } => Some(NewSessionEvent {
-            event_type: SessionEventType::ToolResult,
-            tool_name: Some(name.clone()),
-            tool_use_id: None,
-            content: serde_json::json!({ "is_error": is_error }),
-            metadata: serde_json::json!({}),
-            raw_event: None,
-        }),
+        // Tool events are recorded by the Catalog with full input/output.
+        AgentMessageEvent::ToolCall { .. } | AgentMessageEvent::ToolResult { .. } => None,
         AgentMessageEvent::Done {
             turns,
             input_tokens,

@@ -107,6 +107,8 @@ impl ToolSets {
             sets: Arc::clone(&self.sets),
             audit: self.audit.clone(),
             auth: None,
+            sessions: None,
+            session_id: None,
         }
     }
 }
