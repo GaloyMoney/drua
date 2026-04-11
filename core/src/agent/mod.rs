@@ -20,8 +20,10 @@ pub use error::*;
 use repo::*;
 
 use crate::auth::AuthContext;
-use crate::chat_history::{ChatHistory, ConversationId, ConversationStatus, MessageRole};
 use crate::primitives::*;
+use crate::session::{
+    NewSessionEvent, SessionEventType, SessionId, SessionRuntime, SessionStats, Sessions,
+};
 use crate::toolset::ToolSets;
 
 pub use crate::primitives::AgentMessageEvent;
@@ -46,7 +48,7 @@ pub struct Agents {
     light_config: config::LightRuntimeConfig,
     default_storage_class: String,
     toolsets: Arc<ToolSets>,
-    chat_history: ChatHistory,
+    sessions: Sessions,
     sandbox_cache: Arc<Mutex<HashMap<AgentId, SandboxCacheEntry>>>,
 }
 
@@ -57,7 +59,7 @@ impl Agents {
         toolsets: Arc<ToolSets>,
     ) -> Result<Self, AgentError> {
         let repo = AgentRepo::new(pool);
-        let chat_history = ChatHistory::new(pool);
+        let sessions = Sessions::new(pool);
         let sandbox = if config.sandbox.enabled {
             let client = sandbox_client::SandboxClient::try_from_env(
                 config.sandbox.namespace.clone(),
@@ -82,7 +84,7 @@ impl Agents {
             default_storage_class,
             toolsets,
             sandbox_cache: Arc::new(Mutex::new(HashMap::new())),
-            chat_history,
+            sessions,
         })
     }
 
@@ -187,8 +189,8 @@ impl Agents {
     /// - `RuntimeKind::Light` runs an in-process agentic loop via the Anthropic API
     /// - `RuntimeKind::Sandbox` runs the agent harness inside a K8s sandbox pod
     ///
-    /// Returns the conversation ID and a receiver that streams `AgentMessageEvent`s.
-    /// Each event is also persisted to the chat history.
+    /// Returns a receiver that streams `AgentMessageEvent`s.
+    /// Each event is also persisted to the session history.
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
         &self,
@@ -198,24 +200,43 @@ impl Agents {
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
-        // Create a conversation record
-        let conversation = self
-            .chat_history
-            .create_conversation(agent.id, user_id)
-            .await
-            .map_err(AgentError::ChatHistory)?;
-        let conversation_id = conversation.id;
+        let runtime = match agent.agent_type.runtime_kind() {
+            RuntimeKind::Light => SessionRuntime::Light,
+            RuntimeKind::Sandbox => SessionRuntime::Sandbox,
+        };
 
-        // Record the user's prompt
+        // Create a session record
+        let session = self
+            .sessions
+            .create_session(
+                agent.id,
+                user_id,
+                agent.workspace_id,
+                runtime,
+                Some(&agent.chat_config.model),
+            )
+            .await
+            .map_err(AgentError::Session)?;
+        let session_id = session.id;
+
+        // Record the user's prompt as the first event
         let _ = self
-            .chat_history
-            .record_message(
-                conversation_id,
-                MessageRole::User,
-                serde_json::json!(prompt),
-                serde_json::json!({}),
+            .sessions
+            .record_event(
+                session_id,
+                NewSessionEvent {
+                    event_type: SessionEventType::UserMessage,
+                    tool_name: None,
+                    tool_use_id: None,
+                    content: serde_json::json!({ "text": prompt }),
+                    metadata: serde_json::json!({}),
+                    raw_event: None,
+                },
             )
             .await;
+
+        // Session event channel for rich event capture from sandbox harness
+        let (session_tx, session_rx) = tokio::sync::mpsc::channel::<NewSessionEvent>(128);
 
         let rx = match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
@@ -230,11 +251,11 @@ impl Agents {
                 )
                 .await?
             }
-            RuntimeKind::Sandbox => self.send_message_sandbox(agent, prompt).await?,
+            RuntimeKind::Sandbox => self.send_message_sandbox(agent, prompt, session_tx).await?,
         };
 
-        // Wrap receiver with persistence tap
-        Ok(self.wrap_with_persistence(rx, conversation_id))
+        // Wrap receiver with session recording
+        Ok(self.wrap_with_session_recording(rx, session_rx, session_id))
     }
 
     /// Soft-delete an agent and destroy its sandbox.
@@ -277,9 +298,9 @@ impl Agents {
         Ok(())
     }
 
-    /// Expose chat_history for query access (e.g., from web layer).
-    pub fn chat_history(&self) -> &ChatHistory {
-        &self.chat_history
+    /// Expose sessions for query access (e.g., from web layer).
+    pub fn sessions(&self) -> &Sessions {
+        &self.sessions
     }
 
     /// Sandbox-specific send_message path.
@@ -294,6 +315,7 @@ impl Agents {
         &self,
         agent: Agent,
         prompt: String,
+        session_tx: tokio::sync::mpsc::Sender<NewSessionEvent>,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let base_client = self
             .sandbox
@@ -442,7 +464,10 @@ impl Agents {
                 "disallowed_tools": disallowed_tools,
             });
 
-            if let Err(e) = harness.send_message(&service_fqdn, input, tx.clone()).await {
+            if let Err(e) = harness
+                .send_message(&service_fqdn, input, tx.clone(), Some(session_tx))
+                .await
+            {
                 tracing::error!(error = %e, "Agent message relay failed");
                 // Evict cache on send failure
                 sandbox_cache.lock().await.remove(&agent_id);
@@ -462,16 +487,36 @@ impl Agents {
         Ok(rx)
     }
 
-    /// Wrap an event receiver with a persistence tap that records each event
-    /// to the chat history while forwarding it to the caller.
-    fn wrap_with_persistence(
+    /// Wrap an event receiver with a session recording tap.
+    ///
+    /// Two tasks run concurrently:
+    /// 1. **Agent event forwarder**: intercepts `AgentMessageEvent`s, generates
+    ///    session events from the light runtime path (where no raw harness JSON
+    ///    is available), handles Done/Error for session finalization, and
+    ///    forwards to the SSE caller.
+    /// 2. **Session event recorder**: drains `NewSessionEvent`s produced by the
+    ///    harness client and persists them to the database.
+    fn wrap_with_session_recording(
         &self,
         mut rx: tokio::sync::mpsc::Receiver<AgentMessageEvent>,
-        conversation_id: ConversationId,
+        mut session_rx: tokio::sync::mpsc::Receiver<NewSessionEvent>,
+        session_id: SessionId,
     ) -> tokio::sync::mpsc::Receiver<AgentMessageEvent> {
         let (tx, new_rx) = tokio::sync::mpsc::channel(64);
-        let chat_history = self.chat_history.clone();
+        let sessions = self.sessions.clone();
+        let sessions2 = self.sessions.clone();
 
+        // Task 1: Record rich session events from harness (sandbox path)
+        tokio::spawn(async move {
+            while let Some(event) = session_rx.recv().await {
+                if let Err(e) = sessions2.record_event(session_id, event).await {
+                    tracing::warn!(error = %e, "Failed to persist session event");
+                }
+            }
+        });
+
+        // Task 2: Forward agent events to SSE, record light-path events,
+        //         and finalize the session on Done/Error
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 // Service events are ephemeral — forward to SSE but don't persist
@@ -482,42 +527,41 @@ impl Agents {
                     continue;
                 }
 
-                let (role, content, metadata) = event_to_message(&event);
-
-                if let Err(e) = chat_history
-                    .record_message(conversation_id, role, content, metadata)
-                    .await
-                {
-                    tracing::warn!(error = %e, "Failed to persist chat message");
+                // For the light runtime path, generate session events from
+                // AgentMessageEvents (since there is no harness raw JSON)
+                let session_event = agent_event_to_session_event(&event);
+                if let Some(se) = session_event {
+                    if let Err(e) = sessions.record_event(session_id, se).await {
+                        tracing::warn!(error = %e, "Failed to persist session event (light)");
+                    }
                 }
 
-                // On Done/Error, complete the conversation
+                // On Done/Error, finalize the session
                 match &event {
                     AgentMessageEvent::Done {
                         turns,
                         input_tokens,
                         output_tokens,
+                        duration_ms,
+                        cost_usd,
                         ..
                     } => {
-                        let total_tokens = (*input_tokens as i64) + (*output_tokens as i64);
-                        let _ = chat_history
-                            .complete_conversation(
-                                conversation_id,
-                                ConversationStatus::Completed,
-                                *turns as i32,
-                                total_tokens,
+                        let _ = sessions
+                            .complete_session(
+                                session_id,
+                                SessionStats {
+                                    claude_session_id: None,
+                                    total_turns: *turns as i32,
+                                    total_input_tokens: *input_tokens as i64,
+                                    total_output_tokens: *output_tokens as i64,
+                                    cost_usd: *cost_usd,
+                                    duration_ms: duration_ms.map(|d| d as i64),
+                                },
                             )
                             .await;
                     }
                     AgentMessageEvent::Error { .. } => {
-                        let _ = chat_history
-                            .complete_conversation(
-                                conversation_id,
-                                ConversationStatus::Failed,
-                                0,
-                                0,
-                            )
-                            .await;
+                        let _ = sessions.fail_session(session_id).await;
                     }
                     _ => {}
                 }
@@ -533,50 +577,62 @@ impl Agents {
     }
 }
 
-/// Map an `AgentMessageEvent` to a (role, content, metadata) tuple for persistence.
-fn event_to_message(
-    event: &AgentMessageEvent,
-) -> (MessageRole, serde_json::Value, serde_json::Value) {
+/// Convert an `AgentMessageEvent` into a `NewSessionEvent` for the light
+/// runtime path where no raw harness JSON is available.
+fn agent_event_to_session_event(event: &AgentMessageEvent) -> Option<NewSessionEvent> {
     match event {
-        AgentMessageEvent::Text { text } => (
-            MessageRole::Assistant,
-            serde_json::json!(text),
-            serde_json::json!({}),
-        ),
-        AgentMessageEvent::ToolCall { name, arguments } => (
-            MessageRole::ToolCall,
-            serde_json::json!(name),
-            serde_json::json!({ "arguments": arguments }),
-        ),
-        AgentMessageEvent::ToolResult { name, is_error } => (
-            MessageRole::ToolResult,
-            serde_json::json!(name),
-            serde_json::json!({ "is_error": is_error }),
-        ),
+        AgentMessageEvent::Text { text } => Some(NewSessionEvent {
+            event_type: SessionEventType::AssistantText,
+            tool_name: None,
+            tool_use_id: None,
+            content: serde_json::json!({ "text": text }),
+            metadata: serde_json::json!({}),
+            raw_event: None,
+        }),
+        AgentMessageEvent::ToolCall { name, arguments } => Some(NewSessionEvent {
+            event_type: SessionEventType::ToolCall,
+            tool_name: Some(name.clone()),
+            tool_use_id: None,
+            content: serde_json::json!({ "input": arguments }),
+            metadata: serde_json::json!({}),
+            raw_event: None,
+        }),
+        AgentMessageEvent::ToolResult { name, is_error } => Some(NewSessionEvent {
+            event_type: SessionEventType::ToolResult,
+            tool_name: Some(name.clone()),
+            tool_use_id: None,
+            content: serde_json::json!({ "is_error": is_error }),
+            metadata: serde_json::json!({}),
+            raw_event: None,
+        }),
         AgentMessageEvent::Done {
             turns,
             input_tokens,
             output_tokens,
             duration_ms,
             cost_usd,
-        } => (
-            MessageRole::Done,
-            serde_json::json!(null),
-            serde_json::json!({
+        } => Some(NewSessionEvent {
+            event_type: SessionEventType::SessionEnd,
+            tool_name: None,
+            tool_use_id: None,
+            content: serde_json::json!({
                 "turns": turns,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "duration_ms": duration_ms,
                 "cost_usd": cost_usd,
             }),
-        ),
-        AgentMessageEvent::Error { message } => (
-            MessageRole::Error,
-            serde_json::json!(message),
-            serde_json::json!({}),
-        ),
-        AgentMessageEvent::Service { .. } => {
-            unreachable!("service events are handled before persistence")
-        }
+            metadata: serde_json::json!({}),
+            raw_event: None,
+        }),
+        AgentMessageEvent::Error { message } => Some(NewSessionEvent {
+            event_type: SessionEventType::Error,
+            tool_name: None,
+            tool_use_id: None,
+            content: serde_json::json!({ "message": message }),
+            metadata: serde_json::json!({}),
+            raw_event: None,
+        }),
+        AgentMessageEvent::Service { .. } => None,
     }
 }

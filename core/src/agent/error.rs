@@ -32,6 +32,6 @@ pub enum AgentError {
     MaxTurnsReached(usize),
     #[error("AgentError - ChannelClosed")]
     ChannelClosed,
-    #[error("AgentError - ChatHistory: {0}")]
-    ChatHistory(crate::chat_history::ChatHistoryError),
+    #[error("AgentError - Session: {0}")]
+    Session(crate::session::SessionError),
 }

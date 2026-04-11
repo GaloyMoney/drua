@@ -1,3 +1,5 @@
+use crate::session::{NewSessionEvent, SessionEventType};
+
 use super::entity::{Agent, SandboxConfig, SandboxState};
 use super::error::AgentError;
 use super::repo::AgentRepo;
@@ -5,6 +7,9 @@ use super::AgentMessageEvent;
 
 /// Translate a JSON-line from the agent harness (Claude Code stream-json)
 /// into a canonical [`AgentMessageEvent`].
+///
+/// Only produces events meaningful for the SSE chat stream (text, tool_call,
+/// tool_result, done, error).  System/init/stream_event lines produce nothing.
 pub(super) fn translate_harness_event(line: &str) -> Vec<AgentMessageEvent> {
     let v = match serde_json::from_str::<serde_json::Value>(line) {
         Ok(v) => v,
@@ -97,7 +102,207 @@ pub(super) fn translate_harness_event(line: &str) -> Vec<AgentMessageEvent> {
             };
             vec![AgentMessageEvent::Error { message }]
         }
-        _ => Vec::new(), // Ignore system, init, stream_event, and other internal events
+        _ => Vec::new(), // system, init, stream_event — captured via session events only
+    }
+}
+
+/// Translate a raw harness JSON line into rich [`NewSessionEvent`]s for
+/// persistence.  Unlike [`translate_harness_event`] this captures **all**
+/// event types including system/init/stream_event.
+pub(super) fn translate_to_session_events(
+    line: &str,
+    raw: Option<serde_json::Value>,
+) -> Vec<NewSessionEvent> {
+    let v = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let event_type = match v.get("type").and_then(|t| t.as_str()) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    match event_type {
+        "system" => {
+            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+            match subtype {
+                "init" => {
+                    let session_id = v.get("session_id").and_then(|s| s.as_str());
+                    let model = v.get("model").and_then(|s| s.as_str());
+                    let tools = v.get("tools").cloned().unwrap_or(serde_json::json!([]));
+                    vec![NewSessionEvent {
+                        event_type: SessionEventType::SessionInit,
+                        tool_name: None,
+                        tool_use_id: None,
+                        content: serde_json::json!({
+                            "claude_session_id": session_id,
+                            "model": model,
+                            "tools": tools,
+                        }),
+                        metadata: serde_json::json!({}),
+                        raw_event: raw,
+                    }]
+                }
+                "api_retry" => {
+                    vec![NewSessionEvent {
+                        event_type: SessionEventType::ApiRetry,
+                        tool_name: None,
+                        tool_use_id: None,
+                        content: serde_json::json!({
+                            "attempt": v.get("attempt"),
+                            "max_retries": v.get("max_retries"),
+                            "retry_delay_ms": v.get("retry_delay_ms"),
+                            "error": v.get("error"),
+                        }),
+                        metadata: serde_json::json!({}),
+                        raw_event: raw,
+                    }]
+                }
+                _ => Vec::new(),
+            }
+        }
+        "assistant" => {
+            let mut events = Vec::new();
+            if let Some(blocks) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for block in blocks {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    events.push(NewSessionEvent {
+                                        event_type: SessionEventType::AssistantText,
+                                        tool_name: None,
+                                        tool_use_id: None,
+                                        content: serde_json::json!({ "text": text }),
+                                        metadata: serde_json::json!({}),
+                                        raw_event: None,
+                                    });
+                                }
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown");
+                            let tool_use_id =
+                                block.get("id").and_then(|id| id.as_str()).map(String::from);
+                            let input =
+                                block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            events.push(NewSessionEvent {
+                                event_type: SessionEventType::ToolCall,
+                                tool_name: Some(name.to_string()),
+                                tool_use_id,
+                                content: serde_json::json!({ "input": input }),
+                                metadata: serde_json::json!({}),
+                                raw_event: None,
+                            });
+                        }
+                        Some("tool_result") => {
+                            let tool_use_id = block
+                                .get("tool_use_id")
+                                .and_then(|id| id.as_str())
+                                .map(String::from);
+                            let name = block.get("name").and_then(|n| n.as_str()).map(String::from);
+                            let is_error = block
+                                .get("is_error")
+                                .and_then(|e| e.as_bool())
+                                .unwrap_or(false);
+                            let output = block
+                                .get("content")
+                                .cloned()
+                                .unwrap_or(serde_json::json!(null));
+                            events.push(NewSessionEvent {
+                                event_type: SessionEventType::ToolResult,
+                                tool_name: name,
+                                tool_use_id,
+                                content: serde_json::json!({
+                                    "output": output,
+                                    "is_error": is_error,
+                                }),
+                                metadata: serde_json::json!({}),
+                                raw_event: None,
+                            });
+                        }
+                        Some("thinking") => {
+                            if let Some(text) = block.get("thinking").and_then(|t| t.as_str()) {
+                                events.push(NewSessionEvent {
+                                    event_type: SessionEventType::Thinking,
+                                    tool_name: None,
+                                    tool_use_id: None,
+                                    content: serde_json::json!({ "text": text }),
+                                    metadata: serde_json::json!({}),
+                                    raw_event: None,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Store raw on the first event of the batch (it covers the whole turn)
+            if let Some(first) = events.first_mut() {
+                first.raw_event = raw;
+            }
+            events
+        }
+        "result" => {
+            let session_id = v.get("session_id").and_then(|s| s.as_str());
+            let turns = v.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0);
+            let input_tokens = v
+                .get("total_input_tokens")
+                .or_else(|| v.get("usage").and_then(|u| u.get("input_tokens")))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let output_tokens = v
+                .get("total_output_tokens")
+                .or_else(|| v.get("usage").and_then(|u| u.get("output_tokens")))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let duration_ms = v.get("duration_ms").and_then(|n| n.as_u64());
+            let cost_usd = v.get("total_cost_usd").and_then(|n| n.as_f64());
+            vec![NewSessionEvent {
+                event_type: SessionEventType::SessionEnd,
+                tool_name: None,
+                tool_use_id: None,
+                content: serde_json::json!({
+                    "claude_session_id": session_id,
+                    "turns": turns,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "duration_ms": duration_ms,
+                    "cost_usd": cost_usd,
+                }),
+                metadata: serde_json::json!({}),
+                raw_event: raw,
+            }]
+        }
+        "error" => {
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            let details = v.get("details").and_then(|d| d.as_str());
+            let message = match details {
+                Some(d) => format!("{msg}: {d}"),
+                None => msg.to_string(),
+            };
+            vec![NewSessionEvent {
+                event_type: SessionEventType::Error,
+                tool_name: None,
+                tool_use_id: None,
+                content: serde_json::json!({ "message": message }),
+                metadata: serde_json::json!({}),
+                raw_event: raw,
+            }]
+        }
+        // stream_event deltas are high-volume and reconstruct into the
+        // complete `assistant` event — skip for storage.
+        _ => Vec::new(),
     }
 }
 

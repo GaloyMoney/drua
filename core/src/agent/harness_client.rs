@@ -5,8 +5,10 @@ use opentelemetry_http::HeaderInjector;
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::session::NewSessionEvent;
+
 use super::error::AgentError;
-use super::sandbox::translate_harness_event;
+use super::sandbox::{translate_harness_event, translate_to_session_events};
 use super::AgentMessageEvent;
 
 const HARNESS_PORT: u16 = 3000;
@@ -66,12 +68,16 @@ impl HarnessClient {
     }
 
     /// Send a message to the harness and stream SSE events back through `tx`.
+    ///
+    /// If `session_tx` is provided, raw harness events are translated into
+    /// rich [`NewSessionEvent`]s and forwarded for persistence.
     #[instrument(name = "harness_client.send_message", skip_all, fields(%service_fqdn))]
     pub(super) async fn send_message(
         &self,
         service_fqdn: &str,
         input: serde_json::Value,
         tx: tokio::sync::mpsc::Sender<AgentMessageEvent>,
+        session_tx: Option<tokio::sync::mpsc::Sender<NewSessionEvent>>,
     ) -> Result<(), AgentError> {
         let url = format!("http://{service_fqdn}:{HARNESS_PORT}/message");
 
@@ -119,6 +125,17 @@ impl HarnessClient {
 
                 if let Some(data_line) = event_block.lines().find(|l| l.starts_with("data: ")) {
                     let json_str = &data_line["data: ".len()..];
+
+                    // Translate raw line into session events (captures ALL types)
+                    if let Some(ref stx) = session_tx {
+                        let raw = serde_json::from_str::<serde_json::Value>(json_str).ok();
+                        let session_events = translate_to_session_events(json_str, raw);
+                        for se in session_events {
+                            let _ = stx.send(se).await;
+                        }
+                    }
+
+                    // Translate into SSE agent events (text/tool_call/result/done/error)
                     let events = translate_harness_event(json_str);
                     for event in events {
                         let is_terminal = matches!(
