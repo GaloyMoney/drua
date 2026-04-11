@@ -15,11 +15,6 @@ variable "lingo_api_key" {
 variable "anthropic_api_key" {
   default = ""
 }
-variable "github_app_private_key" {
-  default   = ""
-  sensitive = true
-}
-
 locals {
   cluster_name         = "galoy-agents-cluster"
   cluster_location     = "us-east1-b"
@@ -29,6 +24,8 @@ locals {
   controller_namespace = "galoy-agents-sandbox-controller"
   vpc_name             = "galoy-agents-vpc"
   region               = "us-east1"
+
+  github_app_private_key = fileexists("${path.module}/github-app-private-key.pem") ? file("${path.module}/github-app-private-key.pem") : ""
 }
 
 module "postgresql" {
@@ -79,7 +76,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-auth-header"   = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "lingo-auth-header"    = var.lingo_api_key
     "anthropic-api-key"    = var.anthropic_api_key
-    "github-app-private-key" = var.github_app_private_key
+    "github-app-private-key" = local.github_app_private_key
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]

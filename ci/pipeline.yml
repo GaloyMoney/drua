@@ -160,10 +160,10 @@ jobs:
             github_pat = "${GITHUB_PAT}"
             lingo_api_key = "${LINGO_API_KEY}"
             anthropic_api_key = "${ANTHROPIC_API_KEY}"
-            github_app_private_key = "${GITHUB_APP_PRIVATE_KEY}"
             EOF
 
             printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json
+            printf '%s' "$GITHUB_APP_PRIVATE_KEY" > deployment/tf/github-app-private-key.pem
             set -x
             echo "Deployment files prepared"
   - put: tf-galoy-agents-prod
