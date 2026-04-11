@@ -178,6 +178,23 @@ pub struct WorkspaceNewTemplate {}
 #[template(path = "workspace_detail.html")]
 pub struct WorkspaceDetailTemplate {
     pub workspace: WorkspaceView,
+    pub agent_id: String,
+}
+
+// ── Workspace Secrets ────────────────────────────────────────────────
+
+pub struct WorkspaceSecretView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub secret_type: String,
+    pub updated_at: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_secrets_list.html")]
+pub struct WorkspaceSecretsListTemplate {
+    pub secrets: Vec<WorkspaceSecretView>,
 }
 
 #[derive(Template, WebTemplate)]

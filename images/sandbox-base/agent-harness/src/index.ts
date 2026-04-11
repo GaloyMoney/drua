@@ -68,14 +68,21 @@ interface HarnessInput {
   disallowed_tools?: string[];
 }
 
+interface WorkspaceSecret {
+  name: string;
+  secret_type: string; // "env_var" | "file"
+  value: string;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
 function sendSSE(
   res: ServerResponse,
   event: Record<string, unknown>,
 ): void {
-  const eventType = (event.type as string) ?? "message";
-  res.write(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`);
+  const scrubbed = scrubEvent(event);
+  const eventType = (scrubbed.type as string) ?? "message";
+  res.write(`event: ${eventType}\ndata: ${JSON.stringify(scrubbed)}\n\n`);
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -155,6 +162,117 @@ function getMcpServersFromSaToken(): Record<string, McpHttpServerConfig> | undef
     // Token file not mounted (e.g. local dev) — run without MCP
     return undefined;
   }
+}
+
+// ── Workspace Secrets ────────────────────────────────────────────────
+
+/** Base URL for the galoy-agents server (derived from MCP_GATEWAY_URL). */
+const AGENT_SERVER_URL = MCP_GATEWAY_URL
+  ? MCP_GATEWAY_URL.replace(/\/mcp\/?$/, "")
+  : undefined;
+
+/** Agent ID extracted from pod hostname (format: agent-<uuid-prefix>-<hash>). */
+const AGENT_ID = process.env.AGENT_ID;
+
+/** Secrets fetched from the server — values used for output scrubbing. */
+let injectedSecrets: WorkspaceSecret[] = [];
+
+/** Extra environment variables injected from secrets. */
+const secretEnvVars: Record<string, string> = {};
+
+const SECRETS_DIR = "/run/secrets";
+
+/**
+ * Fetch workspace secrets from the galoy-agents server using SA token auth.
+ * Called on startup and can be called again for refresh.
+ */
+async function fetchSecrets(): Promise<WorkspaceSecret[]> {
+  if (!AGENT_SERVER_URL || !AGENT_ID) {
+    console.log("Secrets fetch skipped: AGENT_SERVER_URL or AGENT_ID not set");
+    return [];
+  }
+
+  let token: string;
+  try {
+    token = readFileSync(SA_TOKEN_PATH, "utf-8").trim();
+    if (!token) return [];
+  } catch {
+    return [];
+  }
+
+  const url = `${AGENT_SERVER_URL}/api/v1/agents/${AGENT_ID}/secrets`;
+  try {
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      console.error(`Secrets fetch failed: ${resp.status} ${resp.statusText}`);
+      return [];
+    }
+    return (await resp.json()) as WorkspaceSecret[];
+  } catch (err) {
+    console.error("Secrets fetch error:", err);
+    return [];
+  }
+}
+
+/**
+ * Inject secrets into the pod environment:
+ * - env_var: stored in secretEnvVars, passed to CLI subprocess
+ * - file: written to /run/secrets/<name>
+ */
+function injectSecrets(secrets: WorkspaceSecret[]): void {
+  for (const secret of secrets) {
+    if (secret.secret_type === "env_var") {
+      secretEnvVars[secret.name] = secret.value;
+      console.log(`[secrets] Injected env var: ${secret.name}`);
+    } else if (secret.secret_type === "file") {
+      try {
+        mkdirSync(SECRETS_DIR, { recursive: true });
+        writeFileSync(join(SECRETS_DIR, secret.name), secret.value, { mode: 0o600 });
+        console.log(`[secrets] Wrote file: ${SECRETS_DIR}/${secret.name}`);
+      } catch (err) {
+        console.error(`[secrets] Failed to write ${secret.name}:`, err);
+      }
+    }
+  }
+  injectedSecrets = secrets;
+}
+
+/**
+ * Scrub known secret values from a string.
+ * Replaces any occurrence of a secret value with [REDACTED].
+ */
+function scrubSecrets(text: string): string {
+  let scrubbed = text;
+  for (const secret of injectedSecrets) {
+    if (secret.value.length >= 4 && scrubbed.includes(secret.value)) {
+      scrubbed = scrubbed.split(secret.value).join("[REDACTED]");
+    }
+  }
+  return scrubbed;
+}
+
+/**
+ * Deep-scrub an event object: walk all string values and replace secret occurrences.
+ */
+function scrubEvent(event: Record<string, unknown>): Record<string, unknown> {
+  if (injectedSecrets.length === 0) return event;
+
+  const scrubValue = (val: unknown): unknown => {
+    if (typeof val === "string") return scrubSecrets(val);
+    if (Array.isArray(val)) return val.map(scrubValue);
+    if (val && typeof val === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(val)) {
+        out[k] = scrubValue(v);
+      }
+      return out;
+    }
+    return val;
+  };
+
+  return scrubValue(event) as Record<string, unknown>;
 }
 
 // ── Persistent CLI subprocess ────────────────────────────────────────
@@ -259,6 +377,7 @@ function spawnCli(config: SpawnConfig): ChildProcess {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
+      ...secretEnvVars,
       HOME: CWD, // Store session data on the PVC, not ephemeral $HOME
       DISABLE_AUTOUPDATER: "1",
     },
@@ -596,6 +715,19 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 // Initialize OpenTelemetry before starting the server
 initTracing();
+
+// Fetch and inject workspace secrets before starting
+(async () => {
+  try {
+    const secrets = await fetchSecrets();
+    if (secrets.length > 0) {
+      injectSecrets(secrets);
+      console.log(`[secrets] Injected ${secrets.length} workspace secret(s)`);
+    }
+  } catch (err) {
+    console.error("[secrets] Failed to fetch secrets on startup:", err);
+  }
+})();
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
