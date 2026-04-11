@@ -31,10 +31,8 @@ impl SaTokenValidator {
 
     /// Validate a bearer token as a K8s SA token.
     ///
-    /// On success, returns the `AgentId` parsed from the bound pod name
-    /// (format: `agent-{id_prefix}`).
-    /// Validate and return the pod name prefix (agent ID prefix) rather than
-    /// a fabricated UUID. The caller must do a prefix-based agent lookup.
+    /// On success, returns the full agent UUID parsed from the bound pod name
+    /// (format: `agent-{uuid}`).
     #[instrument(name = "web.auth.sa_token.validate", skip_all)]
     pub async fn validate(&self, raw_token: &str) -> Result<String, AuthError> {
         let review = TokenReview {
@@ -60,13 +58,14 @@ impl SaTokenValidator {
         }
 
         let pod_name = extract_pod_name(&status)?;
-        let prefix = pod_name
+        let id_str = pod_name
             .strip_prefix("agent-")
             .ok_or(AuthError::InvalidToken)?;
-        if prefix.len() < 8 {
-            return Err(AuthError::InvalidToken);
-        }
-        Ok(prefix.to_string())
+        // Validate as a full UUID to prevent ambiguous prefix lookups
+        id_str
+            .parse::<uuid::Uuid>()
+            .map_err(|_| AuthError::InvalidToken)?;
+        Ok(id_str.to_string())
     }
 }
 

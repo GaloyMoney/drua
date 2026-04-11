@@ -135,13 +135,6 @@ impl Agents {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
 
-    /// Find an agent whose UUID starts with the given prefix.
-    /// Used for SA token auth where only the first 8 chars of the ID are known.
-    #[instrument(name = "domain.agent.find_by_id_prefix", skip(self))]
-    pub async fn find_by_id_prefix(&self, prefix: &str) -> Result<Agent, AgentError> {
-        Ok(self.repo.find_by_id_prefix(prefix).await?)
-    }
-
     #[instrument(name = "domain.agent.list_for_workspace", skip(self))]
     pub async fn list_for_workspace(
         &self,

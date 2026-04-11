@@ -171,7 +171,7 @@ const AGENT_SERVER_URL = MCP_GATEWAY_URL
   ? MCP_GATEWAY_URL.replace(/\/mcp\/?$/, "")
   : undefined;
 
-/** Agent ID extracted from pod hostname (format: agent-<uuid-prefix>-<hash>). */
+/** Agent ID injected as an environment variable by the sandbox provisioner. */
 const AGENT_ID = process.env.AGENT_ID;
 
 /** Secrets fetched from the server — values used for output scrubbing. */

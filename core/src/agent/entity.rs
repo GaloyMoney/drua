@@ -141,7 +141,7 @@ impl Agent {
 
     /// Deterministic sandbox name derived from the agent ID.
     pub fn sandbox_name(&self) -> String {
-        format!("agent-{}", &self.id.to_string()[..8])
+        format!("agent-{}", self.id)
     }
 
     pub(super) fn update_chat_config(&mut self, new_config: ChatConfig) -> Idempotent<()> {
