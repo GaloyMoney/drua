@@ -68,7 +68,6 @@ pub struct Session {
     pub id: SessionId,
     pub agent_id: AgentId,
     pub workspace_id: WorkspaceId,
-    pub model: Option<String>,
     pub status: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,

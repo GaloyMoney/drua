@@ -226,11 +226,7 @@ impl Agents {
                 // Create a rich session for the light agent
                 let session = self
                     .sessions
-                    .create_session(
-                        agent.id,
-                        agent.workspace_id,
-                        Some(agent.chat_config.model.clone()),
-                    )
+                    .create_session(agent.id, agent.workspace_id)
                     .await
                     .map_err(AgentError::Session)?;
 

@@ -29,14 +29,13 @@ impl Sessions {
         &self,
         agent_id: AgentId,
         workspace_id: WorkspaceId,
-        model: Option<String>,
     ) -> Result<Session, SessionError> {
         let id = SessionId::new();
 
         let row = sqlx::query_as::<_, Session>(
-            r#"INSERT INTO sessions (id, agent_id, workspace_id, model)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, agent_id, workspace_id, model, status,
+            r#"INSERT INTO sessions (id, agent_id, workspace_id)
+            VALUES ($1, $2, $3)
+            RETURNING id, agent_id, workspace_id, status,
                       started_at, ended_at, total_turns,
                       total_input_tokens, total_output_tokens,
                       created_at, updated_at"#,
@@ -44,7 +43,6 @@ impl Sessions {
         .bind(id)
         .bind(agent_id)
         .bind(workspace_id)
-        .bind(&model)
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
@@ -232,7 +230,7 @@ impl Sessions {
         limit: i64,
     ) -> Result<Vec<Session>, SessionError> {
         let rows = sqlx::query_as::<_, Session>(
-            r#"SELECT id, agent_id, workspace_id, model, status,
+            r#"SELECT id, agent_id, workspace_id, status,
                       started_at, ended_at, total_turns,
                       total_input_tokens, total_output_tokens,
                       created_at, updated_at
@@ -252,7 +250,7 @@ impl Sessions {
     #[instrument(name = "session.find", skip_all)]
     pub async fn find_session(&self, id: SessionId) -> Result<Session, SessionError> {
         sqlx::query_as::<_, Session>(
-            r#"SELECT id, agent_id, workspace_id, model, status,
+            r#"SELECT id, agent_id, workspace_id, status,
                       started_at, ended_at, total_turns,
                       total_input_tokens, total_output_tokens,
                       created_at, updated_at

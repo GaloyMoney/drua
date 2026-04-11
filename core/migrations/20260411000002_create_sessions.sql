@@ -6,7 +6,6 @@ CREATE TABLE sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_id UUID NOT NULL REFERENCES agents(id),
     workspace_id UUID NOT NULL REFERENCES workspaces(id),
-    model TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMPTZ,
