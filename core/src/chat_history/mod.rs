@@ -161,6 +161,34 @@ impl ChatHistory {
         Ok(rows)
     }
 
+    /// Load the persisted Anthropic API messages array for conversation resume.
+    ///
+    /// Returns `None` if the conversation has no stored messages (new conversation
+    /// or sandbox-based agent). Returns the full messages array suitable for
+    /// passing back to the Messages API.
+    #[instrument(name = "chat_history.load_api_messages", skip_all)]
+    pub async fn load_api_messages(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<Vec<serde_json::Value>>, ChatHistoryError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            api_messages: Option<serde_json::Value>,
+        }
+
+        let row = sqlx::query_as::<_, Row>("SELECT api_messages FROM conversations WHERE id = $1")
+            .bind(conversation_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            Some(Row {
+                api_messages: Some(serde_json::Value::Array(arr)),
+            }) => Ok(Some(arr)),
+            _ => Ok(None),
+        }
+    }
+
     /// Get all messages for a conversation, ordered by sequence.
     #[instrument(name = "chat_history.get_messages", skip_all)]
     pub async fn get_messages(

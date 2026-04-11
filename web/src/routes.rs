@@ -1181,6 +1181,9 @@ pub fn api_router() -> Router<AppState> {
 #[derive(Deserialize)]
 struct AgentMessageRequest {
     prompt: String,
+    /// Optional conversation ID to resume a prior conversation.
+    #[serde(default)]
+    conversation_id: Option<galoy_agents_core::chat_history::ConversationId>,
 }
 
 #[instrument(name = "api.agent.message", skip_all)]
@@ -1201,7 +1204,7 @@ async fn api_agent_message(
     let rx = match state
         .app
         .agents()
-        .send_message(agent_id, user_id, body.prompt)
+        .send_message(agent_id, user_id, body.prompt, body.conversation_id)
         .await
     {
         Ok(rx) => rx,

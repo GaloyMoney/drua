@@ -296,7 +296,7 @@ impl AdminToolSet {
 
         let mut rx = self
             .agents
-            .send_message(AgentId::from(agent_id), user_id, message.to_string())
+            .send_message(AgentId::from(agent_id), user_id, message.to_string(), None)
             .await
             .map_err(|e| ToolSetsError::Admin(e.to_string()))?;
 

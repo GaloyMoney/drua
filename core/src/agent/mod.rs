@@ -187,7 +187,10 @@ impl Agents {
     /// - `RuntimeKind::Light` runs an in-process agentic loop via the Anthropic API
     /// - `RuntimeKind::Sandbox` runs the agent harness inside a K8s sandbox pod
     ///
-    /// Returns the conversation ID and a receiver that streams `AgentMessageEvent`s.
+    /// When `conversation_id` is provided, the light agent resumes from the
+    /// persisted API messages. Otherwise a new conversation is created.
+    ///
+    /// Returns a receiver that streams `AgentMessageEvent`s.
     /// Each event is also persisted to the chat history.
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
@@ -195,16 +198,36 @@ impl Agents {
         id: AgentId,
         user_id: UserId,
         prompt: String,
+        conversation_id: Option<ConversationId>,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
-        // Create a conversation record
-        let conversation = self
-            .chat_history
-            .create_conversation(agent.id, user_id)
-            .await
-            .map_err(AgentError::ChatHistory)?;
-        let conversation_id = conversation.id;
+        // Resume an existing conversation or create a new one
+        let (conversation_id, prior_messages) = if let Some(conv_id) = conversation_id {
+            let conv = self
+                .chat_history
+                .find_conversation(conv_id)
+                .await
+                .map_err(AgentError::ChatHistory)?;
+            if conv.agent_id != agent.id {
+                return Err(AgentError::ChatHistory(
+                    crate::chat_history::ChatHistoryError::ConversationNotFound,
+                ));
+            }
+            let prior = self
+                .chat_history
+                .load_api_messages(conv_id)
+                .await
+                .map_err(AgentError::ChatHistory)?;
+            (conv_id, prior)
+        } else {
+            let conversation = self
+                .chat_history
+                .create_conversation(agent.id, user_id)
+                .await
+                .map_err(AgentError::ChatHistory)?;
+            (conversation.id, None)
+        };
 
         // Record the user's prompt
         let _ = self
@@ -222,11 +245,16 @@ impl Agents {
                 let auth = AuthContext::Agent(agent.workspace_id, agent.id, Vec::new());
                 let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
-                    prompt,
                     &self.light_config,
                     &agent.chat_config,
                     agent.agent_type.system_prompt(),
-                    catalog,
+                    light::LightRunParams {
+                        prompt,
+                        catalog,
+                        chat_history: self.chat_history.clone(),
+                        conversation_id,
+                        prior_messages,
+                    },
                 )
                 .await?
             }
