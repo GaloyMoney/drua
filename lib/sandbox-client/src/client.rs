@@ -3,8 +3,7 @@ use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{
     EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
-    Pod, PodSecurityContext, ResourceRequirements, Volume, VolumeMount,
-    VolumeResourceRequirements,
+    Pod, PodSecurityContext, ResourceRequirements, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
