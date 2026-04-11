@@ -67,7 +67,12 @@ spec:
         - name: mcp-token
           mountPath: /var/run/secrets/galoy-agents
           readOnly: true
+        - name: workspace-secrets
+          mountPath: /run/secrets
       volumes:
+      - name: workspace-secrets
+        emptyDir:
+          medium: Memory
       - name: mcp-token
         projected:
           sources:
