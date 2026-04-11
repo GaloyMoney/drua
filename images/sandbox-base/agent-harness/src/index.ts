@@ -379,6 +379,7 @@ function spawnCli(config: SpawnConfig): ChildProcess {
       ...process.env,
       ...secretEnvVars,
       HOME: CWD, // Store session data on the PVC, not ephemeral $HOME
+      GIT_CONFIG_GLOBAL: "/home/agent/.gitconfig", // Credential helper lives in the image's home
       DISABLE_AUTOUPDATER: "1",
     },
   });
