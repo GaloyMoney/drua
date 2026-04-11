@@ -82,10 +82,10 @@ data:
             - "resources_get"
       {{- end }}
       {{- end }}
-    {{- if .Values.galoyAgents.githubApp.enabled }}
+    {{- if .Values.galoyAgents.config.githubApp.enabled }}
     github_app:
-      client_id: {{ .Values.galoyAgents.githubApp.clientId | quote }}
-      installation_id: {{ .Values.galoyAgents.githubApp.installationId | quote }}
+      client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}
+      installation_id: {{ .Values.galoyAgents.config.githubApp.installationId | quote }}
     {{- end }}
     sandbox:
       enabled: {{ .Values.sandbox.enabled }}
