@@ -285,6 +285,17 @@
 
         packages.sandbox-base-image = import ./images/sandbox-base/default.nix { inherit pkgs; };
 
+        packages.sandbox-tool-server = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "sandbox-tool-server";
+          cargoExtraArgs = "-p sandbox-tool-server";
+        });
+
+        packages.sandbox-light-image = import ./images/sandbox-light/default.nix {
+          inherit pkgs;
+          sandbox-tool-server = self.packages.${system}.sandbox-tool-server;
+        };
+
         devShells.training = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
           shellHook = ''
