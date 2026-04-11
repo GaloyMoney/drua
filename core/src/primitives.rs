@@ -4,6 +4,7 @@ es_entity::entity_id! {
     McpCredsOwnerId,
     ReportId,
     WorkspaceId,
+    WorkspaceSecretId,
     AgentId;
 
     UserId => McpCredsOwnerId,

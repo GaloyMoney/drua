@@ -19,7 +19,7 @@ use galoy_agents_core as domain;
 use domain::auth::AuthContext;
 use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{AgentId, McpCredsId, UserId};
+use domain::primitives::{AgentId, McpCredsId, UserId, WorkspaceSecretId};
 
 use crate::templates::*;
 use crate::AppState;
@@ -57,6 +57,12 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/{id}", get(workspace_detail))
         .route("/workspaces/{id}", post(workspace_update))
         .route("/workspaces/{id}/delete", post(workspace_delete))
+        .route("/workspaces/{id}/secrets", post(workspace_secret_create))
+        .route("/workspaces/{id}/secrets/list", get(workspace_secrets_list))
+        .route(
+            "/workspaces/{id}/secrets/{secret_id}/delete",
+            post(workspace_secret_delete),
+        )
         .route("/agents/{id}/config", get(agent_config_panel))
         .route("/agents/{id}/config", post(agent_config_update))
 }
@@ -766,13 +772,29 @@ async fn workspace_detail(
     }
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    match state.app.workspaces().find_by_id(workspace_id).await {
-        Ok(ws) => WorkspaceDetailTemplate {
-            workspace: workspace_to_view(&ws),
-        }
-        .into_response(),
-        Err(_) => Redirect::to("/workspaces").into_response(),
+    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let agent_id = agents
+        .iter()
+        .find(|a| a.agent_type == domain::primitives::AgentType::WorkspaceLead)
+        .map(|a| a.id.to_string())
+        .unwrap_or_default();
+
+    WorkspaceDetailTemplate {
+        workspace: workspace_to_view(&ws),
+        agent_id,
     }
+    .into_response()
 }
 
 #[instrument(name = "web.workspace_update", skip_all)]
@@ -833,6 +855,130 @@ async fn workspace_delete(
             tracing::error!(error = %e, "Failed to delete workspace");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Secrets
+// ---------------------------------------------------------------------------
+
+fn secret_to_view(s: &domain::workspace_secret::WorkspaceSecret) -> WorkspaceSecretView {
+    WorkspaceSecretView {
+        id: s.id.to_string(),
+        workspace_id: s.workspace_id.to_string(),
+        name: s.name.clone(),
+        secret_type: s.secret_type.clone(),
+        updated_at: s.updated_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+#[instrument(name = "web.workspace_secrets_list", skip_all)]
+async fn workspace_secrets_list(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    match state
+        .app
+        .workspace_secrets()
+        .list_by_workspace(workspace_id)
+        .await
+    {
+        Ok(secrets) => WorkspaceSecretsListTemplate {
+            secrets: secrets.iter().map(secret_to_view).collect(),
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list workspace secrets");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateSecretForm {
+    name: String,
+    secret_type: String,
+    value: String,
+}
+
+#[instrument(name = "web.workspace_secret_create", skip_all)]
+async fn workspace_secret_create(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<CreateSecretForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let secret_type: domain::workspace_secret::SecretType = match form.secret_type.parse() {
+        Ok(t) => t,
+        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    if let Err(e) = state
+        .app
+        .workspace_secrets()
+        .create(workspace_id, &form.name, secret_type, &form.value)
+        .await
+    {
+        tracing::error!(error = %e, "Failed to create workspace secret");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return updated list
+    match state
+        .app
+        .workspace_secrets()
+        .list_by_workspace(workspace_id)
+        .await
+    {
+        Ok(secrets) => WorkspaceSecretsListTemplate {
+            secrets: secrets.iter().map(secret_to_view).collect(),
+        }
+        .into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[instrument(name = "web.workspace_secret_delete", skip_all)]
+async fn workspace_secret_delete(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, secret_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let secret_id = WorkspaceSecretId::from(secret_id);
+
+    if let Err(e) = state.app.workspace_secrets().delete(secret_id).await {
+        tracing::error!(error = %e, "Failed to delete workspace secret");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return updated list
+    match state
+        .app
+        .workspace_secrets()
+        .list_by_workspace(workspace_id)
+        .await
+    {
+        Ok(secrets) => WorkspaceSecretsListTemplate {
+            secrets: secrets.iter().map(secret_to_view).collect(),
+        }
+        .into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -971,7 +1117,9 @@ async fn agent_config_update(
 // ---------------------------------------------------------------------------
 
 pub fn api_router() -> Router<AppState> {
-    Router::new().route("/api/v1/agents/{id}/message", post(api_agent_message))
+    Router::new()
+        .route("/api/v1/agents/{id}/message", post(api_agent_message))
+        .route("/api/v1/agents/{id}/secrets", get(api_agent_secrets))
 }
 
 #[derive(Deserialize)]
@@ -1033,4 +1181,60 @@ async fn api_agent_message(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Internal API — Agent Secrets (for harness injection)
+// ---------------------------------------------------------------------------
+
+/// Internal endpoint: returns secret values for an agent's workspace.
+/// Secured via SA token auth (AuthContext::Agent) — same pattern as MCP gateway.
+#[instrument(name = "api.agent.secrets", skip_all)]
+async fn api_agent_secrets(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    // Only allow Agent auth (SA token from sandbox pods)
+    let workspace_id = match &auth {
+        AuthContext::Agent(workspace_id, _, _) => *workspace_id,
+        _ => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let agent_id = AgentId::from(id);
+
+    // Verify the agent belongs to the authenticated workspace
+    let agent = match state.app.agents().find_by_id(agent_id).await {
+        Ok(a) => a,
+        Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+
+    if agent.workspace_id != workspace_id {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    match state
+        .app
+        .workspace_secrets()
+        .list_with_values(workspace_id)
+        .await
+    {
+        Ok(secrets) => {
+            let body: Vec<serde_json::Value> = secrets
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "secret_type": s.secret_type,
+                        "value": s.encrypted_value,
+                    })
+                })
+                .collect();
+            Json(body).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list secrets for agent");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }

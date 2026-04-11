@@ -10,6 +10,7 @@ pub mod report;
 pub mod toolset;
 pub mod user;
 pub mod workspace;
+pub mod workspace_secret;
 
 pub use config::*;
 
@@ -23,6 +24,7 @@ use report::Reports;
 use toolset::{AdminToolSet, ToolSets, ToolSetsError};
 use user::Users;
 use workspace::Workspaces;
+use workspace_secret::WorkspaceSecrets;
 
 #[derive(Clone)]
 pub struct App {
@@ -34,6 +36,7 @@ pub struct App {
     reports: Option<Arc<Reports>>,
     toolsets: Arc<ToolSets>,
     workspaces: Workspaces,
+    workspace_secrets: WorkspaceSecrets,
 }
 
 impl App {
@@ -88,6 +91,8 @@ impl App {
         // Register admin toolset after agents/workspaces to break circular dep
         toolsets.register(AdminToolSet::new(workspaces.clone(), Arc::clone(&agents)));
 
+        let workspace_secrets = WorkspaceSecrets::new(pool);
+
         Ok(Self {
             users: Users::new(pool),
             mcp_creds,
@@ -97,6 +102,7 @@ impl App {
             reports,
             toolsets,
             workspaces,
+            workspace_secrets,
         })
     }
 
@@ -130,6 +136,10 @@ impl App {
 
     pub fn workspaces(&self) -> &Workspaces {
         &self.workspaces
+    }
+
+    pub fn workspace_secrets(&self) -> &WorkspaceSecrets {
+        &self.workspace_secrets
     }
 }
 

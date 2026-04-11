@@ -24,6 +24,54 @@
 </form>
 
 <hr>
+
+<h3>Secrets</h3>
+<p><small>Secrets are injected into the agent sandbox as environment variables or files. Values are never displayed after creation.</small></p>
+
+<div id="secrets-list"
+     hx-get="/workspaces/{{ workspace.id }}/secrets/list"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  <p aria-busy="true">Loading secrets...</p>
+</div>
+
+<details>
+  <summary>Add Secret</summary>
+  <form hx-post="/workspaces/{{ workspace.id }}/secrets"
+        hx-target="#secrets-list"
+        hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) this.reset()">
+    <label>
+      Name
+      <input type="text" name="name" required placeholder="e.g. GITHUB_TOKEN" pattern="[A-Za-z_][A-Za-z0-9_]*">
+    </label>
+    <label>
+      Type
+      <select name="secret_type" required>
+        <option value="env_var">Environment Variable</option>
+        <option value="file">File (/run/secrets/&lt;name&gt;)</option>
+      </select>
+    </label>
+    <label>
+      Value
+      <input type="password" name="value" required placeholder="Secret value">
+    </label>
+    <button type="submit">Add Secret</button>
+  </form>
+</details>
+
+<hr>
+<details>
+  <summary>Agent Configuration</summary>
+  <div id="agent-config-panel"
+       hx-get="/agents/{{ agent_id }}/config"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p aria-busy="true">Loading configuration...</p>
+  </div>
+</details>
+
+<hr>
 <details>
   <summary>Danger Zone</summary>
   <p>Deleting a workspace will archive it and revoke MCP credentials for all its agents.</p>
