@@ -1,7 +1,6 @@
 pub mod agent;
 pub mod audit;
 pub mod auth;
-pub mod chat_history;
 pub mod code_assistant;
 mod config;
 pub mod encryption;
