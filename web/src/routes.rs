@@ -1210,28 +1210,45 @@ async fn api_agent_secrets(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    match state
+    let secrets = match state
         .app
         .workspace_secrets()
         .list_decrypted(workspace_id)
         .await
     {
-        Ok(secrets) => {
-            let body: Vec<serde_json::Value> = secrets
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "name": s.name,
-                        "secret_type": s.secret_type.as_str(),
-                        "value": s.value,
-                    })
-                })
-                .collect();
-            Json(body).into_response()
-        }
+        Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "Failed to list secrets for agent");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut body: Vec<serde_json::Value> = secrets
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "secret_type": s.secret_type.as_str(),
+                "value": s.value,
+            })
+        })
+        .collect();
+
+    // Auto-provision a GitHub token if the GitHub App is configured.
+    if let Some(github_app) = state.app.github_app() {
+        match github_app.generate_token().await {
+            Ok(token) => {
+                body.push(serde_json::json!({
+                    "name": "github-token",
+                    "secret_type": "file",
+                    "value": token.token,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to generate GitHub App token — skipping");
+            }
         }
     }
+
+    Json(body).into_response()
 }

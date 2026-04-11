@@ -24,6 +24,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 pgvector = { workspace = true }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rmcp = { workspace = true }
 thiserror = "2.0"

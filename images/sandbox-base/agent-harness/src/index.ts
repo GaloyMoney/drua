@@ -729,6 +729,21 @@ initTracing();
   }
 })();
 
+// Background refresh loop — re-fetch secrets every 45 minutes so that
+// short-lived tokens (e.g. GitHub App installation tokens, 1hr TTL) stay fresh.
+const SECRET_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
+setInterval(async () => {
+  try {
+    const secrets = await fetchSecrets();
+    if (secrets.length > 0) {
+      injectSecrets(secrets);
+      console.log(`[secrets] Refreshed ${secrets.length} secret(s)`);
+    }
+  } catch (err) {
+    console.error("[secrets] Refresh failed:", err);
+  }
+}, SECRET_REFRESH_INTERVAL_MS);
+
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
     console.error("Unhandled error in request handler:", err);
