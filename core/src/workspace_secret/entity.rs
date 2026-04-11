@@ -42,10 +42,11 @@ impl WorkspaceSecret {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub(super) fn update_value(&mut self, encrypted_value: Encrypted) {
+    pub(super) fn update_value(&mut self, encrypted_value: Encrypted) -> Idempotent<()> {
         self.encrypted_value = encrypted_value.clone();
         self.events
             .push(WorkspaceSecretEvent::ValueUpdated { encrypted_value });
+        Idempotent::Executed(())
     }
 
     /// Access the encrypted value (for decryption by the service layer).
