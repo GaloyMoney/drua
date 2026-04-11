@@ -5,6 +5,7 @@ pub mod chat_history;
 pub mod code_assistant;
 mod config;
 pub mod encryption;
+pub mod github_app;
 pub mod mcp_creds;
 pub mod primitives;
 pub mod report;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
+use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
 use report::Reports;
 use toolset::{AdminToolSet, ToolSets, ToolSetsError};
@@ -38,6 +40,7 @@ pub struct App {
     toolsets: Arc<ToolSets>,
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
+    github_app: Option<GitHubAppTokenProvider>,
 }
 
 impl App {
@@ -95,6 +98,25 @@ impl App {
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
 
+        // Optionally initialize GitHub App token provider from env vars.
+        // If not configured, agents simply won't get a github-token secret.
+        let github_app = match github_app::GitHubAppConfig::from_env() {
+            Some(gh_config) => match GitHubAppTokenProvider::new(&gh_config) {
+                Ok(provider) => {
+                    tracing::info!("GitHub App token provider initialized");
+                    Some(provider)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "GitHub App configured but failed to initialize — skipping");
+                    None
+                }
+            },
+            None => {
+                tracing::info!("GitHub App not configured — token auto-provisioning disabled");
+                None
+            }
+        };
+
         Ok(Self {
             users: Users::new(pool),
             mcp_creds,
@@ -105,6 +127,7 @@ impl App {
             toolsets,
             workspaces,
             workspace_secrets,
+            github_app,
         })
     }
 
@@ -142,6 +165,10 @@ impl App {
 
     pub fn workspace_secrets(&self) -> &WorkspaceSecrets {
         &self.workspace_secrets
+    }
+
+    pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
+        self.github_app.as_ref()
     }
 }
 
