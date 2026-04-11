@@ -736,6 +736,14 @@ async fn workspace_new(session: Session) -> Response {
 pub struct WorkspaceForm {
     name: String,
     description: Option<String>,
+    // Sandbox config
+    pvc_size: Option<String>,
+    resource_cpu: Option<String>,
+    resource_mem: Option<String>,
+    // Chat/model config
+    model: Option<String>,
+    max_tokens: Option<u32>,
+    max_turns: Option<u32>,
 }
 
 #[instrument(name = "web.workspace_create", skip_all)]
@@ -750,18 +758,63 @@ async fn workspace_create(
     };
 
     let description = form.description.filter(|d| !d.is_empty());
-    match state
+    let workspace = match state
         .app
         .workspaces()
         .create(user_id, &form.name, description)
         .await
     {
-        Ok(_) => Redirect::to("/workspaces").into_response(),
+        Ok(ws) => ws,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create workspace");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    // Apply custom sandbox/model config to the workspace's agent
+    let has_custom_config = form.pvc_size.is_some()
+        || form.resource_cpu.is_some()
+        || form.resource_mem.is_some()
+        || form.model.is_some()
+        || form.max_tokens.is_some()
+        || form.max_turns.is_some();
+
+    if has_custom_config {
+        if let Ok(agents) = state.app.agents().list_for_workspace(workspace.id).await {
+            if let Some(lead) = agents
+                .iter()
+                .find(|a| a.agent_type == domain::primitives::AgentType::WorkspaceLead)
+            {
+                let sandbox_config = domain::agent::SandboxConfig {
+                    pvc_size: form
+                        .pvc_size
+                        .unwrap_or_else(|| lead.sandbox_config.pvc_size.clone()),
+                    resource_cpu: form
+                        .resource_cpu
+                        .unwrap_or_else(|| lead.sandbox_config.resource_cpu.clone()),
+                    resource_mem: form
+                        .resource_mem
+                        .unwrap_or_else(|| lead.sandbox_config.resource_mem.clone()),
+                    disallowed_tools: lead.sandbox_config.disallowed_tools.clone(),
+                };
+                let chat_config = domain::agent::ChatConfig {
+                    model: form.model.unwrap_or_else(|| lead.chat_config.model.clone()),
+                    max_tokens: form.max_tokens.unwrap_or(lead.chat_config.max_tokens),
+                    max_turns: form.max_turns.unwrap_or(lead.chat_config.max_turns),
+                };
+                if let Err(e) = state
+                    .app
+                    .agents()
+                    .update_config(lead.id, chat_config, sandbox_config)
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to apply custom config to new workspace agent");
+                }
+            }
         }
     }
+
+    Redirect::to("/workspaces").into_response()
 }
 
 #[instrument(name = "web.workspace_detail", skip_all)]
