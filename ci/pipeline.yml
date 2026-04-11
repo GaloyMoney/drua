@@ -135,6 +135,7 @@ jobs:
         GITHUB_PAT: #@ data.values.github_pat
         LINGO_API_KEY: #@ data.values.lingo_api_key
         ANTHROPIC_API_KEY: #@ data.values.deploy_anthropic_api_key
+        GITHUB_APP_PRIVATE_KEY: #@ data.values.deploy_github_app_private_key
       run:
         path: sh
         args:
@@ -159,6 +160,7 @@ jobs:
             github_pat = "${GITHUB_PAT}"
             lingo_api_key = "${LINGO_API_KEY}"
             anthropic_api_key = "${ANTHROPIC_API_KEY}"
+            github_app_private_key = "${GITHUB_APP_PRIVATE_KEY}"
             EOF
 
             printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json

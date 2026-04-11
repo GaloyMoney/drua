@@ -15,6 +15,10 @@ variable "lingo_api_key" {
 variable "anthropic_api_key" {
   default = ""
 }
+variable "github_app_private_key" {
+  default   = ""
+  sensitive = true
+}
 
 locals {
   cluster_name         = "galoy-agents-cluster"
@@ -75,6 +79,21 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-auth-header"   = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "lingo-auth-header"    = var.lingo_api_key
     "anthropic-api-key"    = var.anthropic_api_key
+  }
+
+  depends_on = [kubernetes_namespace.galoy_agents]
+}
+
+resource "kubernetes_secret" "github_app" {
+  count = var.github_app_private_key != "" ? 1 : 0
+
+  metadata {
+    name      = "github-app-private-key"
+    namespace = local.namespace
+  }
+
+  data = {
+    "private-key.pem" = var.github_app_private_key
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
@@ -185,9 +204,9 @@ resource "helm_release" "galoy_agents" {
 
   values = [
     templatefile("${path.module}/prod-values.yml.tmpl", {
-      image_digest              = var.image_digest
-      sandbox_base_image_digest = var.sandbox_base_image_digest
-      secret_checksum           = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
+      image_digest                = var.image_digest
+      sandbox_base_image_digest   = var.sandbox_base_image_digest
+      secret_checksum             = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
     })
   ]
 
@@ -197,6 +216,7 @@ resource "helm_release" "galoy_agents" {
 
   depends_on = [
     kubernetes_secret.galoy_agents,
+    kubernetes_secret.github_app,
     kubernetes_namespace.sandbox,
     google_container_node_pool.gvisor,
     kubectl_manifest.sandbox_controller,
