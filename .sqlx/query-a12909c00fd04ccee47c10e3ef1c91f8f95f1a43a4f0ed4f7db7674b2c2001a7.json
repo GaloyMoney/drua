@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace_secrets SET workspace_id = $2, name = $3, deleted = TRUE WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a12909c00fd04ccee47c10e3ef1c91f8f95f1a43a4f0ed4f7db7674b2c2001a7"
+}

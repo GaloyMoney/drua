@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::primitives::*;
-
 /// The type of secret, determining how the harness injects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,27 +35,4 @@ impl std::str::FromStr for SecretType {
             other => Err(format!("invalid secret type: {other}")),
         }
     }
-}
-
-/// A workspace-scoped secret (metadata view — no value).
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct WorkspaceSecret {
-    pub id: WorkspaceSecretId,
-    pub workspace_id: WorkspaceId,
-    pub name: String,
-    pub secret_type: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// A workspace secret with its decrypted value (internal use only).
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct WorkspaceSecretWithValue {
-    pub id: WorkspaceSecretId,
-    pub workspace_id: WorkspaceId,
-    pub name: String,
-    pub secret_type: String,
-    pub encrypted_value: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
 }

@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
             },
         },
         toolsets: config.toolsets.clone(),
+        encryption: Default::default(),
     };
 
     let app = galoy_agents_core::App::init(&pool, app_config).await?;

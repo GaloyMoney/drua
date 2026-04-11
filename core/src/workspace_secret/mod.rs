@@ -1,24 +1,42 @@
+mod entity;
 pub mod error;
 pub mod primitives;
+pub(crate) mod repo;
 
 use tracing::instrument;
 
+pub use entity::WorkspaceSecret;
+use entity::*;
 pub use error::*;
 pub use primitives::*;
+use repo::*;
 
+use crate::encryption::EncryptionKey;
 use crate::primitives::*;
+
+/// A decrypted secret ready for harness injection.
+pub struct DecryptedSecret {
+    pub name: String,
+    pub secret_type: SecretType,
+    pub value: String,
+}
 
 #[derive(Clone)]
 pub struct WorkspaceSecrets {
-    pool: sqlx::PgPool,
+    repo: WorkspaceSecretRepo,
+    encryption_key: EncryptionKey,
 }
 
 impl WorkspaceSecrets {
-    pub fn new(pool: &sqlx::PgPool) -> Self {
-        Self { pool: pool.clone() }
+    pub fn new(pool: &sqlx::PgPool, encryption_key: EncryptionKey) -> Self {
+        let repo = WorkspaceSecretRepo::new(pool);
+        Self {
+            repo,
+            encryption_key,
+        }
     }
 
-    /// Create a new secret for a workspace.
+    /// Create a new secret (or update if name already exists in workspace).
     #[instrument(name = "workspace_secret.create", skip_all)]
     pub async fn create(
         &self,
@@ -27,61 +45,65 @@ impl WorkspaceSecrets {
         secret_type: SecretType,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
-        let id = WorkspaceSecretId::new();
-        let secret_type_str = secret_type.as_str();
+        let encrypted_value = self.encryption_key.encrypt_string(value);
 
-        let row = sqlx::query_as::<_, WorkspaceSecret>(
-            r#"INSERT INTO workspace_secrets (id, workspace_id, name, secret_type, encrypted_value)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (workspace_id, name) DO UPDATE
-                SET encrypted_value = EXCLUDED.encrypted_value,
-                    secret_type = EXCLUDED.secret_type,
-                    updated_at = NOW()
-            RETURNING id, workspace_id, name, secret_type, created_at, updated_at"#,
-        )
-        .bind(id)
-        .bind(workspace_id)
-        .bind(name)
-        .bind(secret_type_str)
-        .bind(value)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row)
+        // Check if secret with this name already exists — update if so
+        let existing = self.list_all_for_workspace(workspace_id).await?;
+        let existing = existing.into_iter().find(|s| s.name == name);
+
+        if let Some(mut secret) = existing {
+            secret.update_value(encrypted_value);
+            self.repo.update(&mut secret).await?;
+            return Ok(secret);
+        }
+
+        let new = NewWorkspaceSecret::builder()
+            .workspace_id(workspace_id)
+            .name(name)
+            .secret_type(secret_type)
+            .encrypted_value(encrypted_value)
+            .build()
+            .expect("Could not build new workspace secret");
+
+        let secret = self.repo.create(new).await?;
+        Ok(secret)
     }
 
-    /// List secrets for a workspace (metadata only, no values).
+    /// List secrets for a workspace (metadata only, no decrypted values).
     #[instrument(name = "workspace_secret.list_by_workspace", skip_all)]
     pub async fn list_by_workspace(
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<WorkspaceSecret>, WorkspaceSecretError> {
-        let rows = sqlx::query_as::<_, WorkspaceSecret>(
-            r#"SELECT id, workspace_id, name, secret_type, created_at, updated_at
-            FROM workspace_secrets
-            WHERE workspace_id = $1
-            ORDER BY name ASC"#,
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
+        self.list_all_for_workspace(workspace_id).await
     }
 
-    /// Find a secret by ID (metadata only).
+    async fn list_all_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<WorkspaceSecret>, WorkspaceSecretError> {
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                workspace_id,
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result.entities)
+    }
+
+    /// Find a secret by ID.
     #[instrument(name = "workspace_secret.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
         id: WorkspaceSecretId,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
-        sqlx::query_as::<_, WorkspaceSecret>(
-            r#"SELECT id, workspace_id, name, secret_type, created_at, updated_at
-            FROM workspace_secrets
-            WHERE id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(WorkspaceSecretError::SecretNotFound)
+        Ok(self.repo.find_by_id(id).await?)
     }
 
     /// Update a secret's value.
@@ -91,49 +113,40 @@ impl WorkspaceSecrets {
         id: WorkspaceSecretId,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
-        let row = sqlx::query_as::<_, WorkspaceSecret>(
-            r#"UPDATE workspace_secrets
-            SET encrypted_value = $1, updated_at = NOW()
-            WHERE id = $2
-            RETURNING id, workspace_id, name, secret_type, created_at, updated_at"#,
-        )
-        .bind(value)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(WorkspaceSecretError::SecretNotFound)?;
-        Ok(row)
+        let mut secret = self.repo.find_by_id(id).await?;
+        let encrypted_value = self.encryption_key.encrypt_string(value);
+        secret.update_value(encrypted_value);
+        self.repo.update(&mut secret).await?;
+        Ok(secret)
     }
 
-    /// Delete a secret.
+    /// Delete a secret (soft delete via archive).
     #[instrument(name = "workspace_secret.delete", skip_all)]
     pub async fn delete(&self, id: WorkspaceSecretId) -> Result<(), WorkspaceSecretError> {
-        let result = sqlx::query(r#"DELETE FROM workspace_secrets WHERE id = $1"#)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(WorkspaceSecretError::SecretNotFound);
-        }
+        let secret = self.repo.find_by_id(id).await?;
+        self.repo.delete(secret).await?;
         Ok(())
     }
 
-    /// List secrets with values for a workspace (internal use — harness injection).
-    #[instrument(name = "workspace_secret.list_with_values", skip_all)]
-    pub async fn list_with_values(
+    /// List secrets with decrypted values for a workspace (internal use — harness injection).
+    #[instrument(name = "workspace_secret.list_decrypted", skip_all)]
+    pub async fn list_decrypted(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<Vec<WorkspaceSecretWithValue>, WorkspaceSecretError> {
-        let rows = sqlx::query_as::<_, WorkspaceSecretWithValue>(
-            r#"SELECT id, workspace_id, name, secret_type, encrypted_value, created_at, updated_at
-            FROM workspace_secrets
-            WHERE workspace_id = $1
-            ORDER BY name ASC"#,
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
+    ) -> Result<Vec<DecryptedSecret>, WorkspaceSecretError> {
+        let secrets = self.list_all_for_workspace(workspace_id).await?;
+
+        let mut result = Vec::with_capacity(secrets.len());
+        for secret in secrets {
+            let value = self
+                .encryption_key
+                .decrypt_string(secret.encrypted_value())?;
+            result.push(DecryptedSecret {
+                name: secret.name.clone(),
+                secret_type: secret.secret_type,
+                value,
+            });
+        }
+        Ok(result)
     }
 }

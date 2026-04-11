@@ -4,6 +4,7 @@ pub mod auth;
 pub mod chat_history;
 pub mod code_assistant;
 mod config;
+pub mod encryption;
 pub mod mcp_creds;
 pub mod primitives;
 pub mod report;
@@ -91,7 +92,8 @@ impl App {
         // Register admin toolset after agents/workspaces to break circular dep
         toolsets.register(AdminToolSet::new(workspaces.clone(), Arc::clone(&agents)));
 
-        let workspace_secrets = WorkspaceSecrets::new(pool);
+        let encryption_key = config.encryption.encryption_key();
+        let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
 
         Ok(Self {
             users: Users::new(pool),
