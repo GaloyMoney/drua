@@ -338,6 +338,36 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
                 };
             }
         }
+    } else if let Some(rest) = subject.strip_prefix("agent::") {
+        // Format: agent::<agent-uuid>::ws:<workspace-uuid>
+        if let Some((agent_id_str, ws_id_str)) = rest.split_once("::ws:") {
+            let agent_label = if let Ok(agent_uuid) = agent_id_str.parse::<uuid::Uuid>() {
+                let agent_id = galoy_agents_core::primitives::AgentId::from(agent_uuid);
+                app.agents()
+                    .find_by_id(agent_id)
+                    .await
+                    .map(|a| format_agent_type(&a.agent_type))
+                    .unwrap_or_else(|_| agent_id_str.to_string())
+            } else {
+                agent_id_str.to_string()
+            };
+
+            let ws_name = if let Ok(ws_uuid) = ws_id_str.parse::<uuid::Uuid>() {
+                let workspace_id = galoy_agents_core::primitives::WorkspaceId::from(ws_uuid);
+                app.workspaces()
+                    .find_by_id(workspace_id)
+                    .await
+                    .map(|ws| ws.name.clone())
+                    .unwrap_or_else(|_| ws_id_str.to_string())
+            } else {
+                ws_id_str.to_string()
+            };
+
+            return AuditSubjectView {
+                label: agent_label,
+                owner: Some(ws_name),
+            };
+        }
     } else if let Some(user_id_str) = subject.strip_prefix("user::") {
         if let Ok(user_id) = user_id_str.parse::<uuid::Uuid>() {
             let user_id = galoy_agents_core::primitives::UserId::from(user_id);
@@ -359,6 +389,12 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
     AuditSubjectView {
         label: subject.to_string(),
         owner: None,
+    }
+}
+
+fn format_agent_type(agent_type: &galoy_agents_core::primitives::AgentType) -> String {
+    match agent_type {
+        galoy_agents_core::primitives::AgentType::WorkspaceLead => "Workspace Lead".to_string(),
     }
 }
 
