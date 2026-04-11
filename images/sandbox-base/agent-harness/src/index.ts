@@ -137,6 +137,34 @@ function writeMcpSettings(
   writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
 }
 
+// ── CLI settings ────────────────────────────────────────────────────
+
+/**
+ * Write CLI-level settings to .claude/settings.json.
+ * Extends the Bash tool timeout so long builds (nix flake check) don't get killed.
+ */
+function writeCliSettings(): void {
+  const settingsDir = join(CWD, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const settingsPath = join(settingsDir, "settings.json");
+
+  let existing: Record<string, unknown> = {};
+  try {
+    if (existsSync(settingsPath)) {
+      existing = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    }
+  } catch {
+    /* start fresh */
+  }
+
+  const env = (existing.env ?? {}) as Record<string, string>;
+  env.BASH_DEFAULT_TIMEOUT_MS = "600000"; // 10 min default per command
+  env.BASH_MAX_TIMEOUT_MS = "1800000"; // 30 min max per command
+  existing.env = env;
+
+  writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+}
+
 // ── SA token MCP config ──────────────────────────────────────────────
 
 /**
@@ -683,6 +711,14 @@ async function handleRequest(
         },
         async (span: Span) => {
           busy = true;
+          // Send SSE comment keepalives every 15s to prevent idle-stream
+          // closure by network intermediaries (Istio/Envoy, cloud LBs).
+          // SSE comments (lines starting with ':') are ignored by parsers.
+          const heartbeatInterval = setInterval(() => {
+            if (!res.writableEnded) {
+              res.write(`: heartbeat\n\n`);
+            }
+          }, 15_000);
           try {
             await handleMessage(input, (event) => sendSSE(res, event));
             span.setStatus({ code: SpanStatusCode.OK });
@@ -693,6 +729,7 @@ async function handleRequest(
             });
             throw err;
           } finally {
+            clearInterval(heartbeatInterval);
             busy = false;
             span.end();
           }
@@ -716,6 +753,9 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 // Initialize OpenTelemetry before starting the server
 initTracing();
+
+// Write CLI settings (extended Bash timeout for long builds)
+writeCliSettings();
 
 // Fetch and inject workspace secrets before starting
 (async () => {
