@@ -11,7 +11,9 @@ use super::AgentMessageEvent;
 
 const HARNESS_PORT: u16 = 3000;
 /// Maximum time a single agentic run can take (many tool calls).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// Set to 30 minutes — with SSE keepalive heartbeats preventing idle-stream
+/// closure, this acts as a safety-net upper bound.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// HTTP client for the agent harness running inside sandbox pods.
 ///
