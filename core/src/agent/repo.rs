@@ -21,5 +21,4 @@ impl AgentRepo {
     pub fn new(pool: &PgPool) -> Self {
         Self { pool: pool.clone() }
     }
-
 }
