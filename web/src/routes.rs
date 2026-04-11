@@ -1192,7 +1192,11 @@ async fn api_agent_message(
 
 /// Internal endpoint: returns secret values for an agent's workspace.
 /// Secured via SA token auth (AuthContext::Agent) — same pattern as MCP gateway.
-#[instrument(name = "api.agent.secrets", skip_all)]
+#[instrument(
+    name = "api.agent.secrets",
+    skip_all,
+    fields(github_token_provisioned, secret_count)
+)]
 async fn api_agent_secrets(
     Extension(auth): Extension<AuthContext>,
     State(state): State<AppState>,
@@ -1235,20 +1239,29 @@ async fn api_agent_secrets(
         .collect();
 
     // Auto-provision a GitHub token if the GitHub App is configured.
-    if let Some(github_app) = state.app.github_app() {
+    let github_token_provisioned = if let Some(github_app) = state.app.github_app() {
         match github_app.generate_token().await {
             Ok(token) => {
+                tracing::info!("GitHub App token generated successfully");
                 body.push(serde_json::json!({
                     "name": "github-token",
                     "secret_type": "file",
                     "value": token.token,
                 }));
+                true
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to generate GitHub App token — skipping");
+                false
             }
         }
-    }
+    } else {
+        tracing::info!("GitHub App not configured — skipping token provisioning");
+        false
+    };
+
+    tracing::Span::current().record("github_token_provisioned", github_token_provisioned);
+    tracing::Span::current().record("secret_count", body.len());
 
     Json(body).into_response()
 }

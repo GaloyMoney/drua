@@ -28,8 +28,15 @@ impl GitHubAppTokenProvider {
     /// Create a new provider by reading the PEM private key from disk.
     /// Returns an error only if the key file cannot be read or parsed.
     pub fn new(config: &GitHubAppConfig) -> Result<Self, GitHubAppError> {
+        tracing::info!(
+            private_key_path = %config.private_key_path,
+            client_id = %config.client_id,
+            installation_id = %config.installation_id,
+            "Initializing GitHub App token provider"
+        );
         let pem_bytes =
             std::fs::read(&config.private_key_path).map_err(GitHubAppError::PrivateKeyRead)?;
+        tracing::info!(pem_bytes_len = pem_bytes.len(), "Read PEM private key");
         let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(&pem_bytes)?;
         Ok(Self {
             client_id: config.client_id.clone(),
@@ -94,14 +101,19 @@ impl GitHubAppTokenProvider {
             .send()
             .await?;
 
+        let resp_status = resp.status().as_u16();
         if !resp.status().is_success() {
-            let status = resp.status().as_u16();
             let message = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(GitHubAppError::ApiError { status, message });
+            tracing::warn!(status = resp_status, %message, "GitHub API token exchange failed");
+            return Err(GitHubAppError::ApiError {
+                status: resp_status,
+                message,
+            });
         }
+        tracing::info!(status = resp_status, "GitHub API token exchange succeeded");
 
         let json: serde_json::Value = resp.json().await?;
         let token = json["token"].as_str().unwrap_or_default().to_string();

@@ -70,14 +70,11 @@ galoyAgents:
     #   categoryDescription: "AI-powered localization engine management and translation"
   ## GitHub App configuration for token auto-provisioning.
   ## When enabled, sandbox agents receive a `github-token` file secret.
+  ## The PEM private key is read from the main galoy-agents secret (key: github-app-private-key).
   githubApp:
     enabled: false
     clientId: ""
     installationId: ""
-    ## Name of a pre-existing K8s Secret containing the PEM private key.
-    ## The key file is mounted read-only into the server pod.
-    privateKeySecret: ""
-    privateKeySecretKey: "private-key.pem"
   secrets:
     create: true
     pgCon: ""

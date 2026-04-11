@@ -188,8 +188,8 @@ spec:
       {{- if .Values.galoyAgents.githubApp.enabled }}
       - name: github-app-key
         secret:
-          secretName: {{ .Values.galoyAgents.githubApp.privateKeySecret }}
+          secretName: {{ template "galoyAgents.fullname" . }}
           items:
-            - key: {{ .Values.galoyAgents.githubApp.privateKeySecretKey }}
-              path: {{ .Values.galoyAgents.githubApp.privateKeySecretKey }}
+            - key: "github-app-private-key"
+              path: "private-key.pem"
       {{- end }}

@@ -79,21 +79,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-auth-header"   = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "lingo-auth-header"    = var.lingo_api_key
     "anthropic-api-key"    = var.anthropic_api_key
-  }
-
-  depends_on = [kubernetes_namespace.galoy_agents]
-}
-
-resource "kubernetes_secret" "github_app" {
-  count = var.github_app_private_key != "" ? 1 : 0
-
-  metadata {
-    name      = "github-app-private-key"
-    namespace = local.namespace
-  }
-
-  data = {
-    "private-key.pem" = var.github_app_private_key
+    "github-app-private-key" = var.github_app_private_key
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
@@ -216,7 +202,6 @@ resource "helm_release" "galoy_agents" {
 
   depends_on = [
     kubernetes_secret.galoy_agents,
-    kubernetes_secret.github_app,
     kubernetes_namespace.sandbox,
     google_container_node_pool.gvisor,
     kubectl_manifest.sandbox_controller,
