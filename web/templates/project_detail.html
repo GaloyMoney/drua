@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }} — Project — Galoy Agents{% endblock %}
+
+{% block nav_workspaces %}class="active"{% endblock %}
+
+{% block content %}
+<h2>Edit Project</h2>
+
+<form method="post" action="/workspaces/{{ project.workspace_id }}/projects/{{ project.id }}">
+  <label>
+    Name
+    <input type="text" name="name" required value="{{ project.name }}">
+  </label>
+  <label>
+    Description
+    <textarea name="description" rows="3">{{ project.description }}</textarea>
+  </label>
+  <label>
+    Status
+    <select name="status">
+      <option value="active" {% if project.status == "active" %}selected{% endif %}>Active</option>
+      <option value="completed" {% if project.status == "completed" %}selected{% endif %}>Completed</option>
+    </select>
+  </label>
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Save Changes</button>
+    <a href="/workspaces/{{ project.workspace_id }}" role="button" class="outline">Back to Workspace</a>
+  </div>
+</form>
+
+<hr>
+
+<h3>Agents in Project</h3>
+<div id="project-agents-list"
+     hx-get="/workspaces/{{ project.workspace_id }}/projects/{{ project.id }}/agents"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  <p aria-busy="true">Loading agents...</p>
+</div>
+
+<hr>
+<h3>Assign Agent</h3>
+{% if unassigned_agents.is_empty() %}
+<p><small>No unassigned agents available in this workspace.</small></p>
+{% else %}
+<form hx-post="/workspaces/{{ project.workspace_id }}/projects/{{ project.id }}/assign"
+      hx-target="#project-agents-list"
+      hx-swap="innerHTML">
+  <div style="display: flex; gap: 0.5rem; align-items: end;">
+    <label style="flex: 1;">
+      Agent
+      <select name="agent_id" required>
+        {% for a in unassigned_agents %}
+        <option value="{{ a.id }}">{{ a.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" style="width: auto;">Assign</button>
+  </div>
+</form>
+{% endif %}
+
+<hr>
+<details>
+  <summary>Danger Zone</summary>
+  <p>Archiving a project will unassign all its agents.</p>
+  <button
+    hx-post="/workspaces/{{ project.workspace_id }}/projects/{{ project.id }}/archive"
+    hx-confirm="Archive this project? All agents will be unassigned."
+    class="secondary outline"
+    style="color: var(--pico-color-red-500, #c62828);"
+  >
+    Archive Project
+  </button>
+</details>
+
+<footer>
+  <small>Created: {{ project.created_at }} | ID: <code>{{ project.id }}</code></small>
+</footer>
+{% endblock %}

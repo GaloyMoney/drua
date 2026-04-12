@@ -108,6 +108,9 @@ pub enum AgentEvent {
     SandboxProvisioned {},
     SandboxReady {},
     SandboxLost {},
+    ProjectChanged {
+        project_id: Option<ProjectId>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +132,8 @@ pub struct Agent {
     pub sandbox_config: SandboxConfig,
     pub chat_config: ChatConfig,
     pub sandbox_state: SandboxState,
+    #[builder(default)]
+    pub project_id: Option<ProjectId>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -209,6 +214,19 @@ impl Agent {
         self.events.push(AgentEvent::SandboxLost {});
         Idempotent::Executed(())
     }
+
+    pub(super) fn change_project(&mut self, project_id: Option<ProjectId>) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentEvent::ProjectChanged { project_id: pid }
+                if *pid == project_id,
+            resets_on: AgentEvent::ProjectChanged { .. }
+        );
+
+        self.project_id = project_id;
+        self.events.push(AgentEvent::ProjectChanged { project_id });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Agent {
@@ -254,6 +272,9 @@ impl TryFromEvents<AgentEvent> for Agent {
                 }
                 AgentEvent::SandboxLost {} => {
                     builder = builder.sandbox_state(SandboxState::None);
+                }
+                AgentEvent::ProjectChanged { project_id } => {
+                    builder = builder.project_id(*project_id);
                 }
             }
         }
@@ -304,7 +325,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
-    use crate::primitives::{AgentId, AgentType, WorkspaceId};
+    use crate::primitives::{AgentId, AgentType, ProjectId, WorkspaceId};
 
     use super::{Agent, ChatConfig, NewAgent, SandboxConfig, SandboxState};
 
@@ -352,6 +373,23 @@ mod tests {
 
         // Idempotent: same config again should be a no-op
         assert!(!agent.update_chat_config(new_config).did_execute());
+    }
+
+    #[test]
+    fn agent_change_project() {
+        let mut agent = new_agent();
+        assert_eq!(agent.project_id, None);
+
+        let pid = ProjectId::new();
+        assert!(agent.change_project(Some(pid)).did_execute());
+        assert_eq!(agent.project_id, Some(pid));
+
+        // Idempotent: same project again
+        assert!(!agent.change_project(Some(pid)).did_execute());
+
+        // Unassign
+        assert!(agent.change_project(None).did_execute());
+        assert_eq!(agent.project_id, None);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use galoy_agents_core as domain;
 use domain::auth::AuthContext;
 use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{AgentId, McpCredsId, UserId, WorkspaceSecretId};
+use domain::primitives::{AgentId, McpCredsId, ProjectId, UserId, WorkspaceSecretId};
 
 use crate::templates::*;
 use crate::AppState;
@@ -62,6 +62,32 @@ pub fn router() -> Router<AppState> {
         .route(
             "/workspaces/{id}/secrets/{secret_id}/delete",
             post(workspace_secret_delete),
+        )
+        .route("/workspaces/{id}/projects/list", get(project_list))
+        .route("/workspaces/{id}/projects", post(project_create))
+        .route(
+            "/workspaces/{ws_id}/projects/{project_id}",
+            get(project_detail),
+        )
+        .route(
+            "/workspaces/{ws_id}/projects/{project_id}",
+            post(project_update),
+        )
+        .route(
+            "/workspaces/{ws_id}/projects/{project_id}/archive",
+            post(project_archive),
+        )
+        .route(
+            "/workspaces/{ws_id}/projects/{project_id}/agents",
+            get(project_agents_list),
+        )
+        .route(
+            "/workspaces/{ws_id}/projects/{project_id}/assign",
+            post(project_assign_agent),
+        )
+        .route(
+            "/workspaces/{ws_id}/projects/{project_id}/unassign/{agent_id}",
+            post(project_unassign_agent),
         )
         .route("/agents/{id}/config", get(agent_config_panel))
         .route("/agents/{id}/config", post(agent_config_update))
@@ -1036,6 +1062,383 @@ async fn workspace_secret_delete(
         .into_response(),
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+fn project_to_view(p: &domain::project::Project, agent_count: usize) -> ProjectView {
+    ProjectView {
+        id: p.id.to_string(),
+        workspace_id: p.workspace_id.to_string(),
+        name: p.name.clone(),
+        description: p.description.clone().unwrap_or_default(),
+        status: p.status.to_string(),
+        agent_count,
+        created_at: p.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+#[instrument(name = "web.project_list", skip_all)]
+async fn project_list(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let projects = match state.app.projects().list_for_workspace(workspace_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list projects");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let views: Vec<ProjectView> = projects
+        .iter()
+        .map(|p| {
+            let count = agents.iter().filter(|a| a.project_id == Some(p.id)).count();
+            project_to_view(p, count)
+        })
+        .collect();
+
+    ProjectListTemplate { projects: views }.into_response()
+}
+
+#[derive(Deserialize)]
+struct ProjectForm {
+    name: String,
+    description: Option<String>,
+    status: Option<String>,
+}
+
+#[instrument(name = "web.project_create", skip_all)]
+async fn project_create(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<ProjectForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let description = form.description.filter(|d| !d.is_empty());
+    if let Err(e) = state
+        .app
+        .projects()
+        .create(workspace_id, &form.name, description)
+        .await
+    {
+        tracing::error!(error = %e, "Failed to create project");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return updated project list
+    return_project_list(&state, workspace_id).await
+}
+
+#[instrument(name = "web.project_detail", skip_all)]
+async fn project_detail(
+    State(state): State<AppState>,
+    session: Session,
+    Path((ws_id, project_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(ws_id);
+    let project_id = ProjectId::from(project_id);
+
+    let project = match state.app.projects().find_by_id(project_id).await {
+        Ok(p) => p,
+        Err(_) => return Redirect::to(&format!("/workspaces/{ws_id}")).into_response(),
+    };
+
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let agent_count = agents
+        .iter()
+        .filter(|a| a.project_id == Some(project_id))
+        .count();
+
+    let unassigned: Vec<ProjectAgentView> = agents
+        .iter()
+        .filter(|a| a.project_id.is_none())
+        .map(|a| ProjectAgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+            agent_type: format_agent_type(&a.agent_type),
+        })
+        .collect();
+
+    ProjectDetailTemplate {
+        project: project_to_view(&project, agent_count),
+        unassigned_agents: unassigned,
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.project_update", skip_all)]
+async fn project_update(
+    State(state): State<AppState>,
+    session: Session,
+    Path((ws_id, project_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Form(form): Form<ProjectForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let project_id = ProjectId::from(project_id);
+    let description = form.description.filter(|d| !d.is_empty());
+
+    if let Err(e) = state
+        .app
+        .projects()
+        .update(project_id, &form.name, description)
+        .await
+    {
+        tracing::error!(error = %e, "Failed to update project");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // If status changed
+    if let Some(status_str) = &form.status {
+        if let Ok(status) = status_str.parse::<domain::primitives::ProjectStatus>() {
+            if let Err(e) = state.app.projects().change_status(project_id, status).await {
+                tracing::error!(error = %e, "Failed to change project status");
+            }
+        }
+    }
+
+    Redirect::to(&format!("/workspaces/{ws_id}")).into_response()
+}
+
+#[instrument(name = "web.project_archive", skip_all)]
+async fn project_archive(
+    State(state): State<AppState>,
+    session: Session,
+    Path((ws_id, project_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(ws_id);
+    let project_id = ProjectId::from(project_id);
+
+    // Unassign all agents from this project
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    for agent in agents.iter().filter(|a| a.project_id == Some(project_id)) {
+        if let Err(e) = state.app.agents().change_project(agent.id, None).await {
+            tracing::warn!(agent_id = %agent.id, error = %e, "Failed to unassign agent from project");
+        }
+    }
+
+    if let Err(e) = state.app.projects().archive(project_id).await {
+        tracing::error!(error = %e, "Failed to archive project");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    if headers.contains_key("hx-request") {
+        return return_project_list(&state, workspace_id).await;
+    }
+    Redirect::to(&format!("/workspaces/{ws_id}")).into_response()
+}
+
+#[instrument(name = "web.project_agents_list", skip_all)]
+async fn project_agents_list(
+    State(state): State<AppState>,
+    session: Session,
+    Path((ws_id, project_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(ws_id);
+    let project_id = ProjectId::from(project_id);
+
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let assigned: Vec<ProjectAgentView> = agents
+        .iter()
+        .filter(|a| a.project_id == Some(project_id))
+        .map(|a| ProjectAgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+            agent_type: format_agent_type(&a.agent_type),
+        })
+        .collect();
+
+    ProjectAgentsListTemplate {
+        agents: assigned,
+        workspace_id: ws_id.to_string(),
+        project_id: project_id.to_string(),
+    }
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct AssignAgentForm {
+    agent_id: uuid::Uuid,
+}
+
+#[instrument(name = "web.project_assign_agent", skip_all)]
+async fn project_assign_agent(
+    State(state): State<AppState>,
+    session: Session,
+    Path((ws_id, project_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Form(form): Form<AssignAgentForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(ws_id);
+    let project_id = ProjectId::from(project_id);
+    let agent_id = AgentId::from(form.agent_id);
+
+    if let Err(e) = state
+        .app
+        .agents()
+        .change_project(agent_id, Some(project_id))
+        .await
+    {
+        tracing::error!(error = %e, "Failed to assign agent to project");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return updated agents list
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let assigned: Vec<ProjectAgentView> = agents
+        .iter()
+        .filter(|a| a.project_id == Some(project_id))
+        .map(|a| ProjectAgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+            agent_type: format_agent_type(&a.agent_type),
+        })
+        .collect();
+
+    ProjectAgentsListTemplate {
+        agents: assigned,
+        workspace_id: ws_id.to_string(),
+        project_id: project_id.to_string(),
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.project_unassign_agent", skip_all)]
+async fn project_unassign_agent(
+    State(state): State<AppState>,
+    session: Session,
+    Path((ws_id, project_id, agent_id)): Path<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(ws_id);
+    let project_id = ProjectId::from(project_id);
+    let agent_id = AgentId::from(agent_id);
+
+    if let Err(e) = state.app.agents().change_project(agent_id, None).await {
+        tracing::error!(error = %e, "Failed to unassign agent from project");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return updated agents list
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let assigned: Vec<ProjectAgentView> = agents
+        .iter()
+        .filter(|a| a.project_id == Some(project_id))
+        .map(|a| ProjectAgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+            agent_type: format_agent_type(&a.agent_type),
+        })
+        .collect();
+
+    ProjectAgentsListTemplate {
+        agents: assigned,
+        workspace_id: ws_id.to_string(),
+        project_id: project_id.to_string(),
+    }
+    .into_response()
+}
+
+async fn return_project_list(
+    state: &AppState,
+    workspace_id: domain::primitives::WorkspaceId,
+) -> Response {
+    let projects = state
+        .app
+        .projects()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let views: Vec<ProjectView> = projects
+        .iter()
+        .map(|p| {
+            let count = agents.iter().filter(|a| a.project_id == Some(p.id)).count();
+            project_to_view(p, count)
+        })
+        .collect();
+
+    ProjectListTemplate { projects: views }.into_response()
 }
 
 // ---------------------------------------------------------------------------

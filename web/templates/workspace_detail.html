@@ -25,6 +25,36 @@
 
 <hr>
 
+<h3>Projects</h3>
+<p><small>Projects group related agents together within a workspace.</small></p>
+
+<div id="project-list"
+     hx-get="/workspaces/{{ workspace.id }}/projects/list"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  <p aria-busy="true">Loading projects...</p>
+</div>
+
+<details>
+  <summary>Create Project</summary>
+  <form hx-post="/workspaces/{{ workspace.id }}/projects"
+        hx-target="#project-list"
+        hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) this.reset()">
+    <label>
+      Name
+      <input type="text" name="name" required placeholder="e.g. backend-api">
+    </label>
+    <label>
+      Description
+      <textarea name="description" rows="2" placeholder="What is this project for?"></textarea>
+    </label>
+    <button type="submit">Create Project</button>
+  </form>
+</details>
+
+<hr>
+
 <h3>Secrets</h3>
 <p><small>Secrets are injected into the agent sandbox as environment variables or files. Values are never displayed after creation.</small></p>
 

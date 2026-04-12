@@ -1,0 +1,34 @@
+{% if agents.is_empty() %}
+<p><small>No agents assigned to this project yet.</small></p>
+{% else %}
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in agents %}
+      <tr>
+        <td><strong>{{ a.name }}</strong></td>
+        <td>{{ a.agent_type }}</td>
+        <td>
+          <button
+            hx-post="/workspaces/{{ workspace_id }}/projects/{{ project_id }}/unassign/{{ a.id }}"
+            hx-target="#project-agents-list"
+            hx-swap="innerHTML"
+            class="secondary outline"
+            style="padding: 0.25rem 0.5rem; margin: 0; font-size: 0.85em;"
+          >
+            Unassign
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</figure>
+{% endif %}

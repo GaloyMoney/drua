@@ -5,10 +5,42 @@ es_entity::entity_id! {
     ReportId,
     WorkspaceId,
     WorkspaceSecretId,
-    AgentId;
+    AgentId,
+    ProjectId;
 
     UserId => McpCredsOwnerId,
     AgentId => McpCredsOwnerId
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
+pub enum ProjectStatus {
+    Active,
+    Completed,
+    Archived,
+}
+
+impl std::fmt::Display for ProjectStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectStatus::Active => write!(f, "active"),
+            ProjectStatus::Completed => write!(f, "completed"),
+            ProjectStatus::Archived => write!(f, "archived"),
+        }
+    }
+}
+
+impl std::str::FromStr for ProjectStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(ProjectStatus::Active),
+            "completed" => Ok(ProjectStatus::Completed),
+            "archived" => Ok(ProjectStatus::Archived),
+            _ => Err(format!("unknown project status: {s}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]

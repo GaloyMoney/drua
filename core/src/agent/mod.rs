@@ -212,6 +212,20 @@ impl Agents {
         Ok(rx)
     }
 
+    /// Change the project assignment for an agent.
+    #[instrument(name = "domain.agent.change_project", skip(self))]
+    pub async fn change_project(
+        &self,
+        id: AgentId,
+        project_id: Option<crate::primitives::ProjectId>,
+    ) -> Result<Agent, AgentError> {
+        let mut agent = self.repo.find_by_id(id).await?;
+        if agent.change_project(project_id).did_execute() {
+            self.repo.update(&mut agent).await?;
+        }
+        Ok(agent)
+    }
+
     /// Soft-delete an agent and destroy its sandbox.
     #[instrument(name = "domain.agent.delete_in_op", skip(self, op))]
     pub async fn delete_in_op(

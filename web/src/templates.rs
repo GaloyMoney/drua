@@ -181,6 +181,45 @@ pub struct WorkspaceDetailTemplate {
     pub agent_id: String,
 }
 
+// ── Projects ────────────────────────────────────────────────────��────
+
+pub struct ProjectView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub agent_count: usize,
+    pub created_at: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "project_list.html")]
+pub struct ProjectListTemplate {
+    pub projects: Vec<ProjectView>,
+}
+
+pub struct ProjectAgentView {
+    pub id: String,
+    pub name: String,
+    pub agent_type: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "project_detail.html")]
+pub struct ProjectDetailTemplate {
+    pub project: ProjectView,
+    pub unassigned_agents: Vec<ProjectAgentView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "project_agents_list.html")]
+pub struct ProjectAgentsListTemplate {
+    pub agents: Vec<ProjectAgentView>,
+    pub workspace_id: String,
+    pub project_id: String,
+}
+
 // ── Workspace Secrets ────────────────────────────────────────────────
 
 pub struct WorkspaceSecretView {

@@ -1,0 +1,48 @@
+{% if projects.is_empty() %}
+<p>No projects yet. Create one to organize your agents.</p>
+{% else %}
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Status</th>
+        <th>Agents</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr>
+        <td><strong>{{ p.name }}</strong></td>
+        <td>{{ p.description }}</td>
+        <td>
+          {% if p.status == "active" %}
+          <span class="badge-active">Active</span>
+          {% elif p.status == "completed" %}
+          <span style="color: var(--pico-muted-color);">Completed</span>
+          {% else %}
+          <span class="badge-revoked">Archived</span>
+          {% endif %}
+        </td>
+        <td>{{ p.agent_count }}</td>
+        <td style="display: flex; gap: 0.5rem;">
+          <a href="/workspaces/{{ p.workspace_id }}/projects/{{ p.id }}">Edit</a>
+          <button
+            hx-post="/workspaces/{{ p.workspace_id }}/projects/{{ p.id }}/archive"
+            hx-confirm="Archive this project? Agents will be unassigned."
+            hx-target="#project-list"
+            hx-swap="innerHTML"
+            class="secondary outline"
+            style="padding: 0.25rem 0.5rem; margin: 0; font-size: 0.85em;"
+          >
+            Archive
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</figure>
+{% endif %}

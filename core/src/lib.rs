@@ -7,6 +7,7 @@ pub mod encryption;
 pub mod github_app;
 pub mod mcp_creds;
 pub mod primitives;
+pub mod project;
 pub mod report;
 pub mod toolset;
 pub mod user;
@@ -22,6 +23,7 @@ use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
+use project::Projects;
 use report::Reports;
 use toolset::{AdminToolSet, ToolSets, ToolSetsError};
 use user::Users;
@@ -37,6 +39,7 @@ pub struct App {
     code_assistant: Option<Arc<CodeAssistant>>,
     reports: Option<Arc<Reports>>,
     toolsets: Arc<ToolSets>,
+    projects: Projects,
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
     github_app: Option<GitHubAppTokenProvider>,
@@ -89,6 +92,7 @@ impl App {
         let toolsets = Arc::new(toolsets);
         let mcp_creds = McpCredentials::new(pool);
         let agents = Arc::new(Agents::init(pool, config.agents, Arc::clone(&toolsets)).await?);
+        let projects = Projects::new(pool);
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
         // Register admin toolset after agents/workspaces to break circular dep
@@ -125,6 +129,7 @@ impl App {
             code_assistant,
             reports,
             toolsets,
+            projects,
             workspaces,
             workspace_secrets,
             github_app,
@@ -157,6 +162,10 @@ impl App {
 
     pub fn toolsets(&self) -> &ToolSets {
         &self.toolsets
+    }
+
+    pub fn projects(&self) -> &Projects {
+        &self.projects
     }
 
     pub fn workspaces(&self) -> &Workspaces {
