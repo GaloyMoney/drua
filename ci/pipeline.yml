@@ -9,6 +9,7 @@ groups:
   - check-code
   - test-bats
   - test-harness
+  - test-sandbox-light
   - build-edge-image
   - build-sandbox-base-image
   - deploy-to-prod
@@ -328,6 +329,32 @@ jobs:
             cachix watch-exec $CACHIX_CACHE_NAME -- \
               nix run .#harness-bats
 
+- name: test-sandbox-light
+  serial: true
+  plan:
+  - get: repo-sandbox-light
+    trigger: true
+  - task: sandbox-light-integration-test
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo-sandbox-light
+        path: repo
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run .#sandbox-light-bats
+
 - name: build-sandbox-base-image
   serial: true
   plan:
@@ -408,6 +435,18 @@ resources:
     - images/sandbox-base/
     - bats/harness.bats
     - bats/harness-helpers.bash
+    - flake.nix
+
+- name: repo-sandbox-light
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+    paths:
+    - images/sandbox-light/
+    - bats/sandbox-light.bats
+    - bats/sandbox-light-helpers.bash
     - flake.nix
 
 - name: repo-labels

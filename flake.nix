@@ -223,6 +223,30 @@
           in "${wrapped}/bin/run-harness-bats";
         };
 
+        apps.sandbox-light-bats = {
+          type = "app";
+          program = let
+            sandboxToolServerWrapper = pkgs.writeShellScriptBin "sandbox-tool-server" ''
+              exec ${self.packages.${system}.sandbox-tool-server}/bin/sandbox-tool-server "$@"
+            '';
+            wrapped = pkgs.writeShellScriptBin "run-sandbox-light-bats" ''
+              set -euo pipefail
+              export TERM="''${TERM:-dumb}"
+              export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerWrapper}/bin/sandbox-tool-server"
+              export PATH="${pkgs.lib.makeBinPath [
+                pkgs.bats
+                pkgs.jq
+                pkgs.curl
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+              ]}:$PATH"
+
+              exec bats bats/sandbox-light.bats
+            '';
+          in "${wrapped}/bin/run-sandbox-light-bats";
+        };
+
         apps.prep-code-assistant = {
           type = "app";
           program = let
