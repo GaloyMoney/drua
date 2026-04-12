@@ -32,9 +32,8 @@ async fn health() -> &'static str {
 
 async fn execute(Json(req): Json<ExecuteRequest>) -> Json<ExecuteResponse> {
     let result = match req.tool.as_str() {
-        "Bash" => execute_bash(&req.input).await,
-        "Read" => execute_read(&req.input).await,
-        "Write" => execute_write(&req.input).await,
+        "bash" => execute_bash(&req.input).await,
+        "str_replace_based_edit_tool" => execute_text_editor(&req.input).await,
         other => Err(format!("Unknown tool: {other}")),
     };
 
@@ -51,26 +50,34 @@ async fn execute(Json(req): Json<ExecuteRequest>) -> Json<ExecuteResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool implementations
+// Bash tool (Anthropic bash_20250124)
+//
+// Input: { command: string, restart?: bool }
 // ---------------------------------------------------------------------------
 
+const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
 async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
+    // Handle restart: reset is a no-op for a stateless server
+    if input
+        .get("restart")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok("Bash session restarted.".to_string());
+    }
+
     let command = input
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'command' field")?;
 
-    let timeout_ms = input
-        .get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(120_000);
-
     let output = tokio::time::timeout(
-        Duration::from_millis(timeout_ms),
+        Duration::from_millis(DEFAULT_TIMEOUT_MS),
         Command::new("/bin/bash").arg("-c").arg(command).output(),
     )
     .await
-    .map_err(|_| format!("Command timed out after {timeout_ms}ms"))?
+    .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
     .map_err(|e| format!("Failed to execute command: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -88,55 +95,197 @@ async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-async fn execute_read(input: &serde_json::Value) -> Result<String, String> {
-    let file_path = input
-        .get("file_path")
+// ---------------------------------------------------------------------------
+// Text editor tool (Anthropic text_editor_20250728)
+//
+// Commands: view, create, str_replace, insert
+// ---------------------------------------------------------------------------
+
+async fn execute_text_editor(input: &serde_json::Value) -> Result<String, String> {
+    let command = input
+        .get("command")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'file_path' field")?;
+        .ok_or("Missing 'command' field")?;
 
-    let content = tokio::fs::read_to_string(file_path)
-        .await
-        .map_err(|e| format!("Failed to read '{file_path}': {e}"))?;
-
-    let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let start = offset.min(lines.len());
-    let end = (offset + limit).min(lines.len());
-
-    let numbered: Vec<String> = lines[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, line)| format!("{:>6}\t{line}", start + i + 1))
-        .collect();
-
-    Ok(numbered.join("\n"))
+    match command {
+        "view" => editor_view(input).await,
+        "create" => editor_create(input).await,
+        "str_replace" => editor_str_replace(input).await,
+        "insert" => editor_insert(input).await,
+        other => Err(format!("Unknown text editor command: {other}")),
+    }
 }
 
-async fn execute_write(input: &serde_json::Value) -> Result<String, String> {
-    let file_path = input
-        .get("file_path")
+/// View a file (with optional line range) or list a directory.
+async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
+    let path = input
+        .get("path")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'file_path' field")?;
-    let content = input
-        .get("content")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'content' field")?;
+        .ok_or("Missing 'path' field")?;
 
-    if let Some(parent) = std::path::Path::new(file_path).parent() {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
+
+    if meta.is_dir() {
+        // List directory contents
+        let mut entries = Vec::new();
+        let mut dir = tokio::fs::read_dir(path)
+            .await
+            .map_err(|e| format!("Error reading directory: {e}"))?;
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| format!("Error reading entry: {e}"))?
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ft = entry.file_type().await.ok();
+            let suffix = if ft.as_ref().is_some_and(|t| t.is_dir()) {
+                "/"
+            } else {
+                ""
+            };
+            entries.push(format!("{name}{suffix}"));
+        }
+        entries.sort();
+        Ok(entries.join("\n"))
+    } else {
+        // Read file contents
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| format!("Error: {e}"))?;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let (start, end) = if let Some(range) = input.get("view_range").and_then(|v| v.as_array()) {
+            let s = range.first().and_then(|v| v.as_i64()).unwrap_or(1).max(1) as usize;
+            let e = range.get(1).and_then(|v| v.as_i64()).unwrap_or(-1);
+            let end = if e == -1 {
+                lines.len()
+            } else {
+                (e as usize).min(lines.len())
+            };
+            (s, end)
+        } else {
+            (1, lines.len())
+        };
+
+        let numbered: Vec<String> = lines[start.saturating_sub(1)..end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{}: {line}", start + i))
+            .collect();
+
+        Ok(numbered.join("\n"))
+    }
+}
+
+/// Create a new file with the given content.
+async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'path' field")?;
+    let file_text = input
+        .get("file_text")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'file_text' field")?;
+
+    if let Some(parent) = std::path::Path::new(path).parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("Failed to create directories: {e}"))?;
+            .map_err(|e| format!("Error creating directories: {e}"))?;
     }
 
-    tokio::fs::write(file_path, content)
+    tokio::fs::write(path, file_text)
         .await
-        .map_err(|e| format!("Failed to write '{file_path}': {e}"))?;
+        .map_err(|e| format!("Error: {e}"))?;
+
+    Ok(format!("File created successfully at: {path}"))
+}
+
+/// Replace exactly one occurrence of `old_str` with `new_str` in a file.
+async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String> {
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'path' field")?;
+    let old_str = input
+        .get("old_str")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'old_str' field")?;
+    let new_str = input
+        .get("new_str")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'new_str' field")?;
+
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
+
+    let count = content.matches(old_str).count();
+    match count {
+        0 => Err(
+            "Error: No match found for replacement. Please check your text and try again."
+                .to_string(),
+        ),
+        1 => {
+            let new_content = content.replacen(old_str, new_str, 1);
+            tokio::fs::write(path, &new_content)
+                .await
+                .map_err(|e| format!("Error: {e}"))?;
+            Ok("Successfully replaced text at exactly one location.".to_string())
+        }
+        n => Err(format!(
+            "Error: Found {n} matches for replacement text. \
+             Please provide more context to make a unique match."
+        )),
+    }
+}
+
+/// Insert text after a given line number (0 = beginning of file).
+async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'path' field")?;
+    let insert_line = input
+        .get("insert_line")
+        .and_then(|v| v.as_u64())
+        .ok_or("Missing 'insert_line' field")? as usize;
+    let insert_text = input
+        .get("new_str")
+        .or_else(|| input.get("insert_text"))
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'new_str' field")?;
+
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
+
+    let mut lines: Vec<&str> = content.lines().collect();
+    let insert_at = insert_line.min(lines.len());
+
+    // Split the insert text into lines and insert them
+    let new_lines: Vec<&str> = insert_text.lines().collect();
+    for (i, line) in new_lines.iter().enumerate() {
+        lines.insert(insert_at + i, line);
+    }
+
+    let new_content = lines.join("\n");
+    // Preserve trailing newline if original had one
+    let new_content = if content.ends_with('\n') {
+        format!("{new_content}\n")
+    } else {
+        new_content
+    };
+
+    tokio::fs::write(path, &new_content)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
 
     Ok(format!(
-        "Successfully wrote {} bytes to {file_path}",
-        content.len()
+        "Successfully inserted {} lines after line {insert_line}.",
+        new_lines.len()
     ))
 }
 
@@ -164,4 +313,273 @@ async fn main() {
         .await
         .expect("failed to bind");
     axum::serve(listener, app).await.expect("server error");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bash_executes_echo() {
+        let input = serde_json::json!({"command": "echo hello"});
+        let result = execute_bash(&input).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn bash_returns_error_on_nonzero_exit() {
+        let input = serde_json::json!({"command": "exit 42"});
+        let result = execute_bash(&input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Exit code 42"));
+    }
+
+    #[tokio::test]
+    async fn bash_restart_returns_ok() {
+        let input = serde_json::json!({"restart": true});
+        let result = execute_bash(&input).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("restarted"));
+    }
+
+    #[tokio::test]
+    async fn bash_missing_command_returns_error() {
+        let input = serde_json::json!({});
+        let result = execute_bash(&input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("command"));
+    }
+
+    #[tokio::test]
+    async fn editor_create_and_view() {
+        let dir = std::env::temp_dir().join("sandbox-test-create-view");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("test.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "line one\nline two\nline three"
+        });
+        let result = editor_create(&create_input).await;
+        assert!(result.is_ok(), "create failed: {:?}", result);
+
+        let view_input = serde_json::json!({
+            "command": "view",
+            "path": file.to_str().unwrap()
+        });
+        let result = editor_view(&view_input).await.unwrap();
+        assert!(result.contains("1: line one"));
+        assert!(result.contains("2: line two"));
+        assert!(result.contains("3: line three"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_view_with_range() {
+        let dir = std::env::temp_dir().join("sandbox-test-view-range");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("range.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "a\nb\nc\nd\ne"
+        });
+        editor_create(&create_input).await.unwrap();
+
+        let view_input = serde_json::json!({
+            "command": "view",
+            "path": file.to_str().unwrap(),
+            "view_range": [2, 4]
+        });
+        let result = editor_view(&view_input).await.unwrap();
+        assert!(result.contains("2: b"));
+        assert!(result.contains("3: c"));
+        assert!(result.contains("4: d"));
+        assert!(!result.contains("1: a"));
+        assert!(!result.contains("5: e"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_view_directory() {
+        let dir = std::env::temp_dir().join("sandbox-test-view-dir");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("file_a.txt"), "a").await.unwrap();
+        tokio::fs::write(dir.join("file_b.txt"), "b").await.unwrap();
+
+        let view_input = serde_json::json!({
+            "command": "view",
+            "path": dir.to_str().unwrap()
+        });
+        let result = editor_view(&view_input).await.unwrap();
+        assert!(result.contains("file_a.txt"));
+        assert!(result.contains("file_b.txt"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_str_replace_single_match() {
+        let dir = std::env::temp_dir().join("sandbox-test-replace");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("replace.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "hello world\ngoodbye world"
+        });
+        editor_create(&create_input).await.unwrap();
+
+        let replace_input = serde_json::json!({
+            "command": "str_replace",
+            "path": file.to_str().unwrap(),
+            "old_str": "hello world",
+            "new_str": "hello rust"
+        });
+        let result = editor_str_replace(&replace_input).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Successfully replaced"));
+
+        let content = tokio::fs::read_to_string(&file).await.unwrap();
+        assert!(content.contains("hello rust"));
+        assert!(content.contains("goodbye world"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_str_replace_no_match() {
+        let dir = std::env::temp_dir().join("sandbox-test-replace-no-match");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("no_match.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "hello world"
+        });
+        editor_create(&create_input).await.unwrap();
+
+        let replace_input = serde_json::json!({
+            "command": "str_replace",
+            "path": file.to_str().unwrap(),
+            "old_str": "nonexistent",
+            "new_str": "replacement"
+        });
+        let result = editor_str_replace(&replace_input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No match found"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_str_replace_multiple_matches() {
+        let dir = std::env::temp_dir().join("sandbox-test-replace-multi");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("multi.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "foo bar foo"
+        });
+        editor_create(&create_input).await.unwrap();
+
+        let replace_input = serde_json::json!({
+            "command": "str_replace",
+            "path": file.to_str().unwrap(),
+            "old_str": "foo",
+            "new_str": "baz"
+        });
+        let result = editor_str_replace(&replace_input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("2 matches"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_insert_at_beginning() {
+        let dir = std::env::temp_dir().join("sandbox-test-insert");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("insert.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "line one\nline two\n"
+        });
+        editor_create(&create_input).await.unwrap();
+
+        let insert_input = serde_json::json!({
+            "command": "insert",
+            "path": file.to_str().unwrap(),
+            "insert_line": 0,
+            "new_str": "header line"
+        });
+        let result = editor_insert(&insert_input).await;
+        assert!(result.is_ok(), "insert failed: {:?}", result);
+
+        let content = tokio::fs::read_to_string(&file).await.unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines[0], "header line");
+        assert_eq!(lines[1], "line one");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn editor_view_nonexistent_file_returns_error() {
+        let input = serde_json::json!({
+            "command": "view",
+            "path": "/nonexistent/path/file.txt"
+        });
+        let result = editor_view(&input).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn text_editor_dispatch_routes_commands() {
+        let dir = std::env::temp_dir().join("sandbox-test-dispatch");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("dispatch.txt");
+
+        // Test create via dispatch
+        let input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "dispatch test"
+        });
+        let result = execute_text_editor(&input).await;
+        assert!(result.is_ok());
+
+        // Test view via dispatch
+        let input = serde_json::json!({
+            "command": "view",
+            "path": file.to_str().unwrap()
+        });
+        let result = execute_text_editor(&input).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("dispatch test"));
+
+        // Test unknown command
+        let input = serde_json::json!({"command": "delete"});
+        let result = execute_text_editor(&input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 }
