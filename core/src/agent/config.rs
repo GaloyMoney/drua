@@ -31,4 +31,6 @@ pub struct PersistenceConfig {
 #[derive(Clone, Debug, Default)]
 pub struct LightRuntimeConfig {
     pub api_key: String,
+    pub openai_api_key: String,
+    pub openai_model: String,
 }

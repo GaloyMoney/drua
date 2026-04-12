@@ -28,6 +28,14 @@ struct Cli {
     /// Anthropic API key for the light agent runtime.
     #[arg(long, env = "ANTHROPIC_API_KEY", default_value = "")]
     anthropic_api_key: String,
+
+    /// OpenAI API key for the light agent runtime (takes priority over Anthropic).
+    #[arg(long, env = "OPENAI_API_KEY", default_value = "")]
+    openai_api_key: String,
+
+    /// OpenAI model to use (default: gpt-4.1).
+    #[arg(long, env = "OPENAI_MODEL", default_value = "")]
+    openai_model: String,
 }
 
 #[tokio::main]
@@ -56,6 +64,8 @@ async fn main() -> anyhow::Result<()> {
             github_client_secret: cli.github_client_secret,
             github_allowed_teams: allowed_teams,
             anthropic_api_key: cli.anthropic_api_key,
+            openai_api_key: cli.openai_api_key,
+            openai_model: cli.openai_model,
         },
     )?;
 
@@ -93,6 +103,8 @@ async fn main() -> anyhow::Result<()> {
             },
             light: galoy_agents_core::agent::config::LightRuntimeConfig {
                 api_key: config.anthropic_api_key.clone(),
+                openai_api_key: config.openai_api_key.clone(),
+                openai_model: config.openai_model.clone(),
             },
         },
         toolsets: config.toolsets.clone(),

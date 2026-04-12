@@ -22,6 +22,10 @@ pub struct Config {
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(skip)]
     pub anthropic_api_key: String,
+    #[serde(skip)]
+    pub openai_api_key: String,
+    #[serde(skip)]
+    pub openai_model: String,
 }
 
 /// GitHub App config from the YAML config file.
@@ -135,6 +139,8 @@ pub struct EnvSecrets {
     pub github_client_secret: String,
     pub github_allowed_teams: Vec<String>,
     pub anthropic_api_key: String,
+    pub openai_api_key: String,
+    pub openai_model: String,
 }
 
 impl Config {
@@ -153,6 +159,8 @@ impl Config {
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_secret = secrets.github_client_secret;
         config.anthropic_api_key = secrets.anthropic_api_key;
+        config.openai_api_key = secrets.openai_api_key;
+        config.openai_model = secrets.openai_model;
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }

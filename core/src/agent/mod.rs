@@ -3,6 +3,7 @@ mod entity;
 pub mod error;
 mod harness_client;
 mod light;
+mod openai_light;
 pub(crate) mod repo;
 mod sandbox;
 
@@ -197,14 +198,26 @@ impl Agents {
             RuntimeKind::Light => {
                 let auth = AuthContext::Agent(agent.workspace_id, agent.id, Vec::new());
                 let catalog = self.toolsets.catalog().with_auth(&auth);
-                light::run(
-                    prompt,
-                    &self.light_config,
-                    &agent.chat_config,
-                    agent.agent_type.system_prompt(),
-                    catalog,
-                )
-                .await?
+                // Prefer OpenAI provider when OPENAI_API_KEY is configured
+                if !self.light_config.openai_api_key.is_empty() {
+                    openai_light::run(
+                        prompt,
+                        &self.light_config,
+                        &agent.chat_config,
+                        agent.agent_type.system_prompt(),
+                        catalog,
+                    )
+                    .await?
+                } else {
+                    light::run(
+                        prompt,
+                        &self.light_config,
+                        &agent.chat_config,
+                        agent.agent_type.system_prompt(),
+                        catalog,
+                    )
+                    .await?
+                }
             }
             RuntimeKind::Sandbox => self.send_message_sandbox(agent, prompt).await?,
         };

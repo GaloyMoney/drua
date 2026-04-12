@@ -24,9 +24,11 @@ pub enum AgentError {
     SandboxExec(String),
     #[error("AgentError - AnthropicApi: status={status}, message={message}")]
     AnthropicApi { status: u16, message: String },
+    #[error("AgentError - OpenaiApi: status={status}, message={message}")]
+    OpenaiApi { status: u16, message: String },
     #[error("AgentError - Http: {0}")]
     Http(reqwest::Error),
-    #[error("Light agent is not configured. Set ANTHROPIC_API_KEY and provide a catalog.")]
+    #[error("Light agent is not configured. Set OPENAI_API_KEY (or ANTHROPIC_API_KEY) and provide a catalog.")]
     LightAgentNotConfigured,
     #[error("AgentError - MaxTurnsReached: {0}")]
     MaxTurnsReached(usize),
