@@ -1,46 +1,26 @@
-use serde::Deserialize;
+mod types;
+
 use tokio::sync::mpsc;
 use tracing::instrument;
 
 use crate::toolset::Catalog;
 
+use self::types::*;
 use super::config::LightRuntimeConfig;
 use super::entity::ChatConfig;
 use super::error::AgentError;
 use super::AgentMessageEvent;
 
 // ---------------------------------------------------------------------------
-// Anthropic API types
+// Constants
 // ---------------------------------------------------------------------------
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 
-#[derive(Deserialize)]
-struct ApiResponse {
-    content: Vec<ApiContentBlock>,
-    stop_reason: Option<String>,
-    usage: ApiUsage,
-}
-
-#[derive(Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ApiContentBlock {
-    Text {
-        text: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-}
-
-#[derive(Deserialize, Clone)]
-struct ApiUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-}
+// ---------------------------------------------------------------------------
+// Anthropic HTTP client
+// ---------------------------------------------------------------------------
 
 struct AnthropicClient {
     http: reqwest::Client,
@@ -55,14 +35,17 @@ impl AnthropicClient {
         }
     }
 
-    async fn create_message(&self, body: serde_json::Value) -> Result<ApiResponse, AgentError> {
+    async fn create_message(
+        &self,
+        request: &MessagesRequest<'_>,
+    ) -> Result<MessagesResponse, AgentError> {
         let resp = self
             .http
             .post(API_URL)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(request)
             .send()
             .await
             .map_err(AgentError::Http)?;
@@ -81,6 +64,94 @@ impl AnthropicClient {
 }
 
 // ---------------------------------------------------------------------------
+// Tool definitions (progressive-disclosure meta-tools)
+// ---------------------------------------------------------------------------
+
+/// The 3 meta-tool definitions for the Anthropic Messages API.
+///
+/// These map to `Catalog::search`, `Catalog::describe`, and
+/// `Catalog::call_with_filter` respectively.
+fn meta_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "search_tools".to_string(),
+            description: "Search for available tools across all upstream services. Returns tool names, brief descriptions, and categories. Use this first to find relevant tools before calling them.\n\nTip: Use describe_tool to get full parameter schemas before calling a tool.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (e.g., 'pipeline status', 'customer accounts', 'code review')"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by service category (e.g., 'ci', 'observability', 'code-quality', or 'all')"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "describe_tool".to_string(),
+            description: "Get the full parameter schema and detailed description for a specific tool. Use after search_tools to understand how to call a tool.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "The tool name returned from search_tools (e.g., 'honeycomb_list_environments')"
+                    }
+                },
+                "required": ["tool_name"]
+            }),
+        },
+        ToolDefinition {
+            name: "call_tool".to_string(),
+            description: "Execute an upstream tool by name with the provided arguments. Use describe_tool first to understand the required parameters.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "The prefixed tool name (e.g., 'honeycomb_list_environments')"
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Tool arguments matching the schema from describe_tool"
+                    },
+                    "output_filter": {
+                        "type": "object",
+                        "description": "Optional post-processing filter applied to tool output. Reduces output size to save tokens. By default, output is capped at 1000 lines.",
+                        "properties": {
+                            "grep": {
+                                "type": "string",
+                                "description": "Regex pattern to filter output lines (only matching lines returned)"
+                            },
+                            "invert_match": {
+                                "type": "boolean",
+                                "description": "Exclude matching lines instead of including them (grep -v). Default: false"
+                            },
+                            "context_lines": {
+                                "type": "integer",
+                                "description": "Lines of context around grep matches (grep -C). Only used with grep"
+                            },
+                            "head": {
+                                "type": "integer",
+                                "description": "Return only the first N lines"
+                            },
+                            "tail": {
+                                "type": "integer",
+                                "description": "Return only the last N lines"
+                            }
+                        }
+                    }
+                },
+                "required": ["tool_name"]
+            }),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Light agent session (groups agentic loop state)
 // ---------------------------------------------------------------------------
 
@@ -90,7 +161,7 @@ struct LightSession {
     model: String,
     max_tokens: u32,
     max_turns: usize,
-    tools: Vec<serde_json::Value>,
+    tools: Vec<ToolDefinition>,
     system: String,
 }
 
@@ -149,38 +220,41 @@ impl LightSession {
         prompt: &str,
         tx: &mpsc::Sender<AgentMessageEvent>,
     ) -> Result<(), AgentError> {
-        let mut messages: Vec<serde_json::Value> =
-            vec![serde_json::json!({ "role": "user", "content": prompt })];
+        let mut messages: Vec<Message> = vec![Message::User {
+            content: MessageContent::Text(prompt.to_string()),
+        }];
 
         let mut total_input = 0u32;
         let mut total_output = 0u32;
 
         for turn in 0..self.max_turns {
-            let body = serde_json::json!({
-                "model": self.model,
-                "max_tokens": self.max_tokens,
-                "system": self.system,
-                "tools": self.tools,
-                "messages": messages,
-            });
+            let request = MessagesRequest {
+                model: &self.model,
+                max_tokens: self.max_tokens,
+                system: &self.system,
+                tools: &self.tools,
+                messages: &messages,
+            };
 
-            let response = self.client.create_message(body).await?;
+            let response = self.client.create_message(&request).await?;
             total_input += response.usage.input_tokens;
             total_output += response.usage.output_tokens;
 
             let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
-            let mut assistant_content: Vec<serde_json::Value> = Vec::new();
+            let mut assistant_content: Vec<ContentBlock> = Vec::new();
 
             for block in &response.content {
                 match block {
-                    ApiContentBlock::Text { text } => {
-                        assistant_content.push(serde_json::json!({"type": "text", "text": text}));
+                    ContentBlock::Text { text } => {
+                        assistant_content.push(ContentBlock::Text { text: text.clone() });
                         send(tx, AgentMessageEvent::Text { text: text.clone() }).await?;
                     }
-                    ApiContentBlock::ToolUse { id, name, input } => {
-                        assistant_content.push(serde_json::json!({
-                            "type": "tool_use", "id": id, "name": name, "input": input
-                        }));
+                    ContentBlock::ToolUse { id, name, input } => {
+                        assistant_content.push(ContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        });
                         send(
                             tx,
                             AgentMessageEvent::ToolCall {
@@ -191,15 +265,17 @@ impl LightSession {
                         .await?;
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
+                    ContentBlock::ToolResult { .. } => {
+                        // ToolResult blocks are never returned by the API
+                    }
                 }
             }
 
-            messages.push(serde_json::json!({
-                "role": "assistant", "content": assistant_content
-            }));
+            messages.push(Message::Assistant {
+                content: assistant_content,
+            });
 
-            let stop = response.stop_reason.as_deref().unwrap_or("end_turn");
-            if stop != "tool_use" || tool_uses.is_empty() {
+            if response.stop_reason != Some(StopReason::ToolUse) || tool_uses.is_empty() {
                 send(
                     tx,
                     AgentMessageEvent::Done {
@@ -215,7 +291,7 @@ impl LightSession {
             }
 
             // Execute tools — route meta-tools through catalog methods
-            let mut tool_results: Vec<serde_json::Value> = Vec::new();
+            let mut tool_results: Vec<ContentBlock> = Vec::new();
             for (id, name, input) in &tool_uses {
                 let result = self.dispatch_tool(name, input).await;
                 let (text, is_error) = match &result {
@@ -230,18 +306,16 @@ impl LightSession {
                     },
                 )
                 .await?;
-                let mut result_json = serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": id,
-                    "content": text,
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: text,
+                    is_error: if is_error { Some(true) } else { None },
                 });
-                if is_error {
-                    result_json["is_error"] = serde_json::json!(true);
-                }
-                tool_results.push(result_json);
             }
 
-            messages.push(serde_json::json!({"role": "user", "content": tool_results}));
+            messages.push(Message::User {
+                content: MessageContent::Blocks(tool_results),
+            });
         }
 
         Err(AgentError::MaxTurnsReached(self.max_turns))
@@ -272,7 +346,7 @@ pub(super) async fn run(
     let max_tokens = chat_config.max_tokens;
     let max_turns = chat_config.max_turns as usize;
 
-    let tools = Catalog::meta_tool_definitions();
+    let tools = meta_tool_definitions();
     let system = build_system_prompt(system_prompt, &catalog);
 
     let session = LightSession {
