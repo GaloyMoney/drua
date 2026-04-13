@@ -26,14 +26,26 @@ impl Sessions {
         }
     }
 
-    #[instrument(name = "domain.agent_session.create_in_op", skip(self, op))]
+    #[instrument(
+        name = "domain.agent_session.create_in_op",
+        skip(self, op, system, tools)
+    )]
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         agent_id: AgentId,
+        model: impl Into<String> + std::fmt::Debug,
+        system: Vec<llm::prompt::SystemBlock>,
+        tools: Vec<llm::prompt::Tool>,
+        max_tokens: u32,
     ) -> Result<AgentSession, AgentSessionError> {
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
+            .model(model)
+            .system(system)
+            .tools(tools)
+            .max_tokens(max_tokens)
             .build()
             .expect("NewAgentSession build");
 

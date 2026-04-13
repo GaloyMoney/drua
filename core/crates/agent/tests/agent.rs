@@ -1,6 +1,8 @@
-use agent::{AgentMessageEvent, AgentRole, Agents};
+use std::collections::HashMap;
+
+use agent::{AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig};
 use llm::prompt::AssistantBlock;
-use llm::{PromptRequest, PromptResponse, ToolUseRequest, Usage};
+use llm::{PromptRequest, PromptResponse, Usage};
 use primitives::{AuthSubject, UserId, WorkspaceId};
 use tokio::sync::mpsc;
 
@@ -16,11 +18,27 @@ async fn send_message_round_trip_via_prompt_channel() {
     let pool = pool().await;
 
     let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
-    let (tool_tx, _tool_rx) = mpsc::channel::<ToolUseRequest>(64);
-    let agents = Agents::new(&pool, prompt_tx, tool_tx);
+
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::WorkspaceLead,
+        RoleConfig {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            system: Vec::new(),
+            max_tokens: 1024,
+        },
+    );
+    let config = AgentsConfig { builtin_roles };
+
+    let agents = Agents::new(&pool, config, prompt_tx);
 
     let agent = agents
-        .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead")
+        .create(
+            WorkspaceId::new(),
+            AgentRole::WorkspaceLead,
+            "lead",
+            Vec::new(),
+        )
         .await
         .expect("create agent");
 

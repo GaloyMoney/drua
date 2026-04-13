@@ -2,6 +2,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
+use llm::prompt::{SystemBlock, Tool};
 use primitives::{AgentId, UserMessageSource};
 
 use super::{
@@ -17,6 +18,10 @@ pub enum AgentSessionEvent {
     Initialized {
         id: AgentSessionId,
         agent_id: AgentId,
+        model: String,
+        system: Vec<SystemBlock>,
+        tools: Vec<Tool>,
+        max_tokens: u32,
     },
     ThreadStarted {
         thread_id: SessionThreadId,
@@ -29,6 +34,10 @@ pub enum AgentSessionEvent {
 pub struct AgentSession {
     pub id: AgentSessionId,
     pub agent_id: AgentId,
+    pub model: String,
+    pub system: Vec<SystemBlock>,
+    pub tools: Vec<Tool>,
+    pub max_tokens: u32,
     #[builder(default = "SessionThreadId::from(uuid::Uuid::nil())")]
     current_thread: SessionThreadId,
     events: EntityEvents<AgentSessionEvent>,
@@ -52,6 +61,10 @@ impl AgentSession {
             .id(thread_id)
             .session_id(self.id)
             .start_reason(ThreadStartReason::InitialThread)
+            .model(self.model.clone())
+            .system(self.system.clone())
+            .tools(self.tools.clone())
+            .max_tokens(self.max_tokens)
             .build()
             .expect("NewSessionThread build");
         self.threads.add_new(new_thread);
@@ -99,8 +112,21 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
 
         for event in events.iter_all() {
             match event {
-                AgentSessionEvent::Initialized { id, agent_id } => {
-                    builder = builder.id(*id).agent_id(*agent_id);
+                AgentSessionEvent::Initialized {
+                    id,
+                    agent_id,
+                    model,
+                    system,
+                    tools,
+                    max_tokens,
+                } => {
+                    builder = builder
+                        .id(*id)
+                        .agent_id(*agent_id)
+                        .model(model.clone())
+                        .system(system.clone())
+                        .tools(tools.clone())
+                        .max_tokens(*max_tokens);
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_thread(*thread_id);
@@ -117,6 +143,11 @@ pub struct NewAgentSession {
     #[builder(setter(into))]
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
+    #[builder(setter(into))]
+    pub(super) model: String,
+    pub(super) system: Vec<SystemBlock>,
+    pub(super) tools: Vec<Tool>,
+    pub(super) max_tokens: u32,
 }
 
 impl NewAgentSession {
@@ -134,6 +165,10 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
             [AgentSessionEvent::Initialized {
                 id: self.id,
                 agent_id: self.agent_id,
+                model: self.model,
+                system: self.system,
+                tools: self.tools,
+                max_tokens: self.max_tokens,
             }],
         )
     }

@@ -8,7 +8,6 @@ members = [
   "core/crates/agent",
   "core/crates/primitives",
   "core/crates/prompt-executor",
-  "core/crates/toolset",
   "lib/anthropic-client",
   "lib/llm",
   "web",
@@ -31,7 +30,6 @@ sandbox-client = { path = "lib/sandbox-client" }
 code-assistant-core = { path = "code-assistant/crates/core" }
 primitives = { path = "core/crates/primitives" }
 prompt-executor = { path = "core/crates/prompt-executor" }
-toolset = { path = "core/crates/toolset" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
 
