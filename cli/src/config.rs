@@ -151,7 +151,10 @@ impl Config {
 
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_secret = secrets.github_client_secret;
-        config.anthropic_api_key = secrets.anthropic_api_key;
+        // Trim to catch stray whitespace / trailing newline that often
+        // sneaks in when the key was piped from `echo` or a broken
+        // `.env`; both render the key invalid upstream for opaque reasons.
+        config.anthropic_api_key = secrets.anthropic_api_key.trim().to_string();
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }

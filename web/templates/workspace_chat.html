@@ -137,8 +137,12 @@ async function sendMessage() {
           if (!data) continue;
           try {
             const parsed = JSON.parse(data);
-            if (parsed.type === 'text') {
+            if (parsed.type === 'assistant_text') {
               appendMsg('msg-assistant', parsed.text);
+            } else if (parsed.type === 'thinking') {
+              appendMsg('msg-system', '(thinking) ' + parsed.text);
+            } else if (parsed.type === 'user_message') {
+              // Already rendered locally when the user hit Send; skip the echo.
             } else if (parsed.type === 'tool_call') {
               const args = parsed.arguments ? ' ' + JSON.stringify(parsed.arguments) : '';
               appendMsg('msg-system', 'tool: ' + parsed.name + args);

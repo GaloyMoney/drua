@@ -46,10 +46,44 @@ impl PromptExecutorConfig {
                         provider: "anthropic".to_string(),
                     });
                 }
-                Provider::Anthropic { .. } => {}
+                Provider::Anthropic { api_key } => {
+                    // Anthropic production keys start with `sk-ant-`. A
+                    // different prefix is usually a paste-swap with some
+                    // other vendor's key (OpenAI, AWS, etc.) and will
+                    // always 401 at the Messages API. Warn loudly and log
+                    // a masked preview so the operator can eyeball the
+                    // value that actually reached the process.
+                    let preview = masked_preview(api_key);
+                    if !api_key.starts_with("sk-ant-") {
+                        tracing::warn!(
+                            model = %model.name,
+                            key_preview = %preview,
+                            key_len = api_key.len(),
+                            "Anthropic credential does not start with `sk-ant-` — this will most likely 401 at the Messages API",
+                        );
+                    } else {
+                        tracing::info!(
+                            model = %model.name,
+                            key_preview = %preview,
+                            "Anthropic credential loaded"
+                        );
+                    }
+                }
             }
         }
         Ok(())
+    }
+}
+
+/// First 7 + last 4 chars, everything else masked. Enough to spot
+/// copy/paste errors without spilling secrets into logs.
+fn masked_preview(s: &str) -> String {
+    if s.len() <= 12 {
+        "***".to_string()
+    } else {
+        let head: String = s.chars().take(7).collect();
+        let tail: String = s.chars().rev().take(4).collect::<String>().chars().rev().collect();
+        format!("{head}…{tail}")
     }
 }
 
