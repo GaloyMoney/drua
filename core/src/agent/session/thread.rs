@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 use llm::prompt::{AssistantBlock, SystemBlock, Tool};
-use primitives::UserMessageSource;
+use crate::primitives::UserMessageSource;
 
 use super::{error::AgentSessionError, AgentSessionId};
 
@@ -250,7 +250,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
     use llm::prompt::{Message, UserBlock};
-    use primitives::UserId;
+    use crate::primitives::UserId;
 
     use super::*;
 

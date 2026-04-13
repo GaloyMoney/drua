@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
-use agent::{AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig};
+use galoy_agents_core::agent::{
+    AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig,
+};
+use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
 use llm::{PromptRequest, PromptResponse, Usage};
-use primitives::{AuthSubject, UserId, WorkspaceId};
+use galoy_agents_core::primitives::{AuthSubject, UserId, WorkspaceId};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use tokio::sync::mpsc;
 

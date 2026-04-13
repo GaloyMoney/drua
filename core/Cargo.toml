@@ -6,7 +6,7 @@ edition.workspace = true
 [lib]
 
 [dependencies]
-primitives = { workspace = true }
+anthropic-client = { workspace = true }
 code-assistant-core = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
@@ -16,14 +16,16 @@ concourse-client = { workspace = true }
 chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
 derive_builder = "0.20"
 es-entity = "0.10"
+futures = { workspace = true }
 hex = "0.4"
 http = "1"
+llm = { workspace = true }
 rand = "0.9"
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"] }
 pgvector = { workspace = true }
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
@@ -38,4 +40,9 @@ tracing-opentelemetry = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
+async-trait = "0.1"
+llm = { workspace = true }
+rmcp = { workspace = true }
+serde_json = "1.0"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

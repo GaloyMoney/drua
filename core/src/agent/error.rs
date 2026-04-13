@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use super::repo::{AgentCreateError, AgentFindError, AgentModifyError, AgentQueryError};
+use super::session::error::AgentSessionError;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -14,22 +15,12 @@ pub enum AgentError {
     Find(#[from] AgentFindError),
     #[error("AgentError - Query: {0}")]
     Query(#[from] AgentQueryError),
-    #[error("AgentError - McpCreds: {0}")]
-    McpCreds(#[from] crate::mcp_creds::McpCredsError),
-    #[error("AgentError - Sandbox: {0}")]
-    Sandbox(#[from] sandbox_client::SandboxError),
-    #[error("Sandbox runtime is not configured. Enable sandbox in the server configuration to chat with agents.")]
-    SandboxNotConfigured,
-    #[error("AgentError - SandboxExec: {0}")]
-    SandboxExec(String),
-    #[error("AgentError - AnthropicApi: status={status}, message={message}")]
-    AnthropicApi { status: u16, message: String },
-    #[error("AgentError - Http: {0}")]
-    Http(reqwest::Error),
-    #[error("Light agent is not configured. Set ANTHROPIC_API_KEY and provide a catalog.")]
-    LightAgentNotConfigured,
-    #[error("AgentError - MaxTurnsReached: {0}")]
-    MaxTurnsReached(usize),
-    #[error("AgentError - ChannelClosed")]
-    ChannelClosed,
+    #[error("AgentError - Session: {0}")]
+    Session(#[from] AgentSessionError),
+    #[error("AgentError - prompt request channel closed")]
+    PromptRequestChannelClosed,
+    #[error("AgentError - role not configured: {0:?}")]
+    RoleNotConfigured(super::entity::AgentRole),
+    #[error("AgentError - unauthorized")]
+    Unauthorized,
 }

@@ -1,6 +1,8 @@
+use galoy_agents_core::prompt_executor::{
+    ModelConfig, PromptExecutor, PromptExecutorConfig, Provider,
+};
 use llm::prompt::{Message, UserBlock};
 use llm::{Prompt, PromptRequest};
-use prompt_executor::{ModelConfig, PromptExecutor, PromptExecutorConfig, Provider};
 
 const MODEL: &str = "claude-haiku-4-5-20251001";
 

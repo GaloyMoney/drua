@@ -1,34 +1,24 @@
-use serde::Deserialize;
+use std::collections::HashMap;
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct AgentConfig {
+use serde::{Deserialize, Serialize};
+
+use crate::AgentRole;
+
+/// Per-role defaults applied when an agent with that role is created.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleConfig {
+    pub model: String,
+    pub system: Vec<llm::prompt::SystemBlock>,
+    pub max_tokens: u32,
+    /// If set, a new thread is started when a user message arrives more than
+    /// this long after the previous user message in the current thread.
+    /// `None` disables the auto-reset.
     #[serde(default)]
-    pub sandbox: SandboxClientConfig,
-    #[serde(skip)]
-    pub light: LightRuntimeConfig,
+    pub reset_time_delta: Option<std::time::Duration>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct SandboxClientConfig {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentsConfig {
     #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub namespace: String,
-    #[serde(default)]
-    pub template_name: String,
-    #[serde(default)]
-    pub persistence: Option<PersistenceConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PersistenceConfig {
-    pub size: String,
-    #[serde(default)]
-    pub storage_class: String,
-    pub mount_path: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct LightRuntimeConfig {
-    pub api_key: String,
+    pub builtin_roles: HashMap<AgentRole, RoleConfig>,
 }

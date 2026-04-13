@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 use llm::prompt::{SystemBlock, Tool};
-use primitives::{AgentId, UserMessageSource};
+use crate::primitives::{AgentId, UserMessageSource};
 
 use super::{
     error::AgentSessionError,

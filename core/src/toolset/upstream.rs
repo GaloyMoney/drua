@@ -12,7 +12,7 @@ use rmcp::{
 
 use crate::auth::AuthSubject;
 
-use super::{McpUpstreamConfig, ToolSet, ToolSetEntry, ToolSetsError};
+use super::{McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct UpstreamToolSet {
     name: String,
@@ -90,7 +90,7 @@ impl UpstreamToolSet {
 }
 
 #[async_trait::async_trait]
-impl ToolSet for UpstreamToolSet {
+impl SearchableToolSet for UpstreamToolSet {
     fn name(&self) -> &str {
         &self.name
     }
