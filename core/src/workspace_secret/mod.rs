@@ -5,14 +5,14 @@ pub(crate) mod repo;
 
 use tracing::instrument;
 
+pub use crate::primitives::*;
 pub use entity::WorkspaceSecret;
 use entity::*;
 pub use error::*;
-pub use crate::primitives::*;
+pub use primitives::*;
 use repo::*;
 
 use crate::encryption::EncryptionKey;
-use crate::primitives::*;
 
 /// A decrypted secret ready for harness injection.
 pub struct DecryptedSecret {

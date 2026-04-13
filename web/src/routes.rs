@@ -600,22 +600,8 @@ async fn workspace_detail(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agents = state
-        .app
-        .agents()
-        .list_for_workspace(workspace_id)
-        .await
-        .unwrap_or_default();
-
-    let agent_id = agents
-        .iter()
-        .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead)
-        .map(|a| a.id.to_string())
-        .unwrap_or_default();
-
     WorkspaceDetailTemplate {
         workspace: workspace_to_view(&ws),
-        agent_id,
     }
     .into_response()
 }

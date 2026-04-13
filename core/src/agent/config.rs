@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::AgentRole;
+use super::AgentRole;
 
 /// Per-role defaults applied when an agent with that role is created.
 #[derive(Debug, Clone, Serialize, Deserialize)]

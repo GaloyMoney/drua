@@ -1,6 +1,0 @@
-error /Users/jcarter/projects/galoymoney/Galoy-agents/.claude/worktrees/rich-session-019d830e/web/src/routes.rs:1193:25 non-exhaustive patterns: `&AuthSubject::AgentOnBehalfOfUser(_, _, _, _)` not covered
-error /Users/jcarter/projects/galoymoney/Galoy-agents/.claude/worktrees/rich-session-019d830e/core/crates/primitives/src/auth_subject.rs:5:1 non-exhaustive patterns: `&AuthSubject::AgentOnBehalfOfUser(_, _, _, _)` not covered
-warning /Users/jcarter/projects/galoymoney/Galoy-agents/.claude/worktrees/rich-session-019d830e/web/src/routes.rs:1188:15 unused variable: `auth`
-warning /Users/jcarter/projects/galoymoney/Galoy-agents/.claude/worktrees/rich-session-019d830e/web/src/routes.rs:1189:11 unused variable: `state`
-warning /Users/jcarter/projects/galoymoney/Galoy-agents/.claude/worktrees/rich-session-019d830e/web/src/routes.rs:1190:10 unused variable: `id`
-warning /Users/jcarter/projects/galoymoney/Galoy-agents/.claude/worktrees/rich-session-019d830e/web/src/routes.rs:1191:10 unused variable: `body`

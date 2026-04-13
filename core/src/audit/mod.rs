@@ -3,8 +3,9 @@ pub mod primitives;
 
 use tracing::instrument;
 
-pub use error::*;
 pub use crate::primitives::*;
+pub use error::*;
+pub use primitives::*;
 
 #[derive(Clone)]
 pub struct Audit {
