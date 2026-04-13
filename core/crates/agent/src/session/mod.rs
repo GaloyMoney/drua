@@ -41,6 +41,16 @@ impl Sessions {
         Ok(session)
     }
 
+    #[instrument(name = "domain.agent_session.add_response_message", skip(self, _text))]
+    pub async fn add_response_message(
+        &self,
+        _agent_id: AgentId,
+        _text: String,
+    ) -> Result<(), AgentSessionError> {
+        // persist an assistant response message — wired up later.
+        Ok(())
+    }
+
     #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]
     pub async fn add_user_message(
         &self,

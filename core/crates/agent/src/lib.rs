@@ -15,13 +15,15 @@ use session::Sessions;
 pub struct Agents {
     repo: AgentRepo,
     sessions: Sessions,
+    prompt_requests: llm::PromptRequestChannel,
 }
 
 impl Agents {
-    pub fn new(pool: &sqlx::PgPool) -> Self {
+    pub fn new(pool: &sqlx::PgPool, prompt_requests: llm::PromptRequestChannel) -> Self {
         Self {
             repo: AgentRepo::new(pool),
             sessions: Sessions::new(pool),
+            prompt_requests,
         }
     }
 
@@ -70,11 +72,10 @@ impl Agents {
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
-        if self
+        if let Some(prompt_state) = self
             .sessions
             .add_user_message(id, source, prompt.clone())
             .await?
-            .is_some()
         {
             let _ = tx
                 .send(AgentMessageEvent::UserMessage {
@@ -82,6 +83,41 @@ impl Agents {
                     text: prompt,
                 })
                 .await;
+
+            let (request, mut response_rx) = llm::PromptRequest::new(prompt_state);
+            self.prompt_requests
+                .send(request)
+                .await
+                .map_err(|_| AgentError::PromptRequestChannelClosed)?;
+
+            let sessions = self.sessions.clone();
+            tokio::spawn(async move {
+                while let Some(event) = response_rx.recv().await {
+                    match event {
+                        llm::PromptResponseEvent::Text { text } => {
+                            let _ = sessions.add_response_message(id, text.clone()).await;
+                            let _ = tx.send(AgentMessageEvent::AssistantText { text }).await;
+                        }
+                        llm::PromptResponseEvent::Done {
+                            input_tokens,
+                            output_tokens,
+                        } => {
+                            let _ = tx
+                                .send(AgentMessageEvent::Done {
+                                    turns: 1,
+                                    input_tokens,
+                                    output_tokens,
+                                })
+                                .await;
+                            break;
+                        }
+                        llm::PromptResponseEvent::Error { message } => {
+                            let _ = tx.send(AgentMessageEvent::Error { message }).await;
+                            break;
+                        }
+                    }
+                }
+            });
         }
 
         Ok(rx)

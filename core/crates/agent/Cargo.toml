@@ -17,4 +17,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+llm = { workspace = true }
+primitives = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
