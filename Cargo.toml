@@ -5,6 +5,7 @@ members = [
   "core",
   "mcp-gateway",
   "lib/sandbox-client",
+  "lib/llm",
   "web",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
