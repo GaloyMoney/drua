@@ -67,6 +67,9 @@ base64 = "0.22"
 # Hashing
 sha2 = "0.10"
 
+# Tokenization
+tiktoken = "3.1"
+
 # Randomization
 rand = "0.8"
 
