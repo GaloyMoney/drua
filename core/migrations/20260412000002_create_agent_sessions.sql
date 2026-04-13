@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS agent_sessions (
     id UUID PRIMARY KEY,
-    agent_id UUID NOT NULL REFERENCES agents(id),
+    agent_id UUID NOT NULL UNIQUE REFERENCES agents(id),
     created_at TIMESTAMPTZ NOT NULL
 );
 
