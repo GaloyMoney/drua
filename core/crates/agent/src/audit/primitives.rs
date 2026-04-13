@@ -47,6 +47,11 @@ pub enum AuditSubject {
         workspace_id: WorkspaceId,
         agent_id: AgentId,
     },
+    AgentOnBehalfOfUser {
+        user_id: UserId,
+        workspace_id: WorkspaceId,
+        agent_id: AgentId,
+    },
     Anonymous,
 }
 
@@ -62,6 +67,14 @@ impl std::fmt::Display for AuditSubject {
                 workspace_id,
                 agent_id,
             } => write!(f, "agent::{agent_id}::ws:{workspace_id}"),
+            AuditSubject::AgentOnBehalfOfUser {
+                user_id,
+                workspace_id,
+                agent_id,
+            } => write!(
+                f,
+                "agent_on_behalf_of_user::{agent_id}::ws:{workspace_id}::user:{user_id}"
+            ),
             AuditSubject::Anonymous => write!(f, "anonymous"),
         }
     }
@@ -79,6 +92,13 @@ impl From<&AuthSubject> for AuditSubject {
                 workspace_id: *workspace_id,
                 agent_id: *agent_id,
             },
+            AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, _) => {
+                AuditSubject::AgentOnBehalfOfUser {
+                    user_id: *user_id,
+                    workspace_id: *workspace_id,
+                    agent_id: *agent_id,
+                }
+            }
             AuthSubject::Anonymous => AuditSubject::Anonymous,
         }
     }

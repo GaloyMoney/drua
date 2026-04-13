@@ -9,6 +9,7 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 concourse-client = { workspace = true }
 derive_builder = { workspace = true }
 es-entity = { workspace = true }
+futures = { workspace = true }
 http = "1"
 llm = { workspace = true }
 primitives = { workspace = true }
@@ -24,7 +25,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+async-trait = "0.1"
 llm = { workspace = true }
 primitives = { workspace = true }
+rmcp = { workspace = true }
+serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }

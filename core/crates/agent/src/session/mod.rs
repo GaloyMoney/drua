@@ -39,6 +39,7 @@ impl Sessions {
         system: Vec<llm::prompt::SystemBlock>,
         tools: Vec<llm::prompt::Tool>,
         max_tokens: u32,
+        reset_time_delta: Option<std::time::Duration>,
     ) -> Result<AgentSession, AgentSessionError> {
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
@@ -46,6 +47,7 @@ impl Sessions {
             .system(system)
             .tools(tools)
             .max_tokens(max_tokens)
+            .reset_time_delta(reset_time_delta)
             .build()
             .expect("NewAgentSession build");
 
@@ -82,6 +84,18 @@ impl Sessions {
         Ok(prompt)
     }
 
+    #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]
+    pub async fn delete_for_agent_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        agent_id: AgentId,
+    ) -> Result<(), AgentSessionError> {
+        self.repo
+            .cascade_delete_for_agent_in_op(op, agent_id)
+            .await?;
+        Ok(())
+    }
+
     #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]
     pub async fn add_user_message(
         &self,
@@ -90,7 +104,7 @@ impl Sessions {
         prompt: String,
     ) -> Result<Option<llm::Prompt>, AgentSessionError> {
         let mut session = self.repo.find_by_agent_id(agent_id).await?;
-        match session.add_user_message(source, prompt)? {
+        match session.add_user_message(chrono::Utc::now(), source, prompt)? {
             es_entity::Idempotent::Executed(prompt) => {
                 self.repo.update(&mut session).await?;
                 Ok(Some(prompt))

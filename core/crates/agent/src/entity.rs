@@ -2,7 +2,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
-use primitives::{AgentId, WorkspaceId};
+use primitives::{AgentId, AuthSubject, UserId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -39,8 +39,18 @@ pub enum AgentMessageEvent {
         turns: u32,
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
     },
     Error {
+        message: String,
+    },
+    /// Infrastructure status update (e.g. sandbox provisioning, executor
+    /// reconnection). Carried through for SSE-protocol parity with the old
+    /// runtime; the new in-process loop currently does not emit this.
+    Service {
         message: String,
     },
 }
@@ -54,6 +64,7 @@ pub enum AgentEvent {
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: String,
+        authz_scopes: Vec<String>,
     },
 }
 
@@ -64,7 +75,28 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_role: AgentRole,
     pub name: String,
+    pub authz_scopes: Vec<String>,
     events: EntityEvents<AgentEvent>,
+}
+
+impl Agent {
+    /// The auth subject this agent acts as when invoking tools — its own
+    /// workspace + id, carrying the scopes persisted on the `Initialized`
+    /// event. Use when no originating user can be attributed.
+    pub fn auth_subject(&self) -> AuthSubject {
+        AuthSubject::Agent(self.workspace_id, self.id, self.authz_scopes.clone())
+    }
+
+    /// Same as [`Self::auth_subject`] but tagged with the user that triggered
+    /// the agent's work, so downstream actions can be attributed back to them.
+    pub fn auth_subject_for_user(&self, user_id: UserId) -> AuthSubject {
+        AuthSubject::AgentOnBehalfOfUser(
+            user_id,
+            self.workspace_id,
+            self.id,
+            self.authz_scopes.clone(),
+        )
+    }
 }
 
 impl TryFromEvents<AgentEvent> for Agent {
@@ -78,12 +110,14 @@ impl TryFromEvents<AgentEvent> for Agent {
                     workspace_id,
                     agent_role,
                     name,
+                    authz_scopes,
                 } => {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
                         .agent_role(*agent_role)
-                        .name(name.clone());
+                        .name(name.clone())
+                        .authz_scopes(authz_scopes.clone());
                 }
             }
         }
@@ -100,6 +134,7 @@ pub struct NewAgent {
     pub(super) agent_role: AgentRole,
     #[builder(setter(into))]
     pub(super) name: String,
+    pub(super) authz_scopes: Vec<String>,
 }
 
 impl NewAgent {
@@ -119,6 +154,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 workspace_id: self.workspace_id,
                 agent_role: self.agent_role,
                 name: self.name,
+                authz_scopes: self.authz_scopes,
             }],
         )
     }

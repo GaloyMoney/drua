@@ -7,8 +7,13 @@ pub enum AuthSubject {
     User(UserId),
     /// Authenticated via bearer token issued to a user (exported agent credential).
     ExportedAgent(UserId, McpCredsId, Vec<String>),
-    /// Agent acting within its workspace (SA token auth or internal light-agent dispatch).
+    /// Agent acting within its workspace without user attribution.
     Agent(WorkspaceId, AgentId, Vec<String>),
+    /// Agent acting within its workspace on behalf of a known user — used
+    /// when the agent's tool calls are triggered by a request that itself
+    /// originated from a `User` or `ExportedAgent`. Carries enough context
+    /// to attribute downstream actions back to the originating user.
+    AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<String>),
     /// No authentication provided.
     Anonymous,
 }
@@ -19,14 +24,29 @@ impl AuthSubject {
             AuthSubject::User(user_id) => Ok(*user_id),
             AuthSubject::ExportedAgent(_, _, _) => Err("ExportedAgent auth not allowed here"),
             AuthSubject::Agent(_, _, _) => Err("Agent auth not allowed here"),
+            AuthSubject::AgentOnBehalfOfUser(_, _, _, _) => Err("Agent auth not allowed here"),
             AuthSubject::Anonymous => Err("Authentication required"),
+        }
+    }
+
+    /// Return the user that this subject ultimately acts for, if any. Covers
+    /// direct `User`, `ExportedAgent`, and `AgentOnBehalfOfUser`. Returns
+    /// `None` for unattributed `Agent` and `Anonymous`.
+    pub fn originating_user_id(&self) -> Option<UserId> {
+        match self {
+            AuthSubject::User(user_id) => Some(*user_id),
+            AuthSubject::ExportedAgent(user_id, _, _) => Some(*user_id),
+            AuthSubject::AgentOnBehalfOfUser(user_id, _, _, _) => Some(*user_id),
+            AuthSubject::Agent(_, _, _) | AuthSubject::Anonymous => None,
         }
     }
 
     /// Return the scopes associated with this auth subject.
     pub fn scopes(&self) -> &[String] {
         match self {
-            AuthSubject::ExportedAgent(_, _, scopes) | AuthSubject::Agent(_, _, scopes) => scopes,
+            AuthSubject::ExportedAgent(_, _, scopes)
+            | AuthSubject::Agent(_, _, scopes)
+            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes,
             _ => &[],
         }
     }
@@ -36,7 +56,9 @@ impl AuthSubject {
     pub fn has_scope(&self, scope: &str) -> bool {
         match self {
             AuthSubject::User(_) => true,
-            AuthSubject::ExportedAgent(_, _, scopes) | AuthSubject::Agent(_, _, scopes) => {
+            AuthSubject::ExportedAgent(_, _, scopes)
+            | AuthSubject::Agent(_, _, scopes)
+            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => {
                 scopes.iter().any(|s| s == scope)
             }
             AuthSubject::Anonymous => false,
@@ -53,7 +75,8 @@ impl AuthSubject {
                 user_id: *user_id,
                 creds_id: *creds_id,
             },
-            AuthSubject::Agent(_, agent_id, _) => UserMessageSource::Agent {
+            AuthSubject::Agent(_, agent_id, _)
+            | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => UserMessageSource::Agent {
                 agent_id: *agent_id,
             },
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
@@ -65,7 +88,14 @@ impl AuthSubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserMessageSource {
-    User { user_id: UserId },
-    ExportedAgent { user_id: UserId, creds_id: McpCredsId },
-    Agent { agent_id: AgentId },
+    User {
+        user_id: UserId,
+    },
+    ExportedAgent {
+        user_id: UserId,
+        creds_id: McpCredsId,
+    },
+    Agent {
+        agent_id: AgentId,
+    },
 }

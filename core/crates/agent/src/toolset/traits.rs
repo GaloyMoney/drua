@@ -39,6 +39,17 @@ pub trait TopLevelTool: Send + Sync {
     ) -> Result<CallToolResult, ToolSetsError>;
 }
 
+impl From<&dyn TopLevelTool> for llm::prompt::Tool {
+    fn from(t: &dyn TopLevelTool) -> Self {
+        llm::prompt::Tool {
+            name: t.name().to_string(),
+            description: Some(t.description().to_string()),
+            input_schema: t.input_schema().clone(),
+            cache_control: None,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait SearchableToolSet: Send + Sync {
     fn name(&self) -> &str;
