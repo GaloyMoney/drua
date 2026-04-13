@@ -125,6 +125,12 @@ fn search(
         })
         .collect();
 
+    // Wildcard / empty query → return all (category-filtered) entries.
+    let query = query.filter(|q| {
+        let t = q.trim();
+        !(t.is_empty() || t == "*")
+    });
+
     if let Some(q) = query {
         let keywords: Vec<String> = normalize(q).split_whitespace().map(String::from).collect();
         if !keywords.is_empty() {
@@ -374,12 +380,17 @@ impl TopLevelTool for CallCatalogTool {
     /// `tool_name`, fetch its `required_scopes`, and check those against the
     /// caller's scopes. If the inner tool can't be found we let the call
     /// proceed and surface the not-found error there.
+    ///
+    /// When `arguments` is `None` the caller is asking "is this tool visible
+    /// at all?" (e.g. `list_tools`, prompt-tools building). Answer yes —
+    /// the inner-tool-specific scope check only makes sense once a concrete
+    /// `tool_name` is provided at invocation time.
     fn is_authorized(&self, scopes: &[&str], arguments: Option<&JsonObject>) -> bool {
         let Some(tool_name) = arguments
             .and_then(|a| a.get("tool_name"))
             .and_then(|v| v.as_str())
         else {
-            return false;
+            return true;
         };
         let lookup = {
             let sets = self.sets.read().expect("toolset lock poisoned");
