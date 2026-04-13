@@ -10,7 +10,7 @@ use rmcp::{
     Peer, RoleClient, ServiceExt,
 };
 
-use crate::auth::AuthContext;
+use crate::auth::AuthSubject;
 
 use super::{McpUpstreamConfig, ToolSet, ToolSetEntry, ToolSetsError};
 
@@ -119,7 +119,7 @@ impl ToolSet for UpstreamToolSet {
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
-        _auth: Option<&AuthContext>,
+        _auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let mut params = CallToolRequestParams::new(tool_name.to_string());
         if let Some(args) = arguments {

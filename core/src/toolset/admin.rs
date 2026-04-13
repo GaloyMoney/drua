@@ -4,7 +4,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 use tracing::instrument;
 
 use crate::agent::Agents;
-use crate::auth::AuthContext;
+use crate::auth::AuthSubject;
 use crate::primitives::*;
 use crate::workspace::Workspaces;
 
@@ -114,11 +114,11 @@ impl AdminToolSet {
         }
     }
 
-    fn extract_user_id(auth: Option<&AuthContext>) -> Result<UserId, ToolSetsError> {
+    fn extract_user_id(auth: Option<&AuthSubject>) -> Result<UserId, ToolSetsError> {
         match auth {
-            Some(AuthContext::ExportedAgent(user_id, _, _)) => Ok(*user_id),
-            Some(AuthContext::Agent(_, _, _)) => Err(ToolSetsError::Unauthorized),
-            Some(AuthContext::User(user_id)) => Ok(*user_id),
+            Some(AuthSubject::ExportedAgent(user_id, _, _)) => Ok(*user_id),
+            Some(AuthSubject::Agent(_, _, _)) => Err(ToolSetsError::Unauthorized),
+            Some(AuthSubject::User(user_id)) => Ok(*user_id),
             _ => Err(ToolSetsError::Unauthorized),
         }
     }
@@ -149,7 +149,7 @@ impl AdminToolSet {
     async fn handle_create_workspace(
         &self,
         args: &JsonObject,
-        auth: Option<&AuthContext>,
+        auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let user_id = Self::extract_user_id(auth)?;
         let name = str_arg(args, "name")?;
@@ -288,7 +288,7 @@ impl AdminToolSet {
     async fn handle_send_agent_message(
         &self,
         args: &JsonObject,
-        auth: Option<&AuthContext>,
+        auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let user_id = Self::extract_user_id(auth)?;
         let agent_id = parse_uuid_arg(args, "agent_id")?;
@@ -358,7 +358,7 @@ impl ToolSet for AdminToolSet {
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
-        auth: Option<&AuthContext>,
+        auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let args = arguments.unwrap_or_default();
         match tool_name {

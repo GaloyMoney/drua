@@ -7,7 +7,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 
-use galoy_agents_core::auth::AuthContext;
+use galoy_agents_core::auth::AuthSubject;
 use galoy_agents_core::App;
 
 #[derive(Clone)]
@@ -36,10 +36,10 @@ impl McpGateway {
         )
     }
 
-    fn require_auth(parts: &http::request::Parts) -> Result<&AuthContext, ErrorData> {
-        match parts.extensions.get::<AuthContext>() {
-            Some(auth @ AuthContext::ExportedAgent(_, _, _))
-            | Some(auth @ AuthContext::Agent(_, _, _)) => Ok(auth),
+    fn require_auth(parts: &http::request::Parts) -> Result<&AuthSubject, ErrorData> {
+        match parts.extensions.get::<AuthSubject>() {
+            Some(auth @ AuthSubject::ExportedAgent(_, _, _))
+            | Some(auth @ AuthSubject::Agent(_, _, _)) => Ok(auth),
             _ => Err(ErrorData::new(
                 ErrorCode::INVALID_REQUEST,
                 "Authentication required: provide a valid Bearer token",

@@ -13,7 +13,7 @@ pub use error::AuthError;
 
 use galoy_agents_core as domain;
 
-use domain::auth::AuthContext;
+use domain::auth::AuthSubject;
 use domain::mcp_creds::token::hash_token;
 use domain::primitives::UserId;
 
@@ -27,7 +27,7 @@ pub fn auth_router() -> Router<AppState> {
         .route("/auth/logout", get(logout))
 }
 
-/// Axum middleware that resolves [`AuthContext`] and inserts it into request extensions.
+/// Axum middleware that resolves [`AuthSubject`] and inserts it into request extensions.
 ///
 /// Extracts headers and session synchronously from the request, then performs
 /// async lookups, to avoid holding `&Request` across `.await` boundaries.
@@ -71,10 +71,10 @@ async fn resolve_auth_context(
     state: Option<&AppState>,
     session: Option<&Session>,
     bearer_token: Option<String>,
-) -> AuthContext {
+) -> AuthSubject {
     let state = match state {
         Some(s) => s,
-        None => return AuthContext::Anonymous,
+        None => return AuthSubject::Anonymous,
     };
 
     // 1. Check Authorization: Bearer header
@@ -85,7 +85,7 @@ async fn resolve_auth_context(
             if !creds.is_revoked() {
                 match &creds.owner {
                     galoy_agents_core::primitives::McpCredsOwner::User { user_id } => {
-                        return AuthContext::ExportedAgent(
+                        return AuthSubject::ExportedAgent(
                             *user_id,
                             creds.id,
                             creds.scopes.clone(),
@@ -95,7 +95,7 @@ async fn resolve_auth_context(
                         let synthetic_user_id = galoy_agents_core::primitives::UserId::from(
                             uuid::Uuid::from(*agent_id),
                         );
-                        return AuthContext::ExportedAgent(
+                        return AuthSubject::ExportedAgent(
                             synthetic_user_id,
                             creds.id,
                             creds.scopes.clone(),
@@ -113,7 +113,7 @@ async fn resolve_auth_context(
                         id_str.parse::<uuid::Uuid>().expect("validated as UUID"),
                     );
                     if let Ok(agent) = state.app.agents().find_by_id(agent_id).await {
-                        return AuthContext::Agent(
+                        return AuthSubject::Agent(
                             agent.workspace_id,
                             agent.id,
                             vec!["agent".to_string()],
@@ -127,11 +127,11 @@ async fn resolve_auth_context(
     // 2. Check session cookie
     if let Some(session) = session {
         if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
-            return AuthContext::User(user_id);
+            return AuthSubject::User(user_id);
         }
     }
 
-    AuthContext::Anonymous
+    AuthSubject::Anonymous
 }
 
 #[instrument(name = "web.auth.logout", skip_all)]

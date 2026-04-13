@@ -16,7 +16,7 @@ use tracing::instrument;
 
 use galoy_agents_core as domain;
 
-use domain::auth::AuthContext;
+use domain::auth::AuthSubject;
 use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
 use domain::primitives::{AgentId, McpCredsId, UserId, WorkspaceSecretId};
@@ -1185,16 +1185,16 @@ struct AgentMessageRequest {
 
 #[instrument(name = "api.agent.message", skip_all)]
 async fn api_agent_message(
-    Extension(auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthSubject>,
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
     Json(body): Json<AgentMessageRequest>,
 ) -> Response {
     let user_id = match &auth {
-        AuthContext::User(id) => *id,
-        AuthContext::ExportedAgent(id, _, _) => *id,
-        AuthContext::Agent(_, _, _) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-        AuthContext::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+        AuthSubject::User(id) => *id,
+        AuthSubject::ExportedAgent(id, _, _) => *id,
+        AuthSubject::Agent(_, _, _) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+        AuthSubject::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 
     let agent_id = AgentId::from(id);
@@ -1244,20 +1244,20 @@ async fn api_agent_message(
 // ---------------------------------------------------------------------------
 
 /// Internal endpoint: returns secret values for an agent's workspace.
-/// Secured via SA token auth (AuthContext::Agent) — same pattern as MCP gateway.
+/// Secured via SA token auth (AuthSubject::Agent) — same pattern as MCP gateway.
 #[instrument(
     name = "api.agent.secrets",
     skip_all,
     fields(github_token_provisioned, secret_count)
 )]
 async fn api_agent_secrets(
-    Extension(auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthSubject>,
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
     // Only allow Agent auth (SA token from sandbox pods)
     let (workspace_id, jwt_agent_id) = match &auth {
-        AuthContext::Agent(workspace_id, agent_id, _) => (*workspace_id, *agent_id),
+        AuthSubject::Agent(workspace_id, agent_id, _) => (*workspace_id, *agent_id),
         _ => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 

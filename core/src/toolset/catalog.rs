@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::audit::{Audit, InteractionOutcome};
-use crate::auth::AuthContext;
+use crate::auth::AuthSubject;
 
 use super::error::ToolSetsError;
 use super::filter::OutputFilter;
@@ -27,13 +27,13 @@ pub struct CatalogEntry {
 pub struct Catalog {
     pub(super) sets: Arc<RwLock<Vec<Arc<dyn ToolSet>>>>,
     pub(super) audit: Option<Arc<Audit>>,
-    pub(super) auth: Option<AuthContext>,
+    pub(super) auth: Option<AuthSubject>,
 }
 
 impl Catalog {
     /// Create a request-scoped catalog that records audit entries under the
-    /// given [`AuthContext`]. Cheap — only clones `Arc`s.
-    pub fn with_auth(&self, auth: &AuthContext) -> Self {
+    /// given [`AuthSubject`]. Cheap — only clones `Arc`s.
+    pub fn with_auth(&self, auth: &AuthSubject) -> Self {
         Self {
             sets: Arc::clone(&self.sets),
             audit: self.audit.clone(),
@@ -444,7 +444,7 @@ mod tests {
             &self,
             _tool_name: &str,
             _arguments: Option<JsonObject>,
-            _auth: Option<&AuthContext>,
+            _auth: Option<&AuthSubject>,
         ) -> Result<CallToolResult, ToolSetsError> {
             unimplemented!()
         }
@@ -579,7 +579,7 @@ mod tests {
             &self,
             _tool_name: &str,
             _arguments: Option<JsonObject>,
-            _auth: Option<&AuthContext>,
+            _auth: Option<&AuthSubject>,
         ) -> Result<CallToolResult, ToolSetsError> {
             Ok(CallToolResult::success(vec![]))
         }
@@ -587,12 +587,12 @@ mod tests {
 
     use crate::primitives::{McpCredsId, UserId};
 
-    fn admin_auth() -> AuthContext {
-        AuthContext::ExportedAgent(UserId::new(), McpCredsId::new(), vec!["admin".to_string()])
+    fn admin_auth() -> AuthSubject {
+        AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), vec!["admin".to_string()])
     }
 
-    fn unprivileged_auth() -> AuthContext {
-        AuthContext::ExportedAgent(UserId::new(), McpCredsId::new(), vec![])
+    fn unprivileged_auth() -> AuthSubject {
+        AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), vec![])
     }
 
     #[tokio::test]

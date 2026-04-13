@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::auth::AuthContext;
+use crate::auth::AuthSubject;
 use crate::primitives::*;
 
 /// Auto-incrementing audit entry identifier (BIGSERIAL).
@@ -66,19 +66,19 @@ impl std::fmt::Display for AuditSubject {
     }
 }
 
-impl From<&AuthContext> for AuditSubject {
-    fn from(ctx: &AuthContext) -> Self {
+impl From<&AuthSubject> for AuditSubject {
+    fn from(ctx: &AuthSubject) -> Self {
         match ctx {
-            AuthContext::User(user_id) => AuditSubject::User { user_id: *user_id },
-            AuthContext::ExportedAgent(user_id, mcp_creds_id, _) => AuditSubject::ExportedAgent {
+            AuthSubject::User(user_id) => AuditSubject::User { user_id: *user_id },
+            AuthSubject::ExportedAgent(user_id, mcp_creds_id, _) => AuditSubject::ExportedAgent {
                 mcp_creds_id: *mcp_creds_id,
                 user_id: *user_id,
             },
-            AuthContext::Agent(workspace_id, agent_id, _) => AuditSubject::Agent {
+            AuthSubject::Agent(workspace_id, agent_id, _) => AuditSubject::Agent {
                 workspace_id: *workspace_id,
                 agent_id: *agent_id,
             },
-            AuthContext::Anonymous => AuditSubject::Anonymous,
+            AuthSubject::Anonymous => AuditSubject::Anonymous,
         }
     }
 }
