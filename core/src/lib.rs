@@ -50,6 +50,12 @@ impl App {
         // required role, instead of erroring out on the first
         // workspace-create.
         config.agents.validate()?;
+        // Same for the executor — catch empty `ANTHROPIC_API_KEY` etc.
+        // before the first agent message lands.
+        config
+            .prompt_executor
+            .validate()
+            .map_err(|e| AppError::PromptExecutor(e.to_string()))?;
 
         let ca_db_exists = {
             let p = &config.toolsets.code_assistant.db_path;
@@ -188,4 +194,6 @@ pub enum AppError {
     CodeAssistant(String),
     #[error("AppError - GitHubApp: {0}")]
     GitHubApp(String),
+    #[error("AppError - PromptExecutor: {0}")]
+    PromptExecutor(String),
 }
