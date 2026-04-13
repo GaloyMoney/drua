@@ -7,7 +7,7 @@ pub mod encryption;
 pub mod github_app;
 pub mod mcp_creds;
 pub mod primitives;
-pub mod report;
+pub mod prompt_executor;
 pub mod toolset;
 pub mod user;
 pub mod workspace;

@@ -1,98 +1,69 @@
 pub mod config;
 mod entity;
 pub mod error;
-mod harness_client;
-mod light;
-pub(crate) mod repo;
-mod sandbox;
+pub mod repo;
+pub mod session;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
-use tokio::time::Instant;
-use tracing::instrument;
-
-pub use config::AgentConfig;
-use entity::*;
-pub use entity::{Agent, ChatConfig, SandboxConfig, SandboxState};
-pub use error::*;
-use repo::*;
-
-use crate::auth::AuthSubject;
-use crate::primitives::*;
 use crate::toolset::ToolSets;
 
-pub use crate::primitives::AgentMessageEvent;
-
-/// Cached sandbox metadata to avoid redundant K8s API calls on every message.
-struct SandboxCacheEntry {
-    service_fqdn: String,
-    image_checked_at: Instant,
-    last_healthy_at: Instant,
+/// Default authorization scopes granted to an agent when it's created.
+/// Eventually this will move into role-config, but for now it's hard-wired:
+/// `WorkspaceLead` gets read+write on its own workspace.
+fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<String> {
+    match role {
+        AgentRole::WorkspaceLead => vec![
+            format!("ws:{workspace_id}:read"),
+            format!("ws:{workspace_id}:write"),
+        ],
+    }
 }
 
-/// How long to trust the image-currency check before re-checking.
-const IMAGE_CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(300);
-/// How long to trust the health check before re-checking.
-const HEALTH_CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+use tracing::instrument;
+
+pub use config::{AgentsConfig, RoleConfig};
+pub use entity::*;
+use error::AgentError;
+use crate::primitives::{AgentId, AuthSubject, WorkspaceId};
+use repo::AgentRepo;
+use session::Sessions;
 
 #[derive(Clone)]
 pub struct Agents {
     repo: AgentRepo,
-    sandbox: Option<Arc<sandbox_client::SandboxClient>>,
-    harness_client: harness_client::HarnessClient,
-    light_config: config::LightRuntimeConfig,
-    default_storage_class: String,
+    sessions: Sessions,
+    config: AgentsConfig,
     toolsets: Arc<ToolSets>,
-    sandbox_cache: Arc<Mutex<HashMap<AgentId, SandboxCacheEntry>>>,
+    prompt_requests: llm::PromptRequestChannel,
 }
 
 impl Agents {
-    pub async fn init(
+    pub fn new(
         pool: &sqlx::PgPool,
-        config: AgentConfig,
+        config: AgentsConfig,
         toolsets: Arc<ToolSets>,
-    ) -> Result<Self, AgentError> {
-        let repo = AgentRepo::new(pool);
-        let sandbox = if config.sandbox.enabled {
-            let client = sandbox_client::SandboxClient::try_from_env(
-                config.sandbox.namespace.clone(),
-                config.sandbox.template_name.clone(),
-            )
-            .await?;
-            Some(Arc::new(client))
-        } else {
-            None
-        };
-        let default_storage_class = config
-            .sandbox
-            .persistence
-            .as_ref()
-            .map(|p| p.storage_class.clone())
-            .unwrap_or_default();
-        Ok(Self {
-            repo,
-            sandbox,
-            harness_client: harness_client::HarnessClient::new(),
-            light_config: config.light,
-            default_storage_class,
+        prompt_requests: llm::PromptRequestChannel,
+    ) -> Self {
+        Self {
+            repo: AgentRepo::new(pool),
+            sessions: Sessions::new(pool),
+            config,
             toolsets,
-            sandbox_cache: Arc::new(Mutex::new(HashMap::new())),
-        })
+            prompt_requests,
+        }
     }
 
     #[instrument(name = "domain.agent.create", skip(self))]
     pub async fn create(
         &self,
         workspace_id: WorkspaceId,
-        agent_type: AgentType,
-        user_id: UserId,
+        agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
         let mut op = self.repo.begin_op().await?;
         let agent = self
-            .create_in_op(&mut op, workspace_id, agent_type, user_id, name)
+            .create_in_op(&mut op, workspace_id, agent_role, name)
             .await?;
         op.commit().await?;
         Ok(agent)
@@ -103,212 +74,112 @@ impl Agents {
         &self,
         op: &mut es_entity::DbOp<'_>,
         workspace_id: WorkspaceId,
-        agent_type: AgentType,
-        user_id: UserId,
+        agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
-        let agent_name = name.into();
-        let agent_id = AgentId::new();
+        let role_config = self
+            .config
+            .builtin_roles
+            .get(&agent_role)
+            .ok_or(AgentError::RoleNotConfigured(agent_role))?
+            .clone();
+
+        let authz_scopes = default_authz_scopes(agent_role, workspace_id);
 
         let new_agent = NewAgent::builder()
-            .id(agent_id)
             .workspace_id(workspace_id)
-            .sandbox_config(agent_type.default_sandbox_config())
-            .agent_type(agent_type)
-            .name(agent_name)
+            .agent_role(agent_role)
+            .name(name)
+            .authz_scopes(authz_scopes.clone())
             .build()
-            .expect("Could not build new agent");
+            .expect("NewAgent build");
 
         let agent = self.repo.create_in_op(op, new_agent).await?;
-        Ok(agent)
-    }
 
-    #[instrument(name = "domain.agent.find_by_id", skip(self))]
-    pub async fn find_by_id(
-        &self,
-        id: impl Into<AgentId> + std::fmt::Debug,
-    ) -> Result<Agent, AgentError> {
-        Ok(self.repo.find_by_id(id.into()).await?)
-    }
+        let scope_refs: Vec<&str> = authz_scopes.iter().map(String::as_str).collect();
+        let tools: Vec<llm::prompt::Tool> = self
+            .toolsets
+            .top_level_tools(&scope_refs)
+            .map(|t| llm::prompt::Tool::from(t.as_ref()))
+            .collect();
 
-    #[instrument(name = "domain.agent.list_for_workspace", skip(self))]
-    pub async fn list_for_workspace(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<Vec<Agent>, AgentError> {
-        let query = es_entity::PaginatedQueryArgs {
-            first: 100,
-            after: None,
-        };
-        let result = self
-            .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
-                query,
-                es_entity::ListDirection::Descending,
+        self.sessions
+            .create_in_op(
+                op,
+                agent.id,
+                role_config.model,
+                role_config.system,
+                tools,
+                role_config.max_tokens,
+                role_config.reset_time_delta,
             )
             .await?;
-        Ok(result.entities)
-    }
-
-    /// Update the chat and sandbox configuration for an agent.
-    ///
-    /// Takes effect on the next message — does not affect in-flight conversations.
-    /// When sandbox resource config changes, the running sandbox is destroyed so
-    /// the next message triggers re-provisioning with the new resources.
-    #[instrument(name = "domain.agent.update_config", skip(self))]
-    pub async fn update_config(
-        &self,
-        id: AgentId,
-        chat_config: ChatConfig,
-        sandbox_config: SandboxConfig,
-    ) -> Result<Agent, AgentError> {
-        let mut agent = self.repo.find_by_id(id).await?;
-        let chat_changed = agent.update_chat_config(chat_config).did_execute();
-        let sandbox_changed = agent.update_sandbox_config(sandbox_config).did_execute();
-        if chat_changed || sandbox_changed {
-            self.repo.update(&mut agent).await?;
-        }
-        // Destroy running sandbox so the next message re-provisions with new config
-        if sandbox_changed {
-            self.sandbox_cache.lock().await.remove(&id);
-            self.destroy_sandbox(id).await?;
-        }
         Ok(agent)
     }
 
-    /// Send a message to an agent, dispatching to the appropriate runtime
-    /// based on the agent's type.
-    ///
-    /// - `RuntimeKind::Light` runs an in-process agentic loop via the Anthropic API
-    /// - `RuntimeKind::Sandbox` runs the agent harness inside a K8s sandbox pod
-    ///
-    /// Returns a receiver that streams `AgentMessageEvent`s.
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
         &self,
+        subject: AuthSubject,
         id: AgentId,
-        _user_id: UserId,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
-        let rx = match agent.agent_type.runtime_kind() {
-            RuntimeKind::Light => {
-                let auth = AuthSubject::Agent(agent.workspace_id, agent.id, Vec::new());
-                let catalog = self.toolsets.catalog().with_auth(&auth);
-                light::run(
-                    prompt,
-                    &self.light_config,
-                    &agent.chat_config,
-                    agent.agent_type.system_prompt(),
-                    catalog,
-                )
-                .await?
-            }
-            RuntimeKind::Sandbox => self.send_message_sandbox(agent, prompt).await?,
-        };
-
-        Ok(rx)
-    }
-
-    /// Soft-delete an agent and destroy its sandbox.
-    #[instrument(name = "domain.agent.delete_in_op", skip(self, op))]
-    pub async fn delete_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        id: impl Into<AgentId> + std::fmt::Debug,
-    ) -> Result<(), AgentError> {
-        let id = id.into();
-        // Best-effort sandbox teardown before deleting the entity
-        if let Err(e) = self.destroy_sandbox(id).await {
-            tracing::warn!(agent_id = %id, error = %e, "Failed to destroy sandbox during agent delete");
+        // Authorization: user and exported agents may always send. Another
+        // agent may only message a peer in its own workspace (whether
+        // unattributed `Agent` or `AgentOnBehalfOfUser`). Anonymous is
+        // rejected.
+        match &subject {
+            AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
+            AuthSubject::Agent(ws, _, _) | AuthSubject::AgentOnBehalfOfUser(_, ws, _, _)
+                if *ws == agent.workspace_id => {}
+            _ => return Err(AgentError::Unauthorized),
         }
-        let agent = self.repo.find_by_id(id).await?;
-        self.repo.delete_in_op(op, agent).await?;
-        Ok(())
-    }
 
-    /// Destroy an agent's sandbox (best-effort). Marks the agent as having
-    /// lost its sandbox and deletes the underlying K8s sandbox resource.
-    #[instrument(name = "domain.agent.destroy_sandbox", skip(self))]
-    pub async fn destroy_sandbox(
-        &self,
-        id: impl Into<AgentId> + std::fmt::Debug,
-    ) -> Result<(), AgentError> {
-        let client = match &self.sandbox {
-            Some(c) => c,
-            None => return Ok(()), // sandboxes not configured, nothing to do
-        };
-        let mut agent = self.repo.find_by_id(id.into()).await?;
-        let sandbox_name = agent.sandbox_name();
-
-        if agent.sandbox_lost().did_execute() {
-            self.repo.update(&mut agent).await?;
-        }
-        if let Err(e) = client.delete_sandbox(&sandbox_name).await {
-            tracing::warn!(sandbox = %sandbox_name, error = %e, "Failed to delete sandbox");
-        }
-        Ok(())
-    }
-
-    /// Sandbox-specific send_message path.
-    ///
-    /// Provisions the sandbox if needed, resolves its service FQDN, then
-    /// sends the message via HTTP POST to the harness and streams SSE
-    /// events back through the channel.
-    ///
-    /// Uses a per-agent cache to skip expensive K8s API calls (image check,
-    /// FQDN resolution, health probe) on the warm path.
-    async fn send_message_sandbox(
-        &self,
-        agent: Agent,
-        prompt: String,
-    ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
-        let base_client = self
-            .sandbox
-            .as_ref()
-            .ok_or(AgentError::SandboxNotConfigured)?;
-
-        let client = sandbox::configure_client(
-            base_client,
-            &agent.sandbox_config,
-            &self.default_storage_class,
-        );
+        let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
-        let harness = self.harness_client.clone();
-        let repo = self.repo.clone();
-        let session_id = Some(agent.id.to_string());
-        let model = Some(agent.chat_config.model.clone());
-        let max_turns = Some(agent.chat_config.max_turns);
-        let disallowed_tools = agent.sandbox_config.disallowed_tools.clone();
-        let sandbox_cache = Arc::clone(&self.sandbox_cache);
-        let agent_id = agent.id;
+        // Attribute the agent's tool calls to the originating user when one
+        // is available — direct `User`, an `ExportedAgent` token, or a peer
+        // `AgentOnBehalfOfUser`. Otherwise fall back to an unattributed
+        // `Agent` subject.
+        let agent_subject = match subject.originating_user_id() {
+            Some(user_id) => agent.auth_subject_for_user(user_id),
+            None => agent.auth_subject(),
+        };
 
-        tokio::spawn(async move {
-            // Check cache for a previously resolved sandbox
-            let cached = {
-                let cache = sandbox_cache.lock().await;
-                cache.get(&agent_id).map(|e| {
-                    (
-                        e.service_fqdn.clone(),
-                        e.image_checked_at,
-                        e.last_healthy_at,
-                    )
+        if let Some(prompt_state) = self
+            .sessions
+            .add_user_message(id, source, prompt.clone())
+            .await?
+        {
+            let _ = tx
+                .send(AgentMessageEvent::UserMessage {
+                    source,
+                    text: prompt,
                 })
-            };
+                .await;
 
-            let service_fqdn = if let Some((fqdn, image_checked_at, last_healthy_at)) = cached {
-                // Fast path: skip image check if recently verified
-                if image_checked_at.elapsed() > IMAGE_CHECK_TTL {
-                    // Re-check image currency periodically
-                    match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            // Sandbox was stale — evict cache and retry
-                            sandbox_cache.lock().await.remove(&agent_id);
-                            tracing::warn!(error = %e, "Cached sandbox stale, evicted");
+            let (request, response_rx) = llm::PromptRequest::new(prompt_state);
+            self.prompt_requests
+                .send(request)
+                .await
+                .map_err(|_| AgentError::PromptRequestChannelClosed)?;
+
+            let sessions = self.sessions.clone();
+            let toolsets = self.toolsets.clone();
+            let prompt_requests = self.prompt_requests.clone();
+            tokio::spawn(async move {
+                let mut next = response_rx.await;
+                let mut turn: u32 = 0;
+                let mut input_tokens: u32 = 0;
+                let mut output_tokens: u32 = 0;
+                loop {
+                    turn += 1;
+                    let response = match next {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
                             let _ = tx
                                 .send(AgentMessageEvent::Error {
                                     message: e.to_string(),
@@ -316,119 +187,142 @@ impl Agents {
                                 .await;
                             return;
                         }
-                    }
-                    // Update image check timestamp
-                    if let Some(entry) = sandbox_cache.lock().await.get_mut(&agent_id) {
-                        entry.image_checked_at = Instant::now();
-                    }
-                }
+                        Err(_) => return, // executor dropped the response channel
+                    };
 
-                // Skip health check if recently healthy
-                if last_healthy_at.elapsed() > HEALTH_CHECK_TTL {
-                    if let Err(e) = harness
-                        .wait_healthy(&fqdn, std::time::Duration::from_secs(30))
+                    input_tokens += response.usage.input_tokens;
+                    output_tokens += response.usage.output_tokens;
+
+                    let tool_calls = sessions
+                        .add_prompt_response(id, response.clone())
                         .await
-                    {
-                        // Health check failed — evict cache
-                        sandbox_cache.lock().await.remove(&agent_id);
-                        tracing::warn!(error = %e, "Cached harness unhealthy, evicted");
+                        .unwrap_or_default();
+                    forward_response(response, &tx).await;
+
+                    if tool_calls.is_empty() {
+                        break;
+                    }
+
+                    let results =
+                        fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx).await;
+
+                    let updated_prompt = match sessions.add_tool_results(id, results).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = tx
+                                .send(AgentMessageEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let (request, rx_next) = llm::PromptRequest::new(updated_prompt);
+                    if prompt_requests.send(request).await.is_err() {
                         let _ = tx
                             .send(AgentMessageEvent::Error {
-                                message: e.to_string(),
+                                message: "prompt request channel closed".to_string(),
                             })
                             .await;
                         return;
                     }
-                    if let Some(entry) = sandbox_cache.lock().await.get_mut(&agent_id) {
-                        entry.last_healthy_at = Instant::now();
-                    }
+                    next = rx_next.await;
                 }
-
-                fqdn
-            } else {
-                // Cold path: full provisioning flow
-                let sandbox_name = match sandbox::ensure_sandbox(&client, agent, &repo, &tx).await {
-                    Ok(name) => name,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Sandbox provisioning failed");
-                        let _ = tx
-                            .send(AgentMessageEvent::Error {
-                                message: e.to_string(),
-                            })
-                            .await;
-                        return;
-                    }
-                };
-
-                let fqdn = match client.get_service_fqdn(&sandbox_name).await {
-                    Ok(fqdn) => fqdn,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to resolve sandbox service FQDN");
-                        let _ = tx
-                            .send(AgentMessageEvent::Error {
-                                message: format!("Failed to resolve sandbox service: {e}"),
-                            })
-                            .await;
-                        return;
-                    }
-                };
 
                 let _ = tx
-                    .send(AgentMessageEvent::Service {
-                        message: "Connecting to agent…".to_string(),
+                    .send(AgentMessageEvent::Done {
+                        turns: turn,
+                        input_tokens,
+                        output_tokens,
+                        duration_ms: None,
+                        cost_usd: None,
                     })
                     .await;
-                if let Err(e) = harness
-                    .wait_healthy(&fqdn, std::time::Duration::from_secs(60))
-                    .await
-                {
-                    tracing::error!(error = %e, "Harness health check failed");
-                    let _ = tx
-                        .send(AgentMessageEvent::Error {
-                            message: e.to_string(),
-                        })
-                        .await;
-                    return;
-                }
-
-                // Populate cache
-                sandbox_cache.lock().await.insert(
-                    agent_id,
-                    SandboxCacheEntry {
-                        service_fqdn: fqdn.clone(),
-                        image_checked_at: Instant::now(),
-                        last_healthy_at: Instant::now(),
-                    },
-                );
-
-                fqdn
-            };
-
-            let input = serde_json::json!({
-                "prompt": prompt,
-                "session_id": session_id,
-                "model": model,
-                "max_turns": max_turns,
-                "disallowed_tools": disallowed_tools,
             });
-
-            if let Err(e) = harness.send_message(&service_fqdn, input, tx.clone()).await {
-                tracing::error!(error = %e, "Agent message relay failed");
-                // Evict cache on send failure
-                sandbox_cache.lock().await.remove(&agent_id);
-                let _ = tx
-                    .send(AgentMessageEvent::Error {
-                        message: e.to_string(),
-                    })
-                    .await;
-            } else {
-                // Update last healthy timestamp on success
-                if let Some(entry) = sandbox_cache.lock().await.get_mut(&agent_id) {
-                    entry.last_healthy_at = Instant::now();
-                }
-            }
-        });
+        }
 
         Ok(rx)
+    }
+}
+
+async fn fan_out_tool_calls(
+    toolsets: &Arc<ToolSets>,
+    subject: &AuthSubject,
+    calls: Vec<llm::RequestToolUse>,
+    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
+) -> Vec<llm::ToolUseResult> {
+    let dispatches = calls.into_iter().map(|tu| {
+        let toolsets = toolsets.clone();
+        let subject = subject.clone();
+        async move {
+            let id = tu.id.clone();
+            let name = tu.name.clone();
+            let result = match toolsets
+                .call_top_level_tool(&subject, &name, tu.input.as_object().cloned())
+                .await
+            {
+                Ok(r) => llm::ToolUseResult {
+                    tool_use_id: id,
+                    content: call_result_to_text(&r),
+                    is_error: r.is_error.unwrap_or(false),
+                },
+                Err(e) => llm::ToolUseResult {
+                    tool_use_id: id,
+                    content: e.to_string(),
+                    is_error: true,
+                },
+            };
+            (name, result)
+        }
+    });
+
+    let outcomes = futures::future::join_all(dispatches).await;
+    let mut results = Vec::with_capacity(outcomes.len());
+    for (name, result) in outcomes {
+        let _ = tx
+            .send(AgentMessageEvent::ToolResult {
+                name,
+                is_error: result.is_error,
+            })
+            .await;
+        results.push(result);
+    }
+    results
+}
+
+fn call_result_to_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn forward_response(
+    response: llm::PromptResponse,
+    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
+) {
+    for block in response.content {
+        match block {
+            llm::prompt::AssistantBlock::Text { text, .. } => {
+                let _ = tx.send(AgentMessageEvent::AssistantText { text }).await;
+            }
+            llm::prompt::AssistantBlock::ToolUse { name, input, .. } => {
+                let _ = tx
+                    .send(AgentMessageEvent::ToolCall {
+                        name,
+                        arguments: Some(input),
+                    })
+                    .await;
+            }
+            llm::prompt::AssistantBlock::Thinking { text, .. } => {
+                let _ = tx.send(AgentMessageEvent::Thinking { text }).await;
+            }
+        }
     }
 }

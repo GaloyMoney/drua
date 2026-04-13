@@ -7,7 +7,7 @@ use tracing::instrument;
 
 pub use entity::*;
 use error::AgentSessionError;
-use primitives::{AgentId, UserMessageSource};
+use crate::primitives::{AgentId, UserMessageSource};
 use repo::AgentSessionRepo;
 
 es_entity::entity_id! { AgentSessionId }

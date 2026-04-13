@@ -8,7 +8,7 @@ use tracing::instrument;
 pub use entity::WorkspaceSecret;
 use entity::*;
 pub use error::*;
-pub use primitives::*;
+pub use crate::primitives::*;
 use repo::*;
 
 use crate::encryption::EncryptionKey;

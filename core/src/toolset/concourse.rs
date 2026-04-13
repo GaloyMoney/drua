@@ -6,7 +6,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 use crate::auth::AuthSubject;
 
 use super::filter::OutputFilter;
-use super::{ToolSet, ToolSetEntry, ToolSetsError};
+use super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct ConcourseToolSet {
     client: Arc<ConcourseClient>,
@@ -116,7 +116,7 @@ impl ConcourseToolSet {
 }
 
 #[async_trait::async_trait]
-impl ToolSet for ConcourseToolSet {
+impl SearchableToolSet for ConcourseToolSet {
     fn name(&self) -> &str {
         "concourse"
     }
