@@ -48,20 +48,24 @@ impl AuthSubject {
     /// authenticate before sending messages).
     pub fn to_message_source(&self) -> UserMessageSource {
         match self {
-            AuthSubject::User(user_id) => UserMessageSource::User(*user_id),
-            AuthSubject::ExportedAgent(user_id, creds_id, _) => {
-                UserMessageSource::ExportedAgent(*user_id, *creds_id)
-            }
-            AuthSubject::Agent(_, agent_id, _) => UserMessageSource::Agent(*agent_id),
+            AuthSubject::User(user_id) => UserMessageSource::User { user_id: *user_id },
+            AuthSubject::ExportedAgent(user_id, creds_id, _) => UserMessageSource::ExportedAgent {
+                user_id: *user_id,
+                creds_id: *creds_id,
+            },
+            AuthSubject::Agent(_, agent_id, _) => UserMessageSource::Agent {
+                agent_id: *agent_id,
+            },
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
         }
     }
 }
 
 /// Originator of a user-facing message sent to an agent session.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserMessageSource {
-    User(UserId),
-    ExportedAgent(UserId, McpCredsId),
-    Agent(AgentId),
+    User { user_id: UserId },
+    ExportedAgent { user_id: UserId, creds_id: McpCredsId },
+    Agent { agent_id: AgentId },
 }

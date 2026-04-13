@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 use primitives::{AgentId, UserMessageSource};
 
-use super::{error::AgentSessionError, thread::SessionThread, AgentSessionId};
+use super::{
+    error::AgentSessionError,
+    thread::{NewSessionThread, SessionThread, SessionThreadId, ThreadStartReason},
+    AgentSessionId,
+};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -14,6 +18,10 @@ pub enum AgentSessionEvent {
         id: AgentSessionId,
         agent_id: AgentId,
     },
+    ThreadStarted {
+        thread_id: SessionThreadId,
+        start_reason: ThreadStartReason,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -21,6 +29,8 @@ pub enum AgentSessionEvent {
 pub struct AgentSession {
     pub id: AgentSessionId,
     pub agent_id: AgentId,
+    #[builder(default = "SessionThreadId::from(uuid::Uuid::nil())")]
+    current_thread: SessionThreadId,
     events: EntityEvents<AgentSessionEvent>,
 
     #[es_entity(nested)]
@@ -29,12 +39,44 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    /// Push the initial thread. Idempotent — if a thread has already been
+    /// started this is a no-op.
+    pub fn init_initial_thread(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentSessionEvent::ThreadStarted { .. }
+        );
+
+        let thread_id = SessionThreadId::new();
+        let new_thread = NewSessionThread::builder()
+            .id(thread_id)
+            .session_id(self.id)
+            .start_reason(ThreadStartReason::InitialThread)
+            .build()
+            .expect("NewSessionThread build");
+        self.threads.add_new(new_thread);
+
+        self.events.push(AgentSessionEvent::ThreadStarted {
+            thread_id,
+            start_reason: ThreadStartReason::InitialThread,
+        });
+        self.current_thread = thread_id;
+
+        Idempotent::Executed(())
+    }
+
+    fn current_thread(&mut self) -> &mut SessionThread {
+        self.threads
+            .get_persisted_mut(&self.current_thread)
+            .expect("current thread present in nested collection")
+    }
+
     pub fn add_user_message(
         &mut self,
-        _source: UserMessageSource,
-        _prompt: String,
+        source: UserMessageSource,
+        prompt: String,
     ) -> Result<Idempotent<llm::Prompt>, AgentSessionError> {
-        unimplemented!()
+        self.current_thread().add_user_message(source, prompt)
     }
 }
 
@@ -48,6 +90,9 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
             match event {
                 AgentSessionEvent::Initialized { id, agent_id } => {
                     builder = builder.id(*id).agent_id(*agent_id);
+                }
+                AgentSessionEvent::ThreadStarted { thread_id, .. } => {
+                    builder = builder.current_thread(*thread_id);
                 }
             }
         }
