@@ -5,6 +5,7 @@ members = [
   "core",
   "mcp-gateway",
   "lib/sandbox-client",
+  "core/crates/primitives",
   "lib/llm",
   "web",
   "code-assistant/crates/core",
@@ -24,6 +25,7 @@ name = "galoy-agents"
 concourse-client = { path = "lib/concourse-client" }
 sandbox-client = { path = "lib/sandbox-client" }
 code-assistant-core = { path = "code-assistant/crates/core" }
+primitives = { path = "core/crates/primitives" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
@@ -79,6 +81,13 @@ futures = "0.3"
 # WebSocket client
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 url = "2"
+
+# Event sourcing
+es-entity = "0.10"
+derive_builder = "0.20"
+
+# Database
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 
 # Errors
 anyhow = "1"

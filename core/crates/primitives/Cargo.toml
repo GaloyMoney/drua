@@ -1,0 +1,9 @@
+[package]
+name = "primitives"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+es-entity = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
