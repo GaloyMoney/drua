@@ -359,7 +359,10 @@ async fn code_assistant_dashboard(State(state): State<AppState>, session: Sessio
         return Redirect::to("/").into_response();
     }
 
-    let ca = state.app.code_assistant().unwrap();
+    let ca = match state.app.code_assistant() {
+        Some(ca) => ca,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
 
     let stats = match ca.logs().dashboard_stats().await {
         Ok(stats) => stats,
@@ -390,14 +393,11 @@ async fn code_assistant_recent(State(state): State<AppState>, session: Session) 
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state
-        .app
-        .code_assistant()
-        .unwrap()
-        .logs()
-        .recent_requests(10)
-        .await
-    {
+    let ca = match state.app.code_assistant() {
+        Some(ca) => ca,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let rows = match ca.logs().recent_requests(10).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load recent requests");
@@ -414,14 +414,11 @@ async fn code_assistant_least_useful(State(state): State<AppState>, session: Ses
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rows = match state
-        .app
-        .code_assistant()
-        .unwrap()
-        .logs()
-        .least_useful(10)
-        .await
-    {
+    let ca = match state.app.code_assistant() {
+        Some(ca) => ca,
+        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let rows = match ca.logs().least_useful(10).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load least useful requests");
