@@ -31,6 +31,9 @@ pub enum SessionThreadEvent {
     AssistantResponse {
         content: Vec<AssistantBlock>,
     },
+    ToolResults {
+        results: Vec<llm::ToolUseResult>,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -77,6 +80,27 @@ impl SessionThread {
         });
 
         Ok(Idempotent::Executed(self.prompt_state.clone()))
+    }
+
+    pub fn add_tool_results(&mut self, results: Vec<llm::ToolUseResult>) -> llm::Prompt {
+        let blocks: Vec<llm::prompt::UserBlock> = results
+            .iter()
+            .map(|r| llm::prompt::UserBlock::ToolResult {
+                tool_use_id: r.tool_use_id.clone(),
+                content: vec![llm::prompt::ToolResultBlock::Text {
+                    text: r.content.clone(),
+                }],
+                is_error: r.is_error,
+                cache_control: None,
+            })
+            .collect();
+
+        self.events
+            .push(SessionThreadEvent::ToolResults { results });
+        self.prompt_state
+            .messages
+            .push(llm::prompt::Message::User { content: blocks });
+        self.prompt_state.clone()
     }
 
     pub fn add_prompt_response(
@@ -136,6 +160,22 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                     prompt_state.messages.push(llm::prompt::Message::Assistant {
                         content: content.clone(),
                     });
+                }
+                SessionThreadEvent::ToolResults { results } => {
+                    let blocks: Vec<llm::prompt::UserBlock> = results
+                        .iter()
+                        .map(|r| llm::prompt::UserBlock::ToolResult {
+                            tool_use_id: r.tool_use_id.clone(),
+                            content: vec![llm::prompt::ToolResultBlock::Text {
+                                text: r.content.clone(),
+                            }],
+                            is_error: r.is_error,
+                            cache_control: None,
+                        })
+                        .collect();
+                    prompt_state
+                        .messages
+                        .push(llm::prompt::Message::User { content: blocks });
                 }
             }
         }

@@ -1,6 +1,6 @@
 use agent::{AgentMessageEvent, AgentRole, Agents};
 use llm::prompt::AssistantBlock;
-use llm::{PromptRequest, PromptResponse, Usage};
+use llm::{PromptRequest, PromptResponse, ToolUseRequest, Usage};
 use primitives::{AuthSubject, UserId, WorkspaceId};
 use tokio::sync::mpsc;
 
@@ -16,7 +16,8 @@ async fn send_message_round_trip_via_prompt_channel() {
     let pool = pool().await;
 
     let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
-    let agents = Agents::new(&pool, prompt_tx);
+    let (tool_tx, _tool_rx) = mpsc::channel::<ToolUseRequest>(64);
+    let agents = Agents::new(&pool, prompt_tx, tool_tx);
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead")

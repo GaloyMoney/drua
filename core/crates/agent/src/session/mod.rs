@@ -58,6 +58,18 @@ impl Sessions {
         Ok(next_tools)
     }
 
+    #[instrument(name = "domain.agent_session.add_tool_results", skip(self, results))]
+    pub async fn add_tool_results(
+        &self,
+        agent_id: AgentId,
+        results: Vec<llm::ToolUseResult>,
+    ) -> Result<llm::Prompt, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let prompt = session.add_tool_results(results);
+        self.repo.update(&mut session).await?;
+        Ok(prompt)
+    }
+
     #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]
     pub async fn add_user_message(
         &self,

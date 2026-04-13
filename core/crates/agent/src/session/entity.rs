@@ -85,6 +85,10 @@ impl AgentSession {
     ) -> Vec<llm::RequestToolUse> {
         self.current_thread().add_prompt_response(response)
     }
+
+    pub fn add_tool_results(&mut self, results: Vec<llm::ToolUseResult>) -> llm::Prompt {
+        self.current_thread().add_tool_results(results)
+    }
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {

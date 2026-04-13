@@ -24,6 +24,7 @@ version = "0.1.0"
 dependencies = [
  "derive_builder",
  "es-entity",
+ "futures",
  "llm",
  "primitives",
  "serde",
@@ -5308,6 +5309,15 @@ dependencies = [
  "bytes",
  "prost",
  "tonic",
+]
+
+[[package]]
+name = "toolset"
+version = "0.1.0"
+dependencies = [
+ "llm",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

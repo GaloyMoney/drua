@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 derive_builder = { workspace = true }
 es-entity = { workspace = true }
+futures = { workspace = true }
 llm = { workspace = true }
 primitives = { workspace = true }
 serde = { workspace = true }

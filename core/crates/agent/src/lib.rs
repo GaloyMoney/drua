@@ -16,14 +16,21 @@ pub struct Agents {
     repo: AgentRepo,
     sessions: Sessions,
     prompt_requests: llm::PromptRequestChannel,
+    #[allow(dead_code)]
+    tool_uses: llm::ToolUseRequestChannel,
 }
 
 impl Agents {
-    pub fn new(pool: &sqlx::PgPool, prompt_requests: llm::PromptRequestChannel) -> Self {
+    pub fn new(
+        pool: &sqlx::PgPool,
+        prompt_requests: llm::PromptRequestChannel,
+        tool_uses: llm::ToolUseRequestChannel,
+    ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
             sessions: Sessions::new(pool),
             prompt_requests,
+            tool_uses,
         }
     }
 
@@ -91,28 +98,129 @@ impl Agents {
                 .map_err(|_| AgentError::PromptRequestChannelClosed)?;
 
             let sessions = self.sessions.clone();
+            let tool_uses = self.tool_uses.clone();
+            let prompt_requests = self.prompt_requests.clone();
             tokio::spawn(async move {
-                match response_rx.await {
-                    Ok(Ok(response)) => {
-                        let _tool_calls = sessions.add_prompt_response(id, response.clone()).await;
-                        forward_response(response, &tx).await;
+                let mut next = response_rx.await;
+                let mut turn: u32 = 0;
+                let mut input_tokens: u32 = 0;
+                let mut output_tokens: u32 = 0;
+                loop {
+                    turn += 1;
+                    let response = match next {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            let _ = tx
+                                .send(AgentMessageEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                        Err(_) => return, // executor dropped the response channel
+                    };
+
+                    input_tokens += response.usage.input_tokens;
+                    output_tokens += response.usage.output_tokens;
+
+                    let tool_calls = sessions
+                        .add_prompt_response(id, response.clone())
+                        .await
+                        .unwrap_or_default();
+                    forward_response(response, &tx).await;
+
+                    if tool_calls.is_empty() {
+                        break;
                     }
-                    Ok(Err(e)) => {
+
+                    let results = fan_out_tool_calls(&tool_uses, tool_calls, &tx).await;
+
+                    let updated_prompt = match sessions.add_tool_results(id, results).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = tx
+                                .send(AgentMessageEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let (request, response_rx) = llm::PromptRequest::new(updated_prompt);
+                    if prompt_requests.send(request).await.is_err() {
                         let _ = tx
                             .send(AgentMessageEvent::Error {
-                                message: e.to_string(),
+                                message: "prompt request channel closed".to_string(),
                             })
                             .await;
+                        return;
                     }
-                    Err(_) => {
-                        // executor dropped the response channel without sending
-                    }
+                    next = response_rx.await;
                 }
+
+                let _ = tx
+                    .send(AgentMessageEvent::Done {
+                        turns: turn,
+                        input_tokens,
+                        output_tokens,
+                    })
+                    .await;
             });
         }
 
         Ok(rx)
     }
+}
+
+async fn fan_out_tool_calls(
+    tool_uses: &llm::ToolUseRequestChannel,
+    calls: Vec<llm::RequestToolUse>,
+    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
+) -> Vec<llm::ToolUseResult> {
+    let dispatches = calls.into_iter().map(|tu| {
+        let chan = tool_uses.clone();
+        async move {
+            let id = tu.id.clone();
+            let name = tu.name.clone();
+            let (req, rx) = llm::ToolUseRequest::new(tu);
+            let result = if chan.send(req).await.is_err() {
+                llm::ToolUseResult {
+                    tool_use_id: id,
+                    content: "tool request channel closed".into(),
+                    is_error: true,
+                }
+            } else {
+                match rx.await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => llm::ToolUseResult {
+                        tool_use_id: id,
+                        content: e.to_string(),
+                        is_error: true,
+                    },
+                    Err(_) => llm::ToolUseResult {
+                        tool_use_id: id,
+                        content: "tool response channel closed".into(),
+                        is_error: true,
+                    },
+                }
+            };
+            (name, result)
+        }
+    });
+
+    let outcomes = futures::future::join_all(dispatches).await;
+    let mut results = Vec::with_capacity(outcomes.len());
+    for (name, result) in outcomes {
+        let _ = tx
+            .send(AgentMessageEvent::ToolResult {
+                name,
+                is_error: result.is_error,
+            })
+            .await;
+        results.push(result);
+    }
+    results
 }
 
 async fn forward_response(
@@ -137,11 +245,4 @@ async fn forward_response(
             }
         }
     }
-    let _ = tx
-        .send(AgentMessageEvent::Done {
-            turns: 1,
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
-        })
-        .await;
 }
