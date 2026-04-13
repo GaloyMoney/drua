@@ -96,14 +96,11 @@ impl ExecutorState {
         let model = self.models.iter().find(|m| m.name == model_name).cloned();
         match model {
             None => {
-                tokio::spawn(async move {
-                    let _ = request
-                        .response_channel
-                        .send(Err(PromptError::Provider(format!(
-                            "model `{model_name}` not configured"
-                        ))))
-                        .await;
-                });
+                let _ = request
+                    .response_channel
+                    .send(Err(PromptError::Provider(format!(
+                        "model `{model_name}` not configured"
+                    ))));
             }
             Some(model) => {
                 if request.prompt.max_tokens.is_none() {
@@ -135,7 +132,7 @@ async fn evaluate_with_anthropic(
         .send_prompt(&prompt)
         .await
         .map_err(|e| PromptError::Provider(e.to_string()));
-    let _ = response.send(outcome).await;
+    let _ = response.send(outcome);
 }
 
 #[derive(Clone)]

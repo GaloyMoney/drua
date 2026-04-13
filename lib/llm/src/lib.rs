@@ -4,4 +4,4 @@ pub mod response;
 
 pub use prompt::Prompt;
 pub use request::{PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
-pub use response::{PromptResponse, StopReason, Usage};
+pub use response::{PromptResponse, RequestToolUse, StopReason, Usage};

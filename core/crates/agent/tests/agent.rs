@@ -49,9 +49,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             },
             stop_reason: None,
         }))
-        .await
         .expect("send response");
-    drop(request);
 
     // Drain the AgentMessageEvent channel until the forwarder closes it.
     let mut events = Vec::new();

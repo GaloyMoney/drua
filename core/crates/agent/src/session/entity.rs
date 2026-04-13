@@ -78,6 +78,13 @@ impl AgentSession {
     ) -> Result<Idempotent<llm::Prompt>, AgentSessionError> {
         self.current_thread().add_user_message(source, prompt)
     }
+
+    pub fn add_prompt_response(
+        &mut self,
+        response: llm::PromptResponse,
+    ) -> Vec<llm::RequestToolUse> {
+        self.current_thread().add_prompt_response(response)
+    }
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {

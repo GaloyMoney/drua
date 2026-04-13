@@ -12,6 +12,8 @@ use repo::AgentSessionRepo;
 
 es_entity::entity_id! { AgentSessionId }
 
+pub use llm::RequestToolUse;
+
 #[derive(Clone)]
 pub struct Sessions {
     repo: AgentSessionRepo,
@@ -41,14 +43,19 @@ impl Sessions {
         Ok(session)
     }
 
-    #[instrument(name = "domain.agent_session.add_response_message", skip(self, _text))]
-    pub async fn add_response_message(
+    #[instrument(
+        name = "domain.agent_session.add_prompt_response",
+        skip(self, response)
+    )]
+    pub async fn add_prompt_response(
         &self,
-        _agent_id: AgentId,
-        _text: String,
-    ) -> Result<(), AgentSessionError> {
-        // persist an assistant response message — wired up later.
-        Ok(())
+        agent_id: AgentId,
+        response: llm::PromptResponse,
+    ) -> Result<Vec<llm::RequestToolUse>, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let next_tools = session.add_prompt_response(response);
+        self.repo.update(&mut session).await?;
+        Ok(next_tools)
     }
 
     #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]

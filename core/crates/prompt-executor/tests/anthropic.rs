@@ -35,11 +35,10 @@ async fn anthropic_round_trip_via_executor() {
         max_tokens: None, // executor should fill this in from default_max_tokens
     };
 
-    let (request, mut response_rx) = PromptRequest::new(prompt);
+    let (request, response_rx) = PromptRequest::new(prompt);
     prompt_tx.send(request).await.expect("dispatch request");
 
     let result = response_rx
-        .recv()
         .await
         .expect("response channel closed without sending")
         .expect("anthropic returned an error");

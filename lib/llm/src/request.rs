@@ -1,4 +1,4 @@
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{Prompt, PromptResponse};
 
@@ -12,11 +12,9 @@ pub struct PromptRequest {
 
 impl PromptRequest {
     /// Build a request for `prompt`, returning the request to dispatch and the
-    /// receiver the caller should drain to get response batches.
-    pub fn new(
-        prompt: Prompt,
-    ) -> (Self, mpsc::Receiver<Result<PromptResponse, PromptError>>) {
-        let (tx, rx) = mpsc::channel(64);
+    /// receiver the caller should `await` to get the response.
+    pub fn new(prompt: Prompt) -> (Self, oneshot::Receiver<Result<PromptResponse, PromptError>>) {
+        let (tx, rx) = oneshot::channel();
         (
             Self {
                 prompt,
@@ -30,10 +28,9 @@ impl PromptRequest {
 /// Channel a producer uses to dispatch prompt requests to an evaluator.
 pub type PromptRequestChannel = mpsc::Sender<PromptRequest>;
 
-/// Channel an evaluator uses to stream responses back to the originator of a
-/// `PromptRequest`. Each send delivers one full `PromptResponse` (content +
-/// usage + stop_reason) or an error.
-pub type PromptResponseChannel = mpsc::Sender<Result<PromptResponse, PromptError>>;
+/// One-shot channel an evaluator uses to send the (single) response for a
+/// `PromptRequest` back to the originator.
+pub type PromptResponseChannel = oneshot::Sender<Result<PromptResponse, PromptError>>;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PromptError {
