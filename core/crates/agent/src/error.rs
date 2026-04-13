@@ -15,4 +15,6 @@ pub enum AgentError {
     Find(#[from] AgentFindError),
     #[error("AgentError - Session: {0}")]
     Session(#[from] AgentSessionError),
+    #[error("AgentError - prompt request channel closed")]
+    PromptRequestChannelClosed,
 }

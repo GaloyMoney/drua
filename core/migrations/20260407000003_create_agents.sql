@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS agents (
     id UUID PRIMARY KEY,
-    workspace_id UUID NOT NULL REFERENCES workspaces(id),
+    workspace_id UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
 );
 
