@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
@@ -10,9 +11,10 @@ use super::{error::AgentSessionError, AgentSessionId};
 es_entity::entity_id! { SessionThreadId }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThreadStartReason {
     InitialThread,
+    TimeDeltaExceeded { previous_thread: SessionThreadId },
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +107,16 @@ impl SessionThread {
             .messages
             .push(llm::prompt::Message::User { content: blocks });
         self.prompt_state.clone()
+    }
+
+    /// Timestamp of the most recent persisted `UserMessage` event, if any.
+    /// Returns `None` while the thread has only its `Initialized` event.
+    pub fn last_user_message_at(&self) -> Option<DateTime<Utc>> {
+        self.events
+            .iter_persisted()
+            .rev()
+            .find(|e| matches!(e.event, SessionThreadEvent::UserMessage { .. }))
+            .map(|e| e.recorded_at)
     }
 
     pub fn add_prompt_response(

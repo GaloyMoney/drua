@@ -27,6 +27,7 @@ dependencies = [
  "concourse-client",
  "derive_builder",
  "es-entity",
+ "futures",
  "http",
  "llm",
  "primitives",

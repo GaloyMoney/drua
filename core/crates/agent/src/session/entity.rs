@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,8 @@ pub enum AgentSessionEvent {
         system: Vec<SystemBlock>,
         tools: Vec<Tool>,
         max_tokens: u32,
+        #[serde(default)]
+        reset_time_delta: Option<std::time::Duration>,
     },
     ThreadStarted {
         thread_id: SessionThreadId,
@@ -38,6 +41,8 @@ pub struct AgentSession {
     pub system: Vec<SystemBlock>,
     pub tools: Vec<Tool>,
     pub max_tokens: u32,
+    #[builder(default)]
+    pub reset_time_delta: Option<std::time::Duration>,
     #[builder(default = "SessionThreadId::from(uuid::Uuid::nil())")]
     current_thread: SessionThreadId,
     events: EntityEvents<AgentSessionEvent>,
@@ -55,12 +60,20 @@ impl AgentSession {
             self.events.iter_all().rev(),
             already_applied: AgentSessionEvent::ThreadStarted { .. }
         );
+        self.start_new_thread(ThreadStartReason::InitialThread);
+        Idempotent::Executed(())
+    }
 
+    /// Push a new thread carrying the session's current model/system/tools/
+    /// max_tokens, emit the `ThreadStarted` event, and switch
+    /// `current_thread` to it. Used both for the initial thread and for
+    /// time-delta-driven resets.
+    fn start_new_thread(&mut self, start_reason: ThreadStartReason) {
         let thread_id = SessionThreadId::new();
         let new_thread = NewSessionThread::builder()
             .id(thread_id)
             .session_id(self.id)
-            .start_reason(ThreadStartReason::InitialThread)
+            .start_reason(start_reason)
             .model(self.model.clone())
             .system(self.system.clone())
             .tools(self.tools.clone())
@@ -71,11 +84,9 @@ impl AgentSession {
 
         self.events.push(AgentSessionEvent::ThreadStarted {
             thread_id,
-            start_reason: ThreadStartReason::InitialThread,
+            start_reason,
         });
         self.current_thread = thread_id;
-
-        Idempotent::Executed(())
     }
 
     fn current_thread(&mut self) -> &mut SessionThread {
@@ -86,9 +97,34 @@ impl AgentSession {
 
     pub fn add_user_message(
         &mut self,
+        now: DateTime<Utc>,
         source: UserMessageSource,
         prompt: String,
     ) -> Result<Idempotent<llm::Prompt>, AgentSessionError> {
+        // If `reset_time_delta` is configured AND the current thread has
+        // already received at least one user message AND that message is older
+        // than the threshold, retire the thread and start a fresh one before
+        // appending. The "first message" check skips the case where the
+        // current thread was just created and has nothing but `Initialized`.
+        if let Some(delta) = self.reset_time_delta {
+            let prev_thread = self.current_thread;
+            let last_at = self
+                .threads
+                .get_persisted(&prev_thread)
+                .and_then(|t| t.last_user_message_at());
+            if let Some(last_at) = last_at {
+                if now
+                    .signed_duration_since(last_at)
+                    .to_std()
+                    .map(|elapsed| elapsed > delta)
+                    .unwrap_or(false)
+                {
+                    self.start_new_thread(ThreadStartReason::TimeDeltaExceeded {
+                        previous_thread: prev_thread,
+                    });
+                }
+            }
+        }
         self.current_thread().add_user_message(source, prompt)
     }
 
@@ -119,6 +155,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     system,
                     tools,
                     max_tokens,
+                    reset_time_delta,
                 } => {
                     builder = builder
                         .id(*id)
@@ -126,7 +163,8 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                         .model(model.clone())
                         .system(system.clone())
                         .tools(tools.clone())
-                        .max_tokens(*max_tokens);
+                        .max_tokens(*max_tokens)
+                        .reset_time_delta(*reset_time_delta);
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_thread(*thread_id);
@@ -148,6 +186,8 @@ pub struct NewAgentSession {
     pub(super) system: Vec<SystemBlock>,
     pub(super) tools: Vec<Tool>,
     pub(super) max_tokens: u32,
+    #[builder(default)]
+    pub(super) reset_time_delta: Option<std::time::Duration>,
 }
 
 impl NewAgentSession {
@@ -169,6 +209,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
                 system: self.system,
                 tools: self.tools,
                 max_tokens: self.max_tokens,
+                reset_time_delta: self.reset_time_delta,
             }],
         )
     }
