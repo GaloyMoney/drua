@@ -1,14 +1,17 @@
 use serde::Deserialize;
 
-use crate::agent::AgentConfig;
+use crate::agent::AgentsConfig;
 use crate::encryption::EncryptionKey;
 use crate::github_app::GitHubAppConfig;
+use crate::prompt_executor::PromptExecutorConfig;
 use crate::toolset::ToolSetsConfig;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
-    pub agents: AgentConfig,
+    pub agents: AgentsConfig,
+    #[serde(default)]
+    pub prompt_executor: PromptExecutorConfig,
     #[serde(default)]
     pub toolsets: ToolSetsConfig,
     #[serde(default)]

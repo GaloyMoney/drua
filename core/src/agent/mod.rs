@@ -24,7 +24,7 @@ use tracing::instrument;
 
 pub use config::{AgentsConfig, RoleConfig};
 pub use entity::*;
-use error::AgentError;
+pub use error::AgentError;
 use crate::primitives::{AgentId, AuthSubject, WorkspaceId};
 use repo::AgentRepo;
 use session::Sessions;

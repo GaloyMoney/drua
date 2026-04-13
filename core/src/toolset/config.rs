@@ -8,15 +8,6 @@ pub struct ToolSetsConfig {
     pub concourse: ConcourseToolSetConfig,
     #[serde(default)]
     pub code_assistant: CodeAssistantToolSetConfig,
-    #[serde(default)]
-    pub report: ReportToolSetConfig,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct ReportToolSetConfig {
-    /// Enable the report toolset.
-    #[serde(default)]
-    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

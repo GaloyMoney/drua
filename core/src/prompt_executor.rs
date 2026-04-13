@@ -8,8 +8,9 @@ use tracing::instrument;
 use anthropic_client::AnthropicClient;
 use llm::{Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptExecutorConfig {
+    #[serde(default)]
     pub models: Vec<ModelConfig>,
 }
 
