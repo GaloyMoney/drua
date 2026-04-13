@@ -1,3 +1,4 @@
+mod builtins;
 mod catalog;
 pub mod concourse;
 mod config;
@@ -6,6 +7,7 @@ mod filter;
 mod traits;
 mod upstream;
 
+pub use builtins::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
 pub use catalog::{Catalog, CatalogEntry};
 pub use concourse::ConcourseToolSet;
 pub use config::*;
@@ -14,6 +16,7 @@ pub use filter::OutputFilter;
 pub use traits::*;
 pub use upstream::*;
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
@@ -24,6 +27,7 @@ use crate::auth::AuthSubject;
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     audit: Option<Arc<Audit>>,
+    top_level: HashMap<String, Arc<dyn TopLevelTool>>,
 }
 
 impl ToolSets {
@@ -65,9 +69,20 @@ impl ToolSets {
             tracing::info!(url = %config.concourse.url, "Concourse toolset initialized");
         }
 
+        let sets = Arc::new(RwLock::new(sets));
+
+        let mut top_level: HashMap<String, Arc<dyn TopLevelTool>> = HashMap::new();
+        let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
+        let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
+        let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
+        top_level.insert(search.name().to_string(), search);
+        top_level.insert(describe.name().to_string(), describe);
+        top_level.insert(call.name().to_string(), call);
+
         Ok(Self {
-            sets: Arc::new(RwLock::new(sets)),
+            sets,
             audit,
+            top_level,
         })
     }
 
@@ -87,6 +102,67 @@ impl ToolSets {
     /// Build a catalog handle that shares the toolset registry.
     pub fn catalog(&self) -> Catalog {
         Catalog::new(Arc::clone(&self.sets))
+    }
+
+    /// Iterator over the registered top-level tools — used by the MCP server
+    /// to populate its `list_tools` response.
+    pub fn top_level_tools(&self) -> impl Iterator<Item = &Arc<dyn TopLevelTool>> {
+        self.top_level.values()
+    }
+
+    /// Look up and execute a top-level tool by name. Performs the same
+    /// boilerplate as [`dispatch_tool_call`] — scope check + dispatch + audit
+    /// — so the MCP server's `call_tool` RPC can delegate straight here.
+    pub async fn call_top_level_tool(
+        &self,
+        subject: &AuthSubject,
+        name: &str,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let tool = self
+            .top_level
+            .get(name)
+            .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?;
+
+        let scopes: Vec<&str> = subject.scopes().iter().map(String::as_str).collect();
+        if !tool.is_authorized(&scopes, arguments.as_ref()) {
+            return Err(ToolSetsError::ToolNotFound(name.to_string()));
+        }
+
+        let start = std::time::Instant::now();
+        let result = tool.call(arguments.clone()).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let (outcome, tokens_returned) = match &result {
+            Ok(r) => (InteractionOutcome::Success, Some(estimate_tokens(r))),
+            Err(e) => (
+                InteractionOutcome::Error {
+                    message: e.to_string(),
+                },
+                None,
+            ),
+        };
+        let args_value = arguments.map(serde_json::Value::Object);
+        if let Some(audit) = &self.audit {
+            if let Err(e) = audit
+                .record_mcp_call(
+                    subject,
+                    name,
+                    Some(&serde_json::json!({
+                        "tool_name": name,
+                        "arguments": args_value,
+                    })),
+                    outcome,
+                    Some(duration_ms),
+                    tokens_returned,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to record audit entry");
+            }
+        }
+
+        result
     }
 
     /// Execute a tool with the global default output filter.
@@ -110,90 +186,91 @@ impl ToolSets {
         arguments: Option<JsonObject>,
         output_filter: Option<OutputFilter>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let (set, tool_name, tool_default_filter) = self
-            .catalog()
-            .find_set(prefixed_name)
-            .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
-
-        if !caller_has_required_scopes(set.as_ref(), subject) {
-            return Err(ToolSetsError::ToolNotFound(prefixed_name.to_string()));
-        }
-
-        let start = std::time::Instant::now();
-        let result = set.call(&tool_name, arguments.clone(), Some(subject)).await;
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        // Priority: caller-provided > tool-specific default > global default
-        let filter = output_filter
-            .or(tool_default_filter)
-            .unwrap_or_else(OutputFilter::global_default);
-        let result = result.and_then(|r| filter.apply(r));
-
-        let (outcome, tokens_returned) = match &result {
-            Ok(call_result) => {
-                let tokens = estimate_tokens(call_result);
-                (InteractionOutcome::Success, Some(tokens))
-            }
-            Err(e) => (
-                InteractionOutcome::Error {
-                    message: e.to_string(),
-                },
-                None,
-            ),
-        };
-        let args_value = arguments.map(serde_json::Value::Object);
-        self.record_audit(
+        dispatch_tool_call(
+            &self.sets,
+            &self.audit,
             subject,
             prefixed_name,
-            serde_json::json!({
-                "tool_name": prefixed_name,
-                "arguments": args_value,
-            }),
-            outcome,
-            Some(duration_ms),
-            tokens_returned,
+            arguments,
+            output_filter,
         )
-        .await;
-
-        result
-    }
-
-    /// Fire-and-forget audit recording. Only records if the audit service is
-    /// configured.
-    async fn record_audit(
-        &self,
-        subject: &AuthSubject,
-        tool_name: &str,
-        metadata: serde_json::Value,
-        outcome: InteractionOutcome,
-        duration_ms: Option<u64>,
-        tokens_returned: Option<u64>,
-    ) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record_mcp_call(
-                    subject,
-                    tool_name,
-                    Some(&metadata),
-                    outcome,
-                    duration_ms,
-                    tokens_returned,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to record audit entry");
-            }
-        }
+        .await
     }
 }
 
-fn caller_has_required_scopes(set: &dyn SearchableToolSet, subject: &AuthSubject) -> bool {
-    let required = set.required_scopes();
+/// Shared dispatch helper used by both [`ToolSets::call_with_filter`] and the
+/// [`CallTool`] top-level tool. Performs: lookup, scope check, dispatch,
+/// output filter, audit recording.
+pub(super) async fn dispatch_tool_call(
+    sets: &Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    audit: &Option<Arc<Audit>>,
+    subject: &AuthSubject,
+    prefixed_name: &str,
+    arguments: Option<JsonObject>,
+    output_filter: Option<OutputFilter>,
+) -> Result<CallToolResult, ToolSetsError> {
+    let catalog = Catalog::new(Arc::clone(sets));
+    let (set, tool_name, tool_default_filter) = catalog
+        .find_set(prefixed_name)
+        .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))?;
+
+    let scopes: Vec<&str> = subject.scopes().iter().map(String::as_str).collect();
+    if !has_scopes(set.required_scopes(), &scopes) {
+        return Err(ToolSetsError::ToolNotFound(prefixed_name.to_string()));
+    }
+
+    let start = std::time::Instant::now();
+    let result = set.call(&tool_name, arguments.clone(), Some(subject)).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    // Priority: caller-provided > tool-specific default > global default
+    let filter = output_filter
+        .or(tool_default_filter)
+        .unwrap_or_else(OutputFilter::global_default);
+    let result = result.and_then(|r| filter.apply(r));
+
+    let (outcome, tokens_returned) = match &result {
+        Ok(call_result) => {
+            let tokens = estimate_tokens(call_result);
+            (InteractionOutcome::Success, Some(tokens))
+        }
+        Err(e) => (
+            InteractionOutcome::Error {
+                message: e.to_string(),
+            },
+            None,
+        ),
+    };
+    let args_value = arguments.map(serde_json::Value::Object);
+    if let Some(audit) = audit {
+        if let Err(e) = audit
+            .record_mcp_call(
+                subject,
+                prefixed_name,
+                Some(&serde_json::json!({
+                    "tool_name": prefixed_name,
+                    "arguments": args_value,
+                })),
+                outcome,
+                Some(duration_ms),
+                tokens_returned,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to record audit entry");
+        }
+    }
+
+    result
+}
+
+fn has_scopes(required: &[&str], available: &[&str]) -> bool {
     if required.is_empty() {
         return true;
     }
-    required.iter().all(|scope| subject.has_scope(scope))
+    required.iter().all(|scope| available.contains(scope))
 }
+
 
 /// Estimate token count from a CallToolResult's text content (~4 chars per token).
 fn estimate_tokens(result: &CallToolResult) -> u64 {
