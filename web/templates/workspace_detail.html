@@ -62,17 +62,6 @@
 
 <hr>
 <details>
-  <summary>Agent Configuration</summary>
-  <div id="agent-config-panel"
-       hx-get="/agents/{{ agent_id }}/config"
-       hx-trigger="load"
-       hx-swap="innerHTML">
-    <p aria-busy="true">Loading configuration...</p>
-  </div>
-</details>
-
-<hr>
-<details>
   <summary>Danger Zone</summary>
   <p>Deleting a workspace will archive it and revoke MCP credentials for all its agents.</p>
   <button
