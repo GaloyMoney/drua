@@ -12,4 +12,6 @@ pub enum AgentSessionError {
     Modify(#[from] AgentSessionModifyError),
     #[error("AgentSessionError - Find: {0}")]
     Find(#[from] AgentSessionFindError),
+    #[error("AgentSessionError - cannot append a user message after another user message")]
+    ConsecutiveUserMessages,
 }

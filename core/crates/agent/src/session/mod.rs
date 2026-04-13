@@ -35,7 +35,10 @@ impl Sessions {
             .build()
             .expect("NewAgentSession build");
 
-        Ok(self.repo.create_in_op(op, new_session).await?)
+        let mut session = self.repo.create_in_op(op, new_session).await?;
+        let _ = session.init_initial_thread();
+        self.repo.update_in_op(op, &mut session).await?;
+        Ok(session)
     }
 
     #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]

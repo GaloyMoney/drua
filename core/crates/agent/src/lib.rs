@@ -67,9 +67,23 @@ impl Agents {
         id: AgentId,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
-        self.sessions
-            .add_user_message(id, subject.to_message_source(), prompt)
-            .await?;
-        unimplemented!()
+        let source = subject.to_message_source();
+        let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
+
+        if self
+            .sessions
+            .add_user_message(id, source, prompt.clone())
+            .await?
+            .is_some()
+        {
+            let _ = tx
+                .send(AgentMessageEvent::UserMessage {
+                    source,
+                    text: prompt,
+                })
+                .await;
+        }
+
+        Ok(rx)
     }
 }

@@ -16,19 +16,27 @@ pub enum AgentRole {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessageEvent {
-    Text { text: String },
+    UserMessage {
+        source: primitives::UserMessageSource,
+        text: String,
+    },
     ToolCall {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<serde_json::Value>,
     },
-    ToolResult { name: String, is_error: bool },
+    ToolResult {
+        name: String,
+        is_error: bool,
+    },
     Done {
         turns: u32,
         input_tokens: u32,
         output_tokens: u32,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
