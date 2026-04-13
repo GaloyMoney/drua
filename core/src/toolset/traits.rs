@@ -1,6 +1,6 @@
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
-use crate::auth::AuthContext;
+use crate::auth::AuthSubject;
 
 use super::filter::OutputFilter;
 use super::ToolSetsError;
@@ -33,6 +33,6 @@ pub trait ToolSet: Send + Sync {
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
-        auth: Option<&AuthContext>,
+        auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError>;
 }

@@ -1,14 +1,8 @@
-es_entity::entity_id! {
-    UserId,
-    McpCredsId,
-    McpCredsOwnerId,
-    ReportId,
-    WorkspaceId,
-    WorkspaceSecretId,
-    AgentId;
+pub use primitives::{AgentId, McpCredsId, McpCredsOwnerId, UserId, WorkspaceId};
 
-    UserId => McpCredsOwnerId,
-    AgentId => McpCredsOwnerId
+es_entity::entity_id! {
+    ReportId,
+    WorkspaceSecretId
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]

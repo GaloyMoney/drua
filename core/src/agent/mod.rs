@@ -19,7 +19,7 @@ pub use entity::{Agent, ChatConfig, SandboxConfig, SandboxState};
 pub use error::*;
 use repo::*;
 
-use crate::auth::AuthContext;
+use crate::auth::AuthSubject;
 use crate::primitives::*;
 use crate::toolset::ToolSets;
 
@@ -195,7 +195,7 @@ impl Agents {
 
         let rx = match agent.agent_type.runtime_kind() {
             RuntimeKind::Light => {
-                let auth = AuthContext::Agent(agent.workspace_id, agent.id, Vec::new());
+                let auth = AuthSubject::Agent(agent.workspace_id, agent.id, Vec::new());
                 let catalog = self.toolsets.catalog().with_auth(&auth);
                 light::run(
                     prompt,
