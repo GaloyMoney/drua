@@ -42,4 +42,26 @@ impl AuthSubject {
             AuthSubject::Anonymous => false,
         }
     }
+
+    /// Convert the subject into the principal that should be recorded as the
+    /// originator of a message. Panics for `Anonymous` (callers must
+    /// authenticate before sending messages).
+    pub fn to_message_source(&self) -> UserMessageSource {
+        match self {
+            AuthSubject::User(user_id) => UserMessageSource::User(*user_id),
+            AuthSubject::ExportedAgent(user_id, creds_id, _) => {
+                UserMessageSource::ExportedAgent(*user_id, *creds_id)
+            }
+            AuthSubject::Agent(_, agent_id, _) => UserMessageSource::Agent(*agent_id),
+            AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
+        }
+    }
+}
+
+/// Originator of a user-facing message sent to an agent session.
+#[derive(Debug, Clone, Copy)]
+pub enum UserMessageSource {
+    User(UserId),
+    ExportedAgent(UserId, McpCredsId),
+    Agent(AgentId),
 }

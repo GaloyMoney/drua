@@ -15,6 +15,9 @@ setup-db:
 
 reset-deps: clean-deps start-deps setup-db
 
+sqlx-prepare:
+	DATABASE_URL=$(PG_CON) cargo sqlx prepare --workspace -- --all-targets
+
 run-server:
 	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) nix run .
 
