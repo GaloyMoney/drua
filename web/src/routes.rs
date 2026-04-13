@@ -45,10 +45,6 @@ pub fn router() -> Router<AppState> {
             get(code_assistant_least_useful),
         )
         .route("/code-assistant/search", get(code_assistant_search))
-        .route("/reports", get(reports_page))
-        .route("/reports/list", get(reports_list))
-        .route("/reports/search", get(reports_search))
-        .route("/reports/{id}", get(reports_detail))
         .route("/workspaces/{id}/chat", get(workspace_chat))
         .route("/workspaces", get(workspaces_page))
         .route("/workspaces/new", get(workspace_new))
@@ -63,8 +59,6 @@ pub fn router() -> Router<AppState> {
             "/workspaces/{id}/secrets/{secret_id}/delete",
             post(workspace_secret_delete),
         )
-        .route("/agents/{id}/config", get(agent_config_panel))
-        .route("/agents/{id}/config", post(agent_config_update))
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {
@@ -313,7 +307,7 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
                 app.agents()
                     .find_by_id(agent_id)
                     .await
-                    .map(|a| format_agent_type(&a.agent_type))
+                    .map(|a| a.name.clone())
                     .unwrap_or_else(|_| agent_id_str.to_string())
             } else {
                 agent_id_str.to_string()
@@ -356,12 +350,6 @@ async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSu
     AuditSubjectView {
         label: subject.to_string(),
         owner: None,
-    }
-}
-
-fn format_agent_type(agent_type: &galoy_agents_core::primitives::AgentType) -> String {
-    match agent_type {
-        galoy_agents_core::primitives::AgentType::WorkspaceLead => "Workspace Lead".to_string(),
     }
 }
 
@@ -519,175 +507,8 @@ async fn code_assistant_search(
 }
 
 // ---------------------------------------------------------------------------
-// Reports
-// ---------------------------------------------------------------------------
-
-fn report_to_view(m: &domain::report::Report) -> ReportView {
-    let id_str = m.id.to_string();
-    ReportView {
-        id: id_str.clone(),
-        short_id: id_str[..8.min(id_str.len())].to_string(),
-        title: m.title.clone(),
-        content: m.content.clone(),
-        tags: if m.tags.is_empty() {
-            String::new()
-        } else {
-            m.tags.join(", ")
-        },
-        created_at: m.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
-        pinned: m.pinned,
-    }
-}
-
-#[instrument(name = "web.reports_page", skip_all)]
-async fn reports_page(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
-    ReportsTemplate {
-        enabled: state.app.reports().is_some(),
-    }
-    .into_response()
-}
-
-#[instrument(name = "web.reports_list", skip_all)]
-async fn reports_list(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let svc = match state.app.reports() {
-        Some(svc) => svc,
-        None => return ReportsListTemplate { reports: vec![] }.into_response(),
-    };
-
-    match svc.list(50).await {
-        Ok(reports) => ReportsListTemplate {
-            reports: reports.iter().map(report_to_view).collect(),
-        }
-        .into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to list reports");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReportsSearchParams {
-    q: Option<String>,
-}
-
-#[instrument(name = "web.reports_search", skip_all)]
-async fn reports_search(
-    State(state): State<AppState>,
-    session: Session,
-    Query(params): Query<ReportsSearchParams>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let query = params.q.unwrap_or_default();
-    if query.is_empty() {
-        return ReportsSearchResultsTemplate {
-            query,
-            results: vec![],
-            error: None,
-        }
-        .into_response();
-    }
-
-    let svc = match state.app.reports() {
-        Some(svc) => svc,
-        None => {
-            return ReportsSearchResultsTemplate {
-                query,
-                results: vec![],
-                error: Some("Report service is not enabled".to_string()),
-            }
-            .into_response();
-        }
-    };
-
-    match svc.search(&query, 20).await {
-        Ok(results) => {
-            let views = results
-                .iter()
-                .map(|r| {
-                    let id_str = r.id.to_string();
-                    ReportSearchResultView {
-                        id: id_str.clone(),
-                        short_id: id_str[..8.min(id_str.len())].to_string(),
-                        title: r.title.clone(),
-                        content: r.content.clone(),
-                        tags: if r.tags.is_empty() {
-                            String::new()
-                        } else {
-                            r.tags.join(", ")
-                        },
-                        score: format!("{:.3}", r.score),
-                        pinned: r.pinned,
-                    }
-                })
-                .collect();
-            ReportsSearchResultsTemplate {
-                query,
-                results: views,
-                error: None,
-            }
-            .into_response()
-        }
-        Err(e) => ReportsSearchResultsTemplate {
-            query,
-            results: vec![],
-            error: Some(e.to_string()),
-        }
-        .into_response(),
-    }
-}
-
-#[instrument(name = "web.reports_detail", skip_all)]
-async fn reports_detail(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<String>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let svc = match state.app.reports() {
-        Some(svc) => svc,
-        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-
-    match svc.find_by_id_prefix(&id).await {
-        Ok(Some(m)) => ReportDetailTemplate {
-            report: report_to_view(&m),
-        }
-        .into_response(),
-        Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to find report by prefix");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
-
-fn agent_to_config_view(agent: &domain::agent::Agent) -> AgentConfigView {
-    AgentConfigView {
-        model: agent.chat_config.model.clone(),
-        max_tokens: agent.chat_config.max_tokens,
-        max_turns: agent.chat_config.max_turns,
-        resource_cpu: agent.sandbox_config.resource_cpu.clone(),
-        resource_mem: agent.sandbox_config.resource_mem.clone(),
-    }
-}
 
 fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
     WorkspaceView {
@@ -736,14 +557,6 @@ async fn workspace_new(session: Session) -> Response {
 pub struct WorkspaceForm {
     name: String,
     description: Option<String>,
-    // Sandbox config
-    pvc_size: Option<String>,
-    resource_cpu: Option<String>,
-    resource_mem: Option<String>,
-    // Chat/model config
-    model: Option<String>,
-    max_tokens: Option<u32>,
-    max_turns: Option<u32>,
 }
 
 #[instrument(name = "web.workspace_create", skip_all)]
@@ -758,60 +571,14 @@ async fn workspace_create(
     };
 
     let description = form.description.filter(|d| !d.is_empty());
-    let workspace = match state
+    if let Err(e) = state
         .app
         .workspaces()
         .create(user_id, &form.name, description)
         .await
     {
-        Ok(ws) => ws,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create workspace");
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    // Apply custom sandbox/model config to the workspace's agent
-    let has_custom_config = form.pvc_size.is_some()
-        || form.resource_cpu.is_some()
-        || form.resource_mem.is_some()
-        || form.model.is_some()
-        || form.max_tokens.is_some()
-        || form.max_turns.is_some();
-
-    if has_custom_config {
-        if let Ok(agents) = state.app.agents().list_for_workspace(workspace.id).await {
-            if let Some(lead) = agents
-                .iter()
-                .find(|a| a.agent_type == domain::primitives::AgentType::WorkspaceLead)
-            {
-                let sandbox_config = domain::agent::SandboxConfig {
-                    pvc_size: form
-                        .pvc_size
-                        .unwrap_or_else(|| lead.sandbox_config.pvc_size.clone()),
-                    resource_cpu: form
-                        .resource_cpu
-                        .unwrap_or_else(|| lead.sandbox_config.resource_cpu.clone()),
-                    resource_mem: form
-                        .resource_mem
-                        .unwrap_or_else(|| lead.sandbox_config.resource_mem.clone()),
-                    disallowed_tools: lead.sandbox_config.disallowed_tools.clone(),
-                };
-                let chat_config = domain::agent::ChatConfig {
-                    model: form.model.unwrap_or_else(|| lead.chat_config.model.clone()),
-                    max_tokens: form.max_tokens.unwrap_or(lead.chat_config.max_tokens),
-                    max_turns: form.max_turns.unwrap_or(lead.chat_config.max_turns),
-                };
-                if let Err(e) = state
-                    .app
-                    .agents()
-                    .update_config(lead.id, chat_config, sandbox_config)
-                    .await
-                {
-                    tracing::warn!(error = %e, "Failed to apply custom config to new workspace agent");
-                }
-            }
-        }
+        tracing::error!(error = %e, "Failed to create workspace");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     Redirect::to("/workspaces").into_response()
@@ -842,7 +609,7 @@ async fn workspace_detail(
 
     let agent_id = agents
         .iter()
-        .find(|a| a.agent_type == domain::primitives::AgentType::WorkspaceLead)
+        .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead)
         .map(|a| a.id.to_string())
         .unwrap_or_default();
 
@@ -1067,7 +834,7 @@ async fn workspace_chat(
 
     let lead = agents
         .iter()
-        .find(|a| a.agent_type == domain::primitives::AgentType::WorkspaceLead);
+        .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead);
 
     let agent_id = match lead {
         Some(a) => a.id.to_string(),
@@ -1079,93 +846,6 @@ async fn workspace_chat(
         agent_id,
     }
     .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// Agent Config
-// ---------------------------------------------------------------------------
-
-#[instrument(name = "web.agent_config_panel", skip_all)]
-async fn agent_config_panel(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let agent_id = AgentId::from(id);
-    let agent = match state.app.agents().find_by_id(agent_id).await {
-        Ok(a) => a,
-        Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
-    };
-
-    AgentConfigPanelTemplate {
-        agent_id: agent.id.to_string(),
-        config: agent_to_config_view(&agent),
-        saved: false,
-    }
-    .into_response()
-}
-
-#[derive(Deserialize)]
-struct AgentConfigForm {
-    model: String,
-    max_tokens: u32,
-    max_turns: u32,
-    resource_cpu: String,
-    resource_mem: String,
-}
-
-#[instrument(name = "web.agent_config_update", skip_all)]
-async fn agent_config_update(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    Form(form): Form<AgentConfigForm>,
-) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let agent_id = AgentId::from(id);
-
-    // Fetch current agent to preserve non-editable sandbox fields
-    let current = match state.app.agents().find_by_id(agent_id).await {
-        Ok(a) => a,
-        Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
-    };
-
-    let chat_config = domain::agent::ChatConfig {
-        model: form.model,
-        max_tokens: form.max_tokens,
-        max_turns: form.max_turns,
-    };
-    let sandbox_config = domain::agent::SandboxConfig {
-        resource_cpu: form.resource_cpu,
-        resource_mem: form.resource_mem,
-        pvc_size: current.sandbox_config.pvc_size.clone(),
-        disallowed_tools: current.sandbox_config.disallowed_tools.clone(),
-    };
-
-    match state
-        .app
-        .agents()
-        .update_config(agent_id, chat_config, sandbox_config)
-        .await
-    {
-        Ok(agent) => AgentConfigPanelTemplate {
-            agent_id: agent.id.to_string(),
-            config: agent_to_config_view(&agent),
-            saved: true,
-        }
-        .into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to update agent config");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,18 +870,20 @@ async fn api_agent_message(
     Path(id): Path<uuid::Uuid>,
     Json(body): Json<AgentMessageRequest>,
 ) -> Response {
-    let user_id = match &auth {
-        AuthSubject::User(id) => *id,
-        AuthSubject::ExportedAgent(id, _, _) => *id,
-        AuthSubject::Agent(_, _, _) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-        AuthSubject::Anonymous => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-    };
+    // Caller must carry an originating-user identity (User or ExportedAgent).
+    // Plain Agent / Anonymous tokens can't use this endpoint.
+    if !matches!(
+        auth,
+        AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _)
+    ) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
 
     let agent_id = AgentId::from(id);
     let rx = match state
         .app
         .agents()
-        .send_message(agent_id, user_id, body.prompt)
+        .send_message(auth, agent_id, body.prompt)
         .await
     {
         Ok(rx) => rx,
@@ -1218,7 +900,9 @@ async fn api_agent_message(
         let mut rx = rx;
         while let Some(event) = rx.recv().await {
             let event_name = match &event {
-                domain::agent::AgentMessageEvent::Text { .. } => "text",
+                domain::agent::AgentMessageEvent::UserMessage { .. } => "user_message",
+                domain::agent::AgentMessageEvent::AssistantText { .. } => "assistant_text",
+                domain::agent::AgentMessageEvent::Thinking { .. } => "thinking",
                 domain::agent::AgentMessageEvent::ToolCall { .. } => "tool_call",
                 domain::agent::AgentMessageEvent::ToolResult { .. } => "tool_result",
                 domain::agent::AgentMessageEvent::Done { .. } => "done",

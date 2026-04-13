@@ -103,54 +103,6 @@ pub struct AuditEntriesTemplate {
     pub entries: Vec<AuditEntryView>,
 }
 
-// ── Reports ──────────────────────────────────────────────────────────
-
-#[derive(Template, WebTemplate)]
-#[template(path = "reports.html")]
-pub struct ReportsTemplate {
-    pub enabled: bool,
-}
-
-pub struct ReportView {
-    pub id: String,
-    pub short_id: String,
-    pub title: String,
-    pub content: String,
-    pub tags: String,
-    pub created_at: String,
-    pub pinned: bool,
-}
-
-pub struct ReportSearchResultView {
-    pub id: String,
-    pub short_id: String,
-    pub title: String,
-    pub content: String,
-    pub tags: String,
-    pub score: String,
-    pub pinned: bool,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "reports_list.html")]
-pub struct ReportsListTemplate {
-    pub reports: Vec<ReportView>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "reports_search_results.html")]
-pub struct ReportsSearchResultsTemplate {
-    pub query: String,
-    pub results: Vec<ReportSearchResultView>,
-    pub error: Option<String>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "reports_detail.html")]
-pub struct ReportDetailTemplate {
-    pub report: ReportView,
-}
-
 // ── Workspaces ───────────────────────────────────────────────────────
 
 pub struct WorkspaceView {
@@ -204,18 +156,3 @@ pub struct WorkspaceChatTemplate {
     pub agent_id: String,
 }
 
-pub struct AgentConfigView {
-    pub model: String,
-    pub max_tokens: u32,
-    pub max_turns: u32,
-    pub resource_cpu: String,
-    pub resource_mem: String,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "agent_config_panel.html")]
-pub struct AgentConfigPanelTemplate {
-    pub agent_id: String,
-    pub config: AgentConfigView,
-    pub saved: bool,
-}
