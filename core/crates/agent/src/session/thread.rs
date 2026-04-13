@@ -2,6 +2,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
+use llm::prompt::AssistantBlock;
 use primitives::UserMessageSource;
 
 use super::{error::AgentSessionError, AgentSessionId};
@@ -26,6 +27,9 @@ pub enum SessionThreadEvent {
     UserMessage {
         source: UserMessageSource,
         text: String,
+    },
+    AssistantResponse {
+        content: Vec<AssistantBlock>,
     },
 }
 
@@ -74,6 +78,31 @@ impl SessionThread {
 
         Ok(Idempotent::Executed(self.prompt_state.clone()))
     }
+
+    pub fn add_prompt_response(
+        &mut self,
+        response: llm::PromptResponse,
+    ) -> Vec<llm::RequestToolUse> {
+        self.events.push(SessionThreadEvent::AssistantResponse {
+            content: response.content.clone(),
+        });
+        self.prompt_state
+            .messages
+            .push(llm::prompt::Message::Assistant {
+                content: response.content.clone(),
+            });
+
+        response
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                AssistantBlock::ToolUse {
+                    id, name, input, ..
+                } => Some(llm::RequestToolUse { id, name, input }),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl TryFromEvents<SessionThreadEvent> for SessionThread {
@@ -101,6 +130,11 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                             text: text.clone(),
                             cache_control: None,
                         }],
+                    });
+                }
+                SessionThreadEvent::AssistantResponse { content, .. } => {
+                    prompt_state.messages.push(llm::prompt::Message::Assistant {
+                        content: content.clone(),
                     });
                 }
             }

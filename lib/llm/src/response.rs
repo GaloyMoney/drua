@@ -27,3 +27,12 @@ pub enum StopReason {
     StopSequence,
     ToolUse,
 }
+
+/// A tool call extracted from an assistant response that the caller is
+/// expected to dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
