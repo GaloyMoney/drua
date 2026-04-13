@@ -1,5 +1,6 @@
 PG_CON ?= postgres://user:password@localhost:5432/galoy_agents
 GITHUB_CLIENT_SECRET ?= dev-secret
+ANTHROPIC_API_KEY ?= $(shell echo $$ANTHROPIC_API_KEY)
 
 clean-deps:
 	docker compose down -v
@@ -19,6 +20,6 @@ sqlx-prepare:
 	DATABASE_URL=$(PG_CON) cargo sqlx prepare --workspace -- --all-targets
 
 run-server:
-	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) nix run .
+	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) nix run .
 
 start: reset-deps run-server

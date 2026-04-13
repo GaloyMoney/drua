@@ -28,6 +28,31 @@ pub enum Provider {
     Anthropic { api_key: String },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PromptExecutorConfigError {
+    #[error("model `{model}` is configured with provider `{provider}` but its credential is empty (e.g. set ANTHROPIC_API_KEY)")]
+    EmptyCredential { model: String, provider: String },
+}
+
+impl PromptExecutorConfig {
+    /// Catch obvious misconfig at startup time so we don't wait until the
+    /// first agent message to get a 401 back from the upstream provider.
+    pub fn validate(&self) -> Result<(), PromptExecutorConfigError> {
+        for model in &self.models {
+            match &model.provider {
+                Provider::Anthropic { api_key } if api_key.is_empty() => {
+                    return Err(PromptExecutorConfigError::EmptyCredential {
+                        model: model.name.clone(),
+                        provider: "anthropic".to_string(),
+                    });
+                }
+                Provider::Anthropic { .. } => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Wraps a `tokio::task::JoinHandle` so that dropping the wrapper aborts the
 /// task. Lets the executor live as long as the owning service struct.
 struct OwnedTaskHandle(Option<JoinHandle<()>>);
