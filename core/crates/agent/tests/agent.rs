@@ -1,5 +1,6 @@
 use agent::{AgentMessageEvent, AgentRole, Agents};
-use llm::{PromptRequest, PromptResponseEvent};
+use llm::prompt::AssistantBlock;
+use llm::{PromptRequest, PromptResponse, Usage};
 use primitives::{AuthSubject, UserId, WorkspaceId};
 use tokio::sync::mpsc;
 
@@ -31,17 +32,25 @@ async fn send_message_round_trip_via_prompt_channel() {
         .await
         .expect("send_message");
 
-    // Evaluator side: receive the dispatched prompt request, send one Text
-    // response and then drop the response channel so the forwarder loop
-    // terminates on its own.
+    // Evaluator side: receive the dispatched prompt request, send one
+    // PromptResponse with a single text block + usage metadata, then drop the
+    // response channel so the forwarder loop terminates on its own.
     let request = prompt_rx.recv().await.expect("prompt request dispatched");
     request
         .response_channel
-        .send(PromptResponseEvent::Text {
-            text: "Hi user".to_string(),
-        })
+        .send(Ok(PromptResponse {
+            content: vec![AssistantBlock::Text {
+                text: "Hi user".to_string(),
+                cache_control: None,
+            }],
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 3,
+            },
+            stop_reason: None,
+        }))
         .await
-        .expect("send text response");
+        .expect("send response");
     drop(request);
 
     // Drain the AgentMessageEvent channel until the forwarder closes it.
@@ -52,8 +61,8 @@ async fn send_message_round_trip_via_prompt_channel() {
 
     assert_eq!(
         events.len(),
-        2,
-        "expected user echo + assistant text, got {events:?}"
+        3,
+        "expected user echo + assistant text + done, got {events:?}"
     );
 
     match &events[0] {
@@ -63,5 +72,16 @@ async fn send_message_round_trip_via_prompt_channel() {
     match &events[1] {
         AgentMessageEvent::AssistantText { text } => assert_eq!(text, "Hi user"),
         other => panic!("event[1] should be AssistantText, got {other:?}"),
+    }
+    match &events[2] {
+        AgentMessageEvent::Done {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            assert_eq!(*input_tokens, 5);
+            assert_eq!(*output_tokens, 3);
+        }
+        other => panic!("event[2] should be Done, got {other:?}"),
     }
 }

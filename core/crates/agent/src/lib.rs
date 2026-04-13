@@ -92,27 +92,48 @@ impl Agents {
 
             let sessions = self.sessions.clone();
             tokio::spawn(async move {
-                while let Some(event) = response_rx.recv().await {
-                    match event {
-                        llm::PromptResponseEvent::Text { text } => {
-                            let _ = sessions.add_response_message(id, text.clone()).await;
-                            let _ = tx.send(AgentMessageEvent::AssistantText { text }).await;
-                        }
-                        llm::PromptResponseEvent::Done {
-                            input_tokens,
-                            output_tokens,
-                        } => {
+                while let Some(result) = response_rx.recv().await {
+                    match result {
+                        Ok(response) => {
+                            for block in &response.content {
+                                match block {
+                                    llm::prompt::AssistantBlock::Text { text, .. } => {
+                                        let _ = sessions
+                                            .add_response_message(id, text.clone())
+                                            .await;
+                                        let _ = tx
+                                            .send(AgentMessageEvent::AssistantText {
+                                                text: text.clone(),
+                                            })
+                                            .await;
+                                    }
+                                    llm::prompt::AssistantBlock::ToolUse {
+                                        name, input, ..
+                                    } => {
+                                        let _ = tx
+                                            .send(AgentMessageEvent::ToolCall {
+                                                name: name.clone(),
+                                                arguments: Some(input.clone()),
+                                            })
+                                            .await;
+                                    }
+                                    llm::prompt::AssistantBlock::Thinking { .. } => {}
+                                }
+                            }
                             let _ = tx
                                 .send(AgentMessageEvent::Done {
                                     turns: 1,
-                                    input_tokens,
-                                    output_tokens,
+                                    input_tokens: response.usage.input_tokens,
+                                    output_tokens: response.usage.output_tokens,
                                 })
                                 .await;
-                            break;
                         }
-                        llm::PromptResponseEvent::Error { message } => {
-                            let _ = tx.send(AgentMessageEvent::Error { message }).await;
+                        Err(e) => {
+                            let _ = tx
+                                .send(AgentMessageEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
                             break;
                         }
                     }
