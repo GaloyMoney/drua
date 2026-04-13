@@ -7,9 +7,18 @@ oauth:
   github_client_id: "Ov23li9ZTNnKjiTRwDcb"
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
+agents:
+  builtin_roles:
+    workspace_lead:
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+      system:
+        - type: text
+          text: |
+            You are the workspace lead agent. You coordinate tasks,
+            answer questions, and use the available tools to help the
+            user accomplish their goals. Be concise and action-oriented.
 toolsets:
-  report:
-    enabled: false
   code_assistant:
     db_path: "./data/code-assistant.db"
   concourse:

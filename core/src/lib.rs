@@ -46,6 +46,11 @@ pub struct App {
 
 impl App {
     pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
+        // Fail loudly at startup if `agents.builtin_roles` is missing a
+        // required role, instead of erroring out on the first
+        // workspace-create.
+        config.agents.validate()?;
+
         let ca_db_exists = {
             let p = &config.toolsets.code_assistant.db_path;
             !p.is_empty() && std::path::Path::new(p).exists()
