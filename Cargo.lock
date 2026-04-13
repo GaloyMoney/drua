@@ -124,6 +124,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "anthropic-client"
+version = "0.1.0"
+dependencies = [
+ "llm",
+ "reqwest 0.12.28",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2634,6 +2645,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror 2.0.18",
  "tiktoken",
  "tokio",
 ]
@@ -3400,6 +3412,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prompt-executor"
+version = "0.1.0"
+dependencies = [
+ "anthropic-client",
+ "llm",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

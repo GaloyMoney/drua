@@ -1,12 +1,11 @@
 [package]
-name = "llm"
+name = "anthropic-client"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+llm = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
-tiktoken = { workspace = true }
-tokio = { workspace = true }
+tracing = { workspace = true }
