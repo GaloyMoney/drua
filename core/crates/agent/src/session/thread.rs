@@ -2,7 +2,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
-use llm::prompt::AssistantBlock;
+use llm::prompt::{AssistantBlock, SystemBlock, Tool};
 use primitives::UserMessageSource;
 
 use super::{error::AgentSessionError, AgentSessionId};
@@ -23,6 +23,10 @@ pub enum SessionThreadEvent {
         id: SessionThreadId,
         session_id: AgentSessionId,
         start_reason: ThreadStartReason,
+        model: String,
+        system: Vec<SystemBlock>,
+        tools: Vec<Tool>,
+        max_tokens: u32,
     },
     UserMessage {
         source: UserMessageSource,
@@ -142,11 +146,19 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                     id,
                     session_id,
                     start_reason,
+                    model,
+                    system,
+                    tools,
+                    max_tokens,
                 } => {
                     builder = builder
                         .id(*id)
                         .session_id(*session_id)
                         .start_reason(*start_reason);
+                    prompt_state.model = model.clone();
+                    prompt_state.system = system.clone();
+                    prompt_state.tools = tools.clone();
+                    prompt_state.max_tokens = Some(*max_tokens);
                 }
                 SessionThreadEvent::UserMessage { text, .. } => {
                     prompt_state.messages.push(llm::prompt::Message::User {
@@ -190,6 +202,11 @@ pub struct NewSessionThread {
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
     pub(super) start_reason: ThreadStartReason,
+    #[builder(setter(into))]
+    pub(super) model: String,
+    pub(super) system: Vec<SystemBlock>,
+    pub(super) tools: Vec<Tool>,
+    pub(super) max_tokens: u32,
 }
 
 impl NewSessionThread {
@@ -208,6 +225,10 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 id: self.id,
                 session_id: self.session_id,
                 start_reason: self.start_reason,
+                model: self.model,
+                system: self.system,
+                tools: self.tools,
+                max_tokens: self.max_tokens,
             }],
         )
     }
@@ -225,6 +246,10 @@ mod tests {
         let new = NewSessionThread::builder()
             .session_id(AgentSessionId::new())
             .start_reason(ThreadStartReason::InitialThread)
+            .model("test-model")
+            .system(Vec::new())
+            .tools(Vec::new())
+            .max_tokens(1024u32)
             .build()
             .expect("NewSessionThread build");
         SessionThread::try_from_events(new.into_events()).expect("hydrate")

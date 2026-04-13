@@ -1,10 +1,15 @@
+pub mod audit;
+pub mod auth;
+pub mod config;
 mod entity;
 pub mod error;
 pub mod repo;
 pub mod session;
+pub mod toolset;
 
 use tracing::instrument;
 
+pub use config::{AgentsConfig, RoleConfig};
 pub use entity::*;
 use error::AgentError;
 use primitives::{AgentId, AuthSubject, WorkspaceId};
@@ -15,48 +20,56 @@ use session::Sessions;
 pub struct Agents {
     repo: AgentRepo,
     sessions: Sessions,
+    config: AgentsConfig,
     prompt_requests: llm::PromptRequestChannel,
-    #[allow(dead_code)]
-    tool_uses: llm::ToolUseRequestChannel,
 }
 
 impl Agents {
     pub fn new(
         pool: &sqlx::PgPool,
+        config: AgentsConfig,
         prompt_requests: llm::PromptRequestChannel,
-        tool_uses: llm::ToolUseRequestChannel,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
             sessions: Sessions::new(pool),
+            config,
             prompt_requests,
-            tool_uses,
         }
     }
 
-    #[instrument(name = "domain.agent.create", skip(self))]
+    #[instrument(name = "domain.agent.create", skip(self, tools))]
     pub async fn create(
         &self,
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
+        tools: Vec<llm::prompt::Tool>,
     ) -> Result<Agent, AgentError> {
         let mut op = self.repo.begin_op().await?;
         let agent = self
-            .create_in_op(&mut op, workspace_id, agent_role, name)
+            .create_in_op(&mut op, workspace_id, agent_role, name, tools)
             .await?;
         op.commit().await?;
         Ok(agent)
     }
 
-    #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
+    #[instrument(name = "domain.agent.create_in_op", skip(self, op, tools))]
     pub async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
+        tools: Vec<llm::prompt::Tool>,
     ) -> Result<Agent, AgentError> {
+        let role_config = self
+            .config
+            .builtin_roles
+            .get(&agent_role)
+            .ok_or(AgentError::RoleNotConfigured(agent_role))?
+            .clone();
+
         let new_agent = NewAgent::builder()
             .workspace_id(workspace_id)
             .agent_role(agent_role)
@@ -65,7 +78,16 @@ impl Agents {
             .expect("NewAgent build");
 
         let agent = self.repo.create_in_op(op, new_agent).await?;
-        self.sessions.create_in_op(op, agent.id).await?;
+        self.sessions
+            .create_in_op(
+                op,
+                agent.id,
+                role_config.model,
+                role_config.system,
+                tools,
+                role_config.max_tokens,
+            )
+            .await?;
         Ok(agent)
     }
 
@@ -98,129 +120,28 @@ impl Agents {
                 .map_err(|_| AgentError::PromptRequestChannelClosed)?;
 
             let sessions = self.sessions.clone();
-            let tool_uses = self.tool_uses.clone();
-            let prompt_requests = self.prompt_requests.clone();
             tokio::spawn(async move {
-                let mut next = response_rx.await;
-                let mut turn: u32 = 0;
-                let mut input_tokens: u32 = 0;
-                let mut output_tokens: u32 = 0;
-                loop {
-                    turn += 1;
-                    let response = match next {
-                        Ok(Ok(r)) => r,
-                        Ok(Err(e)) => {
-                            let _ = tx
-                                .send(AgentMessageEvent::Error {
-                                    message: e.to_string(),
-                                })
-                                .await;
-                            return;
-                        }
-                        Err(_) => return, // executor dropped the response channel
-                    };
-
-                    input_tokens += response.usage.input_tokens;
-                    output_tokens += response.usage.output_tokens;
-
-                    let tool_calls = sessions
-                        .add_prompt_response(id, response.clone())
-                        .await
-                        .unwrap_or_default();
-                    forward_response(response, &tx).await;
-
-                    if tool_calls.is_empty() {
-                        break;
+                match response_rx.await {
+                    Ok(Ok(response)) => {
+                        let _ = sessions.add_prompt_response(id, response.clone()).await;
+                        forward_response(response, &tx).await;
                     }
-
-                    let results = fan_out_tool_calls(&tool_uses, tool_calls, &tx).await;
-
-                    let updated_prompt = match sessions.add_tool_results(id, results).await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let _ = tx
-                                .send(AgentMessageEvent::Error {
-                                    message: e.to_string(),
-                                })
-                                .await;
-                            return;
-                        }
-                    };
-
-                    let (request, response_rx) = llm::PromptRequest::new(updated_prompt);
-                    if prompt_requests.send(request).await.is_err() {
+                    Ok(Err(e)) => {
                         let _ = tx
                             .send(AgentMessageEvent::Error {
-                                message: "prompt request channel closed".to_string(),
+                                message: e.to_string(),
                             })
                             .await;
-                        return;
                     }
-                    next = response_rx.await;
+                    Err(_) => {
+                        // executor dropped the response channel without sending
+                    }
                 }
-
-                let _ = tx
-                    .send(AgentMessageEvent::Done {
-                        turns: turn,
-                        input_tokens,
-                        output_tokens,
-                    })
-                    .await;
             });
         }
 
         Ok(rx)
     }
-}
-
-async fn fan_out_tool_calls(
-    tool_uses: &llm::ToolUseRequestChannel,
-    calls: Vec<llm::RequestToolUse>,
-    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
-) -> Vec<llm::ToolUseResult> {
-    let dispatches = calls.into_iter().map(|tu| {
-        let chan = tool_uses.clone();
-        async move {
-            let id = tu.id.clone();
-            let name = tu.name.clone();
-            let (req, rx) = llm::ToolUseRequest::new(tu);
-            let result = if chan.send(req).await.is_err() {
-                llm::ToolUseResult {
-                    tool_use_id: id,
-                    content: "tool request channel closed".into(),
-                    is_error: true,
-                }
-            } else {
-                match rx.await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => llm::ToolUseResult {
-                        tool_use_id: id,
-                        content: e.to_string(),
-                        is_error: true,
-                    },
-                    Err(_) => llm::ToolUseResult {
-                        tool_use_id: id,
-                        content: "tool response channel closed".into(),
-                        is_error: true,
-                    },
-                }
-            };
-            (name, result)
-        }
-    });
-
-    let outcomes = futures::future::join_all(dispatches).await;
-    let mut results = Vec::with_capacity(outcomes.len());
-    for (name, result) in outcomes {
-        let _ = tx
-            .send(AgentMessageEvent::ToolResult {
-                name,
-                is_error: result.is_error,
-            })
-            .await;
-        results.push(result);
-    }
-    results
 }
 
 async fn forward_response(
@@ -245,4 +166,11 @@ async fn forward_response(
             }
         }
     }
+    let _ = tx
+        .send(AgentMessageEvent::Done {
+            turns: 1,
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+        })
+        .await;
 }

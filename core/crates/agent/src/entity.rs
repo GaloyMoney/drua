@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 use primitives::{AgentId, WorkspaceId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum AgentRole {

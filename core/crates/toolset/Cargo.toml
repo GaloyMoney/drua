@@ -1,9 +1,0 @@
-[package]
-name = "toolset"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-llm = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }

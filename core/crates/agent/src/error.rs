@@ -17,4 +17,6 @@ pub enum AgentError {
     Session(#[from] AgentSessionError),
     #[error("AgentError - prompt request channel closed")]
     PromptRequestChannelClosed,
+    #[error("AgentError - role not configured: {0:?}")]
+    RoleNotConfigured(super::entity::AgentRole),
 }
