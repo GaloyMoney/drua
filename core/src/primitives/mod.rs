@@ -3,13 +3,19 @@
 //! `agent` crates were dissolved.
 
 pub mod auth_subject;
-pub mod ids;
 
-pub use auth_subject::{AuthSubject, UserMessageSource};
-pub use ids::*;
+pub use auth_subject::AuthSubject;
 
 es_entity::entity_id! {
-    WorkspaceSecretId
+    UserId,
+    AgentId,
+    WorkspaceId,
+    McpCredsId,
+    McpCredsOwnerId,
+    WorkspaceSecretId;
+
+    UserId => McpCredsOwnerId,
+    AgentId => McpCredsOwnerId
 }
 
 /// Who owns a set of MCP credentials — either a human user or an internal agent.
@@ -46,4 +52,20 @@ impl From<AgentId> for McpCredsOwner {
     fn from(agent_id: AgentId) -> Self {
         McpCredsOwner::Agent { agent_id }
     }
+}
+
+/// Originator of a user-facing message sent to an agent session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserMessageSource {
+    User {
+        user_id: UserId,
+    },
+    ExportedAgent {
+        user_id: UserId,
+        creds_id: McpCredsId,
+    },
+    Agent {
+        agent_id: AgentId,
+    },
 }

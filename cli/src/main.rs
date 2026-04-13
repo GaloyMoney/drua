@@ -78,23 +78,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let app_config = galoy_agents_core::AppConfig {
-        agents: galoy_agents_core::agent::AgentConfig {
-            sandbox: galoy_agents_core::agent::config::SandboxClientConfig {
-                enabled: config.sandbox.enabled,
-                namespace: config.sandbox.namespace.clone(),
-                template_name: config.sandbox.template_name.clone(),
-                persistence: config.sandbox.persistence.as_ref().map(|p| {
-                    galoy_agents_core::agent::config::PersistenceConfig {
-                        size: p.size.clone(),
-                        storage_class: p.storage_class.clone(),
-                        mount_path: p.mount_path.clone(),
-                    }
-                }),
-            },
-            light: galoy_agents_core::agent::config::LightRuntimeConfig {
-                api_key: config.anthropic_api_key.clone(),
-            },
-        },
+        agents: config.agents.clone(),
+        prompt_executor: config.prompt_executor_config(),
         toolsets: config.toolsets.clone(),
         encryption: Default::default(),
         github_app: github_app_config,

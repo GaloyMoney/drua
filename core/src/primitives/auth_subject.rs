@@ -1,4 +1,4 @@
-use crate::ids::*;
+use super::{AgentId, McpCredsId, UserId, UserMessageSource, WorkspaceId};
 
 /// Unified authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
@@ -84,18 +84,3 @@ impl AuthSubject {
     }
 }
 
-/// Originator of a user-facing message sent to an agent session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum UserMessageSource {
-    User {
-        user_id: UserId,
-    },
-    ExportedAgent {
-        user_id: UserId,
-        creds_id: McpCredsId,
-    },
-    Agent {
-        agent_id: AgentId,
-    },
-}

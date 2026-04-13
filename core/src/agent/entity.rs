@@ -17,7 +17,7 @@ pub enum AgentRole {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessageEvent {
     UserMessage {
-        source: primitives::UserMessageSource,
+        source: crate::primitives::UserMessageSource,
         text: String,
     },
     AssistantText {

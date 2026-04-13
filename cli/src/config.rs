@@ -2,6 +2,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use galoy_agents_core::agent::AgentsConfig;
+use galoy_agents_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
 use galoy_agents_core::toolset::ToolSetsConfig;
 use galoy_agents_web::auth::config::AuthConfig;
 
@@ -15,13 +17,41 @@ pub struct Config {
     #[serde(default)]
     pub db: DbConfig,
     #[serde(default)]
-    pub sandbox: SandboxConfig,
+    pub agents: AgentsConfig,
     #[serde(default)]
     pub toolsets: ToolSetsConfig,
     #[serde(default)]
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(skip)]
     pub anthropic_api_key: String,
+}
+
+impl Config {
+    /// Build a `PromptExecutorConfig` registering every model that the
+    /// configured `agents.builtin_roles` reference, all bound to Anthropic
+    /// using the API key provided via env.
+    pub fn prompt_executor_config(&self) -> PromptExecutorConfig {
+        let mut models: Vec<String> = self
+            .agents
+            .builtin_roles
+            .values()
+            .map(|r| r.model.clone())
+            .collect();
+        models.sort();
+        models.dedup();
+        PromptExecutorConfig {
+            models: models
+                .into_iter()
+                .map(|name| ModelConfig {
+                    name,
+                    provider: Provider::Anthropic {
+                        api_key: self.anthropic_api_key.clone(),
+                    },
+                    default_max_tokens: None,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// GitHub App config from the YAML config file.
@@ -37,37 +67,6 @@ pub struct GitHubAppCliConfig {
     /// Filesystem path to the PEM private key (loaded from env: GITHUB_APP_PRIVATE_KEY_PATH).
     #[serde(skip)]
     pub private_key_path: String,
-}
-
-#[derive(Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxConfig {
-    /// Enable Agent Sandbox integration.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Kubernetes namespace where sandboxes are managed.
-    #[serde(default)]
-    pub namespace: String,
-
-    /// Name of the SandboxTemplate to use when creating claims.
-    #[serde(default)]
-    pub template_name: String,
-
-    /// Persistent storage configuration for sandbox workspaces.
-    #[serde(default)]
-    pub persistence: Option<SandboxPersistenceConfig>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxPersistenceConfig {
-    /// PVC size (e.g., "10Gi").
-    pub size: String,
-    /// StorageClass name (e.g., "pd-balanced").
-    pub storage_class: String,
-    /// Mount path inside the container (e.g., "/workspace").
-    pub mount_path: String,
 }
 
 #[derive(Clone, Deserialize)]

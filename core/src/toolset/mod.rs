@@ -21,7 +21,8 @@ use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
 
-use crate::audit::{Audit, InteractionOutcome};
+use crate::audit::primitives::InteractionOutcome;
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
 pub struct ToolSets {
@@ -105,6 +106,31 @@ impl ToolSets {
             "Late-registered toolset"
         );
         sets.push(toolset);
+    }
+
+    /// Human-readable summary of available toolsets — used as the MCP
+    /// server's `instructions` payload so clients know how to discover and
+    /// call upstream tools.
+    pub fn instructions(&self) -> String {
+        let sets = self.sets.read().expect("toolset lock poisoned");
+        let mut lines = vec![
+            "Tools from upstream services are available via progressive disclosure:".to_string(),
+            "1. search_tools — discover tools by keyword or category".to_string(),
+            "2. describe_tool — get full parameter schema before calling".to_string(),
+            "3. call_tool — execute with proper arguments".to_string(),
+            String::new(),
+            "Available toolsets:".to_string(),
+        ];
+        for set in sets.iter() {
+            lines.push(format!(
+                "  {} ({}, {} tools) — {}",
+                set.name(),
+                set.category(),
+                set.tools().len(),
+                set.category_description(),
+            ));
+        }
+        lines.join("\n")
     }
 
     /// Top-level tools visible to a caller with the given `scopes`. A tool is

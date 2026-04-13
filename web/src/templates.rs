@@ -130,7 +130,6 @@ pub struct WorkspaceNewTemplate {}
 #[template(path = "workspace_detail.html")]
 pub struct WorkspaceDetailTemplate {
     pub workspace: WorkspaceView,
-    pub agent_id: String,
 }
 
 // ── Workspace Secrets ────────────────────────────────────────────────
