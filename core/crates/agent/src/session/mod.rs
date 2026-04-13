@@ -1,6 +1,7 @@
 mod entity;
 pub mod error;
 pub mod repo;
+mod thread;
 
 use tracing::instrument;
 

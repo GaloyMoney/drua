@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 use primitives::AgentId;
 
-use super::AgentSessionId;
+use super::{thread::SessionThread, AgentSessionId};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -22,6 +22,10 @@ pub struct AgentSession {
     pub id: AgentSessionId,
     pub agent_id: AgentId,
     events: EntityEvents<AgentSessionEvent>,
+
+    #[es_entity(nested)]
+    #[builder(default)]
+    pub(super) threads: Nested<SessionThread>,
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {

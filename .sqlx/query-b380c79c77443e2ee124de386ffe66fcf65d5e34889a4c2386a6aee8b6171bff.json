@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO session_threads (id, session_id, created_at) VALUES ($1, $2, COALESCE($3, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b380c79c77443e2ee124de386ffe66fcf65d5e34889a4c2386a6aee8b6171bff"
+}
