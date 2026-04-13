@@ -23,7 +23,7 @@ use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
 use prompt_executor::PromptExecutor;
-use toolset::{ToolSets, ToolSetsError};
+use toolset::{CodeAssistantToolSet, ToolSets, ToolSetsError};
 use user::Users;
 use workspace::Workspaces;
 use workspace_secret::WorkspaceSecrets;
@@ -76,6 +76,9 @@ impl App {
 
         let audit = Arc::new(Audit::new(pool));
         let toolsets = ToolSets::init(config.toolsets, Some(Arc::clone(&audit))).await?;
+        if let Some(ca) = code_assistant.as_ref() {
+            toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
+        }
         let toolsets = Arc::new(toolsets);
 
         // Spawn the prompt executor and hand its request channel to the

@@ -1,4 +1,5 @@
 mod builtins;
+pub mod code_assistant;
 pub mod concourse;
 mod config;
 mod error;
@@ -7,6 +8,7 @@ mod traits;
 mod upstream;
 
 pub use builtins::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
+pub use code_assistant::CodeAssistantToolSet;
 pub use concourse::ConcourseToolSet;
 pub use config::*;
 pub use error::*;
