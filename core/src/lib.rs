@@ -22,8 +22,8 @@ use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
-use report::Reports;
-use toolset::{AdminToolSet, ToolSets, ToolSetsError};
+use prompt_executor::PromptExecutor;
+use toolset::{ToolSets, ToolSetsError};
 use user::Users;
 use workspace::Workspaces;
 use workspace_secret::WorkspaceSecrets;
@@ -35,11 +35,13 @@ pub struct App {
     agents: Arc<Agents>,
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
-    reports: Option<Arc<Reports>>,
     toolsets: Arc<ToolSets>,
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
     github_app: Option<GitHubAppTokenProvider>,
+    /// Held so the executor's worker task stays alive for the lifetime of
+    /// `App`; dropped on shutdown which aborts the task.
+    _prompt_executor: Arc<PromptExecutor>,
 }
 
 impl App {
@@ -48,9 +50,8 @@ impl App {
             let p = &config.toolsets.code_assistant.db_path;
             !p.is_empty() && std::path::Path::new(p).exists()
         };
-        let needs_embedder = ca_db_exists || config.toolsets.report.enabled;
 
-        let embedder = if needs_embedder {
+        let embedder = if ca_db_exists {
             Some(Arc::new(
                 code_assistant_core::embedder::Embedder::new()
                     .map_err(|e| AppError::Embedder(e.to_string()))?,
@@ -73,26 +74,25 @@ impl App {
             None
         };
 
-        let reports = match (&embedder, config.toolsets.report.enabled) {
-            (Some(emb), true) => Some(Arc::new(Reports::new(pool, emb.clone()))),
-            _ => None,
-        };
-
         let audit = Arc::new(Audit::new(pool));
-        let toolsets = ToolSets::init(
-            config.toolsets,
-            code_assistant.clone(),
-            reports.clone(),
-            Some(Arc::clone(&audit)),
-        )
-        .await?;
+        let toolsets = ToolSets::init(config.toolsets, Some(Arc::clone(&audit))).await?;
         let toolsets = Arc::new(toolsets);
-        let mcp_creds = McpCredentials::new(pool);
-        let agents = Arc::new(Agents::init(pool, config.agents, Arc::clone(&toolsets)).await?);
-        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
-        // Register admin toolset after agents/workspaces to break circular dep
-        toolsets.register(AdminToolSet::new(workspaces.clone(), Arc::clone(&agents)));
+        // Spawn the prompt executor and hand its request channel to the
+        // agents service; hold the executor so its worker task lives as
+        // long as `App`.
+        let (prompt_executor, prompt_tx) =
+            PromptExecutor::init(config.prompt_executor).await;
+        let prompt_executor = Arc::new(prompt_executor);
+
+        let mcp_creds = McpCredentials::new(pool);
+        let agents = Arc::new(Agents::new(
+            pool,
+            config.agents,
+            Arc::clone(&toolsets),
+            prompt_tx,
+        ));
+        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
@@ -123,11 +123,11 @@ impl App {
             agents: Arc::clone(&agents),
             audit,
             code_assistant,
-            reports,
             toolsets,
             workspaces,
             workspace_secrets,
             github_app,
+            _prompt_executor: prompt_executor,
         })
     }
 
@@ -149,10 +149,6 @@ impl App {
 
     pub fn code_assistant(&self) -> Option<&CodeAssistant> {
         self.code_assistant.as_deref()
-    }
-
-    pub fn reports(&self) -> Option<&Reports> {
-        self.reports.as_deref()
     }
 
     pub fn toolsets(&self) -> &ToolSets {

@@ -11,7 +11,7 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
-use crate::agent::Agents;
+use crate::agent::{AgentRole, Agents};
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -29,7 +29,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.create", skip(self))]
     pub async fn create(
         &self,
-        user_id: UserId,
+        _user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
@@ -44,8 +44,7 @@ impl Workspaces {
             .create_in_op(
                 &mut op,
                 workspace_id,
-                AgentType::WorkspaceLead,
-                user_id,
+                AgentRole::WorkspaceLead,
                 format!("{name}-lead"),
             )
             .await?;
