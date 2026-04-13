@@ -2,9 +2,9 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
-use primitives::AgentId;
+use primitives::{AgentId, UserMessageSource};
 
-use super::{thread::SessionThread, AgentSessionId};
+use super::{error::AgentSessionError, thread::SessionThread, AgentSessionId};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -26,6 +26,16 @@ pub struct AgentSession {
     #[es_entity(nested)]
     #[builder(default)]
     pub(super) threads: Nested<SessionThread>,
+}
+
+impl AgentSession {
+    pub fn add_user_message(
+        &mut self,
+        _source: UserMessageSource,
+        _prompt: String,
+    ) -> Result<Idempotent<llm::Prompt>, AgentSessionError> {
+        unimplemented!()
+    }
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {

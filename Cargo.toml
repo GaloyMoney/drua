@@ -27,6 +27,7 @@ concourse-client = { path = "lib/concourse-client" }
 sandbox-client = { path = "lib/sandbox-client" }
 code-assistant-core = { path = "code-assistant/crates/core" }
 primitives = { path = "core/crates/primitives" }
+llm = { path = "lib/llm" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }

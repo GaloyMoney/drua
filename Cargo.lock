@@ -24,6 +24,7 @@ version = "0.1.0"
 dependencies = [
  "derive_builder",
  "es-entity",
+ "llm",
  "primitives",
  "serde",
  "serde_json",

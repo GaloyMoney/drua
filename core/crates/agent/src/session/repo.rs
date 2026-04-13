@@ -8,7 +8,7 @@ use super::{entity::*, thread::*, AgentSessionId};
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "AgentSession",
-    columns(agent_id(ty = "AgentId", list_for(by(created_at))))
+    columns(agent_id(ty = "AgentId"))
 )]
 pub struct AgentSessionRepo {
     #[allow(dead_code)]

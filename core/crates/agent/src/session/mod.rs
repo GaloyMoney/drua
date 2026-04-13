@@ -38,13 +38,20 @@ impl Sessions {
         Ok(self.repo.create_in_op(op, new_session).await?)
     }
 
-    #[instrument(name = "domain.agent_session.add_user_message", skip(self, _prompt))]
+    #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]
     pub async fn add_user_message(
         &self,
-        _agent_id: AgentId,
-        _source: UserMessageSource,
-        _prompt: String,
-    ) -> Result<(), AgentSessionError> {
-        unimplemented!()
+        agent_id: AgentId,
+        source: UserMessageSource,
+        prompt: String,
+    ) -> Result<Option<llm::Prompt>, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        match session.add_user_message(source, prompt)? {
+            es_entity::Idempotent::Executed(prompt) => {
+                self.repo.update(&mut session).await?;
+                Ok(Some(prompt))
+            }
+            es_entity::Idempotent::AlreadyApplied => Ok(None),
+        }
     }
 }
