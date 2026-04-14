@@ -74,13 +74,15 @@ impl SearchCatalog {
         });
 
         if let Some(q) = query {
-            let keywords: Vec<String> =
-                normalize(q).split_whitespace().map(String::from).collect();
+            let keywords: Vec<String> = Self::normalize(q)
+                .split_whitespace()
+                .map(String::from)
+                .collect();
             if !keywords.is_empty() {
                 let mut scored: Vec<_> = entries
                     .into_iter()
                     .filter_map(|e| {
-                        let score = keyword_score(&e, &keywords);
+                        let score = Self::keyword_score(&e, &keywords);
                         if score > 0 {
                             Some((score, e))
                         } else {
@@ -94,6 +96,29 @@ impl SearchCatalog {
         }
 
         entries
+    }
+
+    /// Normalize a string for fuzzy keyword matching: lowercase and
+    /// collapse underscores/hyphens into spaces so "search code",
+    /// "search_code", and "search-code" all match each other.
+    fn normalize(s: &str) -> String {
+        s.to_lowercase().replace(['_', '-'], " ")
+    }
+
+    /// Count how many `keywords` appear somewhere in `entry`'s searchable
+    /// text (tool name + upstream name + brief description). Used for
+    /// ranking search results.
+    fn keyword_score(entry: &CatalogEntry, keywords: &[String]) -> usize {
+        let haystack = [
+            Self::normalize(&entry.tool_name),
+            Self::normalize(&entry.upstream_name),
+            Self::normalize(&entry.brief_description),
+        ]
+        .join(" ");
+        keywords
+            .iter()
+            .filter(|kw| haystack.contains(kw.as_str()))
+            .count()
     }
 
     /// Format search results as text grouped by category.
@@ -409,29 +434,6 @@ fn visible_entries(
     out
 }
 
-/// Normalize a string for fuzzy keyword matching: lowercase and collapse
-/// underscores/hyphens into spaces so "search code", "search_code", and
-/// "search-code" all match each other.
-fn normalize(s: &str) -> String {
-    s.to_lowercase().replace(['_', '-'], " ")
-}
-
-/// Count how many `keywords` appear somewhere in `entry`'s searchable
-/// text (tool name + upstream name + brief description). Used by
-/// [`SearchCatalog::execute_search`] for ranking.
-fn keyword_score(entry: &CatalogEntry, keywords: &[String]) -> usize {
-    let haystack = [
-        normalize(&entry.tool_name),
-        normalize(&entry.upstream_name),
-        normalize(&entry.brief_description),
-    ]
-    .join(" ");
-    keywords
-        .iter()
-        .filter(|kw| haystack.contains(kw.as_str()))
-        .count()
-}
-
 fn first_sentence(s: &str) -> String {
     s.split_once(". ")
         .or_else(|| s.split_once(".\n"))
@@ -577,9 +579,9 @@ mod tests {
 
     #[test]
     fn normalize_replaces_underscores_and_hyphens() {
-        assert_eq!(normalize("search_code"), "search code");
-        assert_eq!(normalize("list-pipelines"), "list pipelines");
-        assert_eq!(normalize("Search_Code"), "search code");
-        assert_eq!(normalize("no changes"), "no changes");
+        assert_eq!(SearchCatalog::normalize("search_code"), "search code");
+        assert_eq!(SearchCatalog::normalize("list-pipelines"), "list pipelines");
+        assert_eq!(SearchCatalog::normalize("Search_Code"), "search code");
+        assert_eq!(SearchCatalog::normalize("no changes"), "no changes");
     }
 }
