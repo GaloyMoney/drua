@@ -19,7 +19,8 @@ pub struct UpstreamToolSet {
     tool_prefix: String,
     category: String,
     category_description: String,
-    required_scopes: Vec<&'static str>,
+    /// Scopes required to see / invoke this upstream. Empty = unrestricted.
+    required_scopes: Vec<String>,
     tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,
 }
@@ -74,11 +75,8 @@ impl UpstreamToolSet {
             category_description: upstream.category_description.clone().unwrap_or_default(),
             required_scopes: upstream
                 .required_scopes
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|s| &*Box::leak(s.clone().into_boxed_str()))
-                .collect(),
+                .clone()
+                .unwrap_or_default(),
             tools,
             client,
         })
@@ -107,19 +105,22 @@ impl SearchableToolSet for UpstreamToolSet {
         &self.category_description
     }
 
-    fn required_scopes(&self) -> &[&str] {
-        &self.required_scopes
-    }
-
     fn tools(&self) -> &[ToolSetEntry] {
         &self.tools
+    }
+
+    fn is_visible(&self, subject: &AuthSubject) -> bool {
+        has_required_scopes(&self.required_scopes, subject)
+    }
+
+    fn can_execute(&self, subject: &AuthSubject) -> bool {
+        has_required_scopes(&self.required_scopes, subject)
     }
 
     async fn call(
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
-        _auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let mut params = CallToolRequestParams::new(tool_name.to_string());
         if let Some(args) = arguments {
@@ -128,4 +129,8 @@ impl SearchableToolSet for UpstreamToolSet {
         let result = self.peer().call_tool(params).await?;
         Ok(result)
     }
+}
+
+fn has_required_scopes(required: &[String], subject: &AuthSubject) -> bool {
+    required.iter().all(|scope| subject.has_scope(scope))
 }

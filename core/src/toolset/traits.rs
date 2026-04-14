@@ -67,15 +67,23 @@ pub trait SearchableToolSet: Send + Sync {
     fn category_description(&self) -> &str;
     fn tools(&self) -> &[ToolSetEntry];
 
-    /// Scopes required to access this toolset. Empty means unrestricted.
-    fn required_scopes(&self) -> &[&str] {
-        &[]
+    /// Whether this toolset should appear in the catalog (`search_tools`,
+    /// `describe_tool`, prompt-tools) for the given subject. Default: always
+    /// visible. Override to hide a toolset behind a scope or role.
+    fn is_visible(&self, _subject: &AuthSubject) -> bool {
+        true
+    }
+
+    /// Whether the subject may invoke any tool in this set. Default: yes.
+    /// `CallCatalogTool` enforces this before dispatching and surfaces
+    /// `ToolSetsError::Unauthorized` on `false`.
+    fn can_execute(&self, _subject: &AuthSubject) -> bool {
+        true
     }
 
     async fn call(
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
-        auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError>;
 }
