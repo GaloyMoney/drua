@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::error::InstanceError;
-use crate::types::Sandbox;
+use crate::types::{Sandbox, SandboxMode};
 
 /// HTTP client bound to a single sandbox base URL.
 #[derive(Clone)]
@@ -100,6 +100,25 @@ pub struct InitializeRequest {
     pub github_token: Option<String>,
 }
 
+impl InitializeRequest {
+    /// Build a request from a [`SandboxMode`], optionally including a
+    /// GitHub token to be written to `GITHUB_TOKEN_PATH` inside the sandbox.
+    pub fn from_mode(mode: &SandboxMode, github_token: Option<String>) -> Self {
+        match mode {
+            SandboxMode::Scratch => Self {
+                mode: "scratch".to_string(),
+                repo_url: None,
+                github_token,
+            },
+            SandboxMode::Repo { repo_url } => Self {
+                mode: "repo".to_string(),
+                repo_url: Some(repo_url.clone()),
+                github_token,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct InitializeResponse {
     pub cwd: String,
@@ -111,13 +130,13 @@ pub struct InitializeResponse {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExportedFile {
     pub file_name: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExportedSkill {
     pub name: String,
     pub content: String,

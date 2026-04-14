@@ -8,6 +8,7 @@ pub mod github_app;
 pub mod mcp_creds;
 pub mod primitives;
 pub mod prompt_executor;
+pub mod sandbox;
 pub mod skill;
 pub mod slash_command;
 pub mod toolset;

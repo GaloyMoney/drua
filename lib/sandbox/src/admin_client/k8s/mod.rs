@@ -16,24 +16,17 @@ use tracing::instrument;
 use self::types::*;
 use crate::admin_client::AdminClient;
 use crate::error::AdminError;
-use crate::types::Sandbox as SandboxView;
+use crate::types::{Sandbox as SandboxView, SandboxSpecs};
 
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "galoy-agents";
 
-/// Configuration for persistent storage on sandbox pods.
+/// Cluster-level storage class config for the workspace PVC. Per-sandbox
+/// disk size comes from [`SandboxSpecs::disk_size`].
 #[derive(Clone, Debug)]
 pub struct PersistenceConfig {
-    pub size: String,
     pub storage_class: String,
     pub mount_path: String,
-}
-
-/// Per-agent resource requests/limits that override the template defaults.
-#[derive(Clone, Debug)]
-pub struct ResourceConfig {
-    pub cpu: String,
-    pub memory: String,
 }
 
 /// Default port the sandbox tool server binds to inside the pod (matches the
@@ -47,7 +40,6 @@ pub struct K8sAdminClient {
     namespace: String,
     template_name: String,
     persistence: Option<PersistenceConfig>,
-    resources: Option<ResourceConfig>,
     extra_env: Vec<(String, String)>,
     sandbox_port: u16,
 }
@@ -60,7 +52,6 @@ impl K8sAdminClient {
             namespace,
             template_name,
             persistence: None,
-            resources: None,
             extra_env: Vec::new(),
             sandbox_port: DEFAULT_SANDBOX_PORT,
         }
@@ -69,12 +60,6 @@ impl K8sAdminClient {
     /// Enable persistent storage for sandboxes.
     pub fn with_persistence(mut self, config: PersistenceConfig) -> Self {
         self.persistence = Some(config);
-        self
-    }
-
-    /// Override resource requests/limits for the sandbox container.
-    pub fn with_resources(mut self, config: ResourceConfig) -> Self {
-        self.resources = Some(config);
         self
     }
 
@@ -121,11 +106,12 @@ impl K8sAdminClient {
 
     /// Ensure a standalone PVC exists for the given sandbox name.
     /// Creates the PVC if it doesn't exist; no-ops if it already does.
-    #[instrument(name = "sandbox.admin.k8s.ensure_pvc", skip_all, fields(%name))]
+    #[instrument(name = "sandbox.admin.k8s.ensure_pvc", skip_all, fields(%name, %disk_size))]
     async fn ensure_pvc(
         &self,
         name: &str,
         persistence: &PersistenceConfig,
+        disk_size: &str,
     ) -> Result<String, AdminError> {
         let pvc_name = format!("workspace-{name}");
         let pvcs: Api<PersistentVolumeClaim> =
@@ -153,7 +139,7 @@ impl K8sAdminClient {
                         resources: Some(VolumeResourceRequirements {
                             requests: Some(BTreeMap::from([(
                                 "storage".to_string(),
-                                Quantity(persistence.size.clone()),
+                                Quantity(disk_size.to_string()),
                             )])),
                             ..Default::default()
                         }),
@@ -177,7 +163,11 @@ impl K8sAdminClient {
     /// into the pod. The PVC lifecycle is independent of the Sandbox — it
     /// survives sandbox deletion and is reused on recreation with the same name.
     #[instrument(name = "sandbox.admin.k8s.create_sandbox", skip_all, fields(%name))]
-    pub async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
+    pub async fn create_sandbox(
+        &self,
+        name: &str,
+        specs: &SandboxSpecs,
+    ) -> Result<SandboxView, AdminError> {
         let template = self.read_template().await?;
         let mut pod_template = template.spec.pod_template;
 
@@ -198,7 +188,7 @@ impl K8sAdminClient {
         }
 
         if let Some(ref persistence) = self.persistence {
-            let pvc_name = self.ensure_pvc(name, persistence).await?;
+            let pvc_name = self.ensure_pvc(name, persistence, &specs.disk_size).await?;
 
             if let Some(ref mut spec) = pod_template.spec {
                 // Add PVC as a volume
@@ -234,22 +224,20 @@ impl K8sAdminClient {
             }
         }
 
-        // Override container resources if configured
-        if let Some(ref res) = self.resources {
-            if let Some(ref mut spec) = pod_template.spec {
-                if let Some(container) = spec.containers.first_mut() {
-                    container.resources = Some(ResourceRequirements {
-                        requests: Some(BTreeMap::from([
-                            ("cpu".to_string(), Quantity(res.cpu.clone())),
-                            ("memory".to_string(), Quantity(res.memory.clone())),
-                        ])),
-                        limits: Some(BTreeMap::from([
-                            ("cpu".to_string(), Quantity(res.cpu.clone())),
-                            ("memory".to_string(), Quantity(res.memory.clone())),
-                        ])),
-                        ..Default::default()
-                    });
-                }
+        // Apply per-call resource specs to the first container.
+        if let Some(ref mut spec) = pod_template.spec {
+            if let Some(container) = spec.containers.first_mut() {
+                container.resources = Some(ResourceRequirements {
+                    requests: Some(BTreeMap::from([
+                        ("cpu".to_string(), Quantity(specs.cpu.clone())),
+                        ("memory".to_string(), Quantity(specs.memory.clone())),
+                    ])),
+                    limits: Some(BTreeMap::from([
+                        ("cpu".to_string(), Quantity(specs.cpu.clone())),
+                        ("memory".to_string(), Quantity(specs.memory.clone())),
+                    ])),
+                    ..Default::default()
+                });
             }
         }
 
@@ -573,8 +561,12 @@ impl K8sAdminClient {
 
 #[async_trait]
 impl AdminClient for K8sAdminClient {
-    async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
-        K8sAdminClient::create_sandbox(self, name).await
+    async fn create_sandbox(
+        &self,
+        name: &str,
+        specs: &SandboxSpecs,
+    ) -> Result<SandboxView, AdminError> {
+        K8sAdminClient::create_sandbox(self, name, specs).await
     }
 
     async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {

@@ -15,7 +15,7 @@ use tracing::instrument;
 pub use self::config::LocalSandboxConfig;
 use crate::admin_client::AdminClient;
 use crate::error::AdminError;
-use crate::types::Sandbox as SandboxView;
+use crate::types::{Sandbox as SandboxView, SandboxSpecs};
 
 const SANDBOXES_DIR_NAME: &str = ".sandboxes";
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -64,8 +64,19 @@ impl LocalAdminClient {
         &self.sandboxes_root
     }
 
-    #[instrument(name = "sandbox.admin.local.create_sandbox", skip(self), fields(%name))]
-    pub async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
+    #[instrument(
+        name = "sandbox.admin.local.create_sandbox",
+        skip(self, specs),
+        fields(%name, cpu = %specs.cpu, memory = %specs.memory, disk_size = %specs.disk_size)
+    )]
+    pub async fn create_sandbox(
+        &self,
+        name: &str,
+        specs: &SandboxSpecs,
+    ) -> Result<SandboxView, AdminError> {
+        // Specs are recorded in the span fields above for visibility but
+        // are not enforced by the local backend.
+        let _ = specs;
         {
             let sandboxes = self.sandboxes.lock().await;
             if sandboxes.contains_key(name) {
@@ -148,8 +159,12 @@ impl LocalAdminClient {
 
 #[async_trait]
 impl AdminClient for LocalAdminClient {
-    async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
-        LocalAdminClient::create_sandbox(self, name).await
+    async fn create_sandbox(
+        &self,
+        name: &str,
+        specs: &SandboxSpecs,
+    ) -> Result<SandboxView, AdminError> {
+        LocalAdminClient::create_sandbox(self, name, specs).await
     }
 
     async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
@@ -215,6 +230,14 @@ async fn wait_ready(port: u16, timeout: Duration) -> Result<(), ()> {
 mod tests {
     use super::*;
 
+    fn test_specs() -> SandboxSpecs {
+        SandboxSpecs {
+            cpu: "100m".into(),
+            memory: "128Mi".into(),
+            disk_size: "1Gi".into(),
+        }
+    }
+
     #[tokio::test]
     async fn allocate_port_returns_distinct_ports() {
         let p1 = allocate_port().unwrap();
@@ -249,7 +272,7 @@ mod tests {
 
         // `true` exits immediately without binding, so wait_ready times out.
         let err = client
-            .create_sandbox("alpha")
+            .create_sandbox("alpha", &test_specs())
             .await
             .expect_err("should time out — `true` never binds a port");
         assert!(matches!(err, AdminError::Timeout(_)));
@@ -277,7 +300,7 @@ mod tests {
 
         // First call times out (sleep doesn't bind), but we manually inject the
         // sandbox into the map to simulate one already running.
-        let _ = client.create_sandbox("dup").await;
+        let _ = client.create_sandbox("dup", &test_specs()).await;
         {
             let mut map = client.sandboxes.lock().await;
             map.insert(
@@ -299,7 +322,10 @@ mod tests {
             );
         }
 
-        let err = client.create_sandbox("dup").await.expect_err("duplicate");
+        let err = client
+            .create_sandbox("dup", &test_specs())
+            .await
+            .expect_err("duplicate");
         assert!(matches!(err, AdminError::AlreadyExists(_)));
 
         let _ = client.delete_sandbox("dup").await;

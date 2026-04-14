@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::AdminError;
-use crate::types::Sandbox;
+use crate::types::{Sandbox, SandboxSpecs};
 
 /// Backend-agnostic operations for managing sandbox lifecycle.
 ///
@@ -12,11 +12,15 @@ use crate::types::Sandbox;
 /// `None` otherwise.
 #[async_trait]
 pub trait AdminClient: Send + Sync {
-    /// Create a new sandbox. The returned [`Sandbox`] may not yet be ready
-    /// (k8s in particular needs a follow-up [`Self::wait_sandbox_ready`]
-    /// before its `base_url` is populated). The local backend returns a
-    /// ready sandbox.
-    async fn create_sandbox(&self, name: &str) -> Result<Sandbox, AdminError>;
+    /// Create a new sandbox with the given resource specs. The returned
+    /// [`Sandbox`] may not yet be ready (k8s in particular needs a follow-up
+    /// [`Self::wait_sandbox_ready`] before its `base_url` is populated).
+    /// The local backend returns a ready sandbox and ignores `specs`.
+    async fn create_sandbox(
+        &self,
+        name: &str,
+        specs: &SandboxSpecs,
+    ) -> Result<Sandbox, AdminError>;
 
     /// Delete a sandbox by name. Returns [`AdminError::NotFound`] if no
     /// such sandbox is tracked / exists.

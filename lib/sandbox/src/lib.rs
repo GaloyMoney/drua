@@ -21,4 +21,4 @@ mod types;
 pub use admin_client::AdminClient;
 pub use error::{AdminError, InstanceError};
 pub use instance_client::InstanceClient;
-pub use types::Sandbox;
+pub use types::{Sandbox, SandboxMode, SandboxSpecs};
