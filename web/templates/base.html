@@ -86,6 +86,7 @@
 </head>
 <body>
   <aside class="sidebar">
+    {% block sidebar_content %}
     <h4>Galoy Agents</h4>
     <nav>
       <ul>
@@ -101,6 +102,7 @@
     <div class="sidebar-bottom">
       <a href="/auth/logout">Logout</a>
     </div>
+    {% endblock %}
   </aside>
   <div class="content-area">
     {% block content %}{% endblock %}
