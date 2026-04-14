@@ -1,5 +1,5 @@
 variable "image_digest" {}
-variable "sandbox_base_image_digest" {}
+variable "sandbox_image_digest" {}
 variable "github_client_secret" {}
 variable "concourse_username" {}
 variable "concourse_password" {}
@@ -188,7 +188,7 @@ resource "helm_release" "galoy_agents" {
   values = [
     templatefile("${path.module}/prod-values.yml.tmpl", {
       image_digest                = var.image_digest
-      sandbox_base_image_digest   = var.sandbox_base_image_digest
+      sandbox_image_digest        = var.sandbox_image_digest
       secret_checksum             = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
     })
   ]

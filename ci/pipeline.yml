@@ -8,10 +8,9 @@ groups:
   jobs:
   - check-code
   - test-bats
-  - test-harness
-  - test-sandbox-light
+  - test-sandbox
   - build-edge-image
-  - build-sandbox-base-image
+  - build-sandbox-image
   - deploy-to-prod
   - train-classifier
   - build-code-assistant-index
@@ -111,9 +110,9 @@ jobs:
       passed: [build-edge-image]
       params:
         skip_download: true
-    - get: sandbox-base-edge-image
+    - get: sandbox-edge-image
       trigger: true
-      passed: [build-sandbox-base-image]
+      passed: [build-sandbox-image]
       params:
         skip_download: true
   - task: prepare-deployment
@@ -124,7 +123,7 @@ jobs:
       - name: deploy-config
         path: repo
       - name: edge-image
-      - name: sandbox-base-edge-image
+      - name: sandbox-edge-image
       outputs:
       - name: deployment
       params:
@@ -145,7 +144,7 @@ jobs:
             set -euo pipefail
 
             DIGEST=$(cat edge-image/digest)
-            SANDBOX_BASE_DIGEST=$(cat sandbox-base-edge-image/digest)
+            SANDBOX_DIGEST=$(cat sandbox-edge-image/digest)
 
             cp -r repo/ci/deploy/galoy-agents deployment/tf
             cp -r repo/charts/galoy-agents deployment/tf/chart
@@ -153,7 +152,7 @@ jobs:
             set +x
             cat <<EOF > deployment/tf/terraform.tfvars
             image_digest = "${DIGEST}"
-            sandbox_base_image_digest = "${SANDBOX_BASE_DIGEST}"
+            sandbox_image_digest = "${SANDBOX_DIGEST}"
             github_client_secret = "${GITHUB_CLIENT_SECRET}"
             concourse_username = "${CONCOURSE_USERNAME}"
             concourse_password = "${CONCOURSE_PASSWORD}"
@@ -302,44 +301,17 @@ jobs:
       repository: repo-updated
       rebase: true
 
-- name: test-harness
+- name: test-sandbox
   serial: true
   plan:
-  - get: repo-sandbox-image
-    # trigger: true  # DISABLED: sandbox tests paused for cost/compute reasons
-  - task: harness-integration-test
-    config:
-      platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
-      inputs:
-      - name: repo-sandbox-image
-        path: repo
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
-        ANTHROPIC_API_KEY: #@ data.values.deploy_anthropic_api_key
-      run:
-        path: sh
-        args:
-          - -exc
-          - |
-            set -euo pipefail
-            cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run .#harness-bats
-
-- name: test-sandbox-light
-  serial: true
-  plan:
-  - get: repo-sandbox-light
+  - get: repo-sandbox
     trigger: true
-  - task: sandbox-light-integration-test
+  - task: sandbox-integration-test
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
       inputs:
-      - name: repo-sandbox-light
+      - name: repo-sandbox
         path: repo
       params:
         CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
@@ -353,20 +325,20 @@ jobs:
             cd repo
             cachix use $CACHIX_CACHE_NAME
             cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run .#sandbox-light-bats
+              nix run .#sandbox-bats
 
-- name: build-sandbox-base-image
+- name: build-sandbox-image
   serial: true
   plan:
-  - get: repo-sandbox-image
+  - get: repo-sandbox
     trigger: true
-    # passed: [test-harness]  # DISABLED: sandbox tests paused for cost/compute reasons
+    passed: [test-sandbox]
   - task: build-image
     config:
       platform: linux
       image_resource: #@ nix_flake_cachix_image_config()
       inputs:
-      - name: repo-sandbox-image
+      - name: repo-sandbox
         path: repo
       outputs:
       - name: image
@@ -381,9 +353,9 @@ jobs:
             set -euo pipefail
             cd repo
             cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#sandbox-base-image
+            cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#sandbox-image
             gunzip -c result > ../image/image.tar
-  - put: sandbox-base-edge-image
+  - put: sandbox-edge-image
     params:
       image: image/image.tar
     get_params:
@@ -425,28 +397,16 @@ resources:
     - code-assistant/labels/*
   webhook_token: ((webhook.secret))
 
-- name: repo-sandbox-image
+- name: repo-sandbox
   type: git
   source:
     uri: #@ data.values.git_uri
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
     paths:
-    - images/sandbox-base/
-    - bats/harness.bats
-    - bats/harness-helpers.bash
-    - flake.nix
-
-- name: repo-sandbox-light
-  type: git
-  source:
-    uri: #@ data.values.git_uri
-    branch: #@ data.values.git_branch
-    private_key: #@ data.values.github_private_key
-    paths:
-    - images/sandbox-light/
-    - bats/sandbox-light.bats
-    - bats/sandbox-light-helpers.bash
+    - images/sandbox/
+    - bats/sandbox.bats
+    - bats/sandbox-helpers.bash
     - flake.nix
 
 - name: repo-labels
@@ -511,13 +471,13 @@ resources:
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/" + data.values.folder_registry_image
 
-- name: sandbox-base-edge-image
+- name: sandbox-edge-image
   type: registry-image
   source:
     tag: edge
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
-    repository: #@ data.values.gar_registry + "/sandbox-base"
+    repository: #@ data.values.gar_registry + "/sandbox"
 
 - name: tf-galoy-agents-prod
   type: terraform

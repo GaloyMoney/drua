@@ -191,7 +191,7 @@ sandbox:
   ## Audience claim for the projected SA token (must match gateway validation)
   saTokenAudience: "galoy-agents-mcp"
   image:
-    repository: us.gcr.io/galoyorg/sandbox-base
+    repository: us.gcr.io/galoyorg/sandbox
     digest: ""
     tag: edge
   resources:
