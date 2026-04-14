@@ -164,7 +164,7 @@ impl ToolSets {
         }
 
         let start = std::time::Instant::now();
-        let result = tool.call(arguments.clone()).await;
+        let result = tool.call(subject, arguments.clone()).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
         let (outcome, tokens_returned) = match &result {
