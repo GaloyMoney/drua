@@ -1596,6 +1596,7 @@ name = "galoy-agents-mcp-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "es-entity",
  "galoy-agents-core",
  "http",
  "rmcp",
