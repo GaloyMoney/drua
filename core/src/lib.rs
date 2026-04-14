@@ -112,13 +112,6 @@ impl App {
 
         let mcp_creds = McpCredentials::new(pool);
         let slash_commands = Arc::new(slash_command::default_registry());
-        let agents = Arc::new(Agents::new(
-            pool,
-            config.agents,
-            Arc::clone(&toolsets),
-            prompt_tx,
-        ));
-        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
@@ -148,6 +141,15 @@ impl App {
         };
 
         let sandboxes = Sandboxes::init(pool, config.sandbox, github_app.clone()).await?;
+
+        let agents = Arc::new(Agents::new(
+            pool,
+            config.agents,
+            Arc::clone(&toolsets),
+            prompt_tx,
+            sandboxes.clone(),
+        ));
+        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
         Ok(Self {
             users: Users::new(pool),

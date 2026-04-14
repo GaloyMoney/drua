@@ -7,6 +7,18 @@ use sandbox::{SandboxMode, SandboxSpecs};
 
 use crate::primitives::*;
 
+/// How an agent is attached to a sandbox.
+///
+/// Multiple agents may attach in [`SandboxAgentMode::Read`]; at most one
+/// agent may attach in [`SandboxAgentMode::Write`] at a time. The entity
+/// enforces this invariant in [`Sandbox::attach_agent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxAgentMode {
+    Read,
+    Write,
+}
+
 /// Tracked lifecycle state of the remote sandbox (k8s pod or local process).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +85,17 @@ pub enum SandboxEvent {
         step: String,
         reason: String,
     },
+    /// An agent is now attached to this sandbox in `mode`. If the agent was
+    /// previously attached in a different mode, this event captures the new
+    /// state (upgrade/downgrade).
+    AgentAttached {
+        agent_id: AgentId,
+        mode: SandboxAgentMode,
+    },
+    /// An agent that was previously attached has been detached.
+    AgentDetached {
+        agent_id: AgentId,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -95,6 +118,10 @@ pub struct Sandbox {
     pub exported_system_prompt: Option<ExportedFile>,
     #[builder(default)]
     pub exported_skills: Vec<ExportedSkill>,
+    /// Agents currently attached to this sandbox. At most one entry may
+    /// have [`SandboxAgentMode::Write`] (enforced by [`Self::attach_agent`]).
+    #[builder(default)]
+    pub attached_agents: Vec<(AgentId, SandboxAgentMode)>,
     events: EntityEvents<SandboxEvent>,
 }
 
@@ -202,6 +229,78 @@ impl Sandbox {
             Idempotent::AlreadyApplied
         }
     }
+
+    /// Attach `agent_id` in `mode`, enforcing the workspace and
+    /// single-writer invariants.
+    ///
+    /// - The supplied `workspace_id` must match the sandbox's own
+    ///   workspace — else returns
+    ///   [`super::error::SandboxError::WrongWorkspace`].
+    /// - Same agent already attached in the same mode → [`Idempotent::AlreadyApplied`].
+    /// - Same agent already attached in a different mode → upgrade or downgrade
+    ///   (a downgrade to Read always succeeds; an upgrade to Write only succeeds
+    ///   when no other agent currently holds Write).
+    /// - Attaching as Write while another agent already holds Write returns
+    ///   [`super::error::SandboxError::WriteSlotTaken`].
+    pub(super) fn attach_agent(
+        &mut self,
+        agent_id: AgentId,
+        workspace_id: WorkspaceId,
+        mode: SandboxAgentMode,
+    ) -> Result<Idempotent<()>, super::error::SandboxError> {
+        if self.workspace_id != workspace_id {
+            return Err(super::error::SandboxError::WrongWorkspace {
+                expected: workspace_id,
+                actual: self.workspace_id,
+            });
+        }
+
+        let current_mode = self
+            .attached_agents
+            .iter()
+            .find(|(id, _)| *id == agent_id)
+            .map(|(_, m)| *m);
+
+        if current_mode == Some(mode) {
+            return Ok(Idempotent::AlreadyApplied);
+        }
+
+        if mode == SandboxAgentMode::Write {
+            if let Some((other, _)) = self
+                .attached_agents
+                .iter()
+                .find(|(id, m)| *id != agent_id && *m == SandboxAgentMode::Write)
+            {
+                return Err(super::error::SandboxError::WriteSlotTaken {
+                    current_writer: *other,
+                });
+            }
+        }
+
+        if let Some(entry) = self
+            .attached_agents
+            .iter_mut()
+            .find(|(id, _)| *id == agent_id)
+        {
+            entry.1 = mode;
+        } else {
+            self.attached_agents.push((agent_id, mode));
+        }
+        self.events
+            .push(SandboxEvent::AgentAttached { agent_id, mode });
+        Ok(Idempotent::Executed(()))
+    }
+
+    /// Detach `agent_id`. Idempotent: no-op if the agent isn't attached.
+    pub(super) fn detach_agent(&mut self, agent_id: AgentId) -> Idempotent<()> {
+        let len_before = self.attached_agents.len();
+        self.attached_agents.retain(|(id, _)| *id != agent_id);
+        if self.attached_agents.len() == len_before {
+            return Idempotent::AlreadyApplied;
+        }
+        self.events.push(SandboxEvent::AgentDetached { agent_id });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Sandbox {
@@ -217,6 +316,7 @@ impl core::fmt::Display for Sandbox {
 impl TryFromEvents<SandboxEvent> for Sandbox {
     fn try_from_events(events: EntityEvents<SandboxEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = SandboxBuilder::default();
+        let mut attached_agents: Vec<(AgentId, SandboxAgentMode)> = Vec::new();
 
         // We accumulate `last_error` as we walk the events: a
         // `ProvisioningFailed` sets it; any subsequent successful
@@ -258,8 +358,22 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                 SandboxEvent::ProvisioningFailed { reason, .. } => {
                     last_error = Some(reason.clone());
                 }
+                SandboxEvent::AgentAttached { agent_id, mode } => {
+                    if let Some(entry) = attached_agents
+                        .iter_mut()
+                        .find(|(id, _): &&mut (AgentId, SandboxAgentMode)| *id == *agent_id)
+                    {
+                        entry.1 = *mode;
+                    } else {
+                        attached_agents.push((*agent_id, *mode));
+                    }
+                }
+                SandboxEvent::AgentDetached { agent_id } => {
+                    attached_agents.retain(|(id, _)| *id != *agent_id);
+                }
             }
         }
+        builder = builder.attached_agents(attached_agents);
 
         builder.last_error(last_error).events(events).build()
     }
@@ -315,9 +429,13 @@ mod tests {
     }
 
     fn new_sandbox() -> Sandbox {
+        sandbox_in_workspace(WorkspaceId::new())
+    }
+
+    fn sandbox_in_workspace(workspace_id: WorkspaceId) -> Sandbox {
         let new = NewSandbox::builder()
             .id(SandboxId::new())
-            .workspace_id(WorkspaceId::new())
+            .workspace_id(workspace_id)
             .name("test-sandbox")
             .specs(test_specs())
             .mode(SandboxMode::Scratch)
@@ -365,6 +483,171 @@ mod tests {
         assert!(!res.did_execute());
     }
 
+    // ── attach_agent / detach_agent ────────────────────────────────
+
+    #[test]
+    fn attach_agent_records_new_reader() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let agent = AgentId::new();
+
+        let res = sb
+            .attach_agent(agent, ws, SandboxAgentMode::Read)
+            .expect("attach");
+        assert!(res.did_execute());
+        assert_eq!(sb.attached_agents, vec![(agent, SandboxAgentMode::Read)]);
+    }
+
+    #[test]
+    fn attach_agent_records_new_writer() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let agent = AgentId::new();
+
+        let res = sb
+            .attach_agent(agent, ws, SandboxAgentMode::Write)
+            .expect("attach");
+        assert!(res.did_execute());
+        assert_eq!(sb.attached_agents, vec![(agent, SandboxAgentMode::Write)]);
+    }
+
+    #[test]
+    fn attach_agent_same_mode_is_idempotent() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let agent = AgentId::new();
+
+        sb.attach_agent(agent, ws, SandboxAgentMode::Read).unwrap();
+        let res = sb
+            .attach_agent(agent, ws, SandboxAgentMode::Read)
+            .expect("re-attach");
+        assert!(!res.did_execute(), "second attach must be AlreadyApplied");
+    }
+
+    #[test]
+    fn attach_agent_upgrades_read_to_write_when_slot_free() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let agent = AgentId::new();
+
+        sb.attach_agent(agent, ws, SandboxAgentMode::Read).unwrap();
+        let res = sb
+            .attach_agent(agent, ws, SandboxAgentMode::Write)
+            .expect("upgrade");
+        assert!(res.did_execute());
+        assert_eq!(sb.attached_agents, vec![(agent, SandboxAgentMode::Write)]);
+    }
+
+    #[test]
+    fn attach_agent_downgrades_write_to_read() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let agent = AgentId::new();
+
+        sb.attach_agent(agent, ws, SandboxAgentMode::Write).unwrap();
+        let res = sb
+            .attach_agent(agent, ws, SandboxAgentMode::Read)
+            .expect("downgrade");
+        assert!(res.did_execute());
+        assert_eq!(sb.attached_agents, vec![(agent, SandboxAgentMode::Read)]);
+    }
+
+    #[test]
+    fn attach_agent_allows_multiple_readers() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let a = AgentId::new();
+        let b = AgentId::new();
+        let c = AgentId::new();
+
+        sb.attach_agent(a, ws, SandboxAgentMode::Read).unwrap();
+        sb.attach_agent(b, ws, SandboxAgentMode::Read).unwrap();
+        sb.attach_agent(c, ws, SandboxAgentMode::Read).unwrap();
+        assert_eq!(sb.attached_agents.len(), 3);
+        assert!(sb
+            .attached_agents
+            .iter()
+            .all(|(_, m)| *m == SandboxAgentMode::Read));
+    }
+
+    #[test]
+    fn attach_agent_rejects_second_writer() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let writer_a = AgentId::new();
+        let writer_b = AgentId::new();
+
+        sb.attach_agent(writer_a, ws, SandboxAgentMode::Write)
+            .unwrap();
+        let err = sb
+            .attach_agent(writer_b, ws, SandboxAgentMode::Write)
+            .expect_err("second writer must be rejected");
+        match err {
+            super::super::error::SandboxError::WriteSlotTaken { current_writer } => {
+                assert_eq!(current_writer, writer_a);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // The attach list is unchanged.
+        assert_eq!(
+            sb.attached_agents,
+            vec![(writer_a, SandboxAgentMode::Write)]
+        );
+    }
+
+    #[test]
+    fn attach_agent_allows_writer_with_existing_readers() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let r1 = AgentId::new();
+        let r2 = AgentId::new();
+        let w = AgentId::new();
+
+        sb.attach_agent(r1, ws, SandboxAgentMode::Read).unwrap();
+        sb.attach_agent(r2, ws, SandboxAgentMode::Read).unwrap();
+        let res = sb
+            .attach_agent(w, ws, SandboxAgentMode::Write)
+            .expect("writer ok with existing readers");
+        assert!(res.did_execute());
+    }
+
+    #[test]
+    fn attach_agent_rejects_wrong_workspace() {
+        let owning_ws = WorkspaceId::new();
+        let other_ws = WorkspaceId::new();
+        let mut sb = sandbox_in_workspace(owning_ws);
+
+        let err = sb
+            .attach_agent(AgentId::new(), other_ws, SandboxAgentMode::Read)
+            .expect_err("wrong workspace");
+        match err {
+            super::super::error::SandboxError::WrongWorkspace { expected, actual } => {
+                assert_eq!(expected, other_ws);
+                assert_eq!(actual, owning_ws);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detach_agent_removes_attachment() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let agent = AgentId::new();
+        sb.attach_agent(agent, ws, SandboxAgentMode::Write).unwrap();
+
+        let res = sb.detach_agent(agent);
+        assert!(res.did_execute());
+        assert!(sb.attached_agents.is_empty());
+    }
+
+    #[test]
+    fn detach_unknown_agent_is_idempotent() {
+        let mut sb = new_sandbox();
+        let res = sb.detach_agent(AgentId::new());
+        assert!(!res.did_execute());
+    }
+
     #[test]
     fn provisioning_after_errored_clears_last_error() {
         let mut sb = new_sandbox();
@@ -372,5 +655,62 @@ mod tests {
         let _ = sb.provisioning();
         assert_eq!(sb.state, SandboxState::Provisioning);
         assert!(sb.last_error.is_none());
+    }
+
+    #[test]
+    fn hydration_replays_attach_detach_history() {
+        // Synthesize a stream of events and verify try_from_events folds
+        // them into the expected attached_agents state. Each AgentAttached
+        // upserts the (agent_id, mode); AgentDetached removes the entry.
+        let sandbox_id = SandboxId::new();
+        let workspace_id = WorkspaceId::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+
+        let events = EntityEvents::init(
+            sandbox_id,
+            [
+                SandboxEvent::Initialized {
+                    id: sandbox_id,
+                    workspace_id,
+                    name: "test-sandbox".into(),
+                    specs: test_specs(),
+                    mode: SandboxMode::Scratch,
+                },
+                SandboxEvent::AgentAttached {
+                    agent_id: a,
+                    mode: SandboxAgentMode::Read,
+                },
+                SandboxEvent::AgentAttached {
+                    agent_id: b,
+                    mode: SandboxAgentMode::Write,
+                },
+                // b is detached; the writer slot is free again.
+                SandboxEvent::AgentDetached { agent_id: b },
+                // Now a upgrades to Write.
+                SandboxEvent::AgentAttached {
+                    agent_id: a,
+                    mode: SandboxAgentMode::Write,
+                },
+            ],
+        );
+
+        let sb = Sandbox::try_from_events(events).unwrap();
+        assert_eq!(sb.attached_agents, vec![(a, SandboxAgentMode::Write)]);
+    }
+
+    #[test]
+    fn attach_agent_after_detach_can_reuse_writer_slot() {
+        let mut sb = new_sandbox();
+        let ws = sb.workspace_id;
+        let a = AgentId::new();
+        let b = AgentId::new();
+
+        sb.attach_agent(a, ws, SandboxAgentMode::Write).unwrap();
+        sb.detach_agent(a);
+        let res = sb
+            .attach_agent(b, ws, SandboxAgentMode::Write)
+            .expect("writer slot should be free after detach");
+        assert!(res.did_execute());
     }
 }

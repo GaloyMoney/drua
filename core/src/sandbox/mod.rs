@@ -20,7 +20,7 @@ use crate::github_app::GitHubAppTokenProvider;
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub use config::{SandboxBackendConfig, SandboxConfig};
-pub use entity::{NewSandbox, Sandbox, SandboxEvent, SandboxState};
+pub use entity::{NewSandbox, Sandbox, SandboxAgentMode, SandboxEvent, SandboxState};
 pub use error::*;
 use repo::*;
 
@@ -345,6 +345,53 @@ impl Sandboxes {
         // Re-use the same background lifecycle the initial create goes
         // through — admin.create_sandbox → wait_ready → /initialize → Ready.
         self.spawn_sandbox_creation(id);
+        Ok(sandbox)
+    }
+
+    /// Attach `agent_id` to the sandbox in `mode`. Verifies the sandbox
+    /// belongs to `workspace_id` (else returns
+    /// [`SandboxError::WrongWorkspace`]) and delegates to
+    /// [`Sandbox::attach_agent`] which enforces single-writer.
+    #[instrument(
+        name = "domain.sandbox.attach_to_agent_in_op",
+        skip(self, op),
+        fields(%workspace_id, %sandbox_id, %agent_id, ?mode)
+    )]
+    pub async fn attach_to_agent_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        workspace_id: WorkspaceId,
+        sandbox_id: SandboxId,
+        agent_id: AgentId,
+        mode: SandboxAgentMode,
+    ) -> Result<Sandbox, SandboxError> {
+        let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
+        if sandbox
+            .attach_agent(agent_id, workspace_id, mode)?
+            .did_execute()
+        {
+            self.repo.update_in_op(op, &mut sandbox).await?;
+        }
+        Ok(sandbox)
+    }
+
+    /// Detach `agent_id` from the sandbox. Idempotent at the entity level
+    /// (no-op if not attached).
+    #[instrument(
+        name = "domain.sandbox.detach_from_agent_in_op",
+        skip(self, op),
+        fields(%sandbox_id, %agent_id)
+    )]
+    pub async fn detach_from_agent_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        sandbox_id: SandboxId,
+        agent_id: AgentId,
+    ) -> Result<Sandbox, SandboxError> {
+        let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
+        if sandbox.detach_agent(agent_id).did_execute() {
+            self.repo.update_in_op(op, &mut sandbox).await?;
+        }
         Ok(sandbox)
     }
 

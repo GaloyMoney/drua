@@ -81,6 +81,12 @@ impl AuthSubject {
         }
     }
 
+    /// True if the subject carries any of the supplied scopes. Useful for
+    /// checks like "Admin OR WorkspaceWrite(ws)".
+    pub fn has_any(&self, scopes: &[AuthScope]) -> bool {
+        scopes.iter().any(|s| self.has_scope(s))
+    }
+
     /// Convert the subject into the principal that should be recorded as the
     /// originator of a message. Panics for `Anonymous` (callers must
     /// authenticate before sending messages).

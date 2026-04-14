@@ -113,11 +113,7 @@ async fn resolve_auth_context(
                         id_str.parse::<uuid::Uuid>().expect("validated as UUID"),
                     );
                     if let Ok(agent) = state.app.agents().find_by_id(agent_id).await {
-                        return AuthSubject::Agent(
-                            agent.workspace_id,
-                            agent.id,
-                            agent.authz_scopes.clone(),
-                        );
+                        return agent.auth_subject();
                     }
                 }
             }

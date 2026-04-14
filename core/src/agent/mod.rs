@@ -11,10 +11,10 @@ use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
 /// Eventually this will move into role-config, but for now it's hard-wired:
-/// `WorkspaceLead` gets read+write on its own workspace.
+/// both built-in roles get read+write on their own workspace.
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
     match role {
-        AgentRole::WorkspaceLead => vec![
+        AgentRole::WorkspaceLead | AgentRole::Agent => vec![
             AuthScope::WorkspaceRead(workspace_id),
             AuthScope::WorkspaceWrite(workspace_id),
         ],
@@ -23,7 +23,8 @@ fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthS
 
 use tracing::instrument;
 
-use crate::primitives::{AgentId, AuthScope, AuthSubject, ChatOutputEvent, WorkspaceId};
+use crate::primitives::{AgentId, AuthScope, AuthSubject, ChatOutputEvent, SandboxId, WorkspaceId};
+use crate::sandbox::{SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
@@ -34,6 +35,7 @@ use session::Sessions;
 pub struct Agents {
     repo: AgentRepo,
     sessions: Sessions,
+    sandboxes: Sandboxes,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -45,10 +47,12 @@ impl Agents {
         config: AgentsConfig,
         toolsets: Arc<ToolSets>,
         prompt_requests: llm::PromptRequestChannel,
+        sandboxes: Sandboxes,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
             sessions: Sessions::new(pool),
+            sandboxes,
             config,
             toolsets,
             prompt_requests,
@@ -61,15 +65,25 @@ impl Agents {
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
+        attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
         let mut op = self.repo.begin_op().await?;
         let agent = self
-            .create_in_op(&mut op, workspace_id, agent_role, name)
+            .create_in_op(&mut op, workspace_id, agent_role, name, attach_sandbox)
             .await?;
         op.commit().await?;
         Ok(agent)
     }
 
+    /// Composable variant of [`Self::create`]. When `attach_sandbox` is
+    /// `Some((sandbox_id, mode))`, the agent is attached to the sandbox as
+    /// part of the same op — the entity-level invariants (workspace match,
+    /// single-writer) are enforced by
+    /// [`crate::sandbox::Sandboxes::attach_to_agent_in_op`] and the
+    /// matching `SandboxRead`/`SandboxWrite` scopes are written via
+    /// [`Agent::sandbox_attached`]. Bypasses the subject-based authz check
+    /// that [`Self::attach_sandbox`] performs — callers of `create_in_op`
+    /// are trusted to have authorized the action upstream.
     #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
     pub async fn create_in_op(
         &self,
@@ -77,11 +91,16 @@ impl Agents {
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
+        attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
+        // Fall back to the WorkspaceLead config for the generic `Agent`
+        // role when no dedicated block exists, so deployments don't need
+        // duplicate config to use the new role.
         let role_config = self
             .config
             .builtin_roles
             .get(&agent_role)
+            .or_else(|| self.config.builtin_roles.get(&AgentRole::WorkspaceLead))
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
@@ -95,7 +114,7 @@ impl Agents {
             .build()
             .expect("NewAgent build");
 
-        let agent = self.repo.create_in_op(op, new_agent).await?;
+        let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
         // Build the prompt's `tools` array from the registry as if the
         // agent were calling them — it will, with these same scopes, once
@@ -118,6 +137,16 @@ impl Agents {
                 role_config.reset_time_delta_seconds,
             )
             .await?;
+
+        if let Some((sandbox_id, mode)) = attach_sandbox {
+            self.sandboxes
+                .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
+                .await?;
+            if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
+                self.repo.update_in_op(op, &mut agent).await?;
+            }
+        }
+
         Ok(agent)
     }
 
@@ -162,6 +191,73 @@ impl Agents {
         self.sessions.delete_for_agent_in_op(op, id).await?;
         self.repo.delete_in_op(op, agent).await?;
         Ok(())
+    }
+
+    /// Attach a sandbox to an agent in `mode` (Read or Write). The subject
+    /// must hold [`AuthScope::WorkspaceWrite`] on the agent's workspace.
+    /// Re-attach with a different mode is allowed (downgrade unconditional;
+    /// upgrade to Write succeeds only if no other agent currently holds
+    /// Write — see [`crate::sandbox::Sandbox::attach_agent`]). After the
+    /// entity-level attach, the matching `SandboxRead`/`SandboxWrite`
+    /// scope is added to the agent (and any stale opposite-mode scope for
+    /// the same sandbox is removed).
+    #[instrument(name = "domain.agent.attach_sandbox", skip(self, subject))]
+    pub async fn attach_sandbox(
+        &self,
+        subject: &AuthSubject,
+        agent_id: AgentId,
+        sandbox_id: SandboxId,
+        mode: SandboxAgentMode,
+    ) -> Result<Agent, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        let workspace_id = agent.workspace_id;
+
+        if !subject.has_any(&[AuthScope::Admin, AuthScope::WorkspaceWrite(workspace_id)]) {
+            return Err(AgentError::Unauthorized);
+        }
+
+        let mut op = self.repo.begin_op().await?;
+        self.sandboxes
+            .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
+            .await?;
+
+        // Refetch so we update the most recent version of the agent.
+        let mut agent = self.repo.find_by_id(agent_id).await?;
+        if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
+            self.repo.update_in_op(&mut op, &mut agent).await?;
+        }
+        op.commit().await?;
+        Ok(agent)
+    }
+
+    /// Detach a sandbox from an agent. Authz mirrors `attach_sandbox`.
+    /// Idempotent at both layers — entity attach list and agent scope.
+    #[instrument(name = "domain.agent.detach_sandbox", skip(self, subject))]
+    pub async fn detach_sandbox(
+        &self,
+        subject: &AuthSubject,
+        agent_id: AgentId,
+        sandbox_id: SandboxId,
+    ) -> Result<Agent, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        if !subject.has_any(&[
+            AuthScope::Admin,
+            AuthScope::WorkspaceWrite(agent.workspace_id),
+        ]) {
+            return Err(AgentError::Unauthorized);
+        }
+
+        let mut op = self.repo.begin_op().await?;
+        self.sandboxes
+            .detach_from_agent_in_op(&mut op, sandbox_id, agent_id)
+            .await?;
+
+        let mut agent = self.repo.find_by_id(agent_id).await?;
+        if agent.sandbox_detached(sandbox_id).did_execute() {
+            self.repo.update_in_op(&mut op, &mut agent).await?;
+        }
+        op.commit().await?;
+        Ok(agent)
     }
 
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]

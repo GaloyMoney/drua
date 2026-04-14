@@ -2,6 +2,8 @@ use thiserror::Error;
 
 use sandbox::AdminError;
 
+use crate::primitives::{AgentId, WorkspaceId};
+
 use super::repo::{SandboxCreateError, SandboxFindError, SandboxModifyError, SandboxQueryError};
 
 #[derive(Error, Debug)]
@@ -20,4 +22,11 @@ pub enum SandboxError {
     Admin(#[from] AdminError),
     #[error("SandboxError - Hydration: {0}")]
     Hydration(#[from] es_entity::EntityHydrationError),
+    #[error("SandboxError - sandbox does not belong to workspace {expected} (actual: {actual})")]
+    WrongWorkspace {
+        expected: WorkspaceId,
+        actual: WorkspaceId,
+    },
+    #[error("SandboxError - write slot already taken by agent {current_writer}")]
+    WriteSlotTaken { current_writer: AgentId },
 }
