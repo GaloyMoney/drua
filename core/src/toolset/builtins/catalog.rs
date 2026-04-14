@@ -1,14 +1,12 @@
 //! Catalog-backed meta-tools: `search_tools`, `describe_tool`, and
-//! `call_tool`. The first two are read-only and skip auth/audit; `call_tool`
-//! mutates upstream services so it threads `auth` through and uses the
-//! [`dispatch_tool_call`](super::super::dispatch_tool_call) path for scope
-//! checks + audit.
+//! `call_tool`. The first two are read-only; `call_tool` dispatches into
+//! an upstream `SearchableToolSet`.
 //!
-//! The catalog query helpers ([`search`], [`describe`], [`find_set`], ...)
-//! live in this file because the only consumers are these three meta-tools
-//! plus `dispatch_tool_call` (via `pub(super)` re-export). They operate on a
-//! borrowed slice of toolsets; callers acquire the read lock and drop it
-//! before any `.await`.
+//! Each tool struct owns its read-locked registry access and its
+//! result-formatting helpers. Anything genuinely shared across more than
+//! one tool (visibility-filtered catalog enumeration, string helpers used
+//! by scoring / brief descriptions) lives in the "shared helpers" block
+//! at the bottom of the file.
 
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -21,7 +19,7 @@ use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 
 // ---------------------------------------------------------------------------
-// Catalog query helpers
+// CatalogEntry (shared data shape)
 // ---------------------------------------------------------------------------
 
 pub struct CatalogEntry {
@@ -32,197 +30,6 @@ pub struct CatalogEntry {
     pub brief_description: String,
     pub full_tool: Tool,
     pub default_output_filter: Option<OutputFilter>,
-}
-
-/// Format search results as text grouped by category.
-fn format_search_results(results: &[CatalogEntry]) -> String {
-    if results.is_empty() {
-        return "No tools found matching your query.".to_string();
-    }
-    let mut lines = Vec::new();
-    let mut current_category: Option<&str> = None;
-    for entry in results {
-        let cat = entry.category.as_str();
-        if current_category != Some(cat) {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines.push(format!("{cat}:"));
-            current_category = Some(cat);
-        }
-        lines.push(format!(
-            "  {:40} - {}",
-            entry.prefixed_name, entry.brief_description
-        ));
-    }
-    lines.join("\n")
-}
-
-/// Format a catalog entry as a detailed markdown description.
-fn format_describe(entry: &CatalogEntry) -> String {
-    let tool = &entry.full_tool;
-    let description = tool
-        .description
-        .as_deref()
-        .unwrap_or("No description available.");
-    let schema =
-        serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
-    let filter_desc = match &entry.default_output_filter {
-        Some(f) => format!("tool default: {}", f.describe()),
-        None => format!(
-            "global default: {}",
-            OutputFilter::global_default().describe()
-        ),
-    };
-    format!(
-        "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
-        entry.prefixed_name,
-        entry.upstream_name,
-        entry.category,
-        description,
-        schema,
-        filter_desc,
-        entry.prefixed_name,
-    )
-}
-
-fn entries(sets: &[Arc<dyn SearchableToolSet>], subject: &AuthSubject) -> Vec<CatalogEntry> {
-    let mut out = Vec::new();
-    for set in sets.iter() {
-        if !set.is_visible(subject) {
-            continue;
-        }
-        for tool in set.tools() {
-            let desc = &tool.description;
-            let brief = desc
-                .description
-                .as_ref()
-                .map(|d| first_sentence(d))
-                .unwrap_or_default();
-            out.push(CatalogEntry {
-                prefixed_name: format!("{}_{}", set.prefix(), desc.name),
-                upstream_name: set.name().to_string(),
-                tool_name: desc.name.to_string(),
-                category: set.category().to_string(),
-                brief_description: brief,
-                full_tool: desc.clone(),
-                default_output_filter: tool.default_output_filter.clone(),
-            });
-        }
-    }
-    out
-}
-
-fn search(
-    sets: &[Arc<dyn SearchableToolSet>],
-    subject: &AuthSubject,
-    query: Option<&str>,
-    category: Option<&str>,
-) -> Vec<CatalogEntry> {
-    let mut entries: Vec<CatalogEntry> = entries(sets, subject)
-        .into_iter()
-        .filter(|e| {
-            if let Some(cat) = category {
-                if cat != "all" && e.category != cat {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
-    // Wildcard / empty query → return all (category-filtered) entries.
-    let query = query.filter(|q| {
-        let t = q.trim();
-        !(t.is_empty() || t == "*")
-    });
-
-    if let Some(q) = query {
-        let keywords: Vec<String> = normalize(q).split_whitespace().map(String::from).collect();
-        if !keywords.is_empty() {
-            let mut scored: Vec<_> = entries
-                .into_iter()
-                .filter_map(|e| {
-                    let score = keyword_score(&e, &keywords);
-                    if score > 0 {
-                        Some((score, e))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            entries = scored.into_iter().map(|(_, e)| e).collect();
-        }
-    }
-
-    entries
-}
-
-fn describe(
-    sets: &[Arc<dyn SearchableToolSet>],
-    subject: &AuthSubject,
-    prefixed_name: &str,
-) -> Option<CatalogEntry> {
-    entries(sets, subject)
-        .into_iter()
-        .find(|e| e.prefixed_name == prefixed_name)
-}
-
-/// Find the toolset, stripped tool name, and default output filter for a
-/// prefixed tool name. Only returns a match when `subject` satisfies the
-/// toolset's [`SearchableToolSet::is_visible`]. Returns an `Arc` clone so
-/// callers can drop the lock before any `.await`.
-fn find_set(
-    sets: &[Arc<dyn SearchableToolSet>],
-    subject: &AuthSubject,
-    prefixed_name: &str,
-) -> Option<(Arc<dyn SearchableToolSet>, String, Option<OutputFilter>)> {
-    for set in sets.iter() {
-        if !set.is_visible(subject) {
-            continue;
-        }
-        let prefix = format!("{}_", set.prefix());
-        if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-            if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
-                return Some((
-                    Arc::clone(set),
-                    tool_name.to_string(),
-                    entry.default_output_filter.clone(),
-                ));
-            }
-        }
-    }
-    None
-}
-
-/// Normalize a string for fuzzy keyword matching: lowercase and collapse
-/// underscores/hyphens into spaces so "search code", "search_code", and
-/// "search-code" all match each other.
-fn normalize(s: &str) -> String {
-    s.to_lowercase().replace(['_', '-'], " ")
-}
-
-/// Score a catalog entry against a set of keywords.
-/// Returns the count of query keywords found in the entry's searchable text.
-fn keyword_score(entry: &CatalogEntry, keywords: &[String]) -> usize {
-    let haystack = [
-        normalize(&entry.tool_name),
-        normalize(&entry.upstream_name),
-        normalize(&entry.brief_description),
-    ]
-    .join(" ");
-    keywords
-        .iter()
-        .filter(|kw| haystack.contains(kw.as_str()))
-        .count()
-}
-
-fn first_sentence(s: &str) -> String {
-    s.split_once(". ")
-        .or_else(|| s.split_once(".\n"))
-        .map(|(first, _)| format!("{first}."))
-        .unwrap_or_else(|| s.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +43,81 @@ pub struct SearchCatalog {
 impl SearchCatalog {
     pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
         Self { sets }
+    }
+
+    /// Run the catalog search under the caller's subject. The read lock is
+    /// held only for the synchronous scan and is dropped before this
+    /// method returns.
+    fn execute_search(
+        &self,
+        subject: &AuthSubject,
+        query: Option<&str>,
+        category: Option<&str>,
+    ) -> Vec<CatalogEntry> {
+        let sets = self.sets.read().expect("toolset lock poisoned");
+        let mut entries: Vec<CatalogEntry> = visible_entries(subject, &sets)
+            .into_iter()
+            .filter(|e| {
+                if let Some(cat) = category {
+                    if cat != "all" && e.category != cat {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Wildcard / empty query → return all (category-filtered) entries.
+        let query = query.filter(|q| {
+            let t = q.trim();
+            !(t.is_empty() || t == "*")
+        });
+
+        if let Some(q) = query {
+            let keywords: Vec<String> =
+                normalize(q).split_whitespace().map(String::from).collect();
+            if !keywords.is_empty() {
+                let mut scored: Vec<_> = entries
+                    .into_iter()
+                    .filter_map(|e| {
+                        let score = keyword_score(&e, &keywords);
+                        if score > 0 {
+                            Some((score, e))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0));
+                entries = scored.into_iter().map(|(_, e)| e).collect();
+            }
+        }
+
+        entries
+    }
+
+    /// Format search results as text grouped by category.
+    fn format_results(results: &[CatalogEntry]) -> String {
+        if results.is_empty() {
+            return "No tools found matching your query.".to_string();
+        }
+        let mut lines = Vec::new();
+        let mut current_category: Option<&str> = None;
+        for entry in results {
+            let cat = entry.category.as_str();
+            if current_category != Some(cat) {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(format!("{cat}:"));
+                current_category = Some(cat);
+            }
+            lines.push(format!(
+                "  {:40} - {}",
+                entry.prefixed_name, entry.brief_description
+            ));
+        }
+        lines.join("\n")
     }
 }
 
@@ -273,11 +155,8 @@ impl TopLevelTool for SearchCatalog {
         let category = args
             .and_then(|a| a.get("category"))
             .and_then(|v| v.as_str());
-        let results = {
-            let sets = self.sets.read().expect("toolset lock poisoned");
-            search(&sets, subject, query, category)
-        };
-        let text = format_search_results(&results);
+        let results = self.execute_search(subject, query, category);
+        let text = Self::format_results(&results);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
@@ -293,6 +172,47 @@ pub struct DescribeCatalogTool {
 impl DescribeCatalogTool {
     pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
         Self { sets }
+    }
+
+    /// Locate a single catalog entry by prefixed name, filtered by the
+    /// subject's visibility.
+    fn execute_describe(
+        &self,
+        subject: &AuthSubject,
+        prefixed_name: &str,
+    ) -> Option<CatalogEntry> {
+        let sets = self.sets.read().expect("toolset lock poisoned");
+        visible_entries(subject, &sets)
+            .into_iter()
+            .find(|e| e.prefixed_name == prefixed_name)
+    }
+
+    /// Format a catalog entry as a detailed markdown description.
+    fn format_entry(entry: &CatalogEntry) -> String {
+        let tool = &entry.full_tool;
+        let description = tool
+            .description
+            .as_deref()
+            .unwrap_or("No description available.");
+        let schema =
+            serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
+        let filter_desc = match &entry.default_output_filter {
+            Some(f) => format!("tool default: {}", f.describe()),
+            None => format!(
+                "global default: {}",
+                OutputFilter::global_default().describe()
+            ),
+        };
+        format!(
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            entry.prefixed_name,
+            entry.upstream_name,
+            entry.category,
+            description,
+            schema,
+            filter_desc,
+            entry.prefixed_name,
+        )
     }
 }
 
@@ -329,12 +249,8 @@ impl TopLevelTool for DescribeCatalogTool {
             .and_then(|a| a.get("tool_name"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let entry = {
-            let sets = self.sets.read().expect("toolset lock poisoned");
-            describe(&sets, subject, tool_name)
-        };
-        let text = match entry {
-            Some(entry) => format_describe(&entry),
+        let text = match self.execute_describe(subject, tool_name) {
+            Some(entry) => Self::format_entry(&entry),
             None => format!("Tool not found: {tool_name}"),
         };
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -345,10 +261,9 @@ impl TopLevelTool for DescribeCatalogTool {
 // call_tool
 // ---------------------------------------------------------------------------
 
-/// The call-a-prefixed-tool meta-tool. Unlike `search_tools` / `describe_tool`,
-/// this one mutates upstream services, so it threads `auth` through and uses
-/// the full [`ToolSets::call_with_filter`](super::super::ToolSets::call_with_filter)
-/// path — scope checks + audit recording + the caller-supplied output filter.
+/// The call-a-prefixed-tool meta-tool. Dispatches into the visible +
+/// executable `SearchableToolSet` for the caller and applies an optional
+/// output filter.
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
 }
@@ -356,6 +271,35 @@ pub struct CallCatalogTool {
 impl CallCatalogTool {
     pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
         Self { sets }
+    }
+
+    /// Look up the toolset backing `prefixed_name`, filtered by the
+    /// subject's visibility. Returns the Arc'd toolset, the inner tool
+    /// name with the prefix stripped, and the tool-specific default
+    /// output filter. Returns `None` if the tool is not known or hidden
+    /// from `subject`.
+    fn find_set(
+        &self,
+        subject: &AuthSubject,
+        prefixed_name: &str,
+    ) -> Option<(Arc<dyn SearchableToolSet>, String, Option<OutputFilter>)> {
+        let sets = self.sets.read().expect("toolset lock poisoned");
+        for set in sets.iter() {
+            if !set.is_visible(subject) {
+                continue;
+            }
+            let prefix = format!("{}_", set.prefix());
+            if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
+                if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
+                    return Some((
+                        Arc::clone(set),
+                        tool_name.to_string(),
+                        entry.default_output_filter.clone(),
+                    ));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -412,11 +356,9 @@ impl TopLevelTool for CallCatalogTool {
             .remove("output_filter")
             .and_then(|v| serde_json::from_value(v).ok());
 
-        let (set, name, tool_default_filter) = {
-            let sets = self.sets.read().expect("toolset lock poisoned");
-            find_set(&sets, subject, &tool_name)
-                .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?
-        };
+        let (set, name, tool_default_filter) = self
+            .find_set(subject, &tool_name)
+            .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
         if !set.can_execute(subject) {
             return Err(ToolSetsError::Unauthorized);
@@ -428,6 +370,73 @@ impl TopLevelTool for CallCatalogTool {
             .unwrap_or_else(OutputFilter::global_default);
         result.and_then(|r| filter.apply(r))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Enumerate every [`CatalogEntry`] exposed by the toolsets that
+/// `subject` can see. Toolsets whose `is_visible(subject)` returns
+/// `false` are skipped entirely.
+fn visible_entries(
+    subject: &AuthSubject,
+    sets: &[Arc<dyn SearchableToolSet>],
+) -> Vec<CatalogEntry> {
+    let mut out = Vec::new();
+    for set in sets.iter() {
+        if !set.is_visible(subject) {
+            continue;
+        }
+        for tool in set.tools() {
+            let desc = &tool.description;
+            let brief = desc
+                .description
+                .as_ref()
+                .map(|d| first_sentence(d))
+                .unwrap_or_default();
+            out.push(CatalogEntry {
+                prefixed_name: format!("{}_{}", set.prefix(), desc.name),
+                upstream_name: set.name().to_string(),
+                tool_name: desc.name.to_string(),
+                category: set.category().to_string(),
+                brief_description: brief,
+                full_tool: desc.clone(),
+                default_output_filter: tool.default_output_filter.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Normalize a string for fuzzy keyword matching: lowercase and collapse
+/// underscores/hyphens into spaces so "search code", "search_code", and
+/// "search-code" all match each other.
+fn normalize(s: &str) -> String {
+    s.to_lowercase().replace(['_', '-'], " ")
+}
+
+/// Count how many `keywords` appear somewhere in `entry`'s searchable
+/// text (tool name + upstream name + brief description). Used by
+/// [`SearchCatalog::execute_search`] for ranking.
+fn keyword_score(entry: &CatalogEntry, keywords: &[String]) -> usize {
+    let haystack = [
+        normalize(&entry.tool_name),
+        normalize(&entry.upstream_name),
+        normalize(&entry.brief_description),
+    ]
+    .join(" ");
+    keywords
+        .iter()
+        .filter(|kw| haystack.contains(kw.as_str()))
+        .count()
+}
+
+fn first_sentence(s: &str) -> String {
+    s.split_once(". ")
+        .or_else(|| s.split_once(".\n"))
+        .map(|(first, _)| format!("{first}."))
+        .unwrap_or_else(|| s.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -492,22 +501,24 @@ mod tests {
         }
     }
 
-    fn sets(stubs: Vec<StubToolSet>) -> Vec<Arc<dyn SearchableToolSet>> {
-        stubs
+    fn search_catalog(stubs: Vec<StubToolSet>) -> SearchCatalog {
+        let sets: Vec<Arc<dyn SearchableToolSet>> = stubs
             .into_iter()
             .map(|s| Arc::new(s) as Arc<dyn SearchableToolSet>)
-            .collect()
+            .collect();
+        SearchCatalog::new(Arc::new(RwLock::new(sets)))
     }
 
     #[test]
     fn search_ranks_by_keyword_hits() {
-        let sets = sets(vec![StubToolSet::with_tools(vec![
+        let catalog = search_catalog(vec![StubToolSet::with_tools(vec![
             ("get_pipeline_status", "Get pipeline build status"),
             ("list_pipelines", "List CI pipelines"),
             ("search_code", "Semantic search over indexed codebases"),
         ])]);
 
-        let results = search(&sets, &AuthSubject::Anonymous, Some("pipeline status"), None);
+        let results =
+            catalog.execute_search(&AuthSubject::Anonymous, Some("pipeline status"), None);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].tool_name, "get_pipeline_status");
         assert_eq!(results[1].tool_name, "list_pipelines");
@@ -515,25 +526,26 @@ mod tests {
 
     #[test]
     fn search_individual_keywords_match_across_name() {
-        let sets = sets(vec![StubToolSet::with_tool(
+        let catalog = search_catalog(vec![StubToolSet::with_tool(
             "get_pipeline_status",
             "Returns the current status of a CI pipeline",
         )]);
 
-        let results = search(&sets, &AuthSubject::Anonymous, Some("pipeline status"), None);
+        let results =
+            catalog.execute_search(&AuthSubject::Anonymous, Some("pipeline status"), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tool_name, "get_pipeline_status");
     }
 
     #[test]
     fn search_normalizes_underscores_and_hyphens() {
-        let sets = sets(vec![StubToolSet::with_tool(
+        let catalog = search_catalog(vec![StubToolSet::with_tool(
             "search_code",
             "Semantic search over indexed codebases",
         )]);
 
         for query in ["search code", "search_code", "search-code"] {
-            let results = search(&sets, &AuthSubject::Anonymous, Some(query), None);
+            let results = catalog.execute_search(&AuthSubject::Anonymous, Some(query), None);
             assert_eq!(results.len(), 1, "query '{query}' should match");
             assert_eq!(results[0].tool_name, "search_code");
         }
@@ -541,24 +553,25 @@ mod tests {
 
     #[test]
     fn search_single_keyword_matches() {
-        let sets = sets(vec![StubToolSet::with_tools(vec![
+        let catalog = search_catalog(vec![StubToolSet::with_tools(vec![
             ("list_pipelines", "List CI pipelines"),
             ("get_build_log", "Get build output"),
         ])]);
 
-        let results = search(&sets, &AuthSubject::Anonymous, Some("pipeline"), None);
+        let results = catalog.execute_search(&AuthSubject::Anonymous, Some("pipeline"), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tool_name, "list_pipelines");
     }
 
     #[test]
     fn search_no_match_returns_empty() {
-        let sets = sets(vec![StubToolSet::with_tool(
+        let catalog = search_catalog(vec![StubToolSet::with_tool(
             "search_code",
             "Semantic search over indexed codebases",
         )]);
 
-        let results = search(&sets, &AuthSubject::Anonymous, Some("nonexistent"), None);
+        let results =
+            catalog.execute_search(&AuthSubject::Anonymous, Some("nonexistent"), None);
         assert!(results.is_empty());
     }
 
