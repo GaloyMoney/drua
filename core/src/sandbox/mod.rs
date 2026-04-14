@@ -13,6 +13,7 @@ use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, Local
 use sandbox::instance_client::{InitializeRequest, InitializeResponse, InstanceClient};
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
+use crate::audit::Audit;
 use crate::github_app::GitHubAppTokenProvider;
 
 /// How long [`Sandboxes::spawn_sandbox_creation`] waits for the admin
@@ -104,6 +105,7 @@ impl Sandboxes {
             .expect("could not build new sandbox");
 
         let sandbox = self.repo.create_in_op(op, new_sandbox).await?;
+        Audit::record_sandbox_id(sandbox.id);
         Ok(sandbox)
     }
 
@@ -336,6 +338,7 @@ impl Sandboxes {
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
+        Audit::record_sandbox_id(id);
         let mut op = self.repo.begin_op().await?;
         let mut sandbox = self.repo.find_by_id(id).await?;
         if sandbox.provisioning().did_execute() {
@@ -365,6 +368,7 @@ impl Sandboxes {
         agent_id: AgentId,
         mode: SandboxAgentMode,
     ) -> Result<Sandbox, SandboxError> {
+        Audit::record_sandbox_id(sandbox_id);
         let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
         if sandbox
             .attach_agent(agent_id, workspace_id, mode)?
@@ -388,6 +392,7 @@ impl Sandboxes {
         sandbox_id: SandboxId,
         agent_id: AgentId,
     ) -> Result<Sandbox, SandboxError> {
+        Audit::record_sandbox_id(sandbox_id);
         let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
         if sandbox.detach_agent(agent_id).did_execute() {
             self.repo.update_in_op(op, &mut sandbox).await?;
@@ -419,6 +424,7 @@ impl Sandboxes {
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
+        Audit::record_sandbox_id(id);
         let mut sandbox = self.repo.find_by_id(id).await?;
 
         let resource_name = sandbox.resource_name();
