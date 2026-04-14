@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// `k8s` mode, the service talks to the Agent Sandbox controller via the
 /// configured namespace + template.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "backend", rename_all = "snake_case")]
+#[serde(tag = "provider", rename_all = "snake_case")]
 pub enum SandboxBackendConfig {
     Local {
         sandbox_spawn_cmd: String,
@@ -31,10 +31,7 @@ impl Default for SandboxBackendConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SandboxConfig {
-    /// Flattened so the YAML is `sandbox.backend: k8s` (with sibling
-    /// `namespace` / `template_name`) instead of the previous nested
-    /// `sandbox.backend.backend: k8s`.
-    #[serde(default, flatten)]
+    #[serde(default)]
     pub backend: SandboxBackendConfig,
     /// For local mode: parent of the `.sandboxes/` directory. Defaults to `.`.
     #[serde(default = "default_local_repo_root")]

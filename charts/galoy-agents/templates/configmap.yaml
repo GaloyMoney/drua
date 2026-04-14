@@ -104,7 +104,8 @@ data:
     # (no cargo, no source). Render the K8s backend whenever the chart
     # has the sandbox subchart configured.
     sandbox:
-      backend: k8s
-      namespace: {{ .Values.sandbox.namespace | quote }}
-      template_name: {{ .Values.sandbox.templateName | quote }}
+      backend:
+        provider: k8s
+        namespace: {{ .Values.sandbox.namespace | quote }}
+        template_name: {{ .Values.sandbox.templateName | quote }}
     {{- end }}
