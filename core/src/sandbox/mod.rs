@@ -158,7 +158,9 @@ impl Sandboxes {
         // design, so workspace state is preserved across the cycle.
         // `NotFound` is the expected case on first-time create — ignore.
         match self.admin.delete_sandbox(&name).await {
-            Ok(()) => tracing::info!(sandbox = %name, "pre-create delete: removed existing sandbox"),
+            Ok(()) => {
+                tracing::info!(sandbox = %name, "pre-create delete: removed existing sandbox")
+            }
             Err(sandbox::AdminError::NotFound(_)) => {}
             Err(e) => {
                 self.record_error(id, &name, "pre_create_delete", e.to_string())
