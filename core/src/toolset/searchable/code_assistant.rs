@@ -4,7 +4,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
 use crate::code_assistant::{CodeAssistant, SearchCodeParams};
 
-use super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
+use super::super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct CodeAssistantToolSet {
     service: Arc<CodeAssistant>,
