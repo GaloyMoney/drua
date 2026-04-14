@@ -102,6 +102,20 @@
 
 <hr>
 
+<h3>Skills</h3>
+<p><small>Skills are reusable prompt templates that agents can invoke. Each skill has a name, description, and a markdown body.</small></p>
+
+<div id="skills-list"
+     hx-get="/workspaces/{{ workspace.id }}/skills/list"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  <p aria-busy="true">Loading skills...</p>
+</div>
+
+<a href="/workspaces/{{ workspace.id }}/skills/new" role="button" class="outline" style="margin-bottom: 1rem;">Add Skill</a>
+
+<hr>
+
 <h3>Secrets</h3>
 <p><small>Secrets are injected into the agent sandbox as environment variables or files. Values are never displayed after creation.</small></p>
 

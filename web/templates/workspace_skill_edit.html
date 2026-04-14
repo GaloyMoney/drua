@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Skill — Galoy Agents{% endblock %}
+
+{% block nav_workspaces %}class="active"{% endblock %}
+
+{% block content %}
+<h2>Edit Skill</h2>
+
+<form method="post" action="/workspaces/{{ workspace_id }}/skills/{{ skill.id }}">
+  <label>
+    Name
+    <input type="text" name="name" required value="{{ skill.name }}">
+  </label>
+  <label>
+    Description
+    <input type="text" name="description" value="{{ skill.description }}">
+  </label>
+  <label>
+    Body
+    <textarea name="body" rows="12" required>{{ skill.body }}</textarea>
+  </label>
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Save Changes</button>
+    <a href="/workspaces/{{ workspace_id }}" role="button" class="outline">Cancel</a>
+  </div>
+</form>
+
+<hr>
+<details>
+  <summary>Danger Zone</summary>
+  <button
+    hx-post="/workspaces/{{ workspace_id }}/skills/{{ skill.id }}/delete"
+    hx-confirm="Are you sure you want to delete this skill?"
+    class="secondary outline"
+    style="color: var(--pico-color-red-500, #c62828);"
+  >
+    Delete Skill
+  </button>
+</details>
+
+<footer>
+  <small>Created: {{ skill.created_at }} | ID: <code>{{ skill.id }}</code></small>
+</footer>
+{% endblock %}
