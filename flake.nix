@@ -107,12 +107,20 @@
           inherit (pkgs) lib stdenv;
         };
 
+        sandboxToolServerBin = pkgs.writeShellScriptBin "sandbox-tool-server" ''
+          exec ${self.packages.${system}.sandbox-tool-server}/bin/sandbox-tool-server "$@"
+        '';
+
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
           set -euo pipefail
 
           export TERM="''${TERM:-dumb}"
           export REPO_ROOT="$(pwd)"
           export GALOY_AGENTS_BIN="${galoy-agents}/bin/galoy-agents"
+          # Point bats/sandbox-helpers.bash at the nix-built binary so
+          # setup_file doesn't fall back to `cargo run` (which fetches
+          # + compiles the crate in CI and blows past the bats timeout).
+          export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerBin}/bin/sandbox-tool-server"
           export PG_CON="postgres://user:password@localhost:5432/galoy_agents"
           export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
 
@@ -168,6 +176,7 @@
                 pkgs.postgresql
                 pkgs.procps
                 pkgs.util-linux
+                pkgs.git
               ]}:$PATH"
               exec bats-runner
             '';
