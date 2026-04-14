@@ -130,7 +130,5 @@ impl SearchableToolSet for UpstreamToolSet {
 }
 
 fn has_required_scopes(required: &[AuthScope], subject: &AuthSubject) -> bool {
-    required
-        .iter()
-        .all(|scope| subject.has_scope(&scope.to_string()))
+    required.iter().all(|scope| subject.has_scope(scope))
 }

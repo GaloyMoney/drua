@@ -95,40 +95,6 @@ impl<'de> Deserialize<'de> for AuthScope {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public helpers
-// ---------------------------------------------------------------------------
-
-impl AuthScope {
-    /// Check whether this scope matches the given string representation.
-    ///
-    /// Prefer pattern-matching on the enum when possible; use this for
-    /// backward-compatible string comparisons (e.g. config-driven scope
-    /// checks).
-    pub fn matches_str(&self, s: &str) -> bool {
-        match self {
-            AuthScope::Admin => s == "admin",
-            AuthScope::WorkspaceRead(id) => {
-                s.strip_prefix("ws:")
-                    .and_then(|rest| rest.strip_suffix(":read"))
-                    .and_then(|uuid_str| uuid_str.parse::<uuid::Uuid>().ok())
-                    .map(WorkspaceId::from)
-                    .as_ref()
-                    == Some(id)
-            }
-            AuthScope::WorkspaceWrite(id) => {
-                s.strip_prefix("ws:")
-                    .and_then(|rest| rest.strip_suffix(":write"))
-                    .and_then(|uuid_str| uuid_str.parse::<uuid::Uuid>().ok())
-                    .map(WorkspaceId::from)
-                    .as_ref()
-                    == Some(id)
-            }
-            AuthScope::Raw(raw) => raw == s,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,18 +167,30 @@ mod tests {
         assert_eq!(scope, AuthScope::Raw("read".to_owned()));
     }
 
+    /// Eq-based comparison works across all variants.
     #[test]
-    fn matches_str_all_variants() {
+    fn eq_all_variants() {
         let ws_id = test_workspace_id();
-        assert!(AuthScope::Admin.matches_str("admin"));
-        assert!(!AuthScope::Admin.matches_str("other"));
+        assert_eq!(AuthScope::Admin, AuthScope::Admin);
+        assert_ne!(AuthScope::Admin, AuthScope::Raw("admin".to_owned()));
 
-        let ws_str = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:read";
-        assert!(AuthScope::WorkspaceRead(ws_id).matches_str(ws_str));
-        assert!(!AuthScope::WorkspaceRead(ws_id).matches_str("ws:other:read"));
+        assert_eq!(
+            AuthScope::WorkspaceRead(ws_id),
+            AuthScope::WorkspaceRead(ws_id)
+        );
+        assert_ne!(
+            AuthScope::WorkspaceRead(ws_id),
+            AuthScope::WorkspaceWrite(ws_id)
+        );
 
-        assert!(AuthScope::Raw("custom".to_owned()).matches_str("custom"));
-        assert!(!AuthScope::Raw("custom".to_owned()).matches_str("nope"));
+        assert_eq!(
+            AuthScope::Raw("custom".to_owned()),
+            AuthScope::Raw("custom".to_owned())
+        );
+        assert_ne!(
+            AuthScope::Raw("custom".to_owned()),
+            AuthScope::Raw("other".to_owned())
+        );
     }
 
     /// JSON must round-trip as a plain string (not `{"Raw":"…"}`), so that
