@@ -616,23 +616,12 @@ async fn workspace_detail(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agents = state
-        .app
-        .agents()
-        .list_for_workspace(workspace_id)
-        .await
-        .unwrap_or_default();
-
-    let agent_views: Vec<AgentView> = agents
-        .iter()
-        .map(|a| AgentView {
-            id: a.id.to_string(),
-            name: a.name.clone(),
-        })
-        .collect();
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     WorkspaceDetailTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
+        lead_agent,
         agents: agent_views,
     }
     .into_response()
@@ -854,20 +843,7 @@ async fn workspace_skills_page(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agents = state
-        .app
-        .agents()
-        .list_for_workspace(workspace_id)
-        .await
-        .unwrap_or_default();
-
-    let agent_views: Vec<AgentView> = agents
-        .iter()
-        .map(|a| AgentView {
-            id: a.id.to_string(),
-            name: a.name.clone(),
-        })
-        .collect();
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     let skills = state
         .app
@@ -878,6 +854,8 @@ async fn workspace_skills_page(
 
     WorkspaceSkillsPageTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
+        lead_agent,
         agents: agent_views,
         skills: skills.iter().map(skill_to_view).collect(),
     }
@@ -900,23 +878,12 @@ async fn workspace_skill_new(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agents = state
-        .app
-        .agents()
-        .list_for_workspace(workspace_id)
-        .await
-        .unwrap_or_default();
-
-    let agent_views: Vec<AgentView> = agents
-        .iter()
-        .map(|a| AgentView {
-            id: a.id.to_string(),
-            name: a.name.clone(),
-        })
-        .collect();
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     WorkspaceSkillNewTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
+        lead_agent,
         agents: agent_views,
     }
     .into_response()
@@ -979,23 +946,12 @@ async fn workspace_skill_edit(
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
     };
 
-    let agents = state
-        .app
-        .agents()
-        .list_for_workspace(workspace_id)
-        .await
-        .unwrap_or_default();
-
-    let agent_views: Vec<AgentView> = agents
-        .iter()
-        .map(|a| AgentView {
-            id: a.id.to_string(),
-            name: a.name.clone(),
-        })
-        .collect();
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     WorkspaceSkillEditTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
+        lead_agent,
         agents: agent_views,
         skill: skill_to_view(&skill),
     }
@@ -1109,23 +1065,35 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
     }
 }
 
+/// Returns `(lead_agent, other_agents)` for the workspace sidebar.
+/// The lead sits on its own above the `Agents` header; the rest form the
+/// list underneath. If there's no WorkspaceLead (shouldn't happen after
+/// workspace create, but handle gracefully), `lead_agent` is `None`.
 async fn workspace_sidebar_context(
     state: &AppState,
     workspace_id: domain::primitives::WorkspaceId,
-) -> Vec<AgentView> {
+) -> (Option<AgentView>, Vec<AgentView>) {
     let agents = state
         .app
         .agents()
         .list_for_workspace(workspace_id)
         .await
         .unwrap_or_default();
-    agents
-        .iter()
-        .map(|a| AgentView {
+
+    let mut lead: Option<AgentView> = None;
+    let mut others: Vec<AgentView> = Vec::with_capacity(agents.len());
+    for a in agents.iter() {
+        let view = AgentView {
             id: a.id.to_string(),
             name: a.name.clone(),
-        })
-        .collect()
+        };
+        if a.agent_role == domain::agent::AgentRole::WorkspaceLead && lead.is_none() {
+            lead = Some(view);
+        } else {
+            others.push(view);
+        }
+    }
+    (lead, others)
 }
 
 #[instrument(name = "web.workspace_sandboxes_page", skip_all)]
@@ -1144,7 +1112,7 @@ async fn workspace_sandboxes_page(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     let sandboxes = state
         .app
@@ -1155,6 +1123,7 @@ async fn workspace_sandboxes_page(
 
     WorkspaceSandboxesPageTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
         agents: agent_views,
         sandboxes: sandboxes.iter().map(sandbox_to_view).collect(),
     }
@@ -1177,10 +1146,11 @@ async fn workspace_sandbox_new(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     WorkspaceSandboxNewTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
         agents: agent_views,
     }
     .into_response()
@@ -1275,10 +1245,11 @@ async fn workspace_sandbox_detail(
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/sandboxes")).into_response(),
     };
 
-    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     WorkspaceSandboxDetailTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
         agents: agent_views,
         sandbox: sandbox_to_view(&sandbox),
     }
@@ -1343,7 +1314,7 @@ async fn workspace_agent_new(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
 
     let sandbox_options: Vec<SandboxOptionView> = state
         .app
@@ -1361,6 +1332,7 @@ async fn workspace_agent_new(
 
     WorkspaceAgentNewTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
         agents: agent_views,
         sandbox_options,
     }
@@ -1474,7 +1446,7 @@ async fn workspace_agent_detail(
         Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
     };
 
-    let agents = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agents) = workspace_sidebar_context(&state, workspace_id).await;
 
     let attached_view = attached_sandbox_view(&state, agent.attached_sandbox).await;
 
@@ -1499,12 +1471,14 @@ async fn workspace_agent_detail(
 
     WorkspaceAgentDetailTemplate {
         workspace: workspace_to_view(&ws),
+        lead_agent,
         agents,
         agent: AgentDetailView {
             id: agent.id.to_string(),
             workspace_id: agent.workspace_id.to_string(),
             name: agent.name.clone(),
             role: role_label(agent.agent_role).to_string(),
+            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::WorkspaceLead),
             attached_sandbox: attached_view,
         },
         sandbox_options,
@@ -1636,18 +1610,26 @@ async fn workspace_chat(
 
     let selected_agent_id = selected_agent.map(|a| a.id.to_string()).unwrap_or_default();
 
-    let agent_views: Vec<AgentView> = agents
-        .iter()
-        .map(|a| AgentView {
+    // Split lead out so the sidebar can render it above the "Agents" header.
+    let mut lead_agent: Option<AgentView> = None;
+    let mut agent_views: Vec<AgentView> = Vec::with_capacity(agents.len());
+    for a in agents.iter() {
+        let view = AgentView {
             id: a.id.to_string(),
             name: a.name.clone(),
-        })
-        .collect();
+        };
+        if a.agent_role == domain::agent::AgentRole::WorkspaceLead && lead_agent.is_none() {
+            lead_agent = Some(view);
+        } else {
+            agent_views.push(view);
+        }
+    }
 
     WorkspaceHubTemplate {
         workspaces: all_workspaces.iter().map(workspace_to_view).collect(),
         selected_workspace_id: workspace_id.to_string(),
         selected_workspace: Some(workspace_to_view(&ws)),
+        lead_agent,
         agents: agent_views,
         selected_agent_id,
     }

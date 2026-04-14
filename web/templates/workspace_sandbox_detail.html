@@ -92,15 +92,22 @@
   <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn" title="Workspace settings">&#9881;</a>
 </div>
 
-{% if !agents.is_empty() %}
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/workspaces/{{ workspace.id }}/chat?agent={{ lead.id }}" class="agent-item">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
 <div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
 {% for agent in agents %}
 <a href="/workspaces/{{ workspace.id }}/chat?agent={{ agent.id }}" class="agent-item">
   {{ agent.name }}
 </a>
 {% endfor %}
 {% else %}
-<div class="section-label">Agents</div>
 <small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
 {% endif %}
 <a href="/workspaces/{{ workspace.id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>

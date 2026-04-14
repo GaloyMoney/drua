@@ -134,6 +134,12 @@ impl Agent {
         sandbox_id: SandboxId,
         mode: SandboxAgentMode,
     ) -> Result<Idempotent<()>, super::error::AgentError> {
+        // Leads orchestrate other agents — they never run inside a sandbox
+        // themselves.
+        if matches!(self.agent_role, AgentRole::WorkspaceLead) {
+            return Err(super::error::AgentError::LeadCannotAttachSandbox);
+        }
+
         if let Some((existing_id, existing_mode)) = self.attached_sandbox {
             if existing_id != sandbox_id {
                 return Err(super::error::AgentError::AlreadyAttachedToSandbox {

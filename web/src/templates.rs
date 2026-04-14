@@ -118,6 +118,7 @@ pub struct WorkspaceNewTemplate {}
 #[template(path = "workspace_detail.html")]
 pub struct WorkspaceDetailTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
 }
 
@@ -137,6 +138,7 @@ pub struct SkillView {
 #[template(path = "workspace_skills.html")]
 pub struct WorkspaceSkillsPageTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub skills: Vec<SkillView>,
 }
@@ -145,6 +147,7 @@ pub struct WorkspaceSkillsPageTemplate {
 #[template(path = "workspace_skill_new.html")]
 pub struct WorkspaceSkillNewTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
 }
 
@@ -152,6 +155,7 @@ pub struct WorkspaceSkillNewTemplate {
 #[template(path = "workspace_skill_edit.html")]
 pub struct WorkspaceSkillEditTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub skill: SkillView,
 }
@@ -197,6 +201,7 @@ pub struct SandboxView {
 #[template(path = "workspace_sandboxes.html")]
 pub struct WorkspaceSandboxesPageTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub sandboxes: Vec<SandboxView>,
 }
@@ -205,6 +210,7 @@ pub struct WorkspaceSandboxesPageTemplate {
 #[template(path = "workspace_sandbox_new.html")]
 pub struct WorkspaceSandboxNewTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
 }
 
@@ -212,6 +218,7 @@ pub struct WorkspaceSandboxNewTemplate {
 #[template(path = "workspace_sandbox_detail.html")]
 pub struct WorkspaceSandboxDetailTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub sandbox: SandboxView,
 }
@@ -231,6 +238,7 @@ pub struct SandboxOptionView {
 #[template(path = "workspace_agent_new.html")]
 pub struct WorkspaceAgentNewTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub sandbox_options: Vec<SandboxOptionView>,
 }
@@ -249,6 +257,9 @@ pub struct AgentDetailView {
     pub workspace_id: String,
     pub name: String,
     pub role: String,
+    /// True when the agent is the workspace lead. The lead never runs in a
+    /// sandbox, so the attach form is hidden in the detail view.
+    pub is_lead: bool,
     pub attached_sandbox: Option<AttachedSandboxView>,
 }
 
@@ -256,6 +267,7 @@ pub struct AgentDetailView {
 #[template(path = "workspace_agent_detail.html")]
 pub struct WorkspaceAgentDetailTemplate {
     pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub agent: AgentDetailView,
     /// Used to populate the attach-sandbox dropdown when the agent has no
@@ -297,6 +309,7 @@ pub struct WorkspaceHubTemplate {
     pub selected_workspace: Option<WorkspaceView>,
     /// Flat ID string for dropdown comparison (avoids Askama ref issues).
     pub selected_workspace_id: String,
+    pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub selected_agent_id: String,
 }

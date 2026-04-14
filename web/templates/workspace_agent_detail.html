@@ -76,6 +76,14 @@
   <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn" title="Workspace settings">&#9881;</a>
 </div>
 
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/workspaces/{{ workspace.id }}/chat?agent={{ lead.id }}" class="agent-item{% if lead.id == agent.id %} active{% endif %}">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
 <div class="section-label">Agents</div>
 {% if !agents.is_empty() %}
 {% for a in agents %}
@@ -119,6 +127,9 @@
 <hr>
 <h3>Sandbox attachment</h3>
 
+{% if agent.is_lead %}
+<p><small>The workspace lead orchestrates other agents and never runs in a sandbox itself.</small></p>
+{% else %}
 {% match agent.attached_sandbox %}
 {% when Some(sb) %}
 <p>
@@ -161,4 +172,5 @@
 </form>
 {% endif %}
 {% endmatch %}
+{% endif %}
 {% endblock %}
