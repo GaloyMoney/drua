@@ -1,5 +1,5 @@
 [package]
-name = "sandbox-client"
+name = "k8s-sandbox-client"
 version.workspace = true
 edition.workspace = true
 

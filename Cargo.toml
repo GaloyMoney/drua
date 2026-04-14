@@ -4,7 +4,7 @@ members = [
   "lib/concourse-client",
   "core",
   "mcp-gateway",
-  "lib/sandbox-client",
+  "lib/k8s-sandbox-client",
   "lib/anthropic-client",
   "lib/llm",
   "web",
@@ -24,7 +24,7 @@ name = "galoy-agents"
 [workspace.dependencies]
 # Internal crates
 concourse-client = { path = "lib/concourse-client" }
-sandbox-client = { path = "lib/sandbox-client" }
+k8s-sandbox-client = { path = "lib/k8s-sandbox-client" }
 code-assistant-core = { path = "code-assistant/crates/core" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
