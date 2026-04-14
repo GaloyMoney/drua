@@ -119,7 +119,28 @@
 
 {% block content %}
 <a href="/workspaces/{{ workspace.id }}/sandboxes" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Sandboxes</a>
-<h2>{{ sandbox.name }}</h2>
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem;">
+  <h2 style="margin: 0;">{{ sandbox.name }}</h2>
+  {# Top-of-page lifecycle action. Restart is offered when the sandbox
+     is suspended or errored; Suspend is offered when it's ready.
+     Mid-flight states (provisioning / initializing) get no button. #}
+  {% if sandbox.state == "suspended" || sandbox.state == "errored" %}
+  <form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/restart" style="margin: 0;">
+    <button type="submit" style="margin: 0;">Restart Sandbox</button>
+  </form>
+  {% else if sandbox.state == "ready" %}
+  <form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/suspend" style="margin: 0;">
+    <button
+      type="submit"
+      onclick="return confirm('Suspend this sandbox? The underlying pod/process will be deleted; workspace state is retained.')"
+      class="secondary outline"
+      style="margin: 0;"
+    >
+      Suspend Sandbox
+    </button>
+  </form>
+  {% endif %}
+</div>
 
 {% match sandbox.last_error %}
 {% when Some(err) %}
@@ -179,27 +200,6 @@
   <pre>{{ skill.content }}</pre>
 </details>
 {% endfor %}
-{% endif %}
-
-<hr>
-{% if sandbox.state == "suspended" %}
-<form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/restart" style="display: inline;">
-  <button type="submit">Restart Sandbox</button>
-</form>
-{% else %}
-<details>
-  <summary>Danger Zone</summary>
-  <form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/suspend" style="display: inline;">
-    <button
-      type="submit"
-      onclick="return confirm('Suspend this sandbox? The underlying pod/process will be deleted; workspace state is retained.')"
-      class="secondary outline"
-      style="color: var(--pico-color-red-500, #c62828);"
-    >
-      Suspend Sandbox
-    </button>
-  </form>
-</details>
 {% endif %}
 
 <footer>
