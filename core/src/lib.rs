@@ -9,6 +9,7 @@ pub mod mcp_creds;
 pub mod primitives;
 pub mod prompt_executor;
 pub mod skill;
+pub mod slash_command;
 pub mod toolset;
 pub mod user;
 pub mod workspace;
@@ -102,10 +103,12 @@ impl App {
         let prompt_executor = Arc::new(prompt_executor);
 
         let mcp_creds = McpCredentials::new(pool);
+        let slash_commands = Arc::new(slash_command::default_registry());
         let agents = Arc::new(Agents::new(
             pool,
             config.agents,
             Arc::clone(&toolsets),
+            slash_commands,
             prompt_tx,
         ));
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));

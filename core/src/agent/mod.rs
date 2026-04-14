@@ -6,6 +6,7 @@ pub mod session;
 
 use std::sync::Arc;
 
+use crate::slash_command::{SlashCommandContext, SlashCommandOutput, SlashCommands};
 use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
@@ -35,6 +36,7 @@ pub struct Agents {
     sessions: Sessions,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
+    slash_commands: Arc<SlashCommands>,
     prompt_requests: llm::PromptRequestChannel,
 }
 
@@ -43,6 +45,7 @@ impl Agents {
         pool: &sqlx::PgPool,
         config: AgentsConfig,
         toolsets: Arc<ToolSets>,
+        slash_commands: Arc<SlashCommands>,
         prompt_requests: llm::PromptRequestChannel,
     ) -> Self {
         Self {
@@ -50,6 +53,7 @@ impl Agents {
             sessions: Sessions::new(pool),
             config,
             toolsets,
+            slash_commands,
             prompt_requests,
         }
     }
@@ -186,6 +190,32 @@ impl Agents {
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
 
+        // Slash command interception: messages starting with `/` are handled
+        // entirely server-side without LLM interaction or session persistence.
+        if let Some(response_text) = self.try_slash_command(&subject, id, &prompt) {
+            let _ = tx
+                .send(AgentMessageEvent::UserMessage {
+                    source,
+                    text: prompt,
+                })
+                .await;
+            let _ = tx
+                .send(AgentMessageEvent::AssistantText {
+                    text: response_text,
+                })
+                .await;
+            let _ = tx
+                .send(AgentMessageEvent::Done {
+                    turns: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: None,
+                    cost_usd: None,
+                })
+                .await;
+            return Ok(rx);
+        }
+
         // Attribute the agent's tool calls to the originating user when one
         // is available — direct `User`, an `ExportedAgent` token, or a peer
         // `AgentOnBehalfOfUser`. Otherwise fall back to an unattributed
@@ -289,6 +319,58 @@ impl Agents {
         }
 
         Ok(rx)
+    }
+}
+
+impl Agents {
+    /// If `prompt` starts with `/`, parse as a slash command and execute it.
+    /// Returns `Some(response_text)` on match (found or unknown command),
+    /// `None` if the prompt is not a slash command.
+    fn try_slash_command(
+        &self,
+        subject: &AuthSubject,
+        agent_id: AgentId,
+        prompt: &str,
+    ) -> Option<String> {
+        let trimmed = prompt.trim();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+
+        // Split "/name arg1 arg2" into ("name", "arg1 arg2")
+        let without_slash = &trimmed[1..];
+        let (name, args) = match without_slash.split_once(char::is_whitespace) {
+            Some((n, a)) => (n, a.trim()),
+            None => (without_slash, ""),
+        };
+
+        if name.is_empty() {
+            return None;
+        }
+
+        let ctx = SlashCommandContext {
+            subject: subject.clone(),
+            agent_id,
+        };
+
+        let text = match self.slash_commands.execute(name, &ctx, args) {
+            Ok(SlashCommandOutput::Text(t)) => t,
+            Err(crate::slash_command::SlashCommandError::NotFound(_)) => {
+                let available: Vec<_> = self
+                    .slash_commands
+                    .list()
+                    .into_iter()
+                    .map(|(n, _)| format!("/{n}"))
+                    .collect();
+                format!(
+                    "Unknown command: /{name}. Available commands: {}",
+                    available.join(", ")
+                )
+            }
+            Err(e) => format!("Command error: {e}"),
+        };
+
+        Some(text)
     }
 }
 
