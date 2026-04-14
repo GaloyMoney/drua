@@ -148,6 +148,22 @@ pub struct WorkspaceSecretsListTemplate {
     pub secrets: Vec<WorkspaceSecretView>,
 }
 
+pub struct AgentView {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_hub.html")]
+pub struct WorkspaceHubTemplate {
+    pub workspaces: Vec<WorkspaceView>,
+    pub selected_workspace: Option<WorkspaceView>,
+    /// Flat ID string for dropdown comparison (avoids Askama ref issues).
+    pub selected_workspace_id: String,
+    pub agents: Vec<AgentView>,
+    pub selected_agent_id: String,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "workspace_chat.html")]
 pub struct WorkspaceChatTemplate {

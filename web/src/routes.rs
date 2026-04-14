@@ -542,11 +542,21 @@ fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
 }
 
 #[instrument(name = "web.workspaces_page", skip_all)]
-async fn workspaces_page(session: Session) -> Response {
+async fn workspaces_page(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return Redirect::to("/").into_response();
     }
-    WorkspacesTemplate {}.into_response()
+
+    let workspaces = state.app.workspaces().list_all().await.unwrap_or_default();
+
+    WorkspaceHubTemplate {
+        workspaces: workspaces.iter().map(workspace_to_view).collect(),
+        selected_workspace: None,
+        selected_workspace_id: String::new(),
+        agents: vec![],
+        selected_agent_id: String::new(),
+    }
+    .into_response()
 }
 
 #[instrument(name = "web.workspace_list", skip_all)]
@@ -817,11 +827,17 @@ async fn workspace_secret_delete(
 // Workspace Chat
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ChatQuery {
+    agent: Option<uuid::Uuid>,
+}
+
 #[instrument(name = "web.workspace_chat", skip_all)]
 async fn workspace_chat(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
+    Query(query): Query<ChatQuery>,
 ) -> Response {
     if extract_user_id(&session).await.is_none() {
         return Redirect::to("/").into_response();
@@ -833,6 +849,8 @@ async fn workspace_chat(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
+    let all_workspaces = state.app.workspaces().list_all().await.unwrap_or_default();
+
     let agents = state
         .app
         .agents()
@@ -840,18 +858,32 @@ async fn workspace_chat(
         .await
         .unwrap_or_default();
 
-    let lead = agents
-        .iter()
-        .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead);
-
-    let agent_id = match lead {
-        Some(a) => a.id.to_string(),
-        None => return Redirect::to("/workspaces").into_response(),
+    let selected_agent = match query.agent {
+        Some(agent_uuid) => {
+            let target = AgentId::from(agent_uuid);
+            agents.iter().find(|a| a.id == target)
+        }
+        None => agents
+            .iter()
+            .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead),
     };
 
-    WorkspaceChatTemplate {
-        workspace: workspace_to_view(&ws),
-        agent_id,
+    let selected_agent_id = selected_agent.map(|a| a.id.to_string()).unwrap_or_default();
+
+    let agent_views: Vec<AgentView> = agents
+        .iter()
+        .map(|a| AgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+        })
+        .collect();
+
+    WorkspaceHubTemplate {
+        workspaces: all_workspaces.iter().map(workspace_to_view).collect(),
+        selected_workspace_id: workspace_id.to_string(),
+        selected_workspace: Some(workspace_to_view(&ws)),
+        agents: agent_views,
+        selected_agent_id,
     }
     .into_response()
 }
