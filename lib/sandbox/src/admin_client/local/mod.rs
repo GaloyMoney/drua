@@ -1,35 +1,30 @@
+mod config;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::instrument;
 
-use crate::config::LocalSandboxConfig;
-use crate::error::LocalSandboxError;
+pub use self::config::LocalSandboxConfig;
+use crate::admin_client::AdminClient;
+use crate::error::AdminError;
+use crate::types::Sandbox as SandboxView;
 
 const SANDBOXES_DIR_NAME: &str = ".sandboxes";
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Public view of a running sandbox.
-#[derive(Debug, Clone)]
-pub struct SandboxInfo {
-    pub id: String,
-    pub port: u16,
-    pub base_url: String,
-    pub workspace: PathBuf,
-    pub github_token_path: PathBuf,
-}
-
 /// A running sandbox process owned by the client. The child is killed on drop.
 struct RunningSandbox {
     child: Child,
-    info: SandboxInfo,
+    view: SandboxView,
 }
 
 /// Spawns and tracks sandbox tool server processes locally.
@@ -38,14 +33,14 @@ struct RunningSandbox {
 /// subdir mounted as `WORKSPACE_ROOT` and a `secrets/github-token` path the
 /// `/initialize` endpoint can write to.
 #[derive(Clone)]
-pub struct LocalSandboxClient {
+pub struct LocalAdminClient {
     config: LocalSandboxConfig,
     sandboxes_root: PathBuf,
     ready_timeout: Duration,
     sandboxes: Arc<Mutex<HashMap<String, RunningSandbox>>>,
 }
 
-impl LocalSandboxClient {
+impl LocalAdminClient {
     /// Create a new client. Sandboxes will be placed under
     /// `<repo_root>/.sandboxes/`.
     pub fn new(config: LocalSandboxConfig, repo_root: impl AsRef<Path>) -> Self {
@@ -69,16 +64,16 @@ impl LocalSandboxClient {
         &self.sandboxes_root
     }
 
-    #[instrument(name = "local_sandbox_client.create_sandbox", skip(self), fields(%id))]
-    pub async fn create_sandbox(&self, id: &str) -> Result<SandboxInfo, LocalSandboxError> {
+    #[instrument(name = "sandbox.admin.local.create_sandbox", skip(self), fields(%name))]
+    pub async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         {
             let sandboxes = self.sandboxes.lock().await;
-            if sandboxes.contains_key(id) {
-                return Err(LocalSandboxError::AlreadyExists(id.to_string()));
+            if sandboxes.contains_key(name) {
+                return Err(AdminError::AlreadyExists(name.to_string()));
             }
         }
 
-        let sandbox_dir = self.sandboxes_root.join(id);
+        let sandbox_dir = self.sandboxes_root.join(name);
         let workspace = sandbox_dir.join("workspace");
         let secrets_dir = sandbox_dir.join("secrets");
         let github_token_path = secrets_dir.join("github-token");
@@ -98,77 +93,105 @@ impl LocalSandboxClient {
             .current_dir(&sandbox_dir)
             .kill_on_drop(true);
 
-        let child = cmd.spawn().map_err(LocalSandboxError::Spawn)?;
+        let child = cmd.spawn().map_err(AdminError::Spawn)?;
 
-        let info = SandboxInfo {
-            id: id.to_string(),
-            port,
-            base_url,
-            workspace,
-            github_token_path,
+        wait_ready(port, self.ready_timeout)
+            .await
+            .map_err(|_| AdminError::Timeout(name.to_string()))?;
+
+        let view = SandboxView {
+            name: name.to_string(),
+            phase: "Ready".to_string(),
+            ready: true,
+            base_url: Some(base_url),
+            service_fqdn: None,
         };
-
-        wait_ready(port, self.ready_timeout).await.map_err(|_| {
-            // Best-effort cleanup is via Drop on `child`, which is currently owned.
-            LocalSandboxError::Timeout(id.to_string())
-        })?;
 
         let mut sandboxes = self.sandboxes.lock().await;
         sandboxes.insert(
-            id.to_string(),
+            name.to_string(),
             RunningSandbox {
                 child,
-                info: info.clone(),
+                view: view.clone(),
             },
         );
 
-        tracing::info!(sandbox = %id, port, "Local sandbox spawned");
-        Ok(info)
+        tracing::info!(sandbox = %name, port, "Local sandbox spawned");
+        Ok(view)
     }
 
-    #[instrument(name = "local_sandbox_client.delete_sandbox", skip(self), fields(%id))]
-    pub async fn delete_sandbox(&self, id: &str) -> Result<(), LocalSandboxError> {
+    #[instrument(name = "sandbox.admin.local.delete_sandbox", skip(self), fields(%name))]
+    pub async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         let mut sandboxes = self.sandboxes.lock().await;
         let mut sb = sandboxes
-            .remove(id)
-            .ok_or_else(|| LocalSandboxError::NotFound(id.to_string()))?;
+            .remove(name)
+            .ok_or_else(|| AdminError::NotFound(name.to_string()))?;
         // Best-effort: ignore errors if the child already exited.
         let _ = sb.child.kill().await;
-        tracing::info!(sandbox = %id, "Local sandbox stopped");
+        tracing::info!(sandbox = %name, "Local sandbox stopped");
         Ok(())
     }
 
-    pub async fn get_sandbox(&self, id: &str) -> Result<SandboxInfo, LocalSandboxError> {
+    pub async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         let sandboxes = self.sandboxes.lock().await;
         sandboxes
-            .get(id)
-            .map(|s| s.info.clone())
-            .ok_or_else(|| LocalSandboxError::NotFound(id.to_string()))
+            .get(name)
+            .map(|s| s.view.clone())
+            .ok_or_else(|| AdminError::NotFound(name.to_string()))
     }
 
-    pub async fn list_sandboxes(&self) -> Vec<SandboxInfo> {
+    pub async fn list_sandboxes(&self) -> Vec<SandboxView> {
         let sandboxes = self.sandboxes.lock().await;
-        sandboxes.values().map(|s| s.info.clone()).collect()
+        sandboxes.values().map(|s| s.view.clone()).collect()
+    }
+}
+
+#[async_trait]
+impl AdminClient for LocalAdminClient {
+    async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
+        LocalAdminClient::create_sandbox(self, name).await
+    }
+
+    async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
+        LocalAdminClient::delete_sandbox(self, name).await
+    }
+
+    async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
+        LocalAdminClient::get_sandbox(self, name).await
+    }
+
+    async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, AdminError> {
+        Ok(LocalAdminClient::list_sandboxes(self).await)
+    }
+
+    /// For the local backend `create_sandbox` already blocks until ready, so
+    /// this is effectively a no-op lookup.
+    async fn wait_sandbox_ready(
+        &self,
+        name: &str,
+        _timeout: Duration,
+    ) -> Result<SandboxView, AdminError> {
+        self.get_sandbox(name).await
     }
 }
 
 /// Allocate a free TCP port by binding to port 0. There's a small race window
 /// between drop and the spawned child binding, but it's acceptable for local
 /// dev/test usage.
-fn allocate_port() -> Result<u16, LocalSandboxError> {
+fn allocate_port() -> Result<u16, AdminError> {
     let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").map_err(LocalSandboxError::PortAllocation)?;
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(AdminError::PortAllocation)?;
     let port = listener
         .local_addr()
-        .map_err(LocalSandboxError::PortAllocation)?
+        .map_err(AdminError::PortAllocation)?
         .port();
     Ok(port)
 }
 
-async fn create_dir_all(path: &Path) -> Result<(), LocalSandboxError> {
+async fn create_dir_all(path: &Path) -> Result<(), AdminError> {
     tokio::fs::create_dir_all(path)
         .await
-        .map_err(|source| LocalSandboxError::Io {
+        .map_err(|source| AdminError::Io {
             path: path.display().to_string(),
             source,
         })
@@ -202,8 +225,8 @@ mod tests {
 
     #[tokio::test]
     async fn sandboxes_root_is_under_repo_root() {
-        let tmp = std::env::temp_dir().join("local-sandbox-client-test-root");
-        let client = LocalSandboxClient::new(
+        let tmp = std::env::temp_dir().join("sandbox-test-root");
+        let client = LocalAdminClient::new(
             LocalSandboxConfig {
                 sandbox_spawn_cmd: "true".into(),
             },
@@ -214,9 +237,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_sandbox_creates_workspace_and_secrets_dirs() {
-        let tmp = std::env::temp_dir().join("local-sandbox-client-test-dirs");
+        let tmp = std::env::temp_dir().join("sandbox-test-dirs");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
-        let client = LocalSandboxClient::new(
+        let client = LocalAdminClient::new(
             LocalSandboxConfig {
                 sandbox_spawn_cmd: "true".into(),
             },
@@ -229,7 +252,7 @@ mod tests {
             .create_sandbox("alpha")
             .await
             .expect_err("should time out — `true` never binds a port");
-        assert!(matches!(err, LocalSandboxError::Timeout(_)));
+        assert!(matches!(err, AdminError::Timeout(_)));
 
         // The dirs should still have been created before the spawn attempt.
         let workspace = tmp.join(".sandboxes/alpha/workspace");
@@ -242,9 +265,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_sandbox_rejects_duplicate_id() {
-        let tmp = std::env::temp_dir().join("local-sandbox-client-test-dup");
+        let tmp = std::env::temp_dir().join("sandbox-test-dup");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
-        let client = LocalSandboxClient::new(
+        let client = LocalAdminClient::new(
             LocalSandboxConfig {
                 sandbox_spawn_cmd: "sleep 60".into(),
             },
@@ -265,19 +288,19 @@ mod tests {
                         .kill_on_drop(true)
                         .spawn()
                         .unwrap(),
-                    info: SandboxInfo {
-                        id: "dup".into(),
-                        port: 1,
-                        base_url: "http://127.0.0.1:1".into(),
-                        workspace: tmp.join(".sandboxes/dup/workspace"),
-                        github_token_path: tmp.join(".sandboxes/dup/secrets/github-token"),
+                    view: SandboxView {
+                        name: "dup".into(),
+                        phase: "Ready".into(),
+                        ready: true,
+                        base_url: Some("http://127.0.0.1:1".into()),
+                        service_fqdn: None,
                     },
                 },
             );
         }
 
         let err = client.create_sandbox("dup").await.expect_err("duplicate");
-        assert!(matches!(err, LocalSandboxError::AlreadyExists(_)));
+        assert!(matches!(err, AdminError::AlreadyExists(_)));
 
         let _ = client.delete_sandbox("dup").await;
         let _ = tokio::fs::remove_dir_all(&tmp).await;
@@ -285,8 +308,8 @@ mod tests {
 
     #[tokio::test]
     async fn delete_unknown_sandbox_returns_not_found() {
-        let tmp = std::env::temp_dir().join("local-sandbox-client-test-unknown");
-        let client = LocalSandboxClient::new(
+        let tmp = std::env::temp_dir().join("sandbox-test-unknown");
+        let client = LocalAdminClient::new(
             LocalSandboxConfig {
                 sandbox_spawn_cmd: "true".into(),
             },
@@ -296,6 +319,6 @@ mod tests {
             .delete_sandbox("missing")
             .await
             .expect_err("not found");
-        assert!(matches!(err, LocalSandboxError::NotFound(_)));
+        assert!(matches!(err, AdminError::NotFound(_)));
     }
 }

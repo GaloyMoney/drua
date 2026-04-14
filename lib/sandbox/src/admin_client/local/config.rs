@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Configuration for [`super::LocalSandboxClient`].
+/// Configuration for [`super::LocalAdminClient`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LocalSandboxConfig {
     /// Shell command used to spawn the sandbox tool server.
