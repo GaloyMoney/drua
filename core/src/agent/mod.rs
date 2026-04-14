@@ -6,6 +6,7 @@ pub mod session;
 
 use std::sync::Arc;
 
+use crate::audit::Audit;
 use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
@@ -182,6 +183,8 @@ impl Agents {
                 if *ws == agent.workspace_id => {}
             _ => return Err(AgentError::Unauthorized),
         }
+
+        Audit::record_workspace_id(agent.workspace_id);
 
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);

@@ -29,7 +29,7 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use slash_command::SlashCommands;
-use toolset::{CodeAssistantToolSet, ToolSets, ToolSetsError};
+use toolset::{AllLogs, CodeAssistantToolSet, ToolSets, ToolSetsError, WorkspaceLog};
 use user::Users;
 use workspace::Workspaces;
 use workspace_secret::WorkspaceSecrets;
@@ -95,10 +95,13 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let toolsets = ToolSets::init(config.toolsets).await?;
+        let mut toolsets = ToolSets::init(config.toolsets).await?;
         if let Some(ca) = code_assistant.as_ref() {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }
+        toolsets.register_top_level(WorkspaceLog::new(Arc::clone(&audit)));
+        toolsets.register_top_level(AllLogs::new(Arc::clone(&audit)));
+        toolsets.set_audit(Arc::clone(&audit));
         let toolsets = Arc::new(toolsets);
 
         // Spawn the prompt executor and hand its request channel to the

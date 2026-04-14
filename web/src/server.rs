@@ -10,6 +10,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use galoy_agents_core::audit::primitives::{InteractionOutcome, InteractionType};
 use galoy_agents_core::audit::Audit;
 use galoy_agents_core::auth::AuthSubject;
+use galoy_agents_core::primitives::WorkspaceId;
 
 use crate::auth::session_store::PgSessionStore;
 use crate::AppState;
@@ -66,6 +67,9 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
         Audit::record_metadata(serde_json::json!({ "method": method.as_str(), "path": path }));
         if let Some(ref auth) = auth {
             Audit::record_subject(auth);
+        }
+        if let Some(ws_id) = extract_workspace_id_from_path(&path) {
+            Audit::record_workspace_id(ws_id);
         }
 
         let start = std::time::Instant::now();
@@ -139,4 +143,16 @@ where
         .layer(axum::Extension(app_state.clone()))
         .layer(session_layer)
         .with_state(app_state)
+}
+
+/// Extract a workspace ID from URL paths like `/workspaces/{uuid}/…` or
+/// `/api/v1/workspaces/{uuid}/…`.
+fn extract_workspace_id_from_path(path: &str) -> Option<WorkspaceId> {
+    let segments: Vec<&str> = path.split('/').collect();
+    segments
+        .iter()
+        .position(|s| *s == "workspaces")
+        .and_then(|i| segments.get(i + 1))
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(WorkspaceId::from)
 }

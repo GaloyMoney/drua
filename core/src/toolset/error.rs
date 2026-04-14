@@ -18,6 +18,8 @@ pub enum ToolSetsError {
     InvalidArgument(String),
     #[error("ToolSetsError - CodeAssistant: {0}")]
     CodeAssistant(String),
+    #[error("ToolSetsError - Audit: {0}")]
+    Audit(#[from] crate::audit::AuditError),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

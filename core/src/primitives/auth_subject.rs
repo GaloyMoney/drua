@@ -41,6 +41,24 @@ impl AuthSubject {
         }
     }
 
+    /// Return the workspace this subject is acting within, if any.
+    pub fn workspace_id(&self) -> Option<WorkspaceId> {
+        match self {
+            AuthSubject::Agent(workspace_id, _, _) => Some(*workspace_id),
+            AuthSubject::AgentOnBehalfOfUser(_, workspace_id, _, _) => Some(*workspace_id),
+            _ => None,
+        }
+    }
+
+    /// Return the agent that is acting, if any.
+    pub fn acting_agent_id(&self) -> Option<AgentId> {
+        match self {
+            AuthSubject::Agent(_, agent_id, _) => Some(*agent_id),
+            AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => Some(*agent_id),
+            _ => None,
+        }
+    }
+
     /// Return the scopes associated with this auth subject.
     pub fn scopes(&self) -> &[AuthScope] {
         match self {
