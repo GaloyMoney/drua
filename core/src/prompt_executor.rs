@@ -82,7 +82,14 @@ fn masked_preview(s: &str) -> String {
         "***".to_string()
     } else {
         let head: String = s.chars().take(7).collect();
-        let tail: String = s.chars().rev().take(4).collect::<String>().chars().rev().collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         format!("{head}…{tail}")
     }
 }

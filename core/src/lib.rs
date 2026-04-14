@@ -95,8 +95,7 @@ impl App {
         // Spawn the prompt executor and hand its request channel to the
         // agents service; hold the executor so its worker task lives as
         // long as `App`.
-        let (prompt_executor, prompt_tx) =
-            PromptExecutor::init(config.prompt_executor).await;
+        let (prompt_executor, prompt_tx) = PromptExecutor::init(config.prompt_executor).await;
         let prompt_executor = Arc::new(prompt_executor);
 
         let mcp_creds = McpCredentials::new(pool);

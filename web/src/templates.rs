@@ -154,4 +154,3 @@ pub struct WorkspaceChatTemplate {
     pub workspace: WorkspaceView,
     pub agent_id: String,
 }
-

@@ -112,9 +112,7 @@ impl AgentSession {
             if let Some(last_at) = self.current_thread().last_user_message_at() {
                 if delta.should_reset(last_at, now) {
                     let previous_thread = self.current_thread;
-                    self.start_new_thread(ThreadStartReason::TimeDeltaExceeded {
-                        previous_thread,
-                    });
+                    self.start_new_thread(ThreadStartReason::TimeDeltaExceeded { previous_thread });
                 }
             }
         }

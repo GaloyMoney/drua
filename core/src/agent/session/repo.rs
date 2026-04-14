@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
-use es_entity::*;
 use crate::primitives::AgentId;
+use es_entity::*;
 
 use super::{entity::*, thread::*, AgentSessionId};
 

@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use galoy_agents_core::agent::{
-    AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig,
-};
+use galoy_agents_core::agent::{AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig};
+use galoy_agents_core::primitives::{AuthSubject, UserId, WorkspaceId};
 use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
 use llm::{PromptRequest, PromptResponse, Usage};
-use galoy_agents_core::primitives::{AuthSubject, UserId, WorkspaceId};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use tokio::sync::mpsc;
 
@@ -31,7 +29,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             model: "claude-haiku-4-5-20251001".to_string(),
             system: Vec::new(),
             max_tokens: 1024,
-            reset_time_delta: None,
+            reset_time_delta_seconds: None,
         },
     );
     let config = AgentsConfig { builtin_roles };
@@ -161,7 +159,7 @@ async fn send_message_dispatches_registered_tool_call() {
             model: "claude-haiku-4-5-20251001".to_string(),
             system: Vec::new(),
             max_tokens: 1024,
-            reset_time_delta: None,
+            reset_time_delta_seconds: None,
         },
     );
     let config = AgentsConfig { builtin_roles };
@@ -194,7 +192,12 @@ async fn send_message_dispatches_registered_tool_call() {
     assert!(
         request.prompt.tools.iter().any(|t| t.name == "ping"),
         "first prompt's tools should include `ping`, got {:?}",
-        request.prompt.tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+        request
+            .prompt
+            .tools
+            .iter()
+            .map(|t| &t.name)
+            .collect::<Vec<_>>(),
     );
     request
         .response_channel

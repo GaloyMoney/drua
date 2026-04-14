@@ -1,8 +1,8 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use es_entity::*;
 use crate::primitives::{AgentId, AuthSubject, UserId, WorkspaceId};
+use es_entity::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]

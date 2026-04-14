@@ -5,9 +5,9 @@ mod thread;
 
 use tracing::instrument;
 
+use crate::primitives::{AgentId, UserMessageSource};
 pub use entity::*;
 use error::AgentSessionError;
-use crate::primitives::{AgentId, UserMessageSource};
 use repo::AgentSessionRepo;
 
 es_entity::entity_id! { AgentSessionId }

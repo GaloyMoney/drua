@@ -84,10 +84,7 @@ pub enum ParseAuditSubjectError {
     #[error("AuditSubject - unknown format: {0}")]
     UnknownFormat(String),
     #[error("AuditSubject - malformed `{kind}` subject: {reason}")]
-    Malformed {
-        kind: &'static str,
-        reason: String,
-    },
+    Malformed { kind: &'static str, reason: String },
 }
 
 impl std::str::FromStr for AuditSubject {

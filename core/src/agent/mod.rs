@@ -22,10 +22,10 @@ fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<Strin
 
 use tracing::instrument;
 
+use crate::primitives::{AgentId, AuthSubject, WorkspaceId};
 pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
-use crate::primitives::{AgentId, AuthSubject, WorkspaceId};
 use repo::AgentRepo;
 use session::Sessions;
 

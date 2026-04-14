@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use crate::primitives::UserMessageSource;
 use es_entity::*;
 use llm::prompt::{AssistantBlock, SystemBlock, Tool};
-use crate::primitives::UserMessageSource;
 
 use super::{error::AgentSessionError, AgentSessionId};
 
@@ -248,9 +248,9 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
 
 #[cfg(test)]
 mod tests {
+    use crate::primitives::UserId;
     use es_entity::{IntoEvents as _, TryFromEvents as _};
     use llm::prompt::{Message, UserBlock};
-    use crate::primitives::UserId;
 
     use super::*;
 

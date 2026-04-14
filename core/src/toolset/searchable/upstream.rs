@@ -73,10 +73,7 @@ impl UpstreamToolSet {
             tool_prefix,
             category: upstream.category.clone().unwrap_or_default(),
             category_description: upstream.category_description.clone().unwrap_or_default(),
-            required_scopes: upstream
-                .required_scopes
-                .clone()
-                .unwrap_or_default(),
+            required_scopes: upstream.required_scopes.clone().unwrap_or_default(),
             tools,
             client,
         })

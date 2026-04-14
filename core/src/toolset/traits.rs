@@ -5,7 +5,6 @@ use crate::auth::AuthSubject;
 use super::filter::OutputFilter;
 use super::ToolSetsError;
 
-
 pub struct ToolSetEntry {
     pub name: String,
     pub description: Tool,

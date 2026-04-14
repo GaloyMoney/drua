@@ -201,11 +201,7 @@ impl DescribeCatalogTool {
 
     /// Locate a single catalog entry by prefixed name, filtered by the
     /// subject's visibility.
-    fn execute_describe(
-        &self,
-        subject: &AuthSubject,
-        prefixed_name: &str,
-    ) -> Option<CatalogEntry> {
+    fn execute_describe(&self, subject: &AuthSubject, prefixed_name: &str) -> Option<CatalogEntry> {
         let sets = self.sets.read().expect("toolset lock poisoned");
         visible_entries(subject, &sets)
             .into_iter()
@@ -572,8 +568,7 @@ mod tests {
             "Semantic search over indexed codebases",
         )]);
 
-        let results =
-            catalog.execute_search(&AuthSubject::Anonymous, Some("nonexistent"), None);
+        let results = catalog.execute_search(&AuthSubject::Anonymous, Some("nonexistent"), None);
         assert!(results.is_empty());
     }
 

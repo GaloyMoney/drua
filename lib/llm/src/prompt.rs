@@ -205,8 +205,7 @@ impl Prompt {
                             }
                             AssistantBlock::ToolUse { input, name, .. } => {
                                 total += enc.encode(name).len();
-                                let json = serde_json::to_string(input)
-                                    .unwrap_or_default();
+                                let json = serde_json::to_string(input).unwrap_or_default();
                                 total += enc.encode(&json).len();
                             }
                             AssistantBlock::Thinking { text, .. } => {
