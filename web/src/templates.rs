@@ -216,6 +216,53 @@ pub struct WorkspaceSandboxDetailTemplate {
     pub sandbox: SandboxView,
 }
 
+// ── Agents (workspace-context create form) ─────────────────────────────
+
+/// Minimal dropdown option for the sandbox attachment selector on the
+/// new-agent form. Only sandboxes that exist in the workspace are offered.
+#[allow(dead_code)]
+pub struct SandboxOptionView {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_agent_new.html")]
+pub struct WorkspaceAgentNewTemplate {
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
+    pub sandbox_options: Vec<SandboxOptionView>,
+}
+
+#[allow(dead_code)]
+pub struct AttachedSandboxView {
+    pub id: String,
+    pub name: String,
+    pub mode: String,
+    pub state: String,
+}
+
+#[allow(dead_code)]
+pub struct AgentDetailView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub role: String,
+    pub attached_sandbox: Option<AttachedSandboxView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_agent_detail.html")]
+pub struct WorkspaceAgentDetailTemplate {
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
+    pub agent: AgentDetailView,
+    /// Used to populate the attach-sandbox dropdown when the agent has no
+    /// current attachment. Empty when `agent.attached_sandbox` is `Some`.
+    pub sandbox_options: Vec<SandboxOptionView>,
+}
+
 // ── Workspace Secrets ────────────────────────────────────────────────
 
 pub struct WorkspaceSecretView {

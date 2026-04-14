@@ -45,7 +45,8 @@ impl Workspaces {
                 &mut op,
                 workspace_id,
                 AgentRole::WorkspaceLead,
-                format!("{name}-lead"),
+                "lead",
+                None,
             )
             .await?;
 

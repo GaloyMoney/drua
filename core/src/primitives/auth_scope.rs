@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::WorkspaceId;
+use super::{SandboxId, WorkspaceId};
 
 /// A typed authorization scope carried by [`super::AuthSubject`] variants.
 ///
@@ -17,6 +17,10 @@ pub enum AuthScope {
     WorkspaceRead(WorkspaceId),
     /// Write access scoped to a specific workspace.
     WorkspaceWrite(WorkspaceId),
+    /// Read access scoped to a specific sandbox (granted via attach).
+    SandboxRead(SandboxId),
+    /// Write access scoped to a specific sandbox (granted via attach as writer).
+    SandboxWrite(SandboxId),
     /// Catch-all for scope strings that don't (yet) have a dedicated variant.
     Raw(String),
 }
@@ -31,6 +35,8 @@ impl fmt::Display for AuthScope {
             AuthScope::Admin => f.write_str("admin"),
             AuthScope::WorkspaceRead(id) => write!(f, "ws:{id}:read"),
             AuthScope::WorkspaceWrite(id) => write!(f, "ws:{id}:write"),
+            AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
+            AuthScope::SandboxWrite(id) => write!(f, "sandbox:{id}:write"),
             AuthScope::Raw(s) => f.write_str(s),
         }
     }
@@ -53,6 +59,19 @@ impl FromStr for AuthScope {
             } else if let Some(uuid_str) = rest.strip_suffix(":write") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::WorkspaceWrite(WorkspaceId::from(uuid)));
+                }
+            }
+        }
+
+        // Parse "sandbox:{uuid}:read" / "sandbox:{uuid}:write"
+        if let Some(rest) = s.strip_prefix("sandbox:") {
+            if let Some(uuid_str) = rest.strip_suffix(":read") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::SandboxRead(SandboxId::from(uuid)));
+                }
+            } else if let Some(uuid_str) = rest.strip_suffix(":write") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::SandboxWrite(SandboxId::from(uuid)));
                 }
             }
         }
@@ -103,16 +122,23 @@ mod tests {
         WorkspaceId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
     }
 
+    fn test_sandbox_id() -> SandboxId {
+        SandboxId::from(uuid::Uuid::parse_str("e1e2e3e4-f1f2-1112-2122-313233343536").unwrap())
+    }
+
     /// Round-trip: every variant must survive `Display` → `FromStr`.
     /// When adding a new variant, add it to this list so CI catches any
     /// mismatch immediately.
     #[test]
     fn round_trip_all_variants() {
         let ws_id = test_workspace_id();
+        let sb_id = test_sandbox_id();
         let variants = vec![
             AuthScope::Admin,
             AuthScope::WorkspaceRead(ws_id),
             AuthScope::WorkspaceWrite(ws_id),
+            AuthScope::SandboxRead(sb_id),
+            AuthScope::SandboxWrite(sb_id),
             AuthScope::Raw("custom:thing".to_owned()),
         ];
 
@@ -121,6 +147,33 @@ mod tests {
             let parsed: AuthScope = serialized.parse().unwrap();
             assert_eq!(scope, parsed);
         }
+    }
+
+    #[test]
+    fn display_sandbox_scopes() {
+        let sb_id = test_sandbox_id();
+        assert_eq!(
+            AuthScope::SandboxRead(sb_id).to_string(),
+            "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:read"
+        );
+        assert_eq!(
+            AuthScope::SandboxWrite(sb_id).to_string(),
+            "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:write"
+        );
+    }
+
+    #[test]
+    fn from_str_sandbox() {
+        let sb_id = test_sandbox_id();
+        let read: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:read"
+            .parse()
+            .unwrap();
+        assert_eq!(read, AuthScope::SandboxRead(sb_id));
+
+        let write: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:write"
+            .parse()
+            .unwrap();
+        assert_eq!(write, AuthScope::SandboxWrite(sb_id));
     }
 
     #[test]

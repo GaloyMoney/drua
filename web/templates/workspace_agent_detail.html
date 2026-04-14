@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}{{ agent.name }} — {{ workspace.name }} — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .ws-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .ws-back:hover { color: var(--pico-primary); }
+  .ws-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .ws-mode-header h4 { margin: 0; font-size: 1rem; }
+  .ws-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ws-settings-btn:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover,
+  .agent-item.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-field {
+    display: grid;
+    grid-template-columns: 10rem 1fr;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    gap: 1rem;
+  }
+  .agent-field:last-of-type { border-bottom: none; }
+  .agent-field dt { font-weight: 600; color: var(--pico-muted-color); }
+  .agent-field dd { margin: 0; }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/workspaces" class="ws-back">&larr; Workspaces</a>
+<div class="ws-mode-header">
+  <h4>{{ workspace.name }}</h4>
+  <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn" title="Workspace settings">&#9881;</a>
+</div>
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for a in agents %}
+<a href="/workspaces/{{ workspace.id }}/chat?agent={{ a.id }}" class="agent-item{% if a.id == agent.id %} active{% endif %}">
+  {{ a.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+<a href="/workspaces/{{ workspace.id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<a href="/workspaces/{{ workspace.id }}/chat?agent={{ agent.id }}" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to chat</a>
+<h2>{{ agent.name }}</h2>
+
+<dl>
+  <div class="agent-field">
+    <dt>Role</dt>
+    <dd>{{ agent.role }}</dd>
+  </div>
+  <div class="agent-field">
+    <dt>ID</dt>
+    <dd><code>{{ agent.id }}</code></dd>
+  </div>
+</dl>
+
+<hr>
+<h3>Sandbox attachment</h3>
+
+{% match agent.attached_sandbox %}
+{% when Some(sb) %}
+<p>
+  Attached to
+  <a href="/workspaces/{{ workspace.id }}/sandboxes/{{ sb.id }}"><strong>{{ sb.name }}</strong></a>
+  in <code>{{ sb.mode }}</code> mode <small>(sandbox state: <code>{{ sb.state }}</code>)</small>.
+</p>
+<form method="post" action="/workspaces/{{ workspace.id }}/agents/{{ agent.id }}/detach_sandbox">
+  <button
+    type="submit"
+    onclick="return confirm('Detach this sandbox from the agent? The sandbox itself is not deleted.')"
+    class="secondary outline"
+  >
+    Detach Sandbox
+  </button>
+</form>
+
+{% when None %}
+{% if sandbox_options.is_empty() %}
+<p><em>No sandboxes in this workspace yet — <a href="/workspaces/{{ workspace.id }}/sandboxes/new">create one</a> first.</em></p>
+{% else %}
+<p><small>The agent can hold at most one sandbox at a time. Write mode is exclusive; Read mode is shared.</small></p>
+<form method="post" action="/workspaces/{{ workspace.id }}/agents/{{ agent.id }}/attach_sandbox">
+  <label>
+    Sandbox
+    <select name="sandbox_id" required>
+      {% for sb in sandbox_options %}
+      <option value="{{ sb.id }}">{{ sb.name }} ({{ sb.state }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    Mode
+    <select name="mode" required>
+      <option value="read">Read — shared, multiple agents allowed</option>
+      <option value="write">Write — exclusive, one agent at a time</option>
+    </select>
+  </label>
+  <button type="submit">Attach Sandbox</button>
+</form>
+{% endif %}
+{% endmatch %}
+{% endblock %}

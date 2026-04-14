@@ -45,7 +45,7 @@
     margin-bottom: 1rem;
   }
   .ws-mode-header h4 { margin: 0; font-size: 1rem; }
-  .ws-mode-header .ws-settings-btn {
+  .ws-settings-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -62,7 +62,7 @@
     cursor: pointer;
     flex-shrink: 0;
   }
-  .ws-mode-header .ws-settings-btn:hover {
+  .ws-settings-btn:hover {
     background: var(--pico-primary-background);
     color: var(--pico-primary-inverse);
   }
@@ -155,6 +155,7 @@
 <div class="section-label">Agents</div>
 <small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
 {% endif %}
+<a href="/workspaces/{{ selected_workspace_id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>
 
 <hr style="margin: 0.75rem 0;">
 <nav>
@@ -202,6 +203,8 @@
             <h3>{{ sel.name }}</h3>
             <small>Agent chat</small>
           </div>
+          <a href="/workspaces/{{ selected_workspace_id }}/agents/{{ selected_agent_id }}"
+             class="ws-settings-btn" title="Agent settings">&#9881;</a>
         </div>
         <div class="messages" id="messages"></div>
         <div class="chat-input">
