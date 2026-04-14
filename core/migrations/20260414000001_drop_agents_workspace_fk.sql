@@ -1,0 +1,16 @@
+-- Drop the agents.workspace_id FK to workspaces.
+--
+-- The FK was removed in a subsequent refactor (see commit 7d0c77c) to
+-- keep integration tests self-contained. That change edited the
+-- original 20260407000003_create_agents.sql in place, which broke
+-- sqlx migration checksums on prod ("migration ... was previously
+-- applied but has been modified"). The create migration has been
+-- restored so the recorded checksum matches; this new migration
+-- carries the actual schema change forward.
+--
+-- The constraint name below is the default PostgreSQL assigns to an
+-- inline REFERENCES constraint: <table>_<column>_fkey. `IF EXISTS`
+-- makes this a no-op on fresh DBs where the constraint was never
+-- created (e.g. local dev brought up after the constraint had already
+-- been dropped).
+ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_workspace_id_fkey;
