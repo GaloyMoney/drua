@@ -22,7 +22,7 @@ fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<Strin
 
 use tracing::instrument;
 
-pub use config::{AgentsConfig, RoleConfig};
+pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
 use crate::primitives::{AgentId, AuthSubject, WorkspaceId};
@@ -114,7 +114,7 @@ impl Agents {
                 role_config.system,
                 tools,
                 role_config.max_tokens,
-                role_config.reset_time_delta,
+                role_config.reset_time_delta_seconds,
             )
             .await?;
         Ok(agent)

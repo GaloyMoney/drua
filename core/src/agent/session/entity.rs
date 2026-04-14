@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::ResetTimeDeltaSeconds;
+use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
 use llm::prompt::{SystemBlock, Tool};
-use crate::primitives::{AgentId, UserMessageSource};
 
 use super::{
     error::AgentSessionError,
@@ -24,7 +25,7 @@ pub enum AgentSessionEvent {
         tools: Vec<Tool>,
         max_tokens: u32,
         #[serde(default)]
-        reset_time_delta: Option<std::time::Duration>,
+        reset_time_delta_seconds: Option<ResetTimeDeltaSeconds>,
     },
     ThreadStarted {
         thread_id: SessionThreadId,
@@ -42,7 +43,7 @@ pub struct AgentSession {
     pub tools: Vec<Tool>,
     pub max_tokens: u32,
     #[builder(default)]
-    pub reset_time_delta: Option<std::time::Duration>,
+    pub reset_time_delta_seconds: Option<ResetTimeDeltaSeconds>,
     #[builder(default = "SessionThreadId::from(uuid::Uuid::nil())")]
     current_thread: SessionThreadId,
     events: EntityEvents<AgentSessionEvent>,
@@ -101,26 +102,18 @@ impl AgentSession {
         source: UserMessageSource,
         prompt: String,
     ) -> Result<Idempotent<llm::Prompt>, AgentSessionError> {
-        // If `reset_time_delta` is configured AND the current thread has
-        // already received at least one user message AND that message is older
-        // than the threshold, retire the thread and start a fresh one before
-        // appending. The "first message" check skips the case where the
-        // current thread was just created and has nothing but `Initialized`.
-        if let Some(delta) = self.reset_time_delta {
-            let prev_thread = self.current_thread;
-            let last_at = self
-                .threads
-                .get_persisted(&prev_thread)
-                .and_then(|t| t.last_user_message_at());
-            if let Some(last_at) = last_at {
-                if now
-                    .signed_duration_since(last_at)
-                    .to_std()
-                    .map(|elapsed| elapsed > delta)
-                    .unwrap_or(false)
-                {
+        // If `reset_time_delta_seconds` is configured AND the current thread
+        // has already received at least one user message AND that message is
+        // older than the threshold, retire the thread and start a fresh one
+        // before appending. The "first-message" check (no `last_at`) skips
+        // the case where the current thread was just created and has
+        // nothing but `Initialized`.
+        if let Some(delta) = self.reset_time_delta_seconds {
+            if let Some(last_at) = self.current_thread().last_user_message_at() {
+                if delta.should_reset(last_at, now) {
+                    let previous_thread = self.current_thread;
                     self.start_new_thread(ThreadStartReason::TimeDeltaExceeded {
-                        previous_thread: prev_thread,
+                        previous_thread,
                     });
                 }
             }
@@ -155,7 +148,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     system,
                     tools,
                     max_tokens,
-                    reset_time_delta,
+                    reset_time_delta_seconds,
                 } => {
                     builder = builder
                         .id(*id)
@@ -164,7 +157,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                         .system(system.clone())
                         .tools(tools.clone())
                         .max_tokens(*max_tokens)
-                        .reset_time_delta(*reset_time_delta);
+                        .reset_time_delta_seconds(*reset_time_delta_seconds);
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_thread(*thread_id);
@@ -187,7 +180,7 @@ pub struct NewAgentSession {
     pub(super) tools: Vec<Tool>,
     pub(super) max_tokens: u32,
     #[builder(default)]
-    pub(super) reset_time_delta: Option<std::time::Duration>,
+    pub(super) reset_time_delta_seconds: Option<ResetTimeDeltaSeconds>,
 }
 
 impl NewAgentSession {
@@ -209,7 +202,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
                 system: self.system,
                 tools: self.tools,
                 max_tokens: self.max_tokens,
-                reset_time_delta: self.reset_time_delta,
+                reset_time_delta_seconds: self.reset_time_delta_seconds,
             }],
         )
     }

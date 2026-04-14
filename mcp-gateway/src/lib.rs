@@ -45,8 +45,16 @@ impl McpGateway {
         )
     }
 
-    fn require_auth(ctx: &RequestContext<RoleServer>) -> Result<&AuthSubject, ErrorData> {
-        match ctx.extensions.get::<AuthSubject>() {
+    fn assert_can_see_server(ctx: &RequestContext<RoleServer>) -> Result<&AuthSubject, ErrorData> {
+        // The streamable-http transport stuffs the original axum request's
+        // `http::request::Parts` into `ctx.extensions`. The `AuthSubject`
+        // that `auth_middleware` injected lives on `parts.extensions`, not
+        // on `ctx.extensions` directly.
+        let auth = ctx
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<AuthSubject>());
+        match auth {
             Some(auth @ AuthSubject::ExportedAgent(_, _, _))
             | Some(auth @ AuthSubject::Agent(_, _, _)) => Ok(auth),
             _ => Err(ErrorData::new(
@@ -78,7 +86,7 @@ impl ServerHandler for McpGateway {
     fn get_info(&self) -> ServerInfo {
         let instructions = format!(
             "Galoy Agents MCP Gateway\n\n{}",
-            self.app.toolsets().instructions()
+            self.app.toolsets().mcp_gateway_info()
         );
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
@@ -89,7 +97,7 @@ impl ServerHandler for McpGateway {
         _request: Option<PaginatedRequestParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let auth = Self::require_auth(&ctx)?;
+        let auth = Self::assert_can_see_server(&ctx)?;
         let tools: Vec<Tool> = self
             .app
             .toolsets()
@@ -108,10 +116,10 @@ impl ServerHandler for McpGateway {
         request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let auth = Self::require_auth(&ctx)?.clone();
+        let auth = Self::assert_can_see_server(&ctx)?;
         self.app
             .toolsets()
-            .call_top_level_tool(&auth, request.name.as_ref(), request.arguments)
+            .call_top_level_tool(auth, request.name.as_ref(), request.arguments)
             .await
             .map_err(|e| {
                 ErrorData::new(
