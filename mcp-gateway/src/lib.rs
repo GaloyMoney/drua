@@ -67,7 +67,7 @@ impl McpGateway {
 }
 
 /// Convert a registered top-level tool into the rmcp wire shape.
-fn to_mcp_tool(tool: &Arc<dyn TopLevelTool>) -> Tool {
+fn to_mcp_tool(tool: &(dyn TopLevelTool + '_)) -> Tool {
     let input_schema = match tool.input_schema() {
         serde_json::Value::Object(map) => map.clone(),
         // Defensive: TopLevelTool::input_schema is contractually an object;
@@ -102,7 +102,7 @@ impl ServerHandler for McpGateway {
             .app
             .toolsets()
             .top_level_tools(auth)
-            .map(to_mcp_tool)
+            .map(|t| to_mcp_tool(t.as_ref()))
             .collect();
         Ok(ListToolsResult {
             tools,
