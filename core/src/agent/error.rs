@@ -32,4 +32,6 @@ pub enum AgentError {
         "AgentError - agent is already attached to sandbox {current}; detach it before attaching another"
     )]
     AlreadyAttachedToSandbox { current: SandboxId },
+    #[error("AgentError - workspace lead cannot attach a sandbox")]
+    LeadCannotAttachSandbox,
 }
