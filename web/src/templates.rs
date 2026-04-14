@@ -81,16 +81,14 @@ pub struct CodeAssistantSearchResultsTemplate {
 pub struct AuditTemplate {}
 
 #[allow(dead_code)]
-pub struct AuditSubjectView {
-    pub label: String,
-    pub on_behalf_of: Option<String>,
-}
-
-#[allow(dead_code)]
 pub struct AuditEntryView {
-    pub subject: AuditSubjectView,
+    pub acting_user: Option<String>,
+    pub workspace: Option<String>,
+    pub acting_agent: Option<String>,
+    pub on_behalf_of: Option<String>,
     pub action: String,
     pub outcome: String,
+    pub error: bool,
     pub duration_ms: Option<i64>,
     pub tokens_returned: Option<i64>,
     pub metadata: serde_json::Value,

@@ -31,10 +31,31 @@ impl Audit {
     // boundary so the context is properly propagated.
     // ------------------------------------------------------------------
 
-    /// Record the authenticated subject.
+    /// Decompose the authenticated subject into explicit audit fields.
     pub fn record_subject(auth: &AuthSubject) {
-        let subject: AuditSubject = auth.into();
-        Self::update_context(|ctx| ctx.subject = Some(subject));
+        Self::update_context(|ctx| match auth {
+            AuthSubject::User(user_id) => {
+                ctx.acting_user_id = Some(*user_id);
+            }
+            AuthSubject::ExportedAgent(user_id, _, _) => {
+                ctx.acting_user_id = Some(*user_id);
+            }
+            AuthSubject::Agent(workspace_id, agent_id, _) => {
+                ctx.workspace_id = Some(*workspace_id);
+                ctx.acting_agent_id = Some(*agent_id);
+            }
+            AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, _) => {
+                ctx.acting_agent_id = Some(*agent_id);
+                ctx.workspace_id = Some(*workspace_id);
+                ctx.on_behalf_of_user_id = Some(*user_id);
+            }
+            AuthSubject::Anonymous => {}
+        });
+    }
+
+    /// Record the workspace that scopes this interaction.
+    pub fn record_workspace_id(workspace_id: WorkspaceId) {
+        Self::update_context(|ctx| ctx.workspace_id = Some(workspace_id));
     }
 
     /// Record the interaction type (API call, MCP call, …).
@@ -120,27 +141,13 @@ impl Audit {
         let Some(ctx_data) = Self::collect_context() else {
             return;
         };
-        let subject = match ctx_data.subject {
-            Some(ref s) if !matches!(s, AuditSubject::Anonymous) => s.clone(),
-            _ => return,
-        };
+        // Skip anonymous — nothing to attribute.
+        if ctx_data.acting_user_id.is_none() && ctx_data.acting_agent_id.is_none() {
+            return;
+        }
         let audit = self.clone();
         tokio::spawn(async move {
-            let itype = ctx_data
-                .interaction_type
-                .unwrap_or(InteractionType::ApiCall);
-            if let Err(e) = audit
-                .insert(
-                    subject,
-                    itype,
-                    ctx_data.action.unwrap_or_default(),
-                    ctx_data.metadata.unwrap_or(serde_json::json!({})),
-                    ctx_data.outcome.unwrap_or(InteractionOutcome::Success),
-                    ctx_data.duration_ms,
-                    ctx_data.tokens_returned,
-                )
-                .await
-            {
+            if let Err(e) = audit.insert(&ctx_data).await {
                 tracing::warn!(error = %e, "Failed to record audit entry");
             }
         });
@@ -153,11 +160,15 @@ impl Audit {
             AuditEntry,
             r#"SELECT
                 id AS "id: AuditEntryId",
-                subject,
+                acting_user_id AS "acting_user_id: UserId",
+                workspace_id AS "workspace_id: WorkspaceId",
+                acting_agent_id AS "acting_agent_id: AgentId",
+                on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
                 outcome,
+                error,
                 duration_ms,
                 tokens_returned,
                 recorded_at
@@ -171,42 +182,53 @@ impl Audit {
         Ok(rows)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn insert(
-        &self,
-        subject: AuditSubject,
-        interaction_type: InteractionType,
-        action: String,
-        metadata: serde_json::Value,
-        outcome: InteractionOutcome,
-        duration_ms: Option<u64>,
-        tokens_returned: Option<u64>,
-    ) -> Result<AuditEntry, AuditError> {
-        let sub = subject.to_string();
-        let itype = interaction_type.to_string();
+    async fn insert(&self, ctx: &AuditContextData) -> Result<AuditEntry, AuditError> {
+        let acting_user_id = ctx.acting_user_id.map(uuid::Uuid::from);
+        let workspace_id = ctx.workspace_id.map(uuid::Uuid::from);
+        let acting_agent_id = ctx.acting_agent_id.map(uuid::Uuid::from);
+        let on_behalf_of = ctx.on_behalf_of_user_id.map(uuid::Uuid::from);
+        let itype = ctx
+            .interaction_type
+            .as_ref()
+            .unwrap_or(&InteractionType::ApiCall)
+            .to_string();
+        let action = ctx.action.clone().unwrap_or_default();
+        let metadata = ctx.metadata.clone().unwrap_or(serde_json::json!({}));
+        let outcome = ctx.outcome.as_ref().unwrap_or(&InteractionOutcome::Success);
         let out = outcome.to_string();
-        let dur = duration_ms.map(|ms| ms as i64);
-        let tokens = tokens_returned.map(|t| t as i64);
+        let error = matches!(outcome, InteractionOutcome::Error { .. });
+        let dur = ctx.duration_ms.map(|ms| ms as i64);
+        let tokens = ctx.tokens_returned.map(|t| t as i64);
 
         let row = sqlx::query_as!(
             AuditEntry,
-            r#"INSERT INTO audit_entries (subject, interaction_type, action, metadata, outcome, duration_ms, tokens_returned)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            r#"INSERT INTO audit_entries
+                (acting_user_id, workspace_id, acting_agent_id, on_behalf_of_user_id,
+                 interaction_type, action, metadata, outcome, error, duration_ms, tokens_returned)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING
                 id AS "id: AuditEntryId",
-                subject,
+                acting_user_id AS "acting_user_id: UserId",
+                workspace_id AS "workspace_id: WorkspaceId",
+                acting_agent_id AS "acting_agent_id: AgentId",
+                on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
                 outcome,
+                error,
                 duration_ms,
                 tokens_returned,
                 recorded_at"#,
-            sub,
+            acting_user_id,
+            workspace_id,
+            acting_agent_id,
+            on_behalf_of,
             itype,
             action,
             metadata,
             out,
+            error,
             dur,
             tokens,
         )

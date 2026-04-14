@@ -45,7 +45,8 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
     }
     // MCP gateway spawns its own tokio tasks so the EventContext does
     // not propagate. The gateway handles audit internally.
-    if path.starts_with("/mcp") {
+    // Use exact match — `/mcp-creds/…` routes must NOT be skipped.
+    if path == "/mcp" || path.starts_with("/mcp/") {
         return next.run(request).await;
     }
 

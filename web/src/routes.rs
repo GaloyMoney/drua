@@ -269,11 +269,30 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
         Ok(entries) => {
             let mut views = Vec::with_capacity(entries.len());
             for entry in entries {
-                let subject = resolve_subject(&state.app, &entry.subject).await;
+                let acting_user = match entry.acting_user_id {
+                    Some(id) => Some(lookup_user_label(&state.app, id).await),
+                    None => None,
+                };
+                let workspace = match entry.workspace_id {
+                    Some(id) => Some(lookup_workspace_label(&state.app, id).await),
+                    None => None,
+                };
+                let acting_agent = match entry.acting_agent_id {
+                    Some(id) => Some(lookup_agent_label(&state.app, id).await),
+                    None => None,
+                };
+                let on_behalf_of = match entry.on_behalf_of_user_id {
+                    Some(id) => Some(lookup_user_label(&state.app, id).await),
+                    None => None,
+                };
                 views.push(AuditEntryView {
-                    subject,
+                    acting_user,
+                    workspace,
+                    acting_agent,
+                    on_behalf_of,
                     action: entry.action,
                     outcome: entry.outcome,
+                    error: entry.error.unwrap_or(false),
                     duration_ms: entry.duration_ms,
                     tokens_returned: entry.tokens_returned,
                     metadata: entry.metadata,
@@ -286,72 +305,6 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
             tracing::error!(error = %e, "Failed to load audit entries");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-    }
-}
-
-async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSubjectView {
-    use galoy_agents_core::audit::primitives::AuditSubject;
-
-    let parsed = match subject.parse::<AuditSubject>() {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            return AuditSubjectView {
-                label: subject.to_string(),
-                on_behalf_of: None,
-            };
-        }
-    };
-
-    match parsed {
-        AuditSubject::User { user_id } => AuditSubjectView {
-            label: lookup_user_label(app, user_id).await,
-            on_behalf_of: None,
-        },
-        AuditSubject::ExportedAgent { mcp_creds_id, .. } => {
-            match app.mcp_creds().find_by_id(mcp_creds_id).await {
-                Ok(creds) => {
-                    let user = match creds.owner.user_id() {
-                        Some(user_id) => Some(lookup_user_label(app, user_id).await),
-                        None => None,
-                    };
-                    AuditSubjectView {
-                        label: creds.name,
-                        on_behalf_of: user,
-                    }
-                }
-                Err(_) => AuditSubjectView {
-                    label: subject.to_string(),
-                    on_behalf_of: None,
-                },
-            }
-        }
-        AuditSubject::Agent {
-            workspace_id,
-            agent_id,
-        } => {
-            let agent = lookup_agent_label(app, agent_id).await;
-            let ws = lookup_workspace_label(app, workspace_id).await;
-            AuditSubjectView {
-                label: format!("{agent} (in {ws})"),
-                on_behalf_of: None,
-            }
-        }
-        AuditSubject::AgentOnBehalfOfUser {
-            user_id,
-            workspace_id,
-            agent_id,
-        } => {
-            let agent = lookup_agent_label(app, agent_id).await;
-            let ws = lookup_workspace_label(app, workspace_id).await;
-            AuditSubjectView {
-                label: format!("{agent} (in {ws})"),
-                on_behalf_of: Some(lookup_user_label(app, user_id).await),
-            }
-        }
-        AuditSubject::Anonymous => AuditSubjectView {
-            label: "anonymous".to_string(),
-            on_behalf_of: None,
-        },
     }
 }
 
