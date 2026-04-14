@@ -1,6 +1,9 @@
+mod types;
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
     EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
     Pod, PodSecurityContext, ResourceRequirements, Volume, VolumeMount, VolumeResourceRequirements,
@@ -10,8 +13,10 @@ use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, Po
 use kube::Client;
 use tracing::instrument;
 
-use crate::error::SandboxError;
-use crate::types::*;
+use self::types::*;
+use crate::admin_client::AdminClient;
+use crate::error::AdminError;
+use crate::types::Sandbox as SandboxView;
 
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "galoy-agents";
@@ -31,26 +36,23 @@ pub struct ResourceConfig {
     pub memory: String,
 }
 
+/// Default port the sandbox tool server binds to inside the pod (matches the
+/// `ExposedPorts` in `images/sandbox/default.nix`).
+const DEFAULT_SANDBOX_PORT: u16 = 3000;
+
 /// High-level client for managing Agent Sandbox resources.
 #[derive(Clone)]
-pub struct SandboxClient {
+pub struct K8sAdminClient {
     client: Client,
     namespace: String,
     template_name: String,
     persistence: Option<PersistenceConfig>,
     resources: Option<ResourceConfig>,
+    extra_env: Vec<(String, String)>,
+    sandbox_port: u16,
 }
 
-/// Summary of a sandbox for API consumers.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct SandboxSummary {
-    pub name: String,
-    pub sandbox_name: Option<String>,
-    pub phase: String,
-    pub ready: bool,
-}
-
-impl SandboxClient {
+impl K8sAdminClient {
     /// Create a new sandbox client for the given namespace and template.
     pub fn new(client: Client, namespace: String, template_name: String) -> Self {
         Self {
@@ -59,6 +61,8 @@ impl SandboxClient {
             template_name,
             persistence: None,
             resources: None,
+            extra_env: Vec::new(),
+            sandbox_port: DEFAULT_SANDBOX_PORT,
         }
     }
 
@@ -74,6 +78,19 @@ impl SandboxClient {
         self
     }
 
+    /// Inject extra environment variables into every sandbox container
+    /// created by this client.
+    pub fn with_extra_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.extra_env = env;
+        self
+    }
+
+    /// Override the port used to construct `base_url` (default 3000).
+    pub fn with_sandbox_port(mut self, port: u16) -> Self {
+        self.sandbox_port = port;
+        self
+    }
+
     /// The namespace this client manages sandboxes in.
     pub fn namespace(&self) -> &str {
         &self.namespace
@@ -83,7 +100,7 @@ impl SandboxClient {
     pub async fn try_from_env(
         namespace: String,
         template_name: String,
-    ) -> Result<Self, SandboxError> {
+    ) -> Result<Self, AdminError> {
         let client = Client::try_default().await?;
         Ok(Self::new(client, namespace, template_name))
     }
@@ -93,23 +110,23 @@ impl SandboxClient {
     // -----------------------------------------------------------------------
 
     /// Read the SandboxTemplate to get the pod template.
-    #[instrument(name = "k8s_sandbox_client.read_template", skip_all)]
-    async fn read_template(&self) -> Result<SandboxTemplate, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.read_template", skip_all)]
+    async fn read_template(&self) -> Result<SandboxTemplate, AdminError> {
         let templates: Api<SandboxTemplate> = Api::namespaced(self.client.clone(), &self.namespace);
         templates
             .get(&self.template_name)
             .await
-            .map_err(SandboxError::Kube)
+            .map_err(AdminError::Kube)
     }
 
     /// Ensure a standalone PVC exists for the given sandbox name.
     /// Creates the PVC if it doesn't exist; no-ops if it already does.
-    #[instrument(name = "k8s_sandbox_client.ensure_pvc", skip_all, fields(%name))]
+    #[instrument(name = "sandbox.admin.k8s.ensure_pvc", skip_all, fields(%name))]
     async fn ensure_pvc(
         &self,
         name: &str,
         persistence: &PersistenceConfig,
-    ) -> Result<String, SandboxError> {
+    ) -> Result<String, AdminError> {
         let pvc_name = format!("workspace-{name}");
         let pvcs: Api<PersistentVolumeClaim> =
             Api::namespaced(self.client.clone(), &self.namespace);
@@ -148,7 +165,7 @@ impl SandboxClient {
                 pvcs.create(&PostParams::default(), &pvc).await?;
                 tracing::info!(pvc = %pvc_name, "PVC created");
             }
-            Err(e) => return Err(SandboxError::Kube(e)),
+            Err(e) => return Err(AdminError::Kube(e)),
         }
 
         Ok(pvc_name)
@@ -159,24 +176,20 @@ impl SandboxClient {
     /// Creates a standalone PVC (if it doesn't already exist) and mounts it
     /// into the pod. The PVC lifecycle is independent of the Sandbox — it
     /// survives sandbox deletion and is reused on recreation with the same name.
-    #[instrument(name = "k8s_sandbox_client.create_sandbox", skip_all, fields(%name))]
-    pub async fn create_sandbox(
-        &self,
-        name: &str,
-        extra_env: Vec<(String, String)>,
-    ) -> Result<SandboxSummary, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.create_sandbox", skip_all, fields(%name))]
+    pub async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         let template = self.read_template().await?;
         let mut pod_template = template.spec.pod_template;
 
         // Inject extra environment variables into the first container
-        if !extra_env.is_empty() {
+        if !self.extra_env.is_empty() {
             if let Some(ref mut spec) = pod_template.spec {
                 if let Some(container) = spec.containers.first_mut() {
                     let env = container.env.get_or_insert_with(Vec::new);
-                    for (k, v) in extra_env {
+                    for (k, v) in &self.extra_env {
                         env.push(EnvVar {
-                            name: k,
-                            value: Some(v),
+                            name: k.clone(),
+                            value: Some(v.clone()),
                             value_from: None,
                         });
                     }
@@ -258,19 +271,20 @@ impl SandboxClient {
         sandboxes.create(&PostParams::default(), &sandbox).await?;
 
         tracing::info!(sandbox = %name, "Sandbox created");
-        Ok(SandboxSummary {
+        Ok(SandboxView {
             name: name.to_string(),
-            sandbox_name: Some(name.to_string()),
             phase: "Provisioning".to_string(),
             ready: false,
+            base_url: None,
+            service_fqdn: None,
         })
     }
 
     /// Check if a sandbox's container image matches the current template.
     ///
     /// Returns `true` if the sandbox is up-to-date, `false` if it needs recreation.
-    #[instrument(name = "k8s_sandbox_client.is_sandbox_current", skip_all, fields(%name))]
-    pub async fn is_sandbox_current(&self, name: &str) -> Result<bool, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.is_sandbox_current", skip_all, fields(%name))]
+    pub async fn is_sandbox_current(&self, name: &str) -> Result<bool, AdminError> {
         let template = self.read_template().await?;
         let template_image = template
             .spec
@@ -282,8 +296,8 @@ impl SandboxClient {
 
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(name).await.map_err(|e| match &e {
-            kube::Error::Api(resp) if resp.code == 404 => SandboxError::NotFound(name.to_string()),
-            _ => SandboxError::Kube(e),
+            kube::Error::Api(resp) if resp.code == 404 => AdminError::NotFound(name.to_string()),
+            _ => AdminError::Kube(e),
         })?;
         let sandbox_image = sandbox
             .spec
@@ -306,8 +320,8 @@ impl SandboxClient {
     }
 
     /// Delete a Sandbox. The PVC is retained for recreation.
-    #[instrument(name = "k8s_sandbox_client.delete_sandbox", skip_all, fields(%name))]
-    pub async fn delete_sandbox(&self, name: &str) -> Result<(), SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.delete_sandbox", skip_all, fields(%name))]
+    pub async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         sandboxes.delete(name, &DeleteParams::default()).await?;
         tracing::info!(sandbox = %name, "Sandbox deleted");
@@ -315,61 +329,65 @@ impl SandboxClient {
     }
 
     /// List sandboxes created by this client (filtered by managed-by label).
-    #[instrument(name = "k8s_sandbox_client.list_sandboxes", skip_all)]
-    pub async fn list_sandboxes(&self) -> Result<Vec<SandboxSummary>, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.list_sandboxes", skip_all)]
+    pub async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let lp = ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
         let list = sandboxes.list(&lp).await?;
-        Ok(list.items.iter().map(Self::summary_from_sandbox).collect())
+        Ok(list
+            .items
+            .iter()
+            .map(|s| self.view_from_sandbox(s))
+            .collect())
     }
 
     /// Get a single Sandbox by name.
-    #[instrument(name = "k8s_sandbox_client.get_sandbox", skip_all, fields(%name))]
-    pub async fn get_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.get_sandbox", skip_all, fields(%name))]
+    pub async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(name).await.map_err(|e| match &e {
-            kube::Error::Api(resp) if resp.code == 404 => SandboxError::NotFound(name.to_string()),
-            _ => SandboxError::Kube(e),
+            kube::Error::Api(resp) if resp.code == 404 => AdminError::NotFound(name.to_string()),
+            _ => AdminError::Kube(e),
         })?;
-        Ok(Self::summary_from_sandbox(&sandbox))
+        Ok(self.view_from_sandbox(&sandbox))
     }
 
     /// Poll a Sandbox until it becomes ready or the timeout expires.
-    #[instrument(name = "k8s_sandbox_client.wait_sandbox_ready", skip_all, fields(%name))]
+    #[instrument(name = "sandbox.admin.k8s.wait_sandbox_ready", skip_all, fields(%name))]
     pub async fn wait_sandbox_ready(
         &self,
         name: &str,
         timeout: Duration,
-    ) -> Result<SandboxSummary, SandboxError> {
+    ) -> Result<SandboxView, AdminError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let summary = self.get_sandbox(name).await?;
-            if summary.ready {
-                return Ok(summary);
+            let view = self.get_sandbox(name).await?;
+            if view.ready {
+                return Ok(view);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(SandboxError::Timeout(name.to_string()));
+                return Err(AdminError::Timeout(name.to_string()));
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 
     /// Resolve the running pod for a Sandbox by reading its label selector.
-    #[instrument(name = "k8s_sandbox_client.resolve_sandbox_pod", skip_all, fields(%sandbox_name))]
-    pub async fn resolve_sandbox_pod(&self, sandbox_name: &str) -> Result<String, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.resolve_sandbox_pod", skip_all, fields(%sandbox_name))]
+    pub async fn resolve_sandbox_pod(&self, sandbox_name: &str) -> Result<String, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
             kube::Error::Api(resp) if resp.code == 404 => {
-                SandboxError::NotFound(sandbox_name.to_string())
+                AdminError::NotFound(sandbox_name.to_string())
             }
-            _ => SandboxError::Kube(e),
+            _ => AdminError::Kube(e),
         })?;
 
         let label_selector = sandbox
             .status
             .as_ref()
             .and_then(|s| s.label_selector.clone())
-            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))?;
+            .ok_or_else(|| AdminError::NoPod(sandbox_name.to_string()))?;
 
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let pod_list = pods
@@ -387,16 +405,16 @@ impl SandboxClient {
                     .unwrap_or(false)
             })
             .and_then(|pod| pod.metadata.name.clone())
-            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))
+            .ok_or_else(|| AdminError::NoPod(sandbox_name.to_string()))
     }
 
     /// Exec into a Sandbox pod with TTY.
-    #[instrument(name = "k8s_sandbox_client.exec_sandbox", skip_all, fields(%sandbox_name))]
+    #[instrument(name = "sandbox.admin.k8s.exec_sandbox", skip_all, fields(%sandbox_name))]
     pub async fn exec_sandbox(
         &self,
         sandbox_name: &str,
         command: Vec<String>,
-    ) -> Result<AttachedProcess, SandboxError> {
+    ) -> Result<AttachedProcess, AdminError> {
         let pod_name = self.resolve_sandbox_pod(sandbox_name).await?;
 
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -417,24 +435,24 @@ impl SandboxClient {
     /// The sandbox controller creates a headless Service for every Sandbox
     /// and records its DNS name in `status.serviceFQDN`.  This is how the
     /// galoy-agents server reaches the harness HTTP server inside the pod.
-    #[instrument(name = "k8s_sandbox_client.get_service_fqdn", skip_all, fields(%sandbox_name))]
-    pub async fn get_service_fqdn(&self, sandbox_name: &str) -> Result<String, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.get_service_fqdn", skip_all, fields(%sandbox_name))]
+    pub async fn get_service_fqdn(&self, sandbox_name: &str) -> Result<String, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
             kube::Error::Api(resp) if resp.code == 404 => {
-                SandboxError::NotFound(sandbox_name.to_string())
+                AdminError::NotFound(sandbox_name.to_string())
             }
-            _ => SandboxError::Kube(e),
+            _ => AdminError::Kube(e),
         })?;
 
         sandbox
             .status
             .as_ref()
             .and_then(|s| s.service_fqdn.clone())
-            .ok_or_else(|| SandboxError::NoPod(sandbox_name.to_string()))
+            .ok_or_else(|| AdminError::NoPod(sandbox_name.to_string()))
     }
 
-    fn summary_from_sandbox(sandbox: &Sandbox) -> SandboxSummary {
+    fn view_from_sandbox(&self, sandbox: &Sandbox) -> SandboxView {
         let name = sandbox
             .metadata
             .name
@@ -463,17 +481,23 @@ impl SandboxClient {
             "Provisioning".to_string()
         };
 
-        SandboxSummary {
-            name: name.clone(),
-            sandbox_name: Some(name),
+        let service_fqdn = sandbox.status.as_ref().and_then(|s| s.service_fqdn.clone());
+        let base_url = service_fqdn
+            .as_ref()
+            .map(|fqdn| format!("http://{fqdn}:{}", self.sandbox_port));
+
+        SandboxView {
+            name,
             phase,
             ready,
+            base_url,
+            service_fqdn,
         }
     }
 
     /// Gather diagnostic info about the sandbox infrastructure.
-    #[instrument(name = "k8s_sandbox_client.debug_status", skip_all)]
-    pub async fn debug_status(&self) -> Result<serde_json::Value, SandboxError> {
+    #[instrument(name = "sandbox.admin.k8s.debug_status", skip_all)]
+    pub async fn debug_status(&self) -> Result<serde_json::Value, AdminError> {
         use k8s_openapi::api::core::v1::Event;
 
         // List all sandboxes
@@ -544,5 +568,32 @@ impl SandboxClient {
             "pods": pod_summaries,
             "recent_events": recent_events,
         }))
+    }
+}
+
+#[async_trait]
+impl AdminClient for K8sAdminClient {
+    async fn create_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
+        K8sAdminClient::create_sandbox(self, name).await
+    }
+
+    async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
+        K8sAdminClient::delete_sandbox(self, name).await
+    }
+
+    async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
+        K8sAdminClient::get_sandbox(self, name).await
+    }
+
+    async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, AdminError> {
+        K8sAdminClient::list_sandboxes(self).await
+    }
+
+    async fn wait_sandbox_ready(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<SandboxView, AdminError> {
+        K8sAdminClient::wait_sandbox_ready(self, name, timeout).await
     }
 }

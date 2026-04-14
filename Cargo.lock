@@ -1537,12 +1537,12 @@ dependencies = [
  "galoy-agents-core",
  "galoy-agents-mcp-gateway",
  "galoy-agents-web",
- "k8s-sandbox-client",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "rustls",
+ "sandbox",
  "serde",
  "serde_yaml",
  "sqlx",
@@ -1571,7 +1571,6 @@ dependencies = [
  "hex",
  "http",
  "jsonwebtoken",
- "k8s-sandbox-client",
  "llm",
  "opentelemetry",
  "opentelemetry-http",
@@ -1580,6 +1579,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.2",
  "rmcp",
+ "sandbox",
  "serde",
  "serde_json",
  "sha2",
@@ -2441,21 +2441,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "k8s-sandbox-client"
-version = "0.1.0"
-dependencies = [
- "futures",
- "k8s-openapi",
- "kube",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "kube"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2648,16 +2633,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tiktoken",
  "tokio",
-]
-
-[[package]]
-name = "local-sandbox-client"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4108,6 +4083,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sandbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "reqwest 0.12.28",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
