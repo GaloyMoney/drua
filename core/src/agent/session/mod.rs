@@ -39,7 +39,7 @@ impl Sessions {
         system: Vec<llm::prompt::SystemBlock>,
         tools: Vec<llm::prompt::Tool>,
         max_tokens: u32,
-        reset_time_delta: Option<std::time::Duration>,
+        reset_time_delta_seconds: Option<crate::agent::ResetTimeDeltaSeconds>,
     ) -> Result<AgentSession, AgentSessionError> {
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
@@ -47,7 +47,7 @@ impl Sessions {
             .system(system)
             .tools(tools)
             .max_tokens(max_tokens)
-            .reset_time_delta(reset_time_delta)
+            .reset_time_delta_seconds(reset_time_delta_seconds)
             .build()
             .expect("NewAgentSession build");
 

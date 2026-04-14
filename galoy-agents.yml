@@ -12,6 +12,7 @@ agents:
     workspace_lead:
       model: claude-haiku-4-5-20251001
       max_tokens: 4096
+      reset_time_delta_seconds: 600
       system:
         - type: text
           text: |

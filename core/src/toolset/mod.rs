@@ -109,7 +109,7 @@ impl ToolSets {
     /// Human-readable summary of available toolsets — used as the MCP
     /// server's `instructions` payload so clients know how to discover and
     /// call upstream tools.
-    pub fn instructions(&self) -> String {
+    pub fn mcp_gateway_info(&self) -> String {
         let sets = self.sets.read().expect("toolset lock poisoned");
         let mut lines = vec![
             "Tools from upstream services are available via progressive disclosure:".to_string(),

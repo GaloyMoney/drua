@@ -32,8 +32,21 @@ galoyAgents:
       githubClientId: ""
       githubRedirectUri: ""
       githubAllowedTeams: []
-    report:
-      enabled: false
+    ## Per-role defaults applied when an agent with that role is created.
+    ## `workspaceLead` is the only role today and is REQUIRED — the binary
+    ## refuses to start if `agents.builtin_roles.workspace_lead` is missing.
+    agents:
+      workspaceLead:
+        model: "claude-haiku-4-5-20251001"
+        maxTokens: 4096
+        ## When a user message arrives more than this many seconds after
+        ## the previous user message in the current thread, the session
+        ## starts a fresh thread. `null` disables the auto-reset.
+        resetTimeDeltaSeconds: 600
+        systemPrompt: |
+          You are the workspace lead agent. You coordinate tasks,
+          answer questions, and use the available tools to help the
+          user accomplish their goals. Be concise and action-oriented.
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"
     concourse:

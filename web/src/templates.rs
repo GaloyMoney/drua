@@ -83,7 +83,7 @@ pub struct AuditTemplate {}
 #[allow(dead_code)]
 pub struct AuditSubjectView {
     pub label: String,
-    pub owner: Option<String>,
+    pub on_behalf_of: Option<String>,
 }
 
 #[allow(dead_code)]

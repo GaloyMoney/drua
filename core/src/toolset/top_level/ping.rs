@@ -40,8 +40,7 @@ impl TopLevelTool for Ping {
     }
 
     fn description(&self) -> &str {
-        "Returns 'pong'. Only available to exported-agent credentials; \
-         used as a liveness probe."
+        "Returns 'pong'. Used as a liveness probe."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

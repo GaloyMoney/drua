@@ -13,7 +13,7 @@
     <tbody>
       {% for entry in entries %}
       <tr>
-        <td class="subject-cell"><strong>{{ entry.subject.label }}</strong>{% match entry.subject.owner %}{% when Some with (owner) %}<br><span class="subject-owner">↳ {{ owner }}</span>{% when None %}{% endmatch %}</td>
+        <td class="subject-cell"><strong>{{ entry.subject.label }}</strong>{% match entry.subject.on_behalf_of %}{% when Some with (on_behalf_of) %}<br><span class="subject-owner">↳ on behalf of {{ on_behalf_of }}</span>{% when None %}{% endmatch %}</td>
         <td>{{ entry.action }}</td>
         <td><span class="outcome-{{ entry.outcome }}">{{ entry.outcome }}</span></td>
         <td>{% match entry.duration_ms %}{% when Some with (ms) %}{{ ms }}ms{% when None %}—{% endmatch %}</td>

@@ -274,83 +274,108 @@ async fn audit_entries(
 }
 
 async fn resolve_subject(app: &galoy_agents_core::App, subject: &str) -> AuditSubjectView {
-    if let Some(creds_id_str) = subject.strip_prefix("exported_agent::") {
-        if let Ok(creds_id) = creds_id_str.parse::<uuid::Uuid>() {
-            let creds_id = galoy_agents_core::primitives::McpCredsId::from(creds_id);
-            if let Ok(creds) = app.mcp_creds().find_by_id(creds_id).await {
-                let owner_name = if let Some(user_id) = creds.owner.user_id() {
-                    app.users()
-                        .find_by_id(user_id)
-                        .await
-                        .ok()
-                        .map(|u| {
-                            u.name
-                                .clone()
-                                .or_else(|| u.email.clone())
-                                .unwrap_or_else(|| u.github_id.clone())
-                        })
-                        .unwrap_or_else(|| "unknown".to_string())
-                } else {
-                    "agent".to_string()
-                };
-                return AuditSubjectView {
-                    label: creds.name,
-                    owner: Some(owner_name),
-                };
-            }
-        }
-    } else if let Some(rest) = subject.strip_prefix("agent::") {
-        // Format: agent::<agent-uuid>::ws:<workspace-uuid>
-        if let Some((agent_id_str, ws_id_str)) = rest.split_once("::ws:") {
-            let agent_label = if let Ok(agent_uuid) = agent_id_str.parse::<uuid::Uuid>() {
-                let agent_id = galoy_agents_core::primitives::AgentId::from(agent_uuid);
-                app.agents()
-                    .find_by_id(agent_id)
-                    .await
-                    .map(|a| a.name.clone())
-                    .unwrap_or_else(|_| agent_id_str.to_string())
-            } else {
-                agent_id_str.to_string()
-            };
+    use galoy_agents_core::audit::primitives::AuditSubject;
 
-            let ws_name = if let Ok(ws_uuid) = ws_id_str.parse::<uuid::Uuid>() {
-                let workspace_id = galoy_agents_core::primitives::WorkspaceId::from(ws_uuid);
-                app.workspaces()
-                    .find_by_id(workspace_id)
-                    .await
-                    .map(|ws| ws.name.clone())
-                    .unwrap_or_else(|_| ws_id_str.to_string())
-            } else {
-                ws_id_str.to_string()
-            };
-
+    let parsed = match subject.parse::<AuditSubject>() {
+        Ok(parsed) => parsed,
+        Err(_) => {
             return AuditSubjectView {
-                label: agent_label,
-                owner: Some(ws_name),
+                label: subject.to_string(),
+                on_behalf_of: None,
             };
         }
-    } else if let Some(user_id_str) = subject.strip_prefix("user::") {
-        if let Ok(user_id) = user_id_str.parse::<uuid::Uuid>() {
-            let user_id = galoy_agents_core::primitives::UserId::from(user_id);
-            if let Ok(user) = app.users().find_by_id(user_id).await {
-                let label = user
-                    .name
-                    .clone()
-                    .or_else(|| user.email.clone())
-                    .unwrap_or_else(|| user.github_id.clone());
-                return AuditSubjectView { label, owner: None };
+    };
+
+    match parsed {
+        AuditSubject::User { user_id } => AuditSubjectView {
+            label: lookup_user_label(app, user_id).await,
+            on_behalf_of: None,
+        },
+        AuditSubject::ExportedAgent { mcp_creds_id, .. } => {
+            match app.mcp_creds().find_by_id(mcp_creds_id).await {
+                Ok(creds) => {
+                    let user = match creds.owner.user_id() {
+                        Some(user_id) => Some(lookup_user_label(app, user_id).await),
+                        None => None,
+                    };
+                    AuditSubjectView {
+                        label: creds.name,
+                        on_behalf_of: user,
+                    }
+                }
+                Err(_) => AuditSubjectView {
+                    label: subject.to_string(),
+                    on_behalf_of: None,
+                },
             }
         }
-    } else if subject == "anonymous" {
-        return AuditSubjectView {
+        AuditSubject::Agent {
+            workspace_id,
+            agent_id,
+        } => {
+            let agent = lookup_agent_label(app, agent_id).await;
+            let ws = lookup_workspace_label(app, workspace_id).await;
+            AuditSubjectView {
+                label: format!("{agent} (in {ws})"),
+                on_behalf_of: None,
+            }
+        }
+        AuditSubject::AgentOnBehalfOfUser {
+            user_id,
+            workspace_id,
+            agent_id,
+        } => {
+            let agent = lookup_agent_label(app, agent_id).await;
+            let ws = lookup_workspace_label(app, workspace_id).await;
+            AuditSubjectView {
+                label: format!("{agent} (in {ws})"),
+                on_behalf_of: Some(lookup_user_label(app, user_id).await),
+            }
+        }
+        AuditSubject::Anonymous => AuditSubjectView {
             label: "anonymous".to_string(),
-            owner: None,
-        };
+            on_behalf_of: None,
+        },
     }
-    AuditSubjectView {
-        label: subject.to_string(),
-        owner: None,
-    }
+}
+
+async fn lookup_user_label(
+    app: &galoy_agents_core::App,
+    user_id: galoy_agents_core::primitives::UserId,
+) -> String {
+    app.users()
+        .find_by_id(user_id)
+        .await
+        .ok()
+        .map(|u| {
+            u.name
+                .clone()
+                .or_else(|| u.email.clone())
+                .unwrap_or_else(|| u.github_id.clone())
+        })
+        .unwrap_or_else(|| user_id.to_string())
+}
+
+async fn lookup_agent_label(
+    app: &galoy_agents_core::App,
+    agent_id: galoy_agents_core::primitives::AgentId,
+) -> String {
+    app.agents()
+        .find_by_id(agent_id)
+        .await
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|_| agent_id.to_string())
+}
+
+async fn lookup_workspace_label(
+    app: &galoy_agents_core::App,
+    workspace_id: galoy_agents_core::primitives::WorkspaceId,
+) -> String {
+    app.workspaces()
+        .find_by_id(workspace_id)
+        .await
+        .map(|ws| ws.name.clone())
+        .unwrap_or_else(|_| workspace_id.to_string())
 }
 
 #[instrument(name = "web.code_assistant_dashboard", skip_all)]
