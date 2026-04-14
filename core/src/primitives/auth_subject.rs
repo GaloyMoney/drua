@@ -59,7 +59,7 @@ impl AuthSubject {
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
             | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => {
-                scopes.iter().any(|s| s.as_str() == scope)
+                scopes.iter().any(|s| s.matches_str(scope))
             }
             AuthSubject::Anonymous => false,
         }

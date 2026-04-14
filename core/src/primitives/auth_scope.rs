@@ -2,16 +2,21 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::WorkspaceId;
+
 /// A typed authorization scope carried by [`super::AuthSubject`] variants.
-///
-/// Currently only has a catch-all [`Raw`](AuthScope::Raw) variant; concrete
-/// scopes (e.g. workspace-level read/write, admin) will be added incrementally.
 ///
 /// Serializes as a plain string so that existing event-store JSON and config
 /// files (which store scopes as `["read","write"]`) remain compatible.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AuthScope {
+    /// Full administrative access.
+    Admin,
+    /// Read access scoped to a specific workspace.
+    WorkspaceRead(WorkspaceId),
+    /// Write access scoped to a specific workspace.
+    WorkspaceWrite(WorkspaceId),
     /// Catch-all for scope strings that don't (yet) have a dedicated variant.
     Raw(String),
 }
@@ -23,6 +28,9 @@ pub enum AuthScope {
 impl fmt::Display for AuthScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AuthScope::Admin => f.write_str("admin"),
+            AuthScope::WorkspaceRead(id) => write!(f, "ws:{id}:read"),
+            AuthScope::WorkspaceWrite(id) => write!(f, "ws:{id}:write"),
             AuthScope::Raw(s) => f.write_str(s),
         }
     }
@@ -32,7 +40,23 @@ impl FromStr for AuthScope {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // As concrete variants are added, match known strings here first.
+        if s == "admin" {
+            return Ok(AuthScope::Admin);
+        }
+
+        // Parse "ws:{uuid}:read" / "ws:{uuid}:write"
+        if let Some(rest) = s.strip_prefix("ws:") {
+            if let Some(uuid_str) = rest.strip_suffix(":read") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::WorkspaceRead(WorkspaceId::from(uuid)));
+                }
+            } else if let Some(uuid_str) = rest.strip_suffix(":write") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::WorkspaceWrite(WorkspaceId::from(uuid)));
+                }
+            }
+        }
+
         Ok(AuthScope::Raw(s.to_owned()))
     }
 }
@@ -60,7 +84,7 @@ impl From<&str> for AuthScope {
 
 impl Serialize for AuthScope {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
+        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -76,10 +100,31 @@ impl<'de> Deserialize<'de> for AuthScope {
 // ---------------------------------------------------------------------------
 
 impl AuthScope {
-    /// Return the scope as a string slice, regardless of variant.
-    pub fn as_str(&self) -> &str {
+    /// Check whether this scope matches the given string representation.
+    ///
+    /// Prefer pattern-matching on the enum when possible; use this for
+    /// backward-compatible string comparisons (e.g. config-driven scope
+    /// checks).
+    pub fn matches_str(&self, s: &str) -> bool {
         match self {
-            AuthScope::Raw(s) => s,
+            AuthScope::Admin => s == "admin",
+            AuthScope::WorkspaceRead(id) => {
+                s.strip_prefix("ws:")
+                    .and_then(|rest| rest.strip_suffix(":read"))
+                    .and_then(|uuid_str| uuid_str.parse::<uuid::Uuid>().ok())
+                    .map(WorkspaceId::from)
+                    .as_ref()
+                    == Some(id)
+            }
+            AuthScope::WorkspaceWrite(id) => {
+                s.strip_prefix("ws:")
+                    .and_then(|rest| rest.strip_suffix(":write"))
+                    .and_then(|uuid_str| uuid_str.parse::<uuid::Uuid>().ok())
+                    .map(WorkspaceId::from)
+                    .as_ref()
+                    == Some(id)
+            }
+            AuthScope::Raw(raw) => raw == s,
         }
     }
 }
@@ -88,12 +133,22 @@ impl AuthScope {
 mod tests {
     use super::*;
 
+    fn test_workspace_id() -> WorkspaceId {
+        WorkspaceId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
+    }
+
     /// Round-trip: every variant must survive `Display` → `FromStr`.
     /// When adding a new variant, add it to this list so CI catches any
     /// mismatch immediately.
     #[test]
     fn round_trip_all_variants() {
-        let variants = vec![AuthScope::Raw("ws:abc:read".to_owned())];
+        let ws_id = test_workspace_id();
+        let variants = vec![
+            AuthScope::Admin,
+            AuthScope::WorkspaceRead(ws_id),
+            AuthScope::WorkspaceWrite(ws_id),
+            AuthScope::Raw("custom:thing".to_owned()),
+        ];
 
         for scope in variants {
             let serialized = scope.to_string();
@@ -103,33 +158,91 @@ mod tests {
     }
 
     #[test]
-    fn display_raw() {
-        let scope = AuthScope::Raw("admin".to_owned());
-        assert_eq!(scope.to_string(), "admin");
+    fn display_admin() {
+        assert_eq!(AuthScope::Admin.to_string(), "admin");
     }
 
     #[test]
-    fn from_str_raw() {
+    fn display_workspace_scopes() {
+        let ws_id = test_workspace_id();
+        assert_eq!(
+            AuthScope::WorkspaceRead(ws_id).to_string(),
+            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:read"
+        );
+        assert_eq!(
+            AuthScope::WorkspaceWrite(ws_id).to_string(),
+            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:write"
+        );
+    }
+
+    #[test]
+    fn from_str_admin() {
+        let scope: AuthScope = "admin".parse().unwrap();
+        assert_eq!(scope, AuthScope::Admin);
+    }
+
+    #[test]
+    fn from_str_workspace() {
+        let ws_id = test_workspace_id();
+        let read: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:read"
+            .parse()
+            .unwrap();
+        assert_eq!(read, AuthScope::WorkspaceRead(ws_id));
+
+        let write: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:write"
+            .parse()
+            .unwrap();
+        assert_eq!(write, AuthScope::WorkspaceWrite(ws_id));
+    }
+
+    #[test]
+    fn from_str_unknown_falls_back_to_raw() {
         let scope: AuthScope = "read".parse().unwrap();
         assert_eq!(scope, AuthScope::Raw("read".to_owned()));
+    }
+
+    #[test]
+    fn matches_str_all_variants() {
+        let ws_id = test_workspace_id();
+        assert!(AuthScope::Admin.matches_str("admin"));
+        assert!(!AuthScope::Admin.matches_str("other"));
+
+        let ws_str = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:read";
+        assert!(AuthScope::WorkspaceRead(ws_id).matches_str(ws_str));
+        assert!(!AuthScope::WorkspaceRead(ws_id).matches_str("ws:other:read"));
+
+        assert!(AuthScope::Raw("custom".to_owned()).matches_str("custom"));
+        assert!(!AuthScope::Raw("custom".to_owned()).matches_str("nope"));
     }
 
     /// JSON must round-trip as a plain string (not `{"Raw":"…"}`), so that
     /// existing event-store payloads and config files remain compatible.
     #[test]
     fn serde_round_trip_plain_string() {
-        let scope = AuthScope::Raw("ws:123:write".to_owned());
-        let json = serde_json::to_string(&scope).unwrap();
-        assert_eq!(json, r#""ws:123:write""#);
-        let parsed: AuthScope = serde_json::from_str(&json).unwrap();
-        assert_eq!(scope, parsed);
+        let ws_id = test_workspace_id();
+        let variants = vec![
+            (AuthScope::Admin, r#""admin""#),
+            (
+                AuthScope::WorkspaceRead(ws_id),
+                r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:read""#,
+            ),
+            (AuthScope::Raw("custom".to_owned()), r#""custom""#),
+        ];
+
+        for (scope, expected_json) in variants {
+            let json = serde_json::to_string(&scope).unwrap();
+            assert_eq!(json, expected_json);
+            let parsed: AuthScope = serde_json::from_str(&json).unwrap();
+            assert_eq!(scope, parsed);
+        }
     }
 
-    /// Deserializing from a plain JSON string (as stored in existing events).
+    /// Deserializing from a plain JSON string — "admin" now parses to Admin
+    /// variant, not Raw("admin").
     #[test]
-    fn deserialize_from_plain_string() {
+    fn deserialize_admin_from_plain_string() {
         let parsed: AuthScope = serde_json::from_str(r#""admin""#).unwrap();
-        assert_eq!(parsed, AuthScope::Raw("admin".to_owned()));
+        assert_eq!(parsed, AuthScope::Admin);
     }
 
     /// Vec<AuthScope> serializes the same as the old Vec<String>.
