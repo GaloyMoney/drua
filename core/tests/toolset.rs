@@ -26,7 +26,7 @@ async fn init_toolsets() {
             required_scopes: None,
         }],
     };
-    let toolsets = ToolSets::init(config, None).await.unwrap();
+    let toolsets = ToolSets::init(config).await.unwrap();
 
     // Anonymous subject still sees the unrestricted builtins — the new
     // trait defaults `is_visible` to `true`. Make sure init succeeded and

@@ -39,7 +39,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     let config = AgentsConfig { builtin_roles };
 
     let toolsets = Arc::new(
-        ToolSets::init(ToolSetsConfig::default(), None)
+        ToolSets::init(ToolSetsConfig::default())
             .await
             .expect("init toolsets"),
     );
@@ -170,7 +170,7 @@ async fn send_message_dispatches_registered_tool_call() {
     let config = AgentsConfig { builtin_roles };
 
     // Build ToolSets, register the test tool, then share via Arc.
-    let mut toolsets = ToolSets::init(ToolSetsConfig::default(), None)
+    let mut toolsets = ToolSets::init(ToolSetsConfig::default())
         .await
         .expect("init toolsets");
     toolsets.register_top_level(PingTool::new());

@@ -4,7 +4,12 @@ use axum::{extract::Request, middleware::Next, response::Response};
 use opentelemetry::global;
 use opentelemetry_http::HeaderExtractor;
 use tower_sessions::{cookie::SameSite, SessionManagerLayer};
+use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use galoy_agents_core::audit::primitives::InteractionType;
+use galoy_agents_core::audit::Audit;
+use galoy_agents_core::auth::AuthSubject;
 
 use crate::auth::session_store::PgSessionStore;
 use crate::AppState;
@@ -18,6 +23,68 @@ async fn trace_context_middleware(request: Request, next: Next) -> Response {
     });
     let _ = tracing::Span::current().set_parent(parent_cx);
     next.run(request).await
+}
+
+/// Post-response middleware that records an audit entry for every mutating
+/// HTTP request (POST / PUT / DELETE). Read-only requests are skipped.
+///
+/// Seeds an [`EventContext`] and uses the type-safe [`Audit::record_*`]
+/// helpers to accumulate audit fields. The context is propagated via
+/// [`WithEventContext`] so downstream handlers and services can enrich it.
+/// After the handler completes the collected context is persisted
+/// fire-and-forget.
+#[instrument(name = "web.audit.middleware", skip_all)]
+async fn audit_middleware(request: Request, next: Next) -> Response {
+    use axum::http::Method;
+    use es_entity::context::{EventContext, WithEventContext};
+
+    let method = request.method().clone();
+    if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
+        return next.run(request).await;
+    }
+
+    let auth = request.extensions().get::<AuthSubject>().cloned();
+    let app_state = request.extensions().get::<AppState>().cloned();
+    let path = request.uri().path().to_string();
+
+    // Obtain an empty seed — the `!Send` EventContext must not live across
+    // an `.await`, so we scope it in a block.
+    let seed_data = {
+        let ctx = EventContext::current();
+        ctx.data()
+    };
+
+    async {
+        Audit::record_interaction_type(InteractionType::ApiCall);
+        Audit::record_action(format!("{} {}", method, path));
+        Audit::record_metadata(serde_json::json!({ "method": method.as_str(), "path": path }));
+        if let Some(ref auth) = auth {
+            Audit::record_subject(auth);
+        }
+
+        let start = std::time::Instant::now();
+        let response = next.run(request).await;
+        Audit::record_duration(start);
+
+        let status = response.status();
+        if status.is_success() || status.is_redirection() {
+            Audit::record_success();
+        } else if status == axum::http::StatusCode::UNAUTHORIZED
+            || status == axum::http::StatusCode::FORBIDDEN
+        {
+            Audit::record_error("unauthorized");
+        } else {
+            Audit::record_error(status.to_string());
+        }
+
+        if let Some(state) = app_state {
+            state.app.audit().record_from_context();
+        }
+
+        response
+    }
+    .with_event_context(seed_data)
+    .await
 }
 
 pub struct ServerConfig {
@@ -53,6 +120,7 @@ where
 
     crate::router()
         .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn(audit_middleware))
         .layer(axum::middleware::from_fn(trace_context_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
         .layer(axum::Extension(app_state.clone()))

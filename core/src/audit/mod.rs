@@ -1,11 +1,16 @@
 pub mod error;
 pub mod primitives;
 
+use es_entity::context::EventContext;
 use tracing::instrument;
 
 pub use crate::primitives::*;
 pub use error::*;
 pub use primitives::*;
+
+/// Well-known key under which [`AuditContextData`] is stored in the
+/// [`EventContext`].
+const AUDIT_CONTEXT_KEY: &str = "audit";
 
 #[derive(Clone)]
 pub struct Audit {
@@ -15,6 +20,119 @@ pub struct Audit {
 impl Audit {
     pub fn new(pool: &sqlx::PgPool) -> Self {
         Self { pool: pool.clone() }
+    }
+
+    // ------------------------------------------------------------------
+    // Type-safe context accumulation
+    //
+    // These associated functions record fields into the thread-local
+    // `EventContext` under [`AUDIT_CONTEXT_KEY`]. Call them inside an
+    // `async { … }.with_event_context(seed)` block at the request
+    // boundary so the context is properly propagated.
+    // ------------------------------------------------------------------
+
+    /// Record the authenticated subject.
+    pub fn record_subject(auth: &AuthSubject) {
+        let subject: AuditSubject = auth.into();
+        Self::update_context(|ctx| ctx.subject = Some(subject));
+    }
+
+    /// Record the interaction type (API call, MCP call, …).
+    pub fn record_interaction_type(itype: InteractionType) {
+        Self::update_context(|ctx| ctx.interaction_type = Some(itype));
+    }
+
+    /// Record the action label (e.g. `"POST /workspaces"`).
+    pub fn record_action(action: impl Into<String>) {
+        let action = action.into();
+        Self::update_context(|ctx| ctx.action = Some(action));
+    }
+
+    /// Derive and record the outcome from an HTTP status code.
+    pub fn record_outcome(outcome: InteractionOutcome) {
+        Self::update_context(|ctx| ctx.outcome = Some(outcome));
+    }
+
+    /// Compute elapsed time from `start` and record it.
+    pub fn record_duration(start: std::time::Instant) {
+        let ms = start.elapsed().as_millis() as u64;
+        Self::update_context(|ctx| ctx.duration_ms = Some(ms));
+    }
+
+    /// Record the estimated token count of the response.
+    pub fn record_tokens(tokens: u64) {
+        Self::update_context(|ctx| ctx.tokens_returned = Some(tokens));
+    }
+
+    /// Record a successful outcome.
+    pub fn record_success() {
+        Self::update_context(|ctx| ctx.outcome = Some(InteractionOutcome::Success));
+    }
+
+    /// Record an error outcome with a message.
+    pub fn record_error(message: impl Into<String>) {
+        let message = message.into();
+        Self::update_context(|ctx| ctx.outcome = Some(InteractionOutcome::Error { message }));
+    }
+
+    /// Merge arbitrary metadata into the context.
+    pub fn record_metadata(value: serde_json::Value) {
+        Self::update_context(|ctx| ctx.metadata = Some(value));
+    }
+
+    /// Read-then-modify-then-write the [`AuditContextData`] stored in the
+    /// current [`EventContext`]. Creates a default if none exists yet.
+    fn update_context(f: impl FnOnce(&mut AuditContextData)) {
+        let mut ec = EventContext::current();
+        let mut data: AuditContextData = ec
+            .data()
+            .lookup(AUDIT_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        f(&mut data);
+        ec.insert(AUDIT_CONTEXT_KEY, &data).unwrap_or_default();
+    }
+
+    /// Collect the accumulated [`AuditContextData`] from the current
+    /// [`EventContext`]. Returns `None` if nothing was recorded.
+    pub fn collect_context() -> Option<AuditContextData> {
+        let ec = EventContext::current();
+        ec.data().lookup(AUDIT_CONTEXT_KEY).ok().flatten()
+    }
+
+    /// Collect the accumulated context and persist it as an audit entry.
+    ///
+    /// Persistence is fire-and-forget (`tokio::spawn`) so this never blocks
+    /// the caller. Anonymous subjects and empty contexts are silently skipped.
+    pub fn record_from_context(&self) {
+        let Some(ctx_data) = Self::collect_context() else {
+            return;
+        };
+        let subject = match ctx_data.subject {
+            Some(ref s) if !matches!(s, AuditSubject::Anonymous) => s.clone(),
+            _ => return,
+        };
+        let audit = self.clone();
+        tokio::spawn(async move {
+            let itype = ctx_data
+                .interaction_type
+                .unwrap_or(InteractionType::ApiCall);
+            if let Err(e) = audit
+                .insert(
+                    subject,
+                    itype,
+                    ctx_data.action.unwrap_or_default(),
+                    ctx_data.metadata.unwrap_or(serde_json::json!({})),
+                    ctx_data.outcome.unwrap_or(InteractionOutcome::Success),
+                    ctx_data.duration_ms,
+                    ctx_data.tokens_returned,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to record audit entry");
+            }
+        });
     }
 
     /// Record an API interaction.

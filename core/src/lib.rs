@@ -95,7 +95,7 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let toolsets = ToolSets::init(config.toolsets, Some(Arc::clone(&audit))).await?;
+        let toolsets = ToolSets::init(config.toolsets).await?;
         if let Some(ca) = code_assistant.as_ref() {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }

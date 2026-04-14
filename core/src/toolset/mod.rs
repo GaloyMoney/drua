@@ -17,22 +17,17 @@ use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
 
-use crate::audit::primitives::InteractionOutcome;
-use crate::audit::Audit;
+use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
 
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
-    audit: Option<Arc<Audit>>,
     top_level: HashMap<String, Arc<dyn TopLevelTool>>,
 }
 
 impl ToolSets {
     #[tracing::instrument(name = "toolset.init", skip_all)]
-    pub async fn init(
-        config: ToolSetsConfig,
-        audit: Option<Arc<Audit>>,
-    ) -> Result<Self, ToolSetsError> {
+    pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
@@ -78,11 +73,7 @@ impl ToolSets {
         top_level.insert(call.name().to_string(), call);
         top_level.insert(ping.name().to_string(), ping);
 
-        Ok(Self {
-            sets,
-            audit,
-            top_level,
-        })
+        Ok(Self { sets, top_level })
     }
 
     /// Register a top-level tool. Intended to be called during init before the
@@ -144,8 +135,9 @@ impl ToolSets {
     }
 
     /// Look up and execute a top-level tool by name. Runs
-    /// [`TopLevelTool::can_execute`] + dispatch + audit so the MCP server's
-    /// `call_tool` RPC can delegate straight here.
+    /// [`TopLevelTool::can_execute`] + dispatch and enriches the current
+    /// [`EventContext`](es_entity::context::EventContext) with MCP-specific
+    /// audit fields. The actual persist happens in the web audit middleware.
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -161,36 +153,27 @@ impl ToolSets {
             return Err(ToolSetsError::Unauthorized);
         }
 
-        let start = std::time::Instant::now();
-        let result = tool.call(subject, arguments.clone()).await;
-        let duration_ms = start.elapsed().as_millis() as u64;
+        // Enrich the audit context with MCP-specific fields so the
+        // boundary middleware flushes a useful entry.
+        Audit::record_interaction_type(InteractionType::McpCall);
+        Audit::record_action(name);
+        let args_value = arguments
+            .as_ref()
+            .map(|a| serde_json::Value::Object(a.clone()));
+        Audit::record_metadata(serde_json::json!({
+            "tool_name": name,
+            "arguments": args_value,
+        }));
 
-        let (outcome, tokens_returned) = match &result {
-            Ok(r) => (InteractionOutcome::Success, Some(estimate_tokens(r))),
-            Err(e) => (
-                InteractionOutcome::Error {
-                    message: e.to_string(),
-                },
-                None,
-            ),
-        };
-        let args_value = arguments.map(serde_json::Value::Object);
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record_mcp_call(
-                    subject,
-                    name,
-                    Some(&serde_json::json!({
-                        "tool_name": name,
-                        "arguments": args_value,
-                    })),
-                    outcome,
-                    Some(duration_ms),
-                    tokens_returned,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to record audit entry");
+        let result = tool.call(subject, arguments).await;
+
+        match &result {
+            Ok(r) => {
+                Audit::record_tokens(estimate_tokens(r));
+                Audit::record_success();
+            }
+            Err(e) => {
+                Audit::record_error(e.to_string());
             }
         }
 

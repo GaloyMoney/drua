@@ -1616,6 +1616,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "chrono",
+ "es-entity",
  "galoy-agents-core",
  "k8s-openapi",
  "kube",
