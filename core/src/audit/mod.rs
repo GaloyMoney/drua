@@ -182,6 +182,61 @@ impl Audit {
         Ok(rows)
     }
 
+    /// Query audit entries using the provided filter criteria.
+    ///
+    /// All filter fields are optional — unset fields are excluded from the
+    /// WHERE clause. String fields use `ILIKE` for fuzzy matching.
+    #[instrument(name = "audit.find", skip_all)]
+    pub async fn find(&self, query: &AuditLogQuery) -> Result<Vec<AuditEntry>, AuditError> {
+        let workspace_id = query.workspace_id.map(uuid::Uuid::from);
+        let acting_user_id = query.acting_user_id.map(uuid::Uuid::from);
+        let acting_agent_id = query.acting_agent_id.map(uuid::Uuid::from);
+        let exclude_agent_id = query.exclude_agent_id.map(uuid::Uuid::from);
+        let action = query.action.as_deref();
+        let outcome = query.outcome.as_deref();
+        let error = query.error;
+        let limit = query.limit;
+
+        let rows = sqlx::query_as!(
+            AuditEntry,
+            r#"SELECT
+                id AS "id: AuditEntryId",
+                acting_user_id AS "acting_user_id: UserId",
+                workspace_id AS "workspace_id: WorkspaceId",
+                acting_agent_id AS "acting_agent_id: AgentId",
+                on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
+                interaction_type,
+                action,
+                metadata AS "metadata: serde_json::Value",
+                outcome,
+                error,
+                duration_ms,
+                tokens_returned,
+                recorded_at
+            FROM audit_entries
+            WHERE ($1::uuid IS NULL OR workspace_id = $1)
+              AND ($2::uuid IS NULL OR acting_user_id = $2)
+              AND ($3::uuid IS NULL OR acting_agent_id = $3)
+              AND ($4::uuid IS NULL OR acting_agent_id IS NULL OR acting_agent_id != $4)
+              AND ($5::text IS NULL OR action ILIKE $5)
+              AND ($6::text IS NULL OR outcome ILIKE $6)
+              AND ($7::bool IS NULL OR error = $7)
+            ORDER BY id DESC
+            LIMIT $8"#,
+            workspace_id,
+            acting_user_id,
+            acting_agent_id,
+            exclude_agent_id,
+            action,
+            outcome,
+            error,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     async fn insert(&self, ctx: &AuditContextData) -> Result<AuditEntry, AuditError> {
         let acting_user_id = ctx.acting_user_id.map(uuid::Uuid::from);
         let workspace_id = ctx.workspace_id.map(uuid::Uuid::from);

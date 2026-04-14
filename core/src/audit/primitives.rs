@@ -66,6 +66,30 @@ pub struct AuditContextData {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Filter criteria for querying audit log entries.
+///
+/// All fields are optional — unset fields are not included in the WHERE
+/// clause. String fields use `ILIKE` for fuzzy matching.
+#[derive(Debug, Clone, Default)]
+pub struct AuditLogQuery {
+    /// Only entries for this workspace.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Only entries by this acting user.
+    pub acting_user_id: Option<UserId>,
+    /// Only entries by this acting agent.
+    pub acting_agent_id: Option<AgentId>,
+    /// Exclude entries by this agent (e.g. to hide the caller's own logs).
+    pub exclude_agent_id: Option<AgentId>,
+    /// Substring match on the `action` column.
+    pub action: Option<String>,
+    /// Substring match on the `outcome` column (e.g. "success", "error").
+    pub outcome: Option<String>,
+    /// Only entries where `error` is this value.
+    pub error: Option<bool>,
+    /// Maximum number of rows (clamped to 1..=100, default 20).
+    pub limit: i64,
+}
+
 /// A recorded audit entry.
 #[derive(Debug, Clone)]
 pub struct AuditEntry {

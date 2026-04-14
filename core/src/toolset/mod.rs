@@ -9,7 +9,9 @@ pub use config::*;
 pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
-pub use top_level::{CallCatalogTool, DescribeCatalogTool, Ping, SearchCatalog};
+pub use top_level::{
+    AllLogs, CallCatalogTool, DescribeCatalogTool, Ping, SearchCatalog, WorkspaceLog,
+};
 pub use traits::*;
 
 use std::collections::HashMap;
@@ -17,11 +19,13 @@ use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: HashMap<String, Arc<dyn TopLevelTool>>,
+    audit: Option<Arc<Audit>>,
 }
 
 impl ToolSets {
@@ -72,7 +76,17 @@ impl ToolSets {
         top_level.insert(call.name().to_string(), call);
         top_level.insert(ping.name().to_string(), ping);
 
-        Ok(Self { sets, top_level })
+        Ok(Self {
+            sets,
+            top_level,
+            audit: None,
+        })
+    }
+
+    /// Wire the audit service so tool calls are automatically recorded.
+    /// Optional — when `None` (e.g. in tests) audit is silently skipped.
+    pub fn set_audit(&mut self, audit: Arc<Audit>) {
+        self.audit = Some(audit);
     }
 
     /// Register a top-level tool. Intended to be called during init before the
@@ -134,14 +148,16 @@ impl ToolSets {
     }
 
     /// Look up and execute a top-level tool by name. Runs
-    /// [`TopLevelTool::can_execute`] + dispatch. Audit is handled by the
-    /// caller (e.g. the MCP gateway).
+    /// [`TopLevelTool::can_execute`] + dispatch, and records an audit entry
+    /// when an [`Audit`] instance has been wired via [`set_audit`].
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
         name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        use es_entity::context::{EventContext, WithEventContext};
+
         let tool = self
             .top_level
             .get(name)
@@ -151,7 +167,46 @@ impl ToolSets {
             return Err(ToolSetsError::Unauthorized);
         }
 
-        tool.call(subject, arguments).await
+        let seed = {
+            let ctx = EventContext::current();
+            ctx.data()
+        };
+
+        let audit = self.audit.clone();
+
+        async move {
+            Audit::record_subject(subject);
+            Audit::record_action(name);
+            let args_value = arguments
+                .as_ref()
+                .map(|a| serde_json::Value::Object(a.clone()));
+            Audit::record_metadata(serde_json::json!({
+                "tool_name": name,
+                "arguments": args_value,
+            }));
+
+            let start = std::time::Instant::now();
+            let result = tool.call(subject, arguments).await;
+            Audit::record_duration(start);
+
+            match &result {
+                Ok(r) => {
+                    Audit::record_tokens(estimate_tokens(r));
+                    Audit::record_success();
+                }
+                Err(e) => {
+                    Audit::record_error(e.to_string());
+                }
+            }
+
+            if let Some(audit) = &audit {
+                audit.record_from_context();
+            }
+
+            result
+        }
+        .with_event_context(seed)
+        .await
     }
 }
 
