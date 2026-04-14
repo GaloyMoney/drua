@@ -517,7 +517,7 @@ mod tests {
         let ws = sb.workspace_id;
         let agent = AgentId::new();
 
-        sb.attach_agent(agent, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(agent, ws, SandboxAgentMode::Read).unwrap();
         let res = sb
             .attach_agent(agent, ws, SandboxAgentMode::Read)
             .expect("re-attach");
@@ -530,7 +530,7 @@ mod tests {
         let ws = sb.workspace_id;
         let agent = AgentId::new();
 
-        sb.attach_agent(agent, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(agent, ws, SandboxAgentMode::Read).unwrap();
         let res = sb
             .attach_agent(agent, ws, SandboxAgentMode::Write)
             .expect("upgrade");
@@ -544,7 +544,7 @@ mod tests {
         let ws = sb.workspace_id;
         let agent = AgentId::new();
 
-        sb.attach_agent(agent, ws, SandboxAgentMode::Write).unwrap();
+        let _ = sb.attach_agent(agent, ws, SandboxAgentMode::Write).unwrap();
         let res = sb
             .attach_agent(agent, ws, SandboxAgentMode::Read)
             .expect("downgrade");
@@ -560,9 +560,9 @@ mod tests {
         let b = AgentId::new();
         let c = AgentId::new();
 
-        sb.attach_agent(a, ws, SandboxAgentMode::Read).unwrap();
-        sb.attach_agent(b, ws, SandboxAgentMode::Read).unwrap();
-        sb.attach_agent(c, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(a, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(b, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(c, ws, SandboxAgentMode::Read).unwrap();
         assert_eq!(sb.attached_agents.len(), 3);
         assert!(sb
             .attached_agents
@@ -577,10 +577,14 @@ mod tests {
         let writer_a = AgentId::new();
         let writer_b = AgentId::new();
 
-        sb.attach_agent(writer_a, ws, SandboxAgentMode::Write)
+        let _ = sb
+            .attach_agent(writer_a, ws, SandboxAgentMode::Write)
             .unwrap();
+        // Map Ok to () so we can rely on the Debug impl for expect_err —
+        // `Idempotent` doesn't derive Debug.
         let err = sb
             .attach_agent(writer_b, ws, SandboxAgentMode::Write)
+            .map(|_| ())
             .expect_err("second writer must be rejected");
         match err {
             super::super::error::SandboxError::WriteSlotTaken { current_writer } => {
@@ -603,8 +607,8 @@ mod tests {
         let r2 = AgentId::new();
         let w = AgentId::new();
 
-        sb.attach_agent(r1, ws, SandboxAgentMode::Read).unwrap();
-        sb.attach_agent(r2, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(r1, ws, SandboxAgentMode::Read).unwrap();
+        let _ = sb.attach_agent(r2, ws, SandboxAgentMode::Read).unwrap();
         let res = sb
             .attach_agent(w, ws, SandboxAgentMode::Write)
             .expect("writer ok with existing readers");
@@ -619,6 +623,7 @@ mod tests {
 
         let err = sb
             .attach_agent(AgentId::new(), other_ws, SandboxAgentMode::Read)
+            .map(|_| ())
             .expect_err("wrong workspace");
         match err {
             super::super::error::SandboxError::WrongWorkspace { expected, actual } => {
@@ -634,7 +639,7 @@ mod tests {
         let mut sb = new_sandbox();
         let ws = sb.workspace_id;
         let agent = AgentId::new();
-        sb.attach_agent(agent, ws, SandboxAgentMode::Write).unwrap();
+        let _ = sb.attach_agent(agent, ws, SandboxAgentMode::Write).unwrap();
 
         let res = sb.detach_agent(agent);
         assert!(res.did_execute());
@@ -706,8 +711,8 @@ mod tests {
         let a = AgentId::new();
         let b = AgentId::new();
 
-        sb.attach_agent(a, ws, SandboxAgentMode::Write).unwrap();
-        sb.detach_agent(a);
+        let _ = sb.attach_agent(a, ws, SandboxAgentMode::Write).unwrap();
+        let _ = sb.detach_agent(a);
         let res = sb
             .attach_agent(b, ws, SandboxAgentMode::Write)
             .expect("writer slot should be free after detach");

@@ -152,7 +152,10 @@ impl Agent {
         }
 
         self.attached_sandbox = Some((sandbox_id, mode));
-        self.apply_sandbox_scopes(sandbox_id, mode);
+        // Scope delta may be AlreadyApplied (e.g. on an upgrade that only
+        // adds an already-held scope); we still record the attachment
+        // event below.
+        let _ = self.apply_sandbox_scopes(sandbox_id, mode);
         self.events
             .push(AgentEvent::SandboxAttached { sandbox_id, mode });
         Ok(Idempotent::Executed(()))
@@ -169,7 +172,9 @@ impl Agent {
         }
 
         self.attached_sandbox = None;
-        self.update_auth_scopes(
+        // Scope removal may be AlreadyApplied if the agent somehow didn't
+        // have the scopes (defensive); the detach event still fires.
+        let _ = self.update_auth_scopes(
             &[],
             &[
                 AuthScope::SandboxRead(sandbox_id),

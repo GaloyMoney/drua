@@ -45,7 +45,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             .expect("init toolsets"),
     );
 
-    let sandboxes = Sandboxes::init(&pool, SandboxConfig::default())
+    let sandboxes = Sandboxes::init(&pool, SandboxConfig::default(), None)
         .await
         .expect("init sandboxes");
     let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes);
@@ -180,7 +180,7 @@ async fn send_message_dispatches_registered_tool_call() {
     toolsets.register_top_level(PingTool::new());
     let toolsets = Arc::new(toolsets);
 
-    let sandboxes = Sandboxes::init(&pool, SandboxConfig::default())
+    let sandboxes = Sandboxes::init(&pool, SandboxConfig::default(), None)
         .await
         .expect("init sandboxes");
     let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes);
