@@ -3,8 +3,6 @@ use std::sync::Arc;
 use concourse_client::ConcourseClient;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
-use crate::auth::AuthSubject;
-
 use super::filter::OutputFilter;
 use super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
 
@@ -137,7 +135,6 @@ impl SearchableToolSet for ConcourseToolSet {
         &self,
         tool_name: &str,
         arguments: Option<JsonObject>,
-        _auth: Option<&AuthSubject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let args = arguments.unwrap_or_default();
         match tool_name {

@@ -396,7 +396,7 @@ impl TopLevelTool for CallCatalogTool {
                 .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?
         };
 
-        let result = set.call(&name, inner_args, None).await;
+        let result = set.call(&name, inner_args).await;
         let filter = output_filter
             .or(tool_default_filter)
             .unwrap_or_else(OutputFilter::global_default);
@@ -415,7 +415,6 @@ mod tests {
     use super::super::super::error::ToolSetsError;
     use super::super::super::traits::ToolSetEntry;
     use super::*;
-    use crate::auth::AuthSubject;
 
     struct StubToolSet {
         entries: Vec<ToolSetEntry>,
@@ -462,7 +461,6 @@ mod tests {
             &self,
             _tool_name: &str,
             _arguments: Option<JsonObject>,
-            _auth: Option<&AuthSubject>,
         ) -> Result<CallToolResult, ToolSetsError> {
             unimplemented!()
         }
