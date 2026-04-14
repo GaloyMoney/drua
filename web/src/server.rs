@@ -74,7 +74,9 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
         } else if status == axum::http::StatusCode::UNAUTHORIZED
             || status == axum::http::StatusCode::FORBIDDEN
         {
-            InteractionOutcome::Unauthorized
+            InteractionOutcome::Error {
+                message: "unauthorized".to_string(),
+            }
         } else {
             InteractionOutcome::Error {
                 message: status.to_string(),
