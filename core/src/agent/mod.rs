@@ -14,8 +14,8 @@ use crate::toolset::ToolSets;
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
     match role {
         AgentRole::WorkspaceLead => vec![
-            AuthScope::from(format!("ws:{workspace_id}:read")),
-            AuthScope::from(format!("ws:{workspace_id}:write")),
+            AuthScope::WorkspaceRead(workspace_id),
+            AuthScope::WorkspaceWrite(workspace_id),
         ],
     }
 }
