@@ -139,7 +139,11 @@ impl TopLevelTool for PingTool {
     fn input_schema(&self) -> &serde_json::Value {
         &self.schema
     }
-    async fn call(&self, _arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
         Ok(CallToolResult::success(vec![Content::text("pong")]))
     }
 }

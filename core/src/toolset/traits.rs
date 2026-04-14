@@ -41,6 +41,7 @@ pub trait TopLevelTool: Send + Sync {
 
     async fn call(
         &self,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError>;
 }

@@ -14,6 +14,8 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
+use crate::auth::AuthSubject;
+
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
@@ -84,9 +86,12 @@ fn format_describe(entry: &CatalogEntry) -> String {
     )
 }
 
-fn entries(sets: &[Arc<dyn SearchableToolSet>]) -> Vec<CatalogEntry> {
+fn entries(sets: &[Arc<dyn SearchableToolSet>], subject: &AuthSubject) -> Vec<CatalogEntry> {
     let mut out = Vec::new();
     for set in sets.iter() {
+        if !set.is_visible(subject) {
+            continue;
+        }
         for tool in set.tools() {
             let desc = &tool.description;
             let brief = desc
@@ -110,10 +115,11 @@ fn entries(sets: &[Arc<dyn SearchableToolSet>]) -> Vec<CatalogEntry> {
 
 fn search(
     sets: &[Arc<dyn SearchableToolSet>],
+    subject: &AuthSubject,
     query: Option<&str>,
     category: Option<&str>,
 ) -> Vec<CatalogEntry> {
-    let mut entries: Vec<CatalogEntry> = entries(sets)
+    let mut entries: Vec<CatalogEntry> = entries(sets, subject)
         .into_iter()
         .filter(|e| {
             if let Some(cat) = category {
@@ -155,23 +161,27 @@ fn search(
 
 fn describe(
     sets: &[Arc<dyn SearchableToolSet>],
+    subject: &AuthSubject,
     prefixed_name: &str,
 ) -> Option<CatalogEntry> {
-    entries(sets)
+    entries(sets, subject)
         .into_iter()
         .find(|e| e.prefixed_name == prefixed_name)
 }
 
 /// Find the toolset, stripped tool name, and default output filter for a
-/// prefixed tool name. Returns an `Arc` clone so callers can drop the lock
-/// before any `.await`. Pure name lookup — no scope filtering.
-///
-/// `pub(in super::super)` so [`super::super::dispatch_tool_call`] can use it.
-pub(in super::super) fn find_set(
+/// prefixed tool name. Only returns a match when `subject` satisfies the
+/// toolset's [`SearchableToolSet::is_visible`]. Returns an `Arc` clone so
+/// callers can drop the lock before any `.await`.
+fn find_set(
     sets: &[Arc<dyn SearchableToolSet>],
+    subject: &AuthSubject,
     prefixed_name: &str,
 ) -> Option<(Arc<dyn SearchableToolSet>, String, Option<OutputFilter>)> {
     for set in sets.iter() {
+        if !set.is_visible(subject) {
+            continue;
+        }
         let prefix = format!("{}_", set.prefix());
         if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
             if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
@@ -253,7 +263,11 @@ impl TopLevelTool for SearchCatalog {
         &SEARCH_SCHEMA
     }
 
-    async fn call(&self, arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
         let args = arguments.as_ref();
         let query = args.and_then(|a| a.get("query")).and_then(|v| v.as_str());
         let category = args
@@ -261,7 +275,7 @@ impl TopLevelTool for SearchCatalog {
             .and_then(|v| v.as_str());
         let results = {
             let sets = self.sets.read().expect("toolset lock poisoned");
-            search(&sets, query, category)
+            search(&sets, subject, query, category)
         };
         let text = format_search_results(&results);
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -305,7 +319,11 @@ impl TopLevelTool for DescribeCatalogTool {
         &DESCRIBE_SCHEMA
     }
 
-    async fn call(&self, arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
         let tool_name = arguments
             .as_ref()
             .and_then(|a| a.get("tool_name"))
@@ -313,7 +331,7 @@ impl TopLevelTool for DescribeCatalogTool {
             .unwrap_or("");
         let entry = {
             let sets = self.sets.read().expect("toolset lock poisoned");
-            describe(&sets, tool_name)
+            describe(&sets, subject, tool_name)
         };
         let text = match entry {
             Some(entry) => format_describe(&entry),
@@ -376,7 +394,11 @@ impl TopLevelTool for CallCatalogTool {
         &CALL_SCHEMA
     }
 
-    async fn call(&self, arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
         let mut args = arguments.unwrap_or_default();
         let tool_name = args
             .remove("tool_name")
@@ -392,9 +414,13 @@ impl TopLevelTool for CallCatalogTool {
 
         let (set, name, tool_default_filter) = {
             let sets = self.sets.read().expect("toolset lock poisoned");
-            find_set(&sets, &tool_name)
+            find_set(&sets, subject, &tool_name)
                 .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?
         };
+
+        if !set.can_execute(subject) {
+            return Err(ToolSetsError::Unauthorized);
+        }
 
         let result = set.call(&name, inner_args).await;
         let filter = output_filter
@@ -481,7 +507,7 @@ mod tests {
             ("search_code", "Semantic search over indexed codebases"),
         ])]);
 
-        let results = search(&sets, Some("pipeline status"), None);
+        let results = search(&sets, &AuthSubject::Anonymous, Some("pipeline status"), None);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].tool_name, "get_pipeline_status");
         assert_eq!(results[1].tool_name, "list_pipelines");
@@ -494,7 +520,7 @@ mod tests {
             "Returns the current status of a CI pipeline",
         )]);
 
-        let results = search(&sets, Some("pipeline status"), None);
+        let results = search(&sets, &AuthSubject::Anonymous, Some("pipeline status"), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tool_name, "get_pipeline_status");
     }
@@ -507,7 +533,7 @@ mod tests {
         )]);
 
         for query in ["search code", "search_code", "search-code"] {
-            let results = search(&sets, Some(query), None);
+            let results = search(&sets, &AuthSubject::Anonymous, Some(query), None);
             assert_eq!(results.len(), 1, "query '{query}' should match");
             assert_eq!(results[0].tool_name, "search_code");
         }
@@ -520,7 +546,7 @@ mod tests {
             ("get_build_log", "Get build output"),
         ])]);
 
-        let results = search(&sets, Some("pipeline"), None);
+        let results = search(&sets, &AuthSubject::Anonymous, Some("pipeline"), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tool_name, "list_pipelines");
     }
@@ -532,7 +558,7 @@ mod tests {
             "Semantic search over indexed codebases",
         )]);
 
-        let results = search(&sets, Some("nonexistent"), None);
+        let results = search(&sets, &AuthSubject::Anonymous, Some("nonexistent"), None);
         assert!(results.is_empty());
     }
 
