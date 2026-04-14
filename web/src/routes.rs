@@ -249,11 +249,6 @@ async fn mcp_creds_list(State(state): State<AppState>, session: Session) -> Resp
     .into_response()
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AuditFilterParams {
-    subject: Option<String>,
-}
-
 #[instrument(name = "web.audit_page", skip_all)]
 async fn audit_page(session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
@@ -263,22 +258,12 @@ async fn audit_page(session: Session) -> Response {
 }
 
 #[instrument(name = "web.audit_entries", skip_all)]
-async fn audit_entries(
-    State(state): State<AppState>,
-    session: Session,
-    Query(params): Query<AuditFilterParams>,
-) -> Response {
+async fn audit_entries(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let audit = state.app.audit();
-    let subject = params.subject.as_deref().filter(|s| !s.is_empty());
-
-    let entries = match subject {
-        Some(subj) => audit.find_by_subject(subj, 50).await,
-        None => audit.list_recent(50).await,
-    };
+    let entries = state.app.audit().list_recent(50).await;
 
     match entries {
         Ok(entries) => {
