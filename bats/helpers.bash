@@ -27,13 +27,7 @@ start_server() {
   export GALOY_AGENTS_CONFIG="$REPO_ROOT/galoy-agents.yml"
   export CODE_ASSISTANT_DB_PATH=""  # disable code assistant in tests
 
-  # Placeholder Anthropic key — App::init now validates the credential at
-  # startup and refuses to boot with an empty key. Gateway bats only call
-  # `ping`, which never touches Anthropic, so a fake value is fine.
-  # Inlined (not exported) so harness.bats's `[ -z $ANTHROPIC_API_KEY ]`
-  # skip guard still trips when the test runner has no real key.
-  env ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-sk-ant-test-placeholder}" \
-    $GALOY_AGENTS_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
+  $GALOY_AGENTS_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
 
   # Wait for server

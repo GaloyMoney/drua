@@ -29,22 +29,22 @@ pub enum Provider {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PromptExecutorConfigError {
-    #[error("model `{model}` is configured with provider `{provider}` but its credential is empty (e.g. set ANTHROPIC_API_KEY)")]
-    EmptyCredential { model: String, provider: String },
-}
+pub enum PromptExecutorConfigError {}
 
 impl PromptExecutorConfig {
-    /// Catch obvious misconfig at startup time so we don't wait until the
-    /// first agent message to get a 401 back from the upstream provider.
+    /// Log diagnostics about each configured model's credential. Never
+    /// fails — the executor must boot even with an empty key (e.g. local
+    /// dev, bats tests) so the rest of the surface (auth, MCP gateway,
+    /// search) is reachable; the first real prompt will just 401 at the
+    /// upstream.
     pub fn validate(&self) -> Result<(), PromptExecutorConfigError> {
         for model in &self.models {
             match &model.provider {
                 Provider::Anthropic { api_key } if api_key.is_empty() => {
-                    return Err(PromptExecutorConfigError::EmptyCredential {
-                        model: model.name.clone(),
-                        provider: "anthropic".to_string(),
-                    });
+                    tracing::warn!(
+                        model = %model.name,
+                        "Anthropic credential is empty — agent prompts will fail until ANTHROPIC_API_KEY is set",
+                    );
                 }
                 Provider::Anthropic { api_key } => {
                     // Anthropic production keys start with `sk-ant-`. A
