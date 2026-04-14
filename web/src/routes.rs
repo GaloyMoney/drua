@@ -1422,11 +1422,18 @@ async fn attached_sandbox_view(
     })
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct AgentDetailQuery {
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[instrument(name = "web.workspace_agent_detail", skip_all)]
 async fn workspace_agent_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Query(query): Query<AgentDetailQuery>,
 ) -> Response {
     if extract_user_id(&session).await.is_none() {
         return Redirect::to("/").into_response();
@@ -1480,7 +1487,25 @@ async fn workspace_agent_detail(
             attached_sandbox: attached_view,
         },
         sandbox_options,
+        error: query.error,
     }
+    .into_response()
+}
+
+/// Build `/workspaces/{id}/agents/{agent_id}?error=<encoded>` so the
+/// detail page can render a flash banner explaining why the last
+/// attach/detach failed.
+fn agent_detail_redirect_with_error(
+    workspace_id: uuid::Uuid,
+    agent_id: AgentId,
+    msg: &str,
+) -> Response {
+    let query: String = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("error", msg)
+        .finish();
+    Redirect::to(&format!(
+        "/workspaces/{workspace_id}/agents/{agent_id}?{query}"
+    ))
     .into_response()
 }
 
@@ -1519,8 +1544,8 @@ async fn workspace_agent_attach_sandbox(
         .attach_sandbox(&subject, agent_id, sandbox_id, mode)
         .await
     {
-        tracing::error!(error = %e, "Failed to attach sandbox");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        tracing::warn!(error = %e, "attach_sandbox failed");
+        return agent_detail_redirect_with_error(id, agent_id, &e.to_string());
     }
 
     Redirect::to(&format!("/workspaces/{id}/agents/{agent_id}")).into_response()
@@ -1554,8 +1579,8 @@ async fn workspace_agent_detach_sandbox(
         .detach_sandbox(&subject, agent_id, sandbox_id)
         .await
     {
-        tracing::error!(error = %e, "Failed to detach sandbox");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        tracing::warn!(error = %e, "detach_sandbox failed");
+        return agent_detail_redirect_with_error(id, agent_id, &e.to_string());
     }
 
     Redirect::to(&format!("/workspaces/{id}/agents/{agent_id}")).into_response()

@@ -1638,6 +1638,7 @@ dependencies = [
  "tower-sessions",
  "tracing",
  "tracing-opentelemetry",
+ "url",
  "uuid",
 ]
 
