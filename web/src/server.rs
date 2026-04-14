@@ -7,7 +7,7 @@ use tower_sessions::{cookie::SameSite, SessionManagerLayer};
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use galoy_agents_core::audit::primitives::InteractionType;
+use galoy_agents_core::audit::primitives::{InteractionOutcome, InteractionType};
 use galoy_agents_core::audit::Audit;
 use galoy_agents_core::auth::AuthSubject;
 
@@ -68,7 +68,9 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
 
         let status = response.status();
         if status.is_success() || status.is_redirection() {
-            Audit::record_success();
+            // Use _if_unset so inner handlers (e.g. MCP tool errors
+            // returned as HTTP 200) are not overwritten.
+            Audit::record_outcome_if_unset(InteractionOutcome::Success);
         } else if status == axum::http::StatusCode::UNAUTHORIZED
             || status == axum::http::StatusCode::FORBIDDEN
         {

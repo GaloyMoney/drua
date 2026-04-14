@@ -75,6 +75,17 @@ impl Audit {
         Self::update_context(|ctx| ctx.outcome = Some(InteractionOutcome::Error { message }));
     }
 
+    /// Set the outcome only if no inner handler has recorded one yet.
+    /// Used by the middleware so it doesn't overwrite a more specific
+    /// outcome (e.g. an MCP tool error reported as HTTP 200).
+    pub fn record_outcome_if_unset(outcome: InteractionOutcome) {
+        Self::update_context(|ctx| {
+            if ctx.outcome.is_none() {
+                ctx.outcome = Some(outcome);
+            }
+        });
+    }
+
     /// Merge arbitrary metadata into the context.
     pub fn record_metadata(value: serde_json::Value) {
         Self::update_context(|ctx| ctx.metadata = Some(value));
