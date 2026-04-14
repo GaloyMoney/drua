@@ -144,15 +144,23 @@ pub struct WorkspaceSkillsListTemplate {
 }
 
 #[derive(Template, WebTemplate)]
+#[template(path = "workspace_skills_sidebar.html")]
+pub struct WorkspaceSkillsSidebarTemplate {
+    pub skills: Vec<SkillView>,
+}
+
+#[derive(Template, WebTemplate)]
 #[template(path = "workspace_skill_new.html")]
 pub struct WorkspaceSkillNewTemplate {
-    pub workspace_id: String,
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
 }
 
 #[derive(Template, WebTemplate)]
 #[template(path = "workspace_skill_edit.html")]
 pub struct WorkspaceSkillEditTemplate {
-    pub workspace_id: String,
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
     pub skill: SkillView,
 }
 

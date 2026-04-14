@@ -77,6 +77,14 @@
 <small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
 {% endif %}
 
+<div class="section-label">Skills</div>
+<div id="sidebar-skills"
+     hx-get="/workspaces/{{ workspace.id }}/skills/sidebar"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+</div>
+<a href="/workspaces/{{ workspace.id }}/skills/new" class="agent-item" style="color: var(--pico-muted-color); font-size: 0.85rem;">+ New Skill</a>
+
 <div class="sidebar-bottom">
   <a href="/auth/logout">Logout</a>
 </div>
