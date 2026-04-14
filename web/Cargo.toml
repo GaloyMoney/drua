@@ -34,4 +34,5 @@ opentelemetry = "0.31"
 opentelemetry-http = "0.31"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
+url = { workspace = true }
 uuid = { version = "1", features = ["v4"] }

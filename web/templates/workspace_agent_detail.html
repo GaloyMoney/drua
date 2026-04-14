@@ -113,6 +113,15 @@
 <a href="/workspaces/{{ workspace.id }}/chat?agent={{ agent.id }}" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to chat</a>
 <h2>{{ agent.name }}</h2>
 
+{% match error %}
+  {% when Some(msg) %}
+  <article style="border-left: 4px solid var(--pico-color-red-500, #c62828); padding: 0.5rem 1rem; background: var(--pico-card-background-color);">
+    <strong>Could not attach/detach sandbox.</strong>
+    <pre style="margin-top: 0.5rem; white-space: pre-wrap; word-wrap: break-word;"><code>{{ msg }}</code></pre>
+  </article>
+  {% when None %}
+{% endmatch %}
+
 <dl>
   <div class="agent-field">
     <dt>Role</dt>

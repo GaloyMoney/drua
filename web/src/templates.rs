@@ -273,6 +273,9 @@ pub struct WorkspaceAgentDetailTemplate {
     /// Used to populate the attach-sandbox dropdown when the agent has no
     /// current attachment. Empty when `agent.attached_sandbox` is `Some`.
     pub sandbox_options: Vec<SandboxOptionView>,
+    /// Flash message surfaced after a failed attach/detach (arrives via
+    /// `?error=...` on the redirect back to this page).
+    pub error: Option<String>,
 }
 
 // ── Workspace Secrets ────────────────────────────────────────────────
