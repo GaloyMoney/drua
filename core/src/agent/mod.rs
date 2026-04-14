@@ -93,14 +93,10 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
-        // Fall back to the WorkspaceLead config for the generic `Agent`
-        // role when no dedicated block exists, so deployments don't need
-        // duplicate config to use the new role.
         let role_config = self
             .config
             .builtin_roles
             .get(&agent_role)
-            .or_else(|| self.config.builtin_roles.get(&AgentRole::WorkspaceLead))
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
