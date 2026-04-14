@@ -93,7 +93,7 @@ impl SandboxClient {
     // -----------------------------------------------------------------------
 
     /// Read the SandboxTemplate to get the pod template.
-    #[instrument(name = "sandbox_client.read_template", skip_all)]
+    #[instrument(name = "k8s_sandbox_client.read_template", skip_all)]
     async fn read_template(&self) -> Result<SandboxTemplate, SandboxError> {
         let templates: Api<SandboxTemplate> = Api::namespaced(self.client.clone(), &self.namespace);
         templates
@@ -104,7 +104,7 @@ impl SandboxClient {
 
     /// Ensure a standalone PVC exists for the given sandbox name.
     /// Creates the PVC if it doesn't exist; no-ops if it already does.
-    #[instrument(name = "sandbox_client.ensure_pvc", skip_all, fields(%name))]
+    #[instrument(name = "k8s_sandbox_client.ensure_pvc", skip_all, fields(%name))]
     async fn ensure_pvc(
         &self,
         name: &str,
@@ -159,7 +159,7 @@ impl SandboxClient {
     /// Creates a standalone PVC (if it doesn't already exist) and mounts it
     /// into the pod. The PVC lifecycle is independent of the Sandbox — it
     /// survives sandbox deletion and is reused on recreation with the same name.
-    #[instrument(name = "sandbox_client.create_sandbox", skip_all, fields(%name))]
+    #[instrument(name = "k8s_sandbox_client.create_sandbox", skip_all, fields(%name))]
     pub async fn create_sandbox(
         &self,
         name: &str,
@@ -269,7 +269,7 @@ impl SandboxClient {
     /// Check if a sandbox's container image matches the current template.
     ///
     /// Returns `true` if the sandbox is up-to-date, `false` if it needs recreation.
-    #[instrument(name = "sandbox_client.is_sandbox_current", skip_all, fields(%name))]
+    #[instrument(name = "k8s_sandbox_client.is_sandbox_current", skip_all, fields(%name))]
     pub async fn is_sandbox_current(&self, name: &str) -> Result<bool, SandboxError> {
         let template = self.read_template().await?;
         let template_image = template
@@ -306,7 +306,7 @@ impl SandboxClient {
     }
 
     /// Delete a Sandbox. The PVC is retained for recreation.
-    #[instrument(name = "sandbox_client.delete_sandbox", skip_all, fields(%name))]
+    #[instrument(name = "k8s_sandbox_client.delete_sandbox", skip_all, fields(%name))]
     pub async fn delete_sandbox(&self, name: &str) -> Result<(), SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         sandboxes.delete(name, &DeleteParams::default()).await?;
@@ -315,7 +315,7 @@ impl SandboxClient {
     }
 
     /// List sandboxes created by this client (filtered by managed-by label).
-    #[instrument(name = "sandbox_client.list_sandboxes", skip_all)]
+    #[instrument(name = "k8s_sandbox_client.list_sandboxes", skip_all)]
     pub async fn list_sandboxes(&self) -> Result<Vec<SandboxSummary>, SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let lp = ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
@@ -324,7 +324,7 @@ impl SandboxClient {
     }
 
     /// Get a single Sandbox by name.
-    #[instrument(name = "sandbox_client.get_sandbox", skip_all, fields(%name))]
+    #[instrument(name = "k8s_sandbox_client.get_sandbox", skip_all, fields(%name))]
     pub async fn get_sandbox(&self, name: &str) -> Result<SandboxSummary, SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(name).await.map_err(|e| match &e {
@@ -335,7 +335,7 @@ impl SandboxClient {
     }
 
     /// Poll a Sandbox until it becomes ready or the timeout expires.
-    #[instrument(name = "sandbox_client.wait_sandbox_ready", skip_all, fields(%name))]
+    #[instrument(name = "k8s_sandbox_client.wait_sandbox_ready", skip_all, fields(%name))]
     pub async fn wait_sandbox_ready(
         &self,
         name: &str,
@@ -355,7 +355,7 @@ impl SandboxClient {
     }
 
     /// Resolve the running pod for a Sandbox by reading its label selector.
-    #[instrument(name = "sandbox_client.resolve_sandbox_pod", skip_all, fields(%sandbox_name))]
+    #[instrument(name = "k8s_sandbox_client.resolve_sandbox_pod", skip_all, fields(%sandbox_name))]
     pub async fn resolve_sandbox_pod(&self, sandbox_name: &str) -> Result<String, SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
@@ -391,7 +391,7 @@ impl SandboxClient {
     }
 
     /// Exec into a Sandbox pod with TTY.
-    #[instrument(name = "sandbox_client.exec_sandbox", skip_all, fields(%sandbox_name))]
+    #[instrument(name = "k8s_sandbox_client.exec_sandbox", skip_all, fields(%sandbox_name))]
     pub async fn exec_sandbox(
         &self,
         sandbox_name: &str,
@@ -417,7 +417,7 @@ impl SandboxClient {
     /// The sandbox controller creates a headless Service for every Sandbox
     /// and records its DNS name in `status.serviceFQDN`.  This is how the
     /// galoy-agents server reaches the harness HTTP server inside the pod.
-    #[instrument(name = "sandbox_client.get_service_fqdn", skip_all, fields(%sandbox_name))]
+    #[instrument(name = "k8s_sandbox_client.get_service_fqdn", skip_all, fields(%sandbox_name))]
     pub async fn get_service_fqdn(&self, sandbox_name: &str) -> Result<String, SandboxError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox = sandboxes.get(sandbox_name).await.map_err(|e| match &e {
@@ -472,7 +472,7 @@ impl SandboxClient {
     }
 
     /// Gather diagnostic info about the sandbox infrastructure.
-    #[instrument(name = "sandbox_client.debug_status", skip_all)]
+    #[instrument(name = "k8s_sandbox_client.debug_status", skip_all)]
     pub async fn debug_status(&self) -> Result<serde_json::Value, SandboxError> {
         use k8s_openapi::api::core::v1::Event;
 
