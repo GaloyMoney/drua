@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use galoy_agents_core::agent::{AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig};
-use galoy_agents_core::primitives::{AuthSubject, UserId, WorkspaceId};
+use galoy_agents_core::agent::{AgentRole, Agents, AgentsConfig, RoleConfig};
+use galoy_agents_core::primitives::{AuthSubject, ChatOutputEvent, UserId, WorkspaceId};
 use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
 use llm::{PromptRequest, PromptResponse, Usage};
@@ -79,7 +79,7 @@ async fn send_message_round_trip_via_prompt_channel() {
         }))
         .expect("send response");
 
-    // Drain the AgentMessageEvent channel until the forwarder closes it.
+    // Drain the ChatOutputEvent channel until the forwarder closes it.
     let mut events = Vec::new();
     while let Some(event) = events_rx.recv().await {
         events.push(event);
@@ -92,15 +92,15 @@ async fn send_message_round_trip_via_prompt_channel() {
     );
 
     match &events[0] {
-        AgentMessageEvent::UserMessage { text, .. } => assert_eq!(text, "Hello agent"),
+        ChatOutputEvent::UserMessage { text, .. } => assert_eq!(text, "Hello agent"),
         other => panic!("event[0] should be UserMessage, got {other:?}"),
     }
     match &events[1] {
-        AgentMessageEvent::AssistantText { text } => assert_eq!(text, "Hi user"),
+        ChatOutputEvent::AssistantText { text } => assert_eq!(text, "Hi user"),
         other => panic!("event[1] should be AssistantText, got {other:?}"),
     }
     match &events[2] {
-        AgentMessageEvent::Done {
+        ChatOutputEvent::AssistantDone {
             input_tokens,
             output_tokens,
             ..
@@ -256,29 +256,29 @@ async fn send_message_dispatches_registered_tool_call() {
     assert_eq!(events.len(), 5, "unexpected event sequence: {events:?}");
 
     assert!(
-        matches!(&events[0], AgentMessageEvent::UserMessage { text, .. } if text == "Call ping"),
+        matches!(&events[0], ChatOutputEvent::UserMessage { text, .. } if text == "Call ping"),
         "event[0] should be UserMessage, got {:?}",
         events[0]
     );
     assert!(
-        matches!(&events[1], AgentMessageEvent::ToolCall { name, .. } if name == "ping"),
+        matches!(&events[1], ChatOutputEvent::ToolCall { name, .. } if name == "ping"),
         "event[1] should be ToolCall(ping), got {:?}",
         events[1]
     );
     match &events[2] {
-        AgentMessageEvent::ToolResult { name, is_error } => {
+        ChatOutputEvent::ToolResult { name, is_error } => {
             assert_eq!(name, "ping");
             assert!(!is_error, "ping tool should succeed");
         }
         other => panic!("event[2] should be ToolResult, got {other:?}"),
     }
     assert!(
-        matches!(&events[3], AgentMessageEvent::AssistantText { text } if text == "all done"),
+        matches!(&events[3], ChatOutputEvent::AssistantText { text } if text == "all done"),
         "event[3] should be AssistantText, got {:?}",
         events[3]
     );
     match &events[4] {
-        AgentMessageEvent::Done {
+        ChatOutputEvent::AssistantDone {
             turns,
             input_tokens,
             output_tokens,

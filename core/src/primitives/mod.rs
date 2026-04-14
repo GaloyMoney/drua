@@ -3,8 +3,10 @@
 //! `agent` crates were dissolved.
 
 pub mod auth_subject;
+mod chat_output_event;
 
 pub use auth_subject::AuthSubject;
+pub use chat_output_event::ChatOutputEvent;
 
 es_entity::entity_id! {
     UserId,

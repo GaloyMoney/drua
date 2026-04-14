@@ -11,50 +11,6 @@ pub enum AgentRole {
     WorkspaceLead,
 }
 
-/// Event emitted while the agent is processing a message.
-/// Streamed back to callers via an mpsc channel.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AgentMessageEvent {
-    UserMessage {
-        source: crate::primitives::UserMessageSource,
-        text: String,
-    },
-    AssistantText {
-        text: String,
-    },
-    Thinking {
-        text: String,
-    },
-    ToolCall {
-        name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        arguments: Option<serde_json::Value>,
-    },
-    ToolResult {
-        name: String,
-        is_error: bool,
-    },
-    Done {
-        turns: u32,
-        input_tokens: u32,
-        output_tokens: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cost_usd: Option<f64>,
-    },
-    Error {
-        message: String,
-    },
-    /// Infrastructure status update (e.g. sandbox provisioning, executor
-    /// reconnection). Carried through for SSE-protocol parity with the old
-    /// runtime; the new in-process loop currently does not emit this.
-    Service {
-        message: String,
-    },
-}
-
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[es_event(id = "AgentId")]

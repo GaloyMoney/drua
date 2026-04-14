@@ -22,7 +22,7 @@ fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<Strin
 
 use tracing::instrument;
 
-use crate::primitives::{AgentId, AuthSubject, WorkspaceId};
+use crate::primitives::{AgentId, AuthSubject, ChatOutputEvent, WorkspaceId};
 pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
@@ -169,7 +169,7 @@ impl Agents {
         subject: AuthSubject,
         id: AgentId,
         prompt: String,
-    ) -> Result<tokio::sync::mpsc::Receiver<AgentMessageEvent>, AgentError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
         // Authorization: user and exported agents may always send. Another
@@ -184,7 +184,7 @@ impl Agents {
         }
 
         let source = subject.to_message_source();
-        let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
 
         // Attribute the agent's tool calls to the originating user when one
         // is available — direct `User`, an `ExportedAgent` token, or a peer
@@ -201,7 +201,7 @@ impl Agents {
             .await?
         {
             let _ = tx
-                .send(AgentMessageEvent::UserMessage {
+                .send(ChatOutputEvent::UserMessage {
                     source,
                     text: prompt,
                 })
@@ -227,7 +227,7 @@ impl Agents {
                         Ok(Ok(r)) => r,
                         Ok(Err(e)) => {
                             let _ = tx
-                                .send(AgentMessageEvent::Error {
+                                .send(ChatOutputEvent::Error {
                                     message: e.to_string(),
                                 })
                                 .await;
@@ -256,7 +256,7 @@ impl Agents {
                         Ok(p) => p,
                         Err(e) => {
                             let _ = tx
-                                .send(AgentMessageEvent::Error {
+                                .send(ChatOutputEvent::Error {
                                     message: e.to_string(),
                                 })
                                 .await;
@@ -267,7 +267,7 @@ impl Agents {
                     let (request, rx_next) = llm::PromptRequest::new(updated_prompt);
                     if prompt_requests.send(request).await.is_err() {
                         let _ = tx
-                            .send(AgentMessageEvent::Error {
+                            .send(ChatOutputEvent::Error {
                                 message: "prompt request channel closed".to_string(),
                             })
                             .await;
@@ -277,7 +277,7 @@ impl Agents {
                 }
 
                 let _ = tx
-                    .send(AgentMessageEvent::Done {
+                    .send(ChatOutputEvent::AssistantDone {
                         turns: turn,
                         input_tokens,
                         output_tokens,
@@ -296,7 +296,7 @@ async fn fan_out_tool_calls(
     toolsets: &Arc<ToolSets>,
     subject: &AuthSubject,
     calls: Vec<llm::RequestToolUse>,
-    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
+    tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
 ) -> Vec<llm::ToolUseResult> {
     let dispatches = calls.into_iter().map(|tu| {
         let toolsets = toolsets.clone();
@@ -327,7 +327,7 @@ async fn fan_out_tool_calls(
     let mut results = Vec::with_capacity(outcomes.len());
     for (name, result) in outcomes {
         let _ = tx
-            .send(AgentMessageEvent::ToolResult {
+            .send(ChatOutputEvent::ToolResult {
                 name,
                 is_error: result.is_error,
             })
@@ -351,23 +351,23 @@ fn call_result_to_text(result: &rmcp::model::CallToolResult) -> String {
 
 async fn forward_response(
     response: llm::PromptResponse,
-    tx: &tokio::sync::mpsc::Sender<AgentMessageEvent>,
+    tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
 ) {
     for block in response.content {
         match block {
             llm::prompt::AssistantBlock::Text { text, .. } => {
-                let _ = tx.send(AgentMessageEvent::AssistantText { text }).await;
+                let _ = tx.send(ChatOutputEvent::AssistantText { text }).await;
             }
             llm::prompt::AssistantBlock::ToolUse { name, input, .. } => {
                 let _ = tx
-                    .send(AgentMessageEvent::ToolCall {
+                    .send(ChatOutputEvent::ToolCall {
                         name,
                         arguments: Some(input),
                     })
                     .await;
             }
             llm::prompt::AssistantBlock::Thinking { text, .. } => {
-                let _ = tx.send(AgentMessageEvent::Thinking { text }).await;
+                let _ = tx.send(ChatOutputEvent::Thinking { text }).await;
             }
         }
     }
