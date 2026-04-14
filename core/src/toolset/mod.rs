@@ -9,7 +9,9 @@ pub use config::*;
 pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
-pub use top_level::{CallCatalogTool, DescribeCatalogTool, Ping, SearchCatalog};
+pub use top_level::{
+    CallCatalogTool, DescribeCatalogTool, Ping, SandboxBash, SandboxTextEditor, SearchCatalog,
+};
 pub use traits::*;
 
 use std::collections::HashMap;
@@ -77,6 +79,15 @@ impl ToolSets {
         top_level.insert(describe.name().to_string(), describe);
         top_level.insert(call.name().to_string(), call);
         top_level.insert(ping.name().to_string(), ping);
+
+        if !config.sandbox.url.is_empty() {
+            let url = config.sandbox.url.clone();
+            let bash = Arc::new(SandboxBash::new(url.clone()));
+            let editor = Arc::new(SandboxTextEditor::new(url));
+            top_level.insert(bash.name().to_string(), bash);
+            top_level.insert(editor.name().to_string(), editor);
+            tracing::info!("Sandbox tools registered (bash, text_editor)");
+        }
 
         Ok(Self {
             sets,
