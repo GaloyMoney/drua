@@ -28,8 +28,11 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AllLogs, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets,
-    ToolSetsError, WorkspaceLog,
+    AgentAttachSandbox, AgentCreate, AgentDetachSandbox, AllLogs, Bash, CodeAssistantToolSet,
+    CreateSandbox, GetSandbox, GlobTool, Grep, ListAgents, ListSandboxes, Ls, Read, TextEditor,
+    ToolSets, ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
+    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceListAgents,
+    WorkspaceListSandboxes, WorkspaceLog,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -160,6 +163,25 @@ impl App {
             sandboxes.clone(),
             skills.clone(),
         ));
+
+        // Register agent & sandbox management tools now that both services
+        // are available. Uses interior-mutable `register_top_level` so the
+        // already-Arc'd toolsets can be extended.
+        toolsets.register_top_level(WorkspaceAgentCreate::new(Arc::clone(&agents)));
+        toolsets.register_top_level(AgentCreate::new(Arc::clone(&agents)));
+        toolsets.register_top_level(WorkspaceAgentAttachSandbox::new(Arc::clone(&agents)));
+        toolsets.register_top_level(AgentAttachSandbox::new(Arc::clone(&agents)));
+        toolsets.register_top_level(WorkspaceAgentDetachSandbox::new(Arc::clone(&agents)));
+        toolsets.register_top_level(AgentDetachSandbox::new(Arc::clone(&agents)));
+        toolsets.register_top_level(WorkspaceListAgents::new(Arc::clone(&agents)));
+        toolsets.register_top_level(ListAgents::new(Arc::clone(&agents)));
+        toolsets.register_top_level(WorkspaceCreateSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(CreateSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(WorkspaceListSandboxes::new(sandboxes.clone()));
+        toolsets.register_top_level(ListSandboxes::new(sandboxes.clone()));
+        toolsets.register_top_level(WorkspaceGetSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(GetSandbox::new(sandboxes.clone()));
+
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
         Ok(Self {

@@ -10,8 +10,11 @@ pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
-    AllLogs, Bash, CallCatalogTool, DescribeCatalogTool, GlobTool, Grep, Ls, Ping, Read,
-    SearchCatalog, TextEditor, WorkspaceLog,
+    AgentAttachSandbox, AgentCreate, AgentDetachSandbox, AllLogs, Bash, CallCatalogTool,
+    CreateSandbox, DescribeCatalogTool, GetSandbox, GlobTool, Grep, ListAgents, ListSandboxes, Ls,
+    Ping, Read, SearchCatalog, TextEditor, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
+    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceListAgents,
+    WorkspaceListSandboxes, WorkspaceLog,
 };
 pub use traits::*;
 
@@ -25,7 +28,7 @@ use crate::auth::AuthSubject;
 
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
-    top_level: HashMap<String, Arc<dyn TopLevelTool>>,
+    top_level: RwLock<HashMap<String, Arc<dyn TopLevelTool>>>,
     audit: Option<Arc<Audit>>,
 }
 
@@ -67,19 +70,23 @@ impl ToolSets {
 
         let sets = Arc::new(RwLock::new(sets));
 
-        let mut top_level: HashMap<String, Arc<dyn TopLevelTool>> = HashMap::new();
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
         let ping = Arc::new(Ping::new());
-        top_level.insert(search.name().to_string(), search);
-        top_level.insert(describe.name().to_string(), describe);
-        top_level.insert(call.name().to_string(), call);
-        top_level.insert(ping.name().to_string(), ping);
+
+        let mut top_level = HashMap::new();
+        top_level.insert(search.name().to_string(), search as Arc<dyn TopLevelTool>);
+        top_level.insert(
+            describe.name().to_string(),
+            describe as Arc<dyn TopLevelTool>,
+        );
+        top_level.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
+        top_level.insert(ping.name().to_string(), ping as Arc<dyn TopLevelTool>);
 
         Ok(Self {
             sets,
-            top_level,
+            top_level: RwLock::new(top_level),
             audit: None,
         })
     }
@@ -90,13 +97,16 @@ impl ToolSets {
         self.audit = Some(audit);
     }
 
-    /// Register a top-level tool. Intended to be called during init before the
-    /// `ToolSets` value is wrapped in an `Arc` and shared.
-    pub fn register_top_level(&mut self, tool: impl TopLevelTool + 'static) {
+    /// Register a top-level tool. Uses interior mutability so tools can be
+    /// registered even after the `ToolSets` is wrapped in an `Arc`.
+    pub fn register_top_level(&self, tool: impl TopLevelTool + 'static) {
         let tool: Arc<dyn TopLevelTool> = Arc::new(tool);
         let name = tool.name().to_string();
         tracing::info!(name = %name, "Registered top-level tool");
-        self.top_level.insert(name, tool);
+        self.top_level
+            .write()
+            .expect("top_level lock poisoned")
+            .insert(name, tool);
     }
 
     pub fn register_searchable(&self, toolset: impl SearchableToolSet + 'static) {
@@ -139,13 +149,16 @@ impl ToolSets {
     /// Top-level tools visible to the given `subject`. A tool is included
     /// iff its [`TopLevelTool::is_visible`] returns `true`. Used to populate
     /// prompt `tools` arrays and the MCP `list_tools` response.
-    pub fn top_level_tools<'a>(
-        &'a self,
-        subject: &'a AuthSubject,
-    ) -> impl Iterator<Item = &'a Arc<dyn TopLevelTool>> + 'a {
-        self.top_level
-            .values()
-            .filter(move |t| t.is_visible(subject))
+    pub fn top_level_tools(
+        &self,
+        subject: &AuthSubject,
+    ) -> impl Iterator<Item = Arc<dyn TopLevelTool>> {
+        let map = self.top_level.read().expect("top_level lock poisoned");
+        map.values()
+            .filter(|t| t.is_visible(subject))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// Look up and execute a top-level tool by name. Runs
@@ -159,10 +172,13 @@ impl ToolSets {
     ) -> Result<CallToolResult, ToolSetsError> {
         use es_entity::context::{EventContext, WithEventContext};
 
-        let tool = self
-            .top_level
-            .get(name)
-            .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?;
+        let tool = {
+            let map = self.top_level.read().expect("top_level lock poisoned");
+            Arc::clone(
+                map.get(name)
+                    .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?,
+            )
+        };
 
         if !tool.can_execute(subject) {
             return Err(ToolSetsError::Unauthorized);
