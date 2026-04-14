@@ -151,6 +151,22 @@ impl Sandboxes {
         let name = sandbox.resource_name();
         tracing::Span::current().record("sandbox_name", name.as_str());
 
+        // Always attempt to delete first so the lifecycle is idempotent:
+        // re-running it (restart / upgrade / retry-after-failure) wipes
+        // any half-baked CR/pod from a previous attempt before we
+        // re-create. PVCs / local workspace dirs survive delete by
+        // design, so workspace state is preserved across the cycle.
+        // `NotFound` is the expected case on first-time create — ignore.
+        match self.admin.delete_sandbox(&name).await {
+            Ok(()) => tracing::info!(sandbox = %name, "pre-create delete: removed existing sandbox"),
+            Err(sandbox::AdminError::NotFound(_)) => {}
+            Err(e) => {
+                self.record_error(id, &name, "pre_create_delete", e.to_string())
+                    .await;
+                return;
+            }
+        }
+
         if let Err(e) = self.admin.create_sandbox(&name, &sandbox.specs).await {
             self.record_error(id, &name, "create_sandbox", e.to_string())
                 .await;
