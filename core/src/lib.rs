@@ -120,11 +120,13 @@ impl App {
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
         let skills = Skills::new(pool);
-        let sandboxes = Sandboxes::init(pool, config.sandbox).await?;
 
         // Optionally initialize GitHub App token provider from AppConfig.
         // If configured, verify it works by generating a token — crash on failure
         // so broken config is caught immediately rather than silently skipped.
+        // Built before Sandboxes::init so the provider can be threaded into
+        // the sandbox lifecycle (used to mint a fresh installation token
+        // for `/initialize` so private repos can be cloned).
         let github_app = match config.github_app {
             Some(ref gh_config) => {
                 let provider = GitHubAppTokenProvider::new(gh_config)
@@ -141,6 +143,8 @@ impl App {
                 None
             }
         };
+
+        let sandboxes = Sandboxes::init(pool, config.sandbox, github_app.clone()).await?;
 
         Ok(Self {
             users: Users::new(pool),

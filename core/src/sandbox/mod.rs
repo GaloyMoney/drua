@@ -13,6 +13,8 @@ use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, Local
 use sandbox::instance_client::{InitializeRequest, InitializeResponse, InstanceClient};
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
+use crate::github_app::GitHubAppTokenProvider;
+
 /// How long [`Sandboxes::spawn_sandbox_creation`] waits for the admin
 /// backend to report the sandbox as ready before giving up.
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -26,15 +28,22 @@ use crate::primitives::*;
 
 /// Service for managing sandbox lifecycle. Wraps a backend-agnostic
 /// [`AdminClient`] (k8s or local) and persists per-sandbox lifecycle state
-/// in the `sandboxes` table.
+/// in the `sandboxes` table. Optionally holds a [`GitHubAppTokenProvider`]
+/// used to mint a fresh installation token for each `/initialize` call
+/// (so the sandbox can clone private repos).
 #[derive(Clone)]
 pub struct Sandboxes {
     repo: SandboxRepo,
     admin: Arc<dyn AdminClient>,
+    github_app: Option<GitHubAppTokenProvider>,
 }
 
 impl Sandboxes {
-    pub async fn init(pool: &sqlx::PgPool, config: SandboxConfig) -> Result<Self, SandboxError> {
+    pub async fn init(
+        pool: &sqlx::PgPool,
+        config: SandboxConfig,
+        github_app: Option<GitHubAppTokenProvider>,
+    ) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
             SandboxBackendConfig::Local { sandbox_spawn_cmd } => Arc::new(LocalAdminClient::new(
                 LocalSandboxConfig { sandbox_spawn_cmd },
@@ -48,6 +57,7 @@ impl Sandboxes {
         Ok(Self {
             repo: SandboxRepo::new(pool),
             admin,
+            github_app,
         })
     }
 
@@ -177,8 +187,22 @@ impl Sandboxes {
             return;
         };
         let instance = InstanceClient::new(base_url);
-        // GitHub token wiring is intentionally deferred — pass None for now.
-        let init_req = InitializeRequest::from_mode(&sandbox.mode, None);
+        // Mint a fresh GitHub App installation token for this initialize
+        // call when the provider is configured. Without it, `/initialize`
+        // can't `git clone` private repos. Token failures are surfaced
+        // through the same `record_error` path as other lifecycle steps.
+        let github_token = match self.github_app.as_ref() {
+            Some(provider) => match provider.generate_token().await {
+                Ok(t) => Some(t.token),
+                Err(e) => {
+                    self.record_error(id, &name, "github_app_token", e.to_string())
+                        .await;
+                    return;
+                }
+            },
+            None => None,
+        };
+        let init_req = InitializeRequest::from_mode(&sandbox.mode, github_token);
         let response = match instance.initialize(&init_req).await {
             Ok(r) => r,
             Err(e) => {
