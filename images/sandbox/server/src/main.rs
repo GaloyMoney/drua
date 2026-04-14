@@ -105,7 +105,7 @@ async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
 
     let output = tokio::time::timeout(
         Duration::from_millis(DEFAULT_TIMEOUT_MS),
-        Command::new("/bin/bash").arg("-c").arg(command).output(),
+        Command::new("bash").arg("-c").arg(command).output(),
     )
     .await
     .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
