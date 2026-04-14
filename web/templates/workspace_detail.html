@@ -1,11 +1,89 @@
 {% extends "base.html" %}
 
-{% block title %}{{ workspace.name }} — Galoy Agents{% endblock %}
+{% block title %}{{ workspace.name }} — Settings — Galoy Agents{% endblock %}
 
-{% block nav_workspaces %}class="active"{% endblock %}
+{% block head %}
+<style>
+  .ws-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .ws-back:hover { color: var(--pico-primary); }
+  .ws-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .ws-mode-header h4 { margin: 0; font-size: 1rem; }
+  .ws-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ws-settings-btn.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/workspaces" class="ws-back">&larr; Workspaces</a>
+<div class="ws-mode-header">
+  <h4>{{ workspace.name }}</h4>
+  <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn active" title="Workspace settings">&#9881;</a>
+</div>
+
+{% if !agents.is_empty() %}
+<div class="section-label">Agents</div>
+{% for agent in agents %}
+<a href="/workspaces/{{ workspace.id }}/chat?agent={{ agent.id }}" class="agent-item">
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<div class="section-label">Agents</div>
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
 
 {% block content %}
-<h2>Edit Workspace</h2>
+<h2>Workspace Settings</h2>
 
 <form method="post" action="/workspaces/{{ workspace.id }}">
   <label>
@@ -18,8 +96,7 @@
   </label>
   <div style="display: flex; gap: 1rem;">
     <button type="submit">Save Changes</button>
-    <a href="/workspaces" role="button" class="outline">Cancel</a>
-    <a href="/workspaces/{{ workspace.id }}/chat" role="button" class="secondary">Chat with Agent</a>
+    <a href="/workspaces/{{ workspace.id }}/chat" role="button" class="outline">Back to Chat</a>
   </div>
 </form>
 
