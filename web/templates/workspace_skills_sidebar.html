@@ -1,9 +1,0 @@
-{% if skills.is_empty() %}
-<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No skills yet</small>
-{% else %}
-{% for skill in skills %}
-<a href="/workspaces/{{ skill.workspace_id }}/skills/{{ skill.id }}" class="agent-item">
-  {{ skill.name }}
-</a>
-{% endfor %}
-{% endif %}

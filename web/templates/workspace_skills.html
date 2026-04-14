@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}New Skill — {{ workspace.name }} — Galoy Agents{% endblock %}
+{% block title %}Skills — {{ workspace.name }} — Galoy Agents{% endblock %}
 
 {% block head %}
 <style>
@@ -91,25 +91,33 @@
 {% endblock %}
 
 {% block content %}
-<a href="/workspaces/{{ workspace.id }}/skills" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Skills</a>
-<h2>New Skill</h2>
+<h2>Skills</h2>
+<p><small>Reusable prompt templates that agents can invoke.</small></p>
 
-<form method="post" action="/workspaces/{{ workspace.id }}/skills">
-  <label>
-    Name
-    <input type="text" name="name" required placeholder="e.g. code-review">
-  </label>
-  <label>
-    Description
-    <input type="text" name="description" placeholder="Short description of what this skill does">
-  </label>
-  <label>
-    Body
-    <textarea name="body" rows="12" required placeholder="Markdown prompt text for the skill..."></textarea>
-  </label>
-  <div style="display: flex; gap: 1rem;">
-    <button type="submit">Create Skill</button>
-    <a href="/workspaces/{{ workspace.id }}/skills" role="button" class="outline">Cancel</a>
-  </div>
-</form>
+{% if skills.is_empty() %}
+<p><em>No skills configured yet.</em></p>
+{% else %}
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for skill in skills %}
+      <tr style="cursor: pointer;" onclick="window.location='/workspaces/{{ workspace.id }}/skills/{{ skill.id }}'">
+        <td><strong>{{ skill.name }}</strong></td>
+        <td>{{ skill.description }}</td>
+        <td><small>{{ skill.created_at }}</small></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</figure>
+{% endif %}
+
+<a href="/workspaces/{{ workspace.id }}/skills/new" role="button">New Skill</a>
 {% endblock %}

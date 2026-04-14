@@ -77,13 +77,12 @@
 <small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
 {% endif %}
 
-<div class="section-label">Skills</div>
-<div id="sidebar-skills"
-     hx-get="/workspaces/{{ workspace.id }}/skills/sidebar"
-     hx-trigger="load"
-     hx-swap="innerHTML">
-</div>
-<a href="/workspaces/{{ workspace.id }}/skills/new" class="agent-item" style="color: var(--pico-muted-color); font-size: 0.85rem;">+ New Skill</a>
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+  </ul>
+</nav>
 
 <div class="sidebar-bottom">
   <a href="/auth/logout">Logout</a>
@@ -107,20 +106,6 @@
     <a href="/workspaces/{{ workspace.id }}/chat" role="button" class="outline">Back to Chat</a>
   </div>
 </form>
-
-<hr>
-
-<h3>Skills</h3>
-<p><small>Skills are reusable prompt templates that agents can invoke. Each skill has a name, description, and a markdown body.</small></p>
-
-<div id="skills-list"
-     hx-get="/workspaces/{{ workspace.id }}/skills/list"
-     hx-trigger="load"
-     hx-swap="innerHTML">
-  <p aria-busy="true">Loading skills...</p>
-</div>
-
-<a href="/workspaces/{{ workspace.id }}/skills/new" role="button" class="outline" style="margin-bottom: 1rem;">Add Skill</a>
 
 <hr>
 

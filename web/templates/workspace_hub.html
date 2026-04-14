@@ -156,13 +156,12 @@
 <small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
 {% endif %}
 
-<div class="section-label">Skills</div>
-<div id="sidebar-skills"
-     hx-get="/workspaces/{{ selected_workspace_id }}/skills/sidebar"
-     hx-trigger="load"
-     hx-swap="innerHTML">
-</div>
-<a href="/workspaces/{{ selected_workspace_id }}/skills/new" class="agent-item" style="color: var(--pico-muted-color); font-size: 0.85rem;">+ New Skill</a>
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/workspaces/{{ selected_workspace_id }}/skills" class="agent-item">Skills</a></li>
+  </ul>
+</nav>
 
 {% else %}
 {# ── Top-level mode: nav + workspace list ───────────────── #}
