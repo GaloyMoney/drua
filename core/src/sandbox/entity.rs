@@ -105,8 +105,8 @@ impl Sandbox {
     pub(super) fn initialized(&mut self, response: &InitializeResponse) -> Idempotent<()> {
         let state_changed = self.transition_to(SandboxState::Ready).did_execute();
 
-        let has_exports = response.exported_system_prompt.is_some()
-            || !response.exported_skills.is_empty();
+        let has_exports =
+            response.exported_system_prompt.is_some() || !response.exported_skills.is_empty();
         let push_exports = matches!(self.mode, SandboxMode::Repo { .. }) && has_exports;
 
         if push_exports {
@@ -128,7 +128,11 @@ impl Sandbox {
 
 impl core::fmt::Display for Sandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Sandbox: {}, name: {}, state: {:?}", self.id, self.name, self.state)
+        write!(
+            f,
+            "Sandbox: {}, name: {}, state: {:?}",
+            self.id, self.name, self.state
+        )
     }
 }
 

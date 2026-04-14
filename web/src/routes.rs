@@ -76,10 +76,7 @@ pub fn router() -> Router<AppState> {
             post(workspace_skill_delete),
         )
         .route("/workspaces/{id}/sandboxes", get(workspace_sandboxes_page))
-        .route(
-            "/workspaces/{id}/sandboxes/new",
-            get(workspace_sandbox_new),
-        )
+        .route("/workspaces/{id}/sandboxes/new", get(workspace_sandbox_new))
         .route("/workspaces/{id}/sandboxes", post(workspace_sandbox_create))
         .route(
             "/workspaces/{id}/sandboxes/{sandbox_id}",
