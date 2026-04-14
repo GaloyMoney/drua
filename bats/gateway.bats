@@ -11,7 +11,7 @@ teardown_file() {
 }
 
 @test "mcp: unauthenticated tool call returns auth error" {
-  run mcp_call_no_auth "tools/call" '{"name":"hello","arguments":{"name":"world"}}'
+  run mcp_call_no_auth "tools/call" '{"name":"ping","arguments":{}}'
   echo "$output"
   [[ "$output" == *"Authentication required"* ]]
 }
@@ -19,13 +19,13 @@ teardown_file() {
 @test "mcp: authenticated tool call succeeds" {
   create_test_agent
 
-  run mcp_call "$AGENT_TOKEN" "tools/call" '{"name":"hello","arguments":{"name":"world"}}'
+  run mcp_call "$AGENT_TOKEN" "tools/call" '{"name":"ping","arguments":{}}'
   echo "$output"
-  [[ "$output" == *"Hello, world!"* ]]
+  [[ "$output" == *"pong"* ]]
 }
 
 @test "mcp: invalid token returns auth error" {
-  run mcp_call "invalid-token-value" "tools/call" '{"name":"hello","arguments":{"name":"world"}}'
+  run mcp_call "invalid-token-value" "tools/call" '{"name":"ping","arguments":{}}'
   echo "$output"
   [[ "$output" == *"Authentication required"* ]]
 }
