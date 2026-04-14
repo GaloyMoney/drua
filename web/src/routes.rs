@@ -1188,17 +1188,29 @@ async fn api_agent_message(
     }
 
     let agent_id = AgentId::from(id);
-    let rx = match state
-        .app
-        .agents()
-        .send_message(auth, agent_id, body.prompt)
-        .await
-    {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to send message to agent");
-            let body = serde_json::json!({ "error": e.to_string() });
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+
+    // Slash commands are handled entirely server-side — no LLM, no session
+    // persistence. Route them through the slash command registry and return
+    // events via the same SSE channel shape.
+    let rx = if domain::slash_command::SlashCommands::is_slash_command(&body.prompt) {
+        let source = auth.to_message_source();
+        state
+            .app
+            .slash_commands()
+            .process(source, agent_id, &auth, body.prompt)
+    } else {
+        match state
+            .app
+            .agents()
+            .send_message(auth, agent_id, body.prompt)
+            .await
+        {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to send message to agent");
+                let body = serde_json::json!({ "error": e.to_string() });
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+            }
         }
     };
 

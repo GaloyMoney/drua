@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use crate::agent::AgentMessageEvent;
+use crate::primitives::{AgentId, AuthSubject, UserMessageSource};
+
 use super::error::SlashCommandError;
 use super::traits::{SlashCommand, SlashCommandContext, SlashCommandOutput};
 
@@ -50,6 +53,82 @@ impl SlashCommands {
             .collect();
         items.sort_by_key(|(name, _)| *name);
         items
+    }
+
+    /// Returns `true` if `prompt` looks like a slash command (`/word`).
+    pub fn is_slash_command(prompt: &str) -> bool {
+        let trimmed = prompt.trim();
+        if !trimmed.starts_with('/') {
+            return false;
+        }
+        // Must have at least one char after `/`
+        trimmed.len() > 1 && !trimmed[1..].starts_with(char::is_whitespace)
+    }
+
+    /// Process a slash command prompt end-to-end: parse, execute, and return
+    /// an event stream matching the shape of `Agents::send_message()`.
+    ///
+    /// The caller should already have verified [`Self::is_slash_command`].
+    #[tracing::instrument(name = "slash_command.process", skip_all)]
+    pub fn process(
+        &self,
+        source: UserMessageSource,
+        agent_id: AgentId,
+        subject: &AuthSubject,
+        prompt: String,
+    ) -> tokio::sync::mpsc::Receiver<AgentMessageEvent> {
+        let trimmed = prompt.trim();
+        let without_slash = &trimmed[1..];
+        let (name, args) = match without_slash.split_once(char::is_whitespace) {
+            Some((n, a)) => (n, a.trim()),
+            None => (without_slash, ""),
+        };
+
+        let ctx = SlashCommandContext {
+            subject: subject.clone(),
+            agent_id,
+        };
+
+        let response_text = match self.execute(name, &ctx, args) {
+            Ok(SlashCommandOutput::Text(t)) => t,
+            Err(SlashCommandError::NotFound(_)) => {
+                let available: Vec<_> = self
+                    .list()
+                    .into_iter()
+                    .map(|(n, _)| format!("/{n}"))
+                    .collect();
+                format!(
+                    "Unknown command: /{name}. Available commands: {}",
+                    available.join(", ")
+                )
+            }
+            Err(e) => format!("Command error: {e}"),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessageEvent>(4);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(AgentMessageEvent::UserMessage {
+                    source,
+                    text: prompt,
+                })
+                .await;
+            let _ = tx
+                .send(AgentMessageEvent::AssistantText {
+                    text: response_text,
+                })
+                .await;
+            let _ = tx
+                .send(AgentMessageEvent::Done {
+                    turns: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: None,
+                    cost_usd: None,
+                })
+                .await;
+        });
+        rx
     }
 }
 

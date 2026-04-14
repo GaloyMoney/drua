@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use galoy_agents_core::agent::{AgentMessageEvent, AgentRole, Agents, AgentsConfig, RoleConfig};
 use galoy_agents_core::primitives::{AuthSubject, UserId, WorkspaceId};
-use galoy_agents_core::slash_command;
 use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
 use llm::{PromptRequest, PromptResponse, Usage};
@@ -45,8 +44,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             .expect("init toolsets"),
     );
 
-    let slash_commands = Arc::new(slash_command::default_registry());
-    let agents = Agents::new(&pool, config, toolsets, slash_commands, prompt_tx);
+    let agents = Agents::new(&pool, config, toolsets, prompt_tx);
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead")
@@ -178,8 +176,7 @@ async fn send_message_dispatches_registered_tool_call() {
     toolsets.register_top_level(PingTool::new());
     let toolsets = Arc::new(toolsets);
 
-    let slash_commands = Arc::new(slash_command::default_registry());
-    let agents = Agents::new(&pool, config, toolsets, slash_commands, prompt_tx);
+    let agents = Agents::new(&pool, config, toolsets, prompt_tx);
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead")

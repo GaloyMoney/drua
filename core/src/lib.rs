@@ -26,6 +26,7 @@ use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
 use prompt_executor::PromptExecutor;
 use skill::Skills;
+use slash_command::SlashCommands;
 use toolset::{CodeAssistantToolSet, ToolSets, ToolSetsError};
 use user::Users;
 use workspace::Workspaces;
@@ -39,6 +40,7 @@ pub struct App {
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
     toolsets: Arc<ToolSets>,
+    slash_commands: Arc<SlashCommands>,
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
     skills: Skills,
@@ -108,7 +110,6 @@ impl App {
             pool,
             config.agents,
             Arc::clone(&toolsets),
-            slash_commands,
             prompt_tx,
         ));
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
@@ -144,6 +145,7 @@ impl App {
             audit,
             code_assistant,
             toolsets,
+            slash_commands,
             workspaces,
             workspace_secrets,
             skills,
@@ -170,6 +172,10 @@ impl App {
 
     pub fn code_assistant(&self) -> Option<&CodeAssistant> {
         self.code_assistant.as_deref()
+    }
+
+    pub fn slash_commands(&self) -> &SlashCommands {
+        &self.slash_commands
     }
 
     pub fn toolsets(&self) -> &ToolSets {
