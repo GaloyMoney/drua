@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Skills — {{ workspace.name }} — Galoy Agents{% endblock %}
+{% block title %}Sandboxes — {{ workspace.name }} — Galoy Agents{% endblock %}
 
 {% block head %}
 <style>
@@ -81,8 +81,8 @@
 <hr style="margin: 0.75rem 0;">
 <nav>
   <ul>
-    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item active">Skills</a></li>
-    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item active">Sandboxes</a></li>
   </ul>
 </nav>
 
@@ -92,27 +92,31 @@
 {% endblock %}
 
 {% block content %}
-<h2>Skills</h2>
-<p><small>Reusable prompt templates that agents can invoke.</small></p>
+<h2>Sandboxes</h2>
+<p><small>Isolated workspaces where agents run tools and edit files.</small></p>
 
-{% if skills.is_empty() %}
-<p><em>No skills configured yet.</em></p>
+{% if sandboxes.is_empty() %}
+<p><em>No sandboxes yet.</em></p>
 {% else %}
 <figure>
   <table>
     <thead>
       <tr>
         <th>Name</th>
-        <th>Description</th>
+        <th>State</th>
+        <th>Mode</th>
+        <th>Exports</th>
         <th>Created</th>
       </tr>
     </thead>
     <tbody>
-      {% for skill in skills %}
-      <tr style="cursor: pointer;" onclick="window.location='/workspaces/{{ workspace.id }}/skills/{{ skill.id }}'">
-        <td><strong>{{ skill.name }}</strong></td>
-        <td>{{ skill.description }}</td>
-        <td><small>{{ skill.created_at }}</small></td>
+      {% for sandbox in sandboxes %}
+      <tr style="cursor: pointer;" onclick="window.location='/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}'">
+        <td><strong>{{ sandbox.name }}</strong></td>
+        <td><code>{{ sandbox.state }}</code></td>
+        <td>{{ sandbox.mode_label }}</td>
+        <td><small>{{ sandbox.exports_summary }}</small></td>
+        <td><small>{{ sandbox.created_at }}</small></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -120,5 +124,5 @@
 </figure>
 {% endif %}
 
-<a href="/workspaces/{{ workspace.id }}/skills/new" role="button">New Skill</a>
+<a href="/workspaces/{{ workspace.id }}/sandboxes/new" role="button">New Sandbox</a>
 {% endblock %}

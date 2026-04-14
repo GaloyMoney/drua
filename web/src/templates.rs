@@ -158,6 +158,62 @@ pub struct WorkspaceSkillEditTemplate {
     pub skill: SkillView,
 }
 
+// ── Sandboxes ─────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub struct ExportedFileView {
+    pub file_name: String,
+    pub content: String,
+}
+
+#[allow(dead_code)]
+pub struct ExportedSkillView {
+    pub name: String,
+    pub content: String,
+}
+
+#[allow(dead_code)]
+pub struct SandboxView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub state: String,
+    pub mode_label: String,
+    pub repo_url: Option<String>,
+    pub cpu: String,
+    pub memory: String,
+    pub disk_size: String,
+    pub created_at: String,
+    /// Short one-liner for the list view: `"—"`, `"system prompt"`,
+    /// `"3 skills"`, or `"system prompt + 3 skills"`.
+    pub exports_summary: String,
+    pub exported_system_prompt: Option<ExportedFileView>,
+    pub exported_skills: Vec<ExportedSkillView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_sandboxes.html")]
+pub struct WorkspaceSandboxesPageTemplate {
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
+    pub sandboxes: Vec<SandboxView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_sandbox_new.html")]
+pub struct WorkspaceSandboxNewTemplate {
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_sandbox_detail.html")]
+pub struct WorkspaceSandboxDetailTemplate {
+    pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
+    pub sandbox: SandboxView,
+}
+
 // ── Workspace Secrets ────────────────────────────────────────────────
 
 pub struct WorkspaceSecretView {

@@ -26,6 +26,7 @@ use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
 use prompt_executor::PromptExecutor;
+use sandbox::Sandboxes;
 use skill::Skills;
 use slash_command::SlashCommands;
 use toolset::{CodeAssistantToolSet, ToolSets, ToolSetsError};
@@ -45,6 +46,7 @@ pub struct App {
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
     skills: Skills,
+    sandboxes: Sandboxes,
     github_app: Option<GitHubAppTokenProvider>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
@@ -118,6 +120,7 @@ impl App {
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
         let skills = Skills::new(pool);
+        let sandboxes = Sandboxes::init(pool, config.sandbox).await?;
 
         // Optionally initialize GitHub App token provider from AppConfig.
         // If configured, verify it works by generating a token — crash on failure
@@ -150,6 +153,7 @@ impl App {
             workspaces,
             workspace_secrets,
             skills,
+            sandboxes,
             github_app,
             _prompt_executor: prompt_executor,
         })
@@ -195,6 +199,10 @@ impl App {
         &self.skills
     }
 
+    pub fn sandboxes(&self) -> &Sandboxes {
+        &self.sandboxes
+    }
+
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
         self.github_app.as_ref()
     }
@@ -214,4 +222,6 @@ pub enum AppError {
     GitHubApp(String),
     #[error("AppError - PromptExecutor: {0}")]
     PromptExecutor(String),
+    #[error("AppError - Sandbox: {0}")]
+    Sandbox(#[from] sandbox::error::SandboxError),
 }

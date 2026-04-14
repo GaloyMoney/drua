@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Skills — {{ workspace.name }} — Galoy Agents{% endblock %}
+{% block title %}New Sandbox — {{ workspace.name }} — Galoy Agents{% endblock %}
 
 {% block head %}
 <style>
@@ -81,8 +81,8 @@
 <hr style="margin: 0.75rem 0;">
 <nav>
   <ul>
-    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item active">Skills</a></li>
-    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item active">Sandboxes</a></li>
   </ul>
 </nav>
 
@@ -92,33 +92,46 @@
 {% endblock %}
 
 {% block content %}
-<h2>Skills</h2>
-<p><small>Reusable prompt templates that agents can invoke.</small></p>
+<a href="/workspaces/{{ workspace.id }}/sandboxes" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Sandboxes</a>
+<h2>New Sandbox</h2>
 
-{% if skills.is_empty() %}
-<p><em>No skills configured yet.</em></p>
-{% else %}
-<figure>
-  <table>
-    <thead>
-      <tr>
-        <th>Name</th>
-        <th>Description</th>
-        <th>Created</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for skill in skills %}
-      <tr style="cursor: pointer;" onclick="window.location='/workspaces/{{ workspace.id }}/skills/{{ skill.id }}'">
-        <td><strong>{{ skill.name }}</strong></td>
-        <td>{{ skill.description }}</td>
-        <td><small>{{ skill.created_at }}</small></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</figure>
-{% endif %}
+<form method="post" action="/workspaces/{{ workspace.id }}/sandboxes">
+  <label>
+    Name
+    <input type="text" name="name" required placeholder="my-sandbox">
+  </label>
 
-<a href="/workspaces/{{ workspace.id }}/skills/new" role="button">New Skill</a>
+  <label>
+    Mode
+    <select name="mode" required>
+      <option value="scratch">Scratch — empty workspace</option>
+      <option value="repo">Repo — clone a git repository</option>
+    </select>
+  </label>
+
+  <label>
+    Repo URL <small>(only used in repo mode)</small>
+    <input type="text" name="repo_url" placeholder="https://github.com/org/repo">
+  </label>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+    <label>
+      CPU
+      <input type="text" name="cpu" required value="500m">
+    </label>
+    <label>
+      Memory
+      <input type="text" name="memory" required value="512Mi">
+    </label>
+    <label>
+      Disk Size
+      <input type="text" name="disk_size" required value="10Gi">
+    </label>
+  </div>
+
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Create Sandbox</button>
+    <a href="/workspaces/{{ workspace.id }}/sandboxes" role="button" class="outline">Cancel</a>
+  </div>
+</form>
 {% endblock %}
