@@ -134,7 +134,11 @@ impl Sandboxes {
                 return;
             }
         };
-        let name = sandbox.name.clone();
+        // Use the entity-id-derived `resource_name` (e.g. `sb-019d…`) for
+        // the admin client so the K8s CR / local sandbox dir is uniquely
+        // named. The user-facing `sandbox.name` stays in the entity for
+        // display only.
+        let name = sandbox.resource_name();
         tracing::Span::current().record("sandbox_name", name.as_str());
 
         if let Err(e) = self.admin.create_sandbox(&name, &sandbox.specs).await {
@@ -328,9 +332,10 @@ impl Sandboxes {
         let id = id.into();
         let mut sandbox = self.repo.find_by_id(id).await?;
 
-        if let Err(e) = self.admin.delete_sandbox(&sandbox.name).await {
+        let resource_name = sandbox.resource_name();
+        if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
             tracing::warn!(
-                sandbox = %sandbox.name,
+                sandbox = %resource_name,
                 error = %e,
                 "Admin client delete_sandbox failed; suspending entity anyway"
             );

@@ -105,6 +105,15 @@ impl Sandbox {
             .expect("entity_first_persisted_at not found")
     }
 
+    /// Stable identifier used for the underlying admin-client resource —
+    /// the K8s Sandbox CR name in `K8sAdminClient` and the local sandbox
+    /// directory name in `LocalAdminClient`. Derived from the entity id so
+    /// it's globally unique and obeys k8s name constraints, regardless of
+    /// the user-provided display `name`.
+    pub fn resource_name(&self) -> String {
+        format!("sb-{}", self.id)
+    }
+
     /// Idempotent transition to [`SandboxState::Provisioning`]. Used when
     /// `restart()` re-runs the lifecycle from a `Suspended` or `Errored`
     /// sandbox; clears `last_error` so a stale failure isn't shown after
