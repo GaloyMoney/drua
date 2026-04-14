@@ -2,18 +2,6 @@
 
 {% block title %}New Workspace — Galoy Agents{% endblock %}
 
-{% block head %}
-<style>
-  details.config-section { margin-bottom: 1rem; }
-  details.config-section summary {
-    cursor: pointer; font-weight: 600; font-size: 0.95rem;
-    padding: 0.5rem 0; color: var(--pico-muted-color);
-  }
-  details.config-section summary:hover { color: var(--pico-color); }
-  details.config-section .config-fields { padding-top: 0.5rem; }
-</style>
-{% endblock %}
-
 {% block content %}
 <h2>New Workspace</h2>
 
@@ -26,58 +14,6 @@
     Description
     <textarea name="description" rows="3" placeholder="What is this workspace for?"></textarea>
   </label>
-
-  <details class="config-section">
-    <summary>Sandbox Resources</summary>
-    <div class="config-fields">
-      <label>
-        PVC Size
-        <input type="text" name="pvc_size" value="10Gi" placeholder="e.g. 10Gi">
-      </label>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
-        <label>
-          CPU
-          <select name="resource_cpu">
-            <option value="500m" selected>0.5 CPU</option>
-            <option value="1">1 CPU</option>
-            <option value="2">2 CPU</option>
-          </select>
-        </label>
-        <label>
-          RAM
-          <select name="resource_mem">
-            <option value="512Mi" selected>512 Mi</option>
-            <option value="1Gi">1 Gi</option>
-            <option value="2Gi">2 Gi</option>
-          </select>
-        </label>
-      </div>
-    </div>
-  </details>
-
-  <details class="config-section">
-    <summary>Model Configuration</summary>
-    <div class="config-fields">
-      <label>
-        Model
-        <select name="model">
-          <option value="claude-haiku-4-5-20251001" selected>Claude Haiku 4.5</option>
-          <option value="claude-sonnet-4-6-20250514">Claude Sonnet 4.6</option>
-          <option value="claude-opus-4-6-20250514">Claude Opus 4.6</option>
-        </select>
-      </label>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
-        <label>
-          Max tokens
-          <input type="number" name="max_tokens" min="256" max="65536" value="4096">
-        </label>
-        <label>
-          Max turns
-          <input type="number" name="max_turns" min="1" max="200" value="25">
-        </label>
-      </div>
-    </div>
-  </details>
 
   <div style="display: flex; gap: 1rem;">
     <button type="submit">Create Workspace</button>

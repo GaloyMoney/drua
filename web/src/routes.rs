@@ -603,17 +603,18 @@ async fn workspace_create(
     };
 
     let description = form.description.filter(|d| !d.is_empty());
-    if let Err(e) = state
+    match state
         .app
         .workspaces()
         .create(user_id, &form.name, description)
         .await
     {
-        tracing::error!(error = %e, "Failed to create workspace");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        Ok(ws) => Redirect::to(&format!("/workspaces/{}/chat", ws.id)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create workspace");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
-
-    Redirect::to("/workspaces").into_response()
 }
 
 #[instrument(name = "web.workspace_detail", skip_all)]
