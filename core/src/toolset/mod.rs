@@ -1,20 +1,16 @@
-mod builtins;
-pub mod code_assistant;
-pub mod concourse;
 mod config;
 mod error;
 mod filter;
+pub mod searchable;
+pub mod top_level;
 mod traits;
-mod upstream;
 
-pub use builtins::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
-pub use code_assistant::CodeAssistantToolSet;
-pub use concourse::ConcourseToolSet;
 pub use config::*;
 pub use error::*;
 pub use filter::OutputFilter;
+pub use searchable::*;
+pub use top_level::{CallCatalogTool, DescribeCatalogTool, Ping, SearchCatalog};
 pub use traits::*;
-pub use upstream::*;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -76,9 +72,11 @@ impl ToolSets {
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
+        let ping = Arc::new(Ping::new());
         top_level.insert(search.name().to_string(), search);
         top_level.insert(describe.name().to_string(), describe);
         top_level.insert(call.name().to_string(), call);
+        top_level.insert(ping.name().to_string(), ping);
 
         Ok(Self {
             sets,

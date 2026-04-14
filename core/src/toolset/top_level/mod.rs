@@ -1,5 +1,7 @@
 //! Built-in [`TopLevelTool`](super::traits::TopLevelTool) implementations.
 
-pub(super) mod catalog;
+mod catalog;
+mod ping;
 
 pub use catalog::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
+pub use ping::Ping;

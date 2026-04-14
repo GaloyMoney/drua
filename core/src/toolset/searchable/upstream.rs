@@ -12,7 +12,7 @@ use rmcp::{
 
 use crate::auth::AuthSubject;
 
-use super::{McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError};
+use super::super::{McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError};
 
 pub struct UpstreamToolSet {
     name: String,
@@ -26,7 +26,7 @@ pub struct UpstreamToolSet {
 }
 
 impl UpstreamToolSet {
-    pub(super) async fn init(
+    pub(in super::super) async fn init(
         upstream: &McpUpstreamConfig,
     ) -> Result<UpstreamToolSet, ToolSetsError> {
         let mut headers = HashMap::new();
