@@ -2,7 +2,7 @@
   <table>
     <thead>
       <tr>
-        <th>Subject</th>
+        <th>Actor</th>
         <th>Action</th>
         <th>Outcome</th>
         <th>Duration</th>
@@ -13,7 +13,7 @@
     <tbody>
       {% for entry in entries %}
       <tr>
-        <td class="subject-cell"><strong>{{ entry.subject.label }}</strong>{% match entry.subject.on_behalf_of %}{% when Some with (on_behalf_of) %}<br><span class="subject-owner">↳ on behalf of {{ on_behalf_of }}</span>{% when None %}{% endmatch %}</td>
+        <td class="subject-cell">{% match entry.acting_agent %}{% when Some with (agent) %}<strong>{{ agent }}</strong>{% when None %}{% endmatch %}{% match entry.acting_user %}{% when Some with (user) %}<strong>{{ user }}</strong>{% when None %}{% endmatch %}{% match entry.workspace %}{% when Some with (ws) %}<br><span class="subject-owner">ws: {{ ws }}</span>{% when None %}{% endmatch %}{% match entry.on_behalf_of %}{% when Some with (obo) %}<br><span class="subject-owner">↳ on behalf of {{ obo }}</span>{% when None %}{% endmatch %}</td>
         <td>{{ entry.action }}</td>
         <td><span class="outcome-{{ entry.outcome }}">{{ entry.outcome }}</span></td>
         <td>{% match entry.duration_ms %}{% when Some with (ms) %}{{ ms }}ms{% when None %}—{% endmatch %}</td>
