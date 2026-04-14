@@ -11,7 +11,7 @@ use super::AgentRole;
 /// [`AgentsConfig::builtin_roles`] for the service to start. Add new
 /// variants to the enum AND to this list — the compiler won't help, but
 /// [`AgentsConfig::validate`] will fail fast at startup.
-const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::WorkspaceLead];
+const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::WorkspaceLead, AgentRole::Agent];
 
 /// Whole-second auto-reset threshold for an `AgentSession`. Wraps a
 /// `u32` count of seconds; the `#[serde(transparent)]` derive lets it

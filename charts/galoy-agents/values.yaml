@@ -33,12 +33,9 @@ galoyAgents:
       githubRedirectUri: ""
       githubAllowedTeams: []
     ## Per-role defaults applied when an agent with that role is created.
-    ## `workspaceLead` is REQUIRED — the binary refuses to start if
-    ## `agents.builtin_roles.workspace_lead` is missing.
-    ## `agent` is optional; when absent the generic `Agent` role falls
-    ## back to `workspaceLead`'s config, which means the agent ends up
-    ## introducing itself as the workspace lead. Provide a dedicated
-    ## `agent:` block below to avoid that.
+    ## Both `workspaceLead` and `agent` are REQUIRED — the binary refuses
+    ## to start if either `agents.builtin_roles.workspace_lead` or
+    ## `agents.builtin_roles.agent` is missing.
     agents:
       workspaceLead:
         model: "claude-haiku-4-5-20251001"
