@@ -2651,6 +2651,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-sandbox-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
