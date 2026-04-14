@@ -139,12 +139,14 @@ impl Agents {
             .await?;
 
         if let Some((sandbox_id, mode)) = attach_sandbox {
-            self.sandboxes
-                .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
-                .await?;
+            // Agent side first — `sandbox_attached` rejects a WorkspaceLead
+            // role before we touch the sandbox side.
             if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
                 self.repo.update_in_op(op, &mut agent).await?;
             }
+            self.sandboxes
+                .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
+                .await?;
         }
 
         Ok(agent)
@@ -217,15 +219,20 @@ impl Agents {
         }
 
         let mut op = self.repo.begin_op().await?;
-        self.sandboxes
-            .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
-            .await?;
 
-        // Refetch so we update the most recent version of the agent.
+        // Agent side first: `sandbox_attached` enforces the entity-level
+        // invariants (lead can't attach; at most one sandbox per agent).
+        // Failing here short-circuits before the sandbox-side round-trip.
         let mut agent = self.repo.find_by_id(agent_id).await?;
         if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
+
+        // Then sandbox side (enforces workspace match and single-writer).
+        self.sandboxes
+            .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
+            .await?;
+
         op.commit().await?;
         Ok(agent)
     }
@@ -248,14 +255,17 @@ impl Agents {
         }
 
         let mut op = self.repo.begin_op().await?;
-        self.sandboxes
-            .detach_from_agent_in_op(&mut op, sandbox_id, agent_id)
-            .await?;
 
+        // Symmetric with attach: agent side first, then sandbox side.
         let mut agent = self.repo.find_by_id(agent_id).await?;
         if agent.sandbox_detached(sandbox_id).did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
+
+        self.sandboxes
+            .detach_from_agent_in_op(&mut op, sandbox_id, agent_id)
+            .await?;
+
         op.commit().await?;
         Ok(agent)
     }
