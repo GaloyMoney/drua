@@ -39,13 +39,18 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
     use es_entity::context::{EventContext, WithEventContext};
 
     let method = request.method().clone();
+    let path = request.uri().path().to_string();
     if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
+        return next.run(request).await;
+    }
+    // MCP gateway spawns its own tokio tasks so the EventContext does
+    // not propagate. The gateway handles audit internally.
+    if path.starts_with("/mcp") {
         return next.run(request).await;
     }
 
     let auth = request.extensions().get::<AuthSubject>().cloned();
     let app_state = request.extensions().get::<AppState>().cloned();
-    let path = request.uri().path().to_string();
 
     // Obtain an empty seed — the `!Send` EventContext must not live across
     // an `.await`, so we scope it in a block.

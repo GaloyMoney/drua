@@ -17,7 +17,6 @@ use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
 
-use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
 
 pub struct ToolSets {
@@ -135,9 +134,8 @@ impl ToolSets {
     }
 
     /// Look up and execute a top-level tool by name. Runs
-    /// [`TopLevelTool::can_execute`] + dispatch and enriches the current
-    /// [`EventContext`](es_entity::context::EventContext) with MCP-specific
-    /// audit fields. The actual persist happens in the web audit middleware.
+    /// [`TopLevelTool::can_execute`] + dispatch. Audit is handled by the
+    /// caller (e.g. the MCP gateway).
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -153,36 +151,13 @@ impl ToolSets {
             return Err(ToolSetsError::Unauthorized);
         }
 
-        // Enrich the audit context with MCP-specific fields so the
-        // boundary middleware flushes a useful entry.
-        Audit::record_interaction_type(InteractionType::McpCall);
-        Audit::record_action(name);
-        let args_value = arguments
-            .as_ref()
-            .map(|a| serde_json::Value::Object(a.clone()));
-        Audit::record_metadata(serde_json::json!({
-            "tool_name": name,
-            "arguments": args_value,
-        }));
-
-        let result = tool.call(subject, arguments).await;
-
-        match &result {
-            Ok(r) => {
-                Audit::record_tokens(estimate_tokens(r));
-                Audit::record_success();
-            }
-            Err(e) => {
-                Audit::record_error(e.to_string());
-            }
-        }
-
-        result
+        tool.call(subject, arguments).await
     }
 }
 
-/// Estimate token count from a CallToolResult's text content (~4 chars per token).
-fn estimate_tokens(result: &CallToolResult) -> u64 {
+/// Estimate token count from a [`CallToolResult`]'s text content (~4 chars
+/// per token).
+pub fn estimate_tokens(result: &CallToolResult) -> u64 {
     let total_chars: usize = result
         .content
         .iter()

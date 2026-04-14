@@ -19,8 +19,10 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{RoleServer, ServerHandler};
 
+use galoy_agents_core::audit::primitives::InteractionType;
+use galoy_agents_core::audit::Audit;
 use galoy_agents_core::auth::AuthSubject;
-use galoy_agents_core::toolset::TopLevelTool;
+use galoy_agents_core::toolset::{estimate_tokens, TopLevelTool};
 use galoy_agents_core::App;
 
 #[derive(Clone)]
@@ -116,17 +118,63 @@ impl ServerHandler for McpGateway {
         request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        use es_entity::context::{EventContext, WithEventContext};
+
         let auth = Self::assert_can_see_server(&ctx)?;
-        self.app
-            .toolsets()
-            .call_top_level_tool(auth, request.name.as_ref(), request.arguments)
-            .await
-            .map_err(|e| {
+        let name = request.name.as_ref();
+
+        // The rmcp transport spawns a task so the web middleware's
+        // EventContext does not propagate here. Seed a fresh one for
+        // MCP-specific audit fields.
+        let seed = {
+            let ctx = EventContext::current();
+            ctx.data()
+        };
+
+        let app = self.app.clone();
+        let auth_clone = auth.clone();
+        let args = request.arguments;
+
+        async move {
+            Audit::record_interaction_type(InteractionType::McpCall);
+            Audit::record_subject(&auth_clone);
+            Audit::record_action(name);
+            let args_value = args
+                .as_ref()
+                .map(|a| serde_json::Value::Object(a.clone()));
+            Audit::record_metadata(serde_json::json!({
+                "tool_name": name,
+                "arguments": args_value,
+            }));
+
+            let start = std::time::Instant::now();
+            let result = app
+                .toolsets()
+                .call_top_level_tool(&auth_clone, name, args)
+                .await;
+            Audit::record_duration(start);
+
+            match &result {
+                Ok(r) => {
+                    Audit::record_tokens(estimate_tokens(r));
+                    Audit::record_success();
+                }
+                Err(e) => {
+                    Audit::record_error(e.to_string());
+                }
+            }
+
+            app.audit().record_from_context();
+
+            result.map_err(|e| {
                 ErrorData::new(
                     ErrorCode::INTERNAL_ERROR,
                     e.to_string(),
                     None::<serde_json::Value>,
                 )
             })
+        }
+        .with_event_context(seed)
+        .await
     }
 }
