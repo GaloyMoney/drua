@@ -113,16 +113,6 @@ pub struct WorkspaceView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspaces.html")]
-pub struct WorkspacesTemplate {}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "workspace_list.html")]
-pub struct WorkspaceListTemplate {
-    pub workspaces: Vec<WorkspaceView>,
-}
-
-#[derive(Template, WebTemplate)]
 #[template(path = "workspace_new.html")]
 pub struct WorkspaceNewTemplate {}
 
@@ -130,6 +120,7 @@ pub struct WorkspaceNewTemplate {}
 #[template(path = "workspace_detail.html")]
 pub struct WorkspaceDetailTemplate {
     pub workspace: WorkspaceView,
+    pub agents: Vec<AgentView>,
 }
 
 // ── Workspace Secrets ────────────────────────────────────────────────
@@ -146,6 +137,12 @@ pub struct WorkspaceSecretView {
 #[template(path = "workspace_secrets_list.html")]
 pub struct WorkspaceSecretsListTemplate {
     pub secrets: Vec<WorkspaceSecretView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_sidebar_list.html")]
+pub struct WorkspaceSidebarListTemplate {
+    pub workspaces: Vec<WorkspaceView>,
 }
 
 pub struct AgentView {

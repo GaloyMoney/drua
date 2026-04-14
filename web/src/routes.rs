@@ -48,7 +48,7 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/{id}/chat", get(workspace_chat))
         .route("/workspaces", get(workspaces_page))
         .route("/workspaces/new", get(workspace_new))
-        .route("/workspaces/list", get(workspace_list))
+        .route("/workspaces/sidebar", get(workspace_sidebar_list))
         .route("/workspaces", post(workspace_create))
         .route("/workspaces/{id}", get(workspace_detail))
         .route("/workspaces/{id}", post(workspace_update))
@@ -559,19 +559,19 @@ async fn workspaces_page(State(state): State<AppState>, session: Session) -> Res
     .into_response()
 }
 
-#[instrument(name = "web.workspace_list", skip_all)]
-async fn workspace_list(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.workspace_sidebar_list", skip_all)]
+async fn workspace_sidebar_list(State(state): State<AppState>, session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
     match state.app.workspaces().list_all().await {
-        Ok(workspaces) => WorkspaceListTemplate {
+        Ok(workspaces) => WorkspaceSidebarListTemplate {
             workspaces: workspaces.iter().map(workspace_to_view).collect(),
         }
         .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to list workspaces");
+            tracing::error!(error = %e, "Failed to list workspaces for sidebar");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -632,8 +632,24 @@ async fn workspace_detail(
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let agent_views: Vec<AgentView> = agents
+        .iter()
+        .map(|a| AgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+        })
+        .collect();
+
     WorkspaceDetailTemplate {
         workspace: workspace_to_view(&ws),
+        agents: agent_views,
     }
     .into_response()
 }
@@ -657,7 +673,7 @@ async fn workspace_update(
         .update(workspace_id, &form.name, description)
         .await
     {
-        Ok(_) => Redirect::to("/workspaces").into_response(),
+        Ok(_) => Redirect::to(&format!("/workspaces/{id}")).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to update workspace");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()

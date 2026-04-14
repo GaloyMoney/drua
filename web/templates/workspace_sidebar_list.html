@@ -1,0 +1,13 @@
+{% for ws in workspaces %}
+<a href="/workspaces/{{ ws.id }}/chat"
+   style="display:block; padding:0.4rem 0.75rem; border-radius:var(--pico-border-radius); text-decoration:none; color:var(--pico-color); font-size:0.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+   onmouseover="this.style.background='var(--pico-primary-background)';this.style.color='var(--pico-primary-inverse)'"
+   onmouseout="this.style.background='';this.style.color='var(--pico-color)'"
+>{{ ws.name }}</a>
+{% endfor %}
+{% if workspaces.is_empty() %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No workspaces yet</small>
+{% endif %}
+<a href="/workspaces/new"
+   style="display:block; padding:0.4rem 0.75rem; font-size:0.85rem; color:var(--pico-muted-color); text-decoration:none;"
+>+ New Workspace</a>
