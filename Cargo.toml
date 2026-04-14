@@ -5,6 +5,7 @@ members = [
   "core",
   "mcp-gateway",
   "lib/k8s-sandbox-client",
+  "lib/local-sandbox-client",
   "lib/anthropic-client",
   "lib/llm",
   "web",
@@ -25,6 +26,7 @@ name = "galoy-agents"
 # Internal crates
 concourse-client = { path = "lib/concourse-client" }
 k8s-sandbox-client = { path = "lib/k8s-sandbox-client" }
+local-sandbox-client = { path = "lib/local-sandbox-client" }
 code-assistant-core = { path = "code-assistant/crates/core" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
