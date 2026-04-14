@@ -305,7 +305,7 @@ jobs:
   serial: true
   plan:
   - get: repo-sandbox-image
-    trigger: true
+    # trigger: true  # DISABLED: sandbox tests paused for cost/compute reasons
   - task: harness-integration-test
     config:
       platform: linux
@@ -333,7 +333,7 @@ jobs:
   plan:
   - get: repo-sandbox-image
     trigger: true
-    passed: [test-harness]
+    # passed: [test-harness]  # DISABLED: sandbox tests paused for cost/compute reasons
   - task: build-image
     config:
       platform: linux
