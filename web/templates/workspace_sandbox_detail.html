@@ -121,6 +121,15 @@
 <a href="/workspaces/{{ workspace.id }}/sandboxes" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Sandboxes</a>
 <h2>{{ sandbox.name }}</h2>
 
+{% match sandbox.last_error %}
+{% when Some(err) %}
+<article style="border-left: 4px solid var(--pico-color-red-500); padding: 0.5rem 1rem; background: var(--pico-card-background-color);">
+  <strong>Provisioning failed.</strong>
+  <pre style="margin-top: 0.5rem; white-space: pre-wrap; word-wrap: break-word;"><code>{{ err }}</code></pre>
+</article>
+{% when None %}
+{% endmatch %}
+
 <dl>
   <div class="sandbox-field">
     <dt>State</dt>

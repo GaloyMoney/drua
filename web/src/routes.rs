@@ -1144,6 +1144,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         workspace_id: s.workspace_id.to_string(),
         name: s.name.clone(),
         state: s.state.to_string(),
+        last_error: s.last_error.clone(),
         mode_label,
         repo_url,
         cpu: s.specs.cpu.clone(),

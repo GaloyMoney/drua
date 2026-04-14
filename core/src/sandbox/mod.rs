@@ -106,10 +106,10 @@ impl Sandboxes {
     /// 3. `instance.initialize(mode)` → transition to
     ///    [`SandboxState::Ready`]
     ///
-    /// Failures at any step are logged and the entity is left in its last
-    /// state for a follow-up reconciler. (TODO: introduce an explicit
-    /// `Failed` / `Errored` state so callers can distinguish stuck-in-flight
-    /// from in-flight.)
+    /// Any failure routes through [`Self::record_error`] which transitions
+    /// the entity to [`SandboxState::Errored`] and persists the failing
+    /// step + reason as a [`SandboxEvent::ProvisioningFailed`]. The UI
+    /// surfaces `last_error` whenever `state == Errored`.
     pub fn spawn_sandbox_creation(&self, id: SandboxId) {
         let me = self.clone();
         tokio::spawn(async move {
@@ -117,18 +117,29 @@ impl Sandboxes {
         });
     }
 
+    /// Background lifecycle. `#[instrument]` gives the spawned task its
+    /// own root span so the per-step `tracing::error!`s land in Honeycomb
+    /// instead of disappearing into stderr (the `tokio::spawn` detaches
+    /// from the caller's span context).
+    #[instrument(
+        name = "domain.sandbox.run_creation_lifecycle",
+        skip(self),
+        fields(sandbox_id = %id, sandbox_name)
+    )]
     async fn run_creation_lifecycle(&self, id: SandboxId) {
         let sandbox = match self.repo.find_by_id(id).await {
             Ok(s) => s,
             Err(e) => {
+                // No name yet, so just record the error against the id.
                 tracing::error!(sandbox_id = %id, error = %e, "could not load sandbox for lifecycle");
                 return;
             }
         };
         let name = sandbox.name.clone();
+        tracing::Span::current().record("sandbox_name", name.as_str());
 
         if let Err(e) = self.admin.create_sandbox(&name, &sandbox.specs).await {
-            tracing::error!(sandbox = %name, error = %e, "admin.create_sandbox failed");
+            self.record_error(id, &name, "create_sandbox", e.to_string()).await;
             return;
         }
 
@@ -139,18 +150,24 @@ impl Sandboxes {
         {
             Ok(v) => v,
             Err(e) => {
-                tracing::error!(sandbox = %name, error = %e, "sandbox failed to become ready");
+                self.record_error(id, &name, "wait_sandbox_ready", e.to_string()).await;
                 return;
             }
         };
 
-        if let Err(e) = self.transition(id, SandboxState::Initializing).await {
-            tracing::error!(sandbox = %name, error = %e, "transition to Initializing failed");
+        if let Err(e) = self.run_initializing(id).await {
+            self.record_error(id, &name, "transition_initializing", e.to_string()).await;
             return;
         }
 
         let Some(base_url) = view.base_url else {
-            tracing::error!(sandbox = %name, "sandbox is ready but admin reported no base_url");
+            self.record_error(
+                id,
+                &name,
+                "wait_sandbox_ready",
+                "sandbox reported ready but admin returned no base_url".to_string(),
+            )
+            .await;
             return;
         };
         let instance = InstanceClient::new(base_url);
@@ -159,13 +176,13 @@ impl Sandboxes {
         let response = match instance.initialize(&init_req).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(sandbox = %name, error = %e, "instance.initialize failed");
+                self.record_error(id, &name, "initialize", e.to_string()).await;
                 return;
             }
         };
 
         if let Err(e) = self.apply_initialized(id, &response).await {
-            tracing::error!(sandbox = %name, error = %e, "apply_initialized failed");
+            self.record_error(id, &name, "apply_initialized", e.to_string()).await;
         }
     }
 
@@ -183,10 +200,45 @@ impl Sandboxes {
         Ok(())
     }
 
-    async fn transition(&self, id: SandboxId, next: SandboxState) -> Result<(), SandboxError> {
+    /// Idempotent transition into [`SandboxState::Initializing`].
+    async fn run_initializing(&self, id: SandboxId) -> Result<(), SandboxError> {
         let mut op = self.repo.begin_op().await?;
         let mut sandbox = self.repo.find_by_id(id).await?;
-        if sandbox.transition_to(next).did_execute() {
+        if sandbox.initializing().did_execute() {
+            self.repo.update_in_op(&mut op, &mut sandbox).await?;
+        }
+        op.commit().await?;
+        Ok(())
+    }
+
+    /// Persist a provisioning failure: transition to `Errored`, push a
+    /// `ProvisioningFailed` event with `step` + `reason`, and emit a
+    /// matching `tracing::error!` so the failure shows up in Honeycomb.
+    /// Failures inside this method itself are logged and otherwise
+    /// swallowed — there's nothing useful to do beyond that since the
+    /// caller is the lifecycle background task.
+    async fn record_error(
+        &self,
+        id: SandboxId,
+        name: &str,
+        step: &'static str,
+        reason: String,
+    ) {
+        tracing::error!(sandbox = %name, step, error = %reason, "sandbox provisioning step failed");
+        if let Err(e) = self.persist_errored(id, step, &reason).await {
+            tracing::error!(sandbox = %name, step, error = %e, "failed to persist provisioning error");
+        }
+    }
+
+    async fn persist_errored(
+        &self,
+        id: SandboxId,
+        step: &str,
+        reason: &str,
+    ) -> Result<(), SandboxError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut sandbox = self.repo.find_by_id(id).await?;
+        if sandbox.errored(step, reason).did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
         op.commit().await?;
@@ -242,10 +294,7 @@ impl Sandboxes {
         let id = id.into();
         let mut op = self.repo.begin_op().await?;
         let mut sandbox = self.repo.find_by_id(id).await?;
-        if sandbox
-            .transition_to(SandboxState::Provisioning)
-            .did_execute()
-        {
+        if sandbox.provisioning().did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
         op.commit().await?;
@@ -289,7 +338,7 @@ impl Sandboxes {
             );
         }
 
-        if sandbox.transition_to(SandboxState::Suspended).did_execute() {
+        if sandbox.suspended().did_execute() {
             self.repo.update_in_op(op, &mut sandbox).await?;
         }
         Ok(sandbox)

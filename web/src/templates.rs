@@ -178,6 +178,10 @@ pub struct SandboxView {
     pub workspace_id: String,
     pub name: String,
     pub state: String,
+    /// Reason for the most recent provisioning failure. Set when the
+    /// sandbox is in the `errored` state; rendered as a banner on the
+    /// detail page.
+    pub last_error: Option<String>,
     pub mode_label: String,
     pub repo_url: Option<String>,
     pub cpu: String,

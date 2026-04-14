@@ -25,6 +25,11 @@ pub enum SandboxState {
     /// PVC is retained; local: the `.sandboxes/<name>/` directory is left
     /// in place). Recreating with the same name resumes from that state.
     Suspended,
+    /// A step in the provisioning / restart lifecycle failed. The failure
+    /// reason is recorded on the entity as `last_error` and emitted as a
+    /// [`SandboxEvent::ProvisioningFailed`]. Calling `restart()` clears
+    /// this and re-runs the lifecycle.
+    Errored,
 }
 
 impl core::fmt::Display for SandboxState {
@@ -34,6 +39,7 @@ impl core::fmt::Display for SandboxState {
             SandboxState::Initializing => "initializing",
             SandboxState::Ready => "ready",
             SandboxState::Suspended => "suspended",
+            SandboxState::Errored => "errored",
         };
         f.write_str(s)
     }
@@ -60,6 +66,13 @@ pub enum SandboxEvent {
         exported_system_prompt: Option<ExportedFile>,
         exported_skills: Vec<ExportedSkill>,
     },
+    /// A step in the provisioning / restart lifecycle failed. `step` names
+    /// the failing step (`create_sandbox`, `wait_ready`, `initialize`, …)
+    /// so we can group failures in observability without parsing `reason`.
+    ProvisioningFailed {
+        step: String,
+        reason: String,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -72,6 +85,12 @@ pub struct Sandbox {
     pub mode: SandboxMode,
     #[builder(default = "SandboxState::Provisioning")]
     pub state: SandboxState,
+    /// Reason for the most recent failed provisioning step, set by
+    /// [`Self::errored`] and rendered in the UI when `state == Errored`.
+    /// Cleared back to `None` when the sandbox transitions out of
+    /// `Errored` (e.g. via `provisioning()` on restart).
+    #[builder(default)]
+    pub last_error: Option<String>,
     #[builder(default)]
     pub exported_system_prompt: Option<ExportedFile>,
     #[builder(default)]
@@ -86,13 +105,65 @@ impl Sandbox {
             .expect("entity_first_persisted_at not found")
     }
 
-    /// Move to `next_state` if not already there. Returns
-    /// [`Idempotent::AlreadyApplied`] if the entity is already in that state.
-    pub(super) fn transition_to(&mut self, next_state: SandboxState) -> Idempotent<()> {
+    /// Idempotent transition to [`SandboxState::Provisioning`]. Used when
+    /// `restart()` re-runs the lifecycle from a `Suspended` or `Errored`
+    /// sandbox; clears `last_error` so a stale failure isn't shown after
+    /// the next attempt succeeds.
+    pub(super) fn provisioning(&mut self) -> Idempotent<()> {
+        self.transition_in_event(SandboxState::Provisioning)
+    }
+
+    /// Idempotent transition to [`SandboxState::Initializing`].
+    pub(super) fn initializing(&mut self) -> Idempotent<()> {
+        self.transition_in_event(SandboxState::Initializing)
+    }
+
+    /// Idempotent transition to [`SandboxState::Suspended`].
+    pub(super) fn suspended(&mut self) -> Idempotent<()> {
+        self.transition_in_event(SandboxState::Suspended)
+    }
+
+    /// Mark the sandbox as failed at `step` with `reason`. Always pushes a
+    /// [`SandboxEvent::ProvisioningFailed`] (so we have a record of every
+    /// attempt) and idempotently transitions to [`SandboxState::Errored`].
+    /// Returns [`Idempotent::AlreadyApplied`] only if the entity is already
+    /// `Errored` *and* the reason hasn't changed.
+    pub(super) fn errored(
+        &mut self,
+        step: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Idempotent<()> {
+        let step = step.into();
+        let reason = reason.into();
+        let already_errored_with_same_reason =
+            self.state == SandboxState::Errored && self.last_error.as_deref() == Some(&reason);
+        if already_errored_with_same_reason {
+            return Idempotent::AlreadyApplied;
+        }
+        self.state = SandboxState::Errored;
+        self.last_error = Some(reason.clone());
+        self.events.push(SandboxEvent::ProvisioningFailed {
+            step,
+            reason,
+        });
+        // Also emit a state change so existing consumers that only
+        // hydrate from StateChanged keep working.
+        self.events.push(SandboxEvent::StateChanged {
+            state: SandboxState::Errored,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Shared body for the success-path transitions above. Pushes a
+    /// `StateChanged` event when the state actually changes; clears
+    /// `last_error` whenever we move *out* of `Errored` so the UI doesn't
+    /// keep showing a stale failure after a successful retry.
+    fn transition_in_event(&mut self, next_state: SandboxState) -> Idempotent<()> {
         if self.state == next_state {
             return Idempotent::AlreadyApplied;
         }
         self.state = next_state;
+        self.last_error = None;
         self.events
             .push(SandboxEvent::StateChanged { state: next_state });
         Idempotent::Executed(())
@@ -103,7 +174,7 @@ impl Sandbox {
     /// the response actually carried any exports, persist an
     /// [`SandboxEvent::ExportsUpdated`] event.
     pub(super) fn initialized(&mut self, response: &InitializeResponse) -> Idempotent<()> {
-        let state_changed = self.transition_to(SandboxState::Ready).did_execute();
+        let state_changed = self.transition_in_event(SandboxState::Ready).did_execute();
 
         let has_exports =
             response.exported_system_prompt.is_some() || !response.exported_skills.is_empty();
@@ -140,6 +211,12 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
     fn try_from_events(events: EntityEvents<SandboxEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = SandboxBuilder::default();
 
+        // We accumulate `last_error` as we walk the events: a
+        // `ProvisioningFailed` sets it; any subsequent successful
+        // `StateChanged` (i.e. *out* of `Errored`) clears it. This mirrors
+        // the live mutators in the entity.
+        let mut last_error: Option<String> = None;
+
         for event in events.iter_all() {
             match event {
                 SandboxEvent::Initialized {
@@ -158,6 +235,9 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                         .state(SandboxState::Provisioning);
                 }
                 SandboxEvent::StateChanged { state } => {
+                    if *state != SandboxState::Errored {
+                        last_error = None;
+                    }
                     builder = builder.state(*state);
                 }
                 SandboxEvent::ExportsUpdated {
@@ -168,10 +248,13 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                         .exported_system_prompt(exported_system_prompt.clone())
                         .exported_skills(exported_skills.clone());
                 }
+                SandboxEvent::ProvisioningFailed { reason, .. } => {
+                    last_error = Some(reason.clone());
+                }
             }
         }
 
-        builder.events(events).build()
+        builder.last_error(last_error).events(events).build()
     }
 }
 
@@ -244,17 +327,43 @@ mod tests {
     }
 
     #[test]
-    fn transition_to_advances_state() {
+    fn initializing_advances_state() {
         let mut sb = new_sandbox();
-        let res = sb.transition_to(SandboxState::Initializing);
+        let res = sb.initializing();
         assert!(res.did_execute());
         assert_eq!(sb.state, SandboxState::Initializing);
     }
 
     #[test]
-    fn transition_to_same_state_is_idempotent() {
+    fn provisioning_from_provisioning_is_idempotent() {
         let mut sb = new_sandbox();
-        let res = sb.transition_to(SandboxState::Provisioning);
+        let res = sb.provisioning();
         assert!(!res.did_execute());
+    }
+
+    #[test]
+    fn errored_records_reason_and_state() {
+        let mut sb = new_sandbox();
+        let res = sb.errored("create_sandbox", "k8s api timeout");
+        assert!(res.did_execute());
+        assert_eq!(sb.state, SandboxState::Errored);
+        assert_eq!(sb.last_error.as_deref(), Some("k8s api timeout"));
+    }
+
+    #[test]
+    fn errored_with_same_reason_is_idempotent() {
+        let mut sb = new_sandbox();
+        let _ = sb.errored("create_sandbox", "boom");
+        let res = sb.errored("create_sandbox", "boom");
+        assert!(!res.did_execute());
+    }
+
+    #[test]
+    fn provisioning_after_errored_clears_last_error() {
+        let mut sb = new_sandbox();
+        let _ = sb.errored("create_sandbox", "boom");
+        let _ = sb.provisioning();
+        assert_eq!(sb.state, SandboxState::Provisioning);
+        assert!(sb.last_error.is_none());
     }
 }
