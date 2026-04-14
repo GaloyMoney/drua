@@ -10,6 +10,16 @@ pub struct ToolSetsConfig {
     pub concourse: ConcourseToolSetConfig,
     #[serde(default)]
     pub code_assistant: CodeAssistantToolSetConfig,
+    #[serde(default)]
+    pub sandbox: SandboxToolConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SandboxToolConfig {
+    /// Base URL of the sandbox tool server (e.g. "http://sandbox:3000").
+    /// When non-empty, `bash` and `text_editor` top-level tools are registered.
+    #[serde(default)]
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
