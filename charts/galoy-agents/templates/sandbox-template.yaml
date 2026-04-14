@@ -30,7 +30,7 @@ spec:
         {{- else }}
         image: {{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}
         {{- end }}
-        command: ["agent-harness"]
+        command: ["sandbox-tool-server"]
         ports:
         - name: http
           containerPort: 3000
