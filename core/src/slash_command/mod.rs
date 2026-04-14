@@ -4,7 +4,7 @@ mod traits;
 
 use std::collections::HashMap;
 
-use crate::primitives::{AgentId, AuthSubject, ChatOutputEvent, UserMessageSource};
+use crate::primitives::{AgentId, AuthSubject, ChatOutputEvent};
 
 pub use error::SlashCommandError;
 pub use traits::{SlashCommand, SlashCommandContext, SlashCommandOutput};
@@ -18,56 +18,6 @@ pub struct SlashCommands {
 }
 
 impl SlashCommands {
-    pub fn new() -> Self {
-        Self {
-            commands: HashMap::new(),
-        }
-    }
-
-    /// Register a command. Overwrites any existing command with the same name.
-    pub fn register(&mut self, cmd: impl SlashCommand + 'static) {
-        self.commands.insert(cmd.name().to_string(), Box::new(cmd));
-    }
-
-    /// Look up a command by name (without the leading `/`).
-    pub fn find(&self, name: &str) -> Option<&dyn SlashCommand> {
-        self.commands.get(name).map(|c| c.as_ref())
-    }
-
-    /// Execute a command by name, returning an error if the command is not found.
-    pub async fn execute(
-        &self,
-        name: &str,
-        ctx: &SlashCommandContext,
-        args: &str,
-    ) -> Result<SlashCommandOutput, SlashCommandError> {
-        let cmd = self
-            .find(name)
-            .ok_or_else(|| SlashCommandError::NotFound(name.to_string()))?;
-        cmd.execute(ctx, args).await
-    }
-
-    /// List all registered commands as `(name, description)` pairs.
-    pub fn list(&self) -> Vec<(&str, &str)> {
-        let mut items: Vec<_> = self
-            .commands
-            .values()
-            .map(|c| (c.name(), c.description()))
-            .collect();
-        items.sort_by_key(|(name, _)| *name);
-        items
-    }
-
-    /// Returns `true` if `prompt` looks like a slash command (`/word`).
-    pub fn is_slash_command(prompt: &str) -> bool {
-        let trimmed = prompt.trim();
-        if !trimmed.starts_with('/') {
-            return false;
-        }
-        // Must have at least one char after `/`
-        trimmed.len() > 1 && !trimmed[1..].starts_with(char::is_whitespace)
-    }
-
     /// Process a slash command prompt end-to-end: parse, execute, and return
     /// an event stream matching the shape of `Agents::send_message()`.
     ///
@@ -75,11 +25,12 @@ impl SlashCommands {
     #[tracing::instrument(name = "slash_command.process", skip_all)]
     pub async fn process(
         &self,
-        source: UserMessageSource,
-        agent_id: AgentId,
         subject: &AuthSubject,
+        agent_id: AgentId,
         prompt: String,
     ) -> tokio::sync::mpsc::Receiver<ChatOutputEvent> {
+        let source = subject.to_message_source();
+
         let trimmed = prompt.trim();
         let without_slash = &trimmed[1..];
         let (name, args) = match without_slash.split_once(char::is_whitespace) {
@@ -120,16 +71,57 @@ impl SlashCommands {
                 text: response_text,
             })
             .await;
-        let _ = tx
-            .send(ChatOutputEvent::AssistantDone {
-                turns: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-                duration_ms: None,
-                cost_usd: None,
-            })
-            .await;
         rx
+    }
+
+    pub fn new() -> Self {
+        Self {
+            commands: HashMap::new(),
+        }
+    }
+
+    /// Register a command. Overwrites any existing command with the same name.
+    pub fn register(&mut self, cmd: impl SlashCommand + 'static) {
+        self.commands.insert(cmd.name().to_string(), Box::new(cmd));
+    }
+
+    /// Returns `true` if `prompt` looks like a slash command (`/word`).
+    pub fn is_slash_command(prompt: &str) -> bool {
+        let trimmed = prompt.trim();
+        if !trimmed.starts_with('/') {
+            return false;
+        }
+        // Must have at least one char after `/`
+        trimmed.len() > 1 && !trimmed[1..].starts_with(char::is_whitespace)
+    }
+
+    /// Look up a command by name (without the leading `/`).
+    fn find(&self, name: &str) -> Option<&dyn SlashCommand> {
+        self.commands.get(name).map(|c| c.as_ref())
+    }
+
+    /// Execute a command by name, returning an error if the command is not found.
+    async fn execute(
+        &self,
+        name: &str,
+        ctx: &SlashCommandContext,
+        args: &str,
+    ) -> Result<SlashCommandOutput, SlashCommandError> {
+        let cmd = self
+            .find(name)
+            .ok_or_else(|| SlashCommandError::NotFound(name.to_string()))?;
+        cmd.execute(ctx, args).await
+    }
+
+    /// List all registered commands as `(name, description)` pairs.
+    fn list(&self) -> Vec<(&str, &str)> {
+        let mut items: Vec<_> = self
+            .commands
+            .values()
+            .map(|c| (c.name(), c.description()))
+            .collect();
+        items.sort_by_key(|(name, _)| *name);
+        items
     }
 }
 

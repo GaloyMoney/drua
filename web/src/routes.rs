@@ -1193,11 +1193,10 @@ async fn api_agent_message(
     // persistence. Route them through the slash command registry and return
     // events via the same SSE channel shape.
     let rx = if domain::slash_command::SlashCommands::is_slash_command(&body.prompt) {
-        let source = auth.to_message_source();
         state
             .app
             .slash_commands()
-            .process(source, agent_id, &auth, body.prompt)
+            .process(&auth, agent_id, body.prompt)
             .await
     } else {
         match state
