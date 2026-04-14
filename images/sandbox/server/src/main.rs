@@ -430,15 +430,22 @@ async fn initialize_repo(
         .await
         .map_err(|e| format!("Failed to create repos directory: {e}"))?;
 
-    let output = Command::new("git")
-        .args(["clone", repo_url, clone_dir.to_str().unwrap()])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run git clone: {e}"))?;
+    // Idempotent: skip the clone if the target dir already contains the
+    // repo (e.g. after a sandbox restart with a retained workspace). Only
+    // considered "already cloned" when `.git` exists inside — a stray empty
+    // dir still triggers a fresh clone.
+    let already_cloned = clone_dir.join(".git").is_dir();
+    if !already_cloned {
+        let output = Command::new("git")
+            .args(["clone", repo_url, clone_dir.to_str().unwrap()])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git clone: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git clone failed: {stderr}"));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git clone failed: {stderr}"));
+        }
     }
 
     let system_prompt = scan_claude_md(&clone_dir).await;
@@ -484,31 +491,66 @@ async fn scan_claude_md(repo_dir: &Path) -> Option<ExportedFile> {
         })
 }
 
-/// Scan `.claude/commands/*.md` for skill definitions.
+/// Scan a cloned repo for skill definitions.
+///
+/// Supports two layouts:
+/// 1. **Anthropic skills** — `.claude/skills/<name>/SKILL.md` (per-skill
+///    directory with a canonical `SKILL.md`; used by e.g. lana-bank).
+/// 2. **Flat commands** — `.claude/commands/<name>.md` (single-file slash
+///    command style).
+///
+/// Layout 1 takes priority; a skill already picked up from there is not
+/// overridden by a same-named file in `commands/`. Results are sorted by
+/// name.
 async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
-    let commands_dir = repo_dir.join(".claude").join("commands");
-    let mut skills = Vec::new();
+    let mut skills: Vec<ExportedSkill> = Vec::new();
+    let claude_dir = repo_dir.join(".claude");
 
-    let mut dir = match tokio::fs::read_dir(&commands_dir).await {
-        Ok(d) => d,
-        Err(_) => return skills,
-    };
+    // Layout 1: .claude/skills/<name>/SKILL.md
+    let skills_dir = claude_dir.join("skills");
+    if let Ok(mut dir) = tokio::fs::read_dir(&skills_dir).await {
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let skill_file = path.join("SKILL.md");
+            if let Ok(content) = tokio::fs::read_to_string(&skill_file).await {
+                skills.push(ExportedSkill {
+                    name: name.to_string(),
+                    content,
+                });
+            }
+        }
+    }
 
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        if name.is_empty() {
-            continue;
-        }
-        if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            skills.push(ExportedSkill { name, content });
+    // Layout 2: .claude/commands/*.md (legacy; skipped if the name was
+    // already captured from layout 1)
+    let commands_dir = claude_dir.join("commands");
+    if let Ok(mut dir) = tokio::fs::read_dir(&commands_dir).await {
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name.is_empty() || skills.iter().any(|s| s.name == name) {
+                continue;
+            }
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                skills.push(ExportedSkill {
+                    name: name.to_string(),
+                    content,
+                });
+            }
         }
     }
 
@@ -911,6 +953,69 @@ mod tests {
 
         let skills = scan_skills(&dir).await;
         assert!(skills.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn scan_skills_finds_anthropic_skills_dir_layout() {
+        // `.claude/skills/<name>/SKILL.md` — used by lana-bank and the
+        // Anthropic-published skill convention.
+        let dir = std::env::temp_dir().join("sandbox-test-skills-anthropic");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let skills_dir = dir.join(".claude").join("skills");
+        tokio::fs::create_dir_all(skills_dir.join("lana-qa")).await.unwrap();
+        tokio::fs::create_dir_all(skills_dir.join("lana-review")).await.unwrap();
+        tokio::fs::create_dir_all(skills_dir.join("no-skill-md")).await.unwrap();
+        tokio::fs::write(skills_dir.join("lana-qa").join("SKILL.md"), "QA checks")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            skills_dir.join("lana-review").join("SKILL.md"),
+            "Review PR",
+        )
+        .await
+        .unwrap();
+
+        let skills = scan_skills(&dir).await;
+        assert_eq!(skills.len(), 2, "only dirs containing SKILL.md count");
+        assert_eq!(skills[0].name, "lana-qa");
+        assert_eq!(skills[0].content, "QA checks");
+        assert_eq!(skills[1].name, "lana-review");
+        assert_eq!(skills[1].content, "Review PR");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn scan_skills_merges_both_layouts_with_skills_dir_priority() {
+        // If a name appears in both layouts, the `.claude/skills/<name>/SKILL.md`
+        // version wins.
+        let dir = std::env::temp_dir().join("sandbox-test-skills-merged");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+
+        let skills_dir = dir.join(".claude").join("skills");
+        tokio::fs::create_dir_all(skills_dir.join("shared")).await.unwrap();
+        tokio::fs::write(skills_dir.join("shared").join("SKILL.md"), "from skills")
+            .await
+            .unwrap();
+
+        let commands_dir = dir.join(".claude").join("commands");
+        tokio::fs::create_dir_all(&commands_dir).await.unwrap();
+        tokio::fs::write(commands_dir.join("shared.md"), "from commands")
+            .await
+            .unwrap();
+        tokio::fs::write(commands_dir.join("only-flat.md"), "flat only")
+            .await
+            .unwrap();
+
+        let skills = scan_skills(&dir).await;
+        assert_eq!(skills.len(), 2);
+        // Alphabetical: only-flat, shared
+        assert_eq!(skills[0].name, "only-flat");
+        assert_eq!(skills[0].content, "flat only");
+        assert_eq!(skills[1].name, "shared");
+        assert_eq!(skills[1].content, "from skills", "skills/ layout wins");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
