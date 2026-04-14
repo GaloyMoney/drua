@@ -138,7 +138,8 @@ impl Sandboxes {
         tracing::Span::current().record("sandbox_name", name.as_str());
 
         if let Err(e) = self.admin.create_sandbox(&name, &sandbox.specs).await {
-            self.record_error(id, &name, "create_sandbox", e.to_string()).await;
+            self.record_error(id, &name, "create_sandbox", e.to_string())
+                .await;
             return;
         }
 
@@ -149,13 +150,15 @@ impl Sandboxes {
         {
             Ok(v) => v,
             Err(e) => {
-                self.record_error(id, &name, "wait_sandbox_ready", e.to_string()).await;
+                self.record_error(id, &name, "wait_sandbox_ready", e.to_string())
+                    .await;
                 return;
             }
         };
 
         if let Err(e) = self.run_initializing(id).await {
-            self.record_error(id, &name, "transition_initializing", e.to_string()).await;
+            self.record_error(id, &name, "transition_initializing", e.to_string())
+                .await;
             return;
         }
 
@@ -175,13 +178,15 @@ impl Sandboxes {
         let response = match instance.initialize(&init_req).await {
             Ok(r) => r,
             Err(e) => {
-                self.record_error(id, &name, "initialize", e.to_string()).await;
+                self.record_error(id, &name, "initialize", e.to_string())
+                    .await;
                 return;
             }
         };
 
         if let Err(e) = self.apply_initialized(id, &response).await {
-            self.record_error(id, &name, "apply_initialized", e.to_string()).await;
+            self.record_error(id, &name, "apply_initialized", e.to_string())
+                .await;
         }
     }
 
@@ -216,13 +221,7 @@ impl Sandboxes {
     /// Failures inside this method itself are logged and otherwise
     /// swallowed — there's nothing useful to do beyond that since the
     /// caller is the lifecycle background task.
-    async fn record_error(
-        &self,
-        id: SandboxId,
-        name: &str,
-        step: &'static str,
-        reason: String,
-    ) {
+    async fn record_error(&self, id: SandboxId, name: &str, step: &'static str, reason: String) {
         tracing::error!(sandbox = %name, step, error = %reason, "sandbox provisioning step failed");
         if let Err(e) = self.persist_errored(id, step, &reason).await {
             tracing::error!(sandbox = %name, step, error = %e, "failed to persist provisioning error");

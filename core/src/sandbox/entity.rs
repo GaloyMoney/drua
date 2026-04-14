@@ -142,10 +142,8 @@ impl Sandbox {
         }
         self.state = SandboxState::Errored;
         self.last_error = Some(reason.clone());
-        self.events.push(SandboxEvent::ProvisioningFailed {
-            step,
-            reason,
-        });
+        self.events
+            .push(SandboxEvent::ProvisioningFailed { step, reason });
         // Also emit a state change so existing consumers that only
         // hydrate from StateChanged keep working.
         self.events.push(SandboxEvent::StateChanged {
