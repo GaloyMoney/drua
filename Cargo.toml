@@ -10,7 +10,7 @@ members = [
   "web",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
-  "images/sandbox-light/server",
+  "images/sandbox/server",
 ]
 resolver = "2"
 

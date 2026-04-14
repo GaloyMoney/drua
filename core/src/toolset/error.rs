@@ -18,8 +18,6 @@ pub enum ToolSetsError {
     InvalidArgument(String),
     #[error("ToolSetsError - CodeAssistant: {0}")]
     CodeAssistant(String),
-    #[error("ToolSetsError - SandboxHttp: {0}")]
-    SandboxHttp(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

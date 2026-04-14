@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::routing::{get, post};
@@ -20,6 +21,36 @@ struct ExecuteRequest {
 struct ExecuteResponse {
     output: String,
     is_error: bool,
+}
+
+#[derive(Deserialize)]
+struct InitializeRequest {
+    mode: String,
+    #[serde(default)]
+    repo_url: Option<String>,
+    #[serde(default)]
+    github_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct InitializeResponse {
+    cwd: String,
+    exported_system_prompt: Option<ExportedFile>,
+    exported_skills: Vec<ExportedSkill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExportedFile {
+    file_name: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExportedSkill {
+    name: String,
+    content: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +321,202 @@ async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Initialize endpoint
+//
+// POST /initialize { mode: "scratch"|"repo", repo_url?: string }
+// ---------------------------------------------------------------------------
+
+const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
+const DEFAULT_GITHUB_TOKEN_PATH: &str = "/run/secrets/github-token";
+
+fn workspace_root() -> String {
+    std::env::var("WORKSPACE_ROOT").unwrap_or_else(|_| DEFAULT_WORKSPACE_ROOT.to_string())
+}
+
+fn github_token_path() -> String {
+    std::env::var("GITHUB_TOKEN_PATH").unwrap_or_else(|_| DEFAULT_GITHUB_TOKEN_PATH.to_string())
+}
+
+async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeResponse> {
+    if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
+        if let Err(e) = write_github_token(&github_token_path(), token).await {
+            return Json(InitializeResponse {
+                cwd: workspace_root(),
+                exported_system_prompt: None,
+                exported_skills: Vec::new(),
+                error: Some(e),
+            });
+        }
+    }
+
+    initialize_inner(&workspace_root(), &req.mode, req.repo_url.as_deref()).await
+}
+
+async fn initialize_inner(
+    workspace: &str,
+    mode: &str,
+    repo_url: Option<&str>,
+) -> Json<InitializeResponse> {
+    let result = match mode {
+        "scratch" => initialize_scratch(workspace).await,
+        "repo" => initialize_repo(workspace, repo_url).await,
+        other => Err(format!(
+            "Unknown mode: {other}. Expected 'scratch' or 'repo'."
+        )),
+    };
+
+    match result {
+        Ok(resp) => Json(resp),
+        Err(msg) => Json(InitializeResponse {
+            cwd: workspace.to_string(),
+            exported_system_prompt: None,
+            exported_skills: Vec::new(),
+            error: Some(msg),
+        }),
+    }
+}
+
+/// Write the GitHub token to `path` with mode 0600. Creates parent dirs as needed.
+/// The git credential helper baked into the sandbox image reads from this path.
+async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
+    let path_buf = PathBuf::from(path);
+    if let Some(parent) = path_buf.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create token directory {parent:?}: {e}"))?;
+    }
+    tokio::fs::write(&path_buf, token)
+        .await
+        .map_err(|e| format!("Failed to write github token: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        tokio::fs::set_permissions(&path_buf, perms)
+            .await
+            .map_err(|e| format!("Failed to chmod github token: {e}"))?;
+    }
+
+    Ok(())
+}
+
+async fn initialize_scratch(workspace: &str) -> Result<InitializeResponse, String> {
+    tokio::fs::create_dir_all(workspace)
+        .await
+        .map_err(|e| format!("Failed to create workspace: {e}"))?;
+
+    Ok(InitializeResponse {
+        cwd: workspace.to_string(),
+        exported_system_prompt: None,
+        exported_skills: Vec::new(),
+        error: None,
+    })
+}
+
+async fn initialize_repo(
+    workspace: &str,
+    repo_url: Option<&str>,
+) -> Result<InitializeResponse, String> {
+    let repo_url = repo_url
+        .filter(|u| !u.is_empty())
+        .ok_or("Missing 'repo_url' for repo mode")?;
+
+    let repo_name = extract_repo_name(repo_url)?;
+    let repos_dir = PathBuf::from(workspace).join("repos");
+    let clone_dir = repos_dir.join(&repo_name);
+
+    tokio::fs::create_dir_all(&repos_dir)
+        .await
+        .map_err(|e| format!("Failed to create repos directory: {e}"))?;
+
+    let output = Command::new("git")
+        .args(["clone", repo_url, clone_dir.to_str().unwrap()])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git clone: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git clone failed: {stderr}"));
+    }
+
+    let system_prompt = scan_claude_md(&clone_dir).await;
+    let skills = scan_skills(&clone_dir).await;
+
+    Ok(InitializeResponse {
+        cwd: clone_dir.to_string_lossy().to_string(),
+        exported_system_prompt: system_prompt,
+        exported_skills: skills,
+        error: None,
+    })
+}
+
+/// Extract repo name from URL — last path segment, stripped of `.git` suffix.
+fn extract_repo_name(url: &str) -> Result<String, String> {
+    let path = url.trim_end_matches('/');
+    let name = path
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| format!("Cannot extract repo name from URL: {url}"))?;
+
+    if name.is_empty() {
+        return Err(format!("Cannot extract repo name from URL: {url}"));
+    }
+
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if name.is_empty() {
+        return Err(format!("Cannot extract repo name from URL: {url}"));
+    }
+
+    Ok(name.to_string())
+}
+
+/// Read CLAUDE.md at the repo root, if present.
+async fn scan_claude_md(repo_dir: &Path) -> Option<ExportedFile> {
+    let path = repo_dir.join("CLAUDE.md");
+    tokio::fs::read_to_string(&path)
+        .await
+        .ok()
+        .map(|content| ExportedFile {
+            file_name: "CLAUDE.md".to_string(),
+            content,
+        })
+}
+
+/// Scan `.claude/commands/*.md` for skill definitions.
+async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
+    let commands_dir = repo_dir.join(".claude").join("commands");
+    let mut skills = Vec::new();
+
+    let mut dir = match tokio::fs::read_dir(&commands_dir).await {
+        Ok(d) => d,
+        Err(_) => return skills,
+    };
+
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            skills.push(ExportedSkill { name, content });
+        }
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -299,7 +526,8 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/execute", post(execute));
+        .route("/execute", post(execute))
+        .route("/initialize", post(initialize));
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -579,6 +807,313 @@ mod tests {
         let result = execute_text_editor(&input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── extract_repo_name ──────────────────────────────────────────
+
+    #[test]
+    fn extract_repo_name_https_with_git_suffix() {
+        let name = extract_repo_name("https://github.com/org/my-repo.git").unwrap();
+        assert_eq!(name, "my-repo");
+    }
+
+    #[test]
+    fn extract_repo_name_https_without_suffix() {
+        let name = extract_repo_name("https://github.com/org/my-repo").unwrap();
+        assert_eq!(name, "my-repo");
+    }
+
+    #[test]
+    fn extract_repo_name_trailing_slash() {
+        let name = extract_repo_name("https://github.com/org/my-repo/").unwrap();
+        assert_eq!(name, "my-repo");
+    }
+
+    #[test]
+    fn extract_repo_name_bare_name() {
+        let name = extract_repo_name("my-repo.git").unwrap();
+        assert_eq!(name, "my-repo");
+    }
+
+    #[test]
+    fn extract_repo_name_empty_url_fails() {
+        assert!(extract_repo_name("").is_err());
+    }
+
+    // ── scan_claude_md ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn scan_claude_md_finds_file() {
+        let dir = std::env::temp_dir().join("sandbox-test-claude-md");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("CLAUDE.md"), "# Instructions\nDo stuff")
+            .await
+            .unwrap();
+
+        let result = scan_claude_md(&dir).await;
+        assert!(result.is_some());
+        let exported = result.unwrap();
+        assert_eq!(exported.file_name, "CLAUDE.md");
+        assert!(exported.content.contains("Do stuff"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn scan_claude_md_returns_none_when_missing() {
+        let dir = std::env::temp_dir().join("sandbox-test-claude-md-missing");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let result = scan_claude_md(&dir).await;
+        assert!(result.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── scan_skills ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn scan_skills_finds_md_files() {
+        let dir = std::env::temp_dir().join("sandbox-test-skills");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let commands_dir = dir.join(".claude").join("commands");
+        tokio::fs::create_dir_all(&commands_dir).await.unwrap();
+        tokio::fs::write(commands_dir.join("review.md"), "Review the code")
+            .await
+            .unwrap();
+        tokio::fs::write(commands_dir.join("deploy.md"), "Deploy the app")
+            .await
+            .unwrap();
+        // Non-md file should be ignored
+        tokio::fs::write(commands_dir.join("notes.txt"), "ignored")
+            .await
+            .unwrap();
+
+        let skills = scan_skills(&dir).await;
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, "deploy");
+        assert_eq!(skills[0].content, "Deploy the app");
+        assert_eq!(skills[1].name, "review");
+        assert_eq!(skills[1].content, "Review the code");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn scan_skills_returns_empty_when_no_commands_dir() {
+        let dir = std::env::temp_dir().join("sandbox-test-skills-empty");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let skills = scan_skills(&dir).await;
+        assert!(skills.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── write_github_token ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_github_token_creates_file_and_parent_dir() {
+        let base = std::env::temp_dir().join("sandbox-test-token");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        let path = base.join("nested").join("github-token");
+
+        write_github_token(path.to_str().unwrap(), "ghp_secret")
+            .await
+            .unwrap();
+
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(written, "ghp_secret");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = tokio::fs::metadata(&path)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    // ── initialize_scratch ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn initialize_scratch_returns_workspace() {
+        let dir = std::env::temp_dir().join("sandbox-test-init-scratch");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+
+        let workspace = dir.to_str().unwrap();
+        let result = initialize_scratch(workspace).await;
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.cwd, workspace);
+        assert!(resp.exported_system_prompt.is_none());
+        assert!(resp.exported_skills.is_empty());
+        assert!(resp.error.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── initialize_repo ────────────────────────────────────────────
+
+    /// Returns true when `git` is on PATH (not available inside nix build sandbox).
+    async fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[tokio::test]
+    async fn initialize_repo_with_local_bare_repo() {
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-init-repo");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        // Create a bare repo with CLAUDE.md and a skill
+        let bare_dir = base.join("test-repo.git");
+        let work_dir = base.join("work");
+
+        // Init bare repo
+        let output = Command::new("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git init --bare failed");
+
+        // Clone it to a work dir, add files, push
+        let output = Command::new("git")
+            .args([
+                "clone",
+                bare_dir.to_str().unwrap(),
+                work_dir.to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git clone failed");
+
+        tokio::fs::write(work_dir.join("CLAUDE.md"), "# Test instructions")
+            .await
+            .unwrap();
+        let cmds_dir = work_dir.join(".claude").join("commands");
+        tokio::fs::create_dir_all(&cmds_dir).await.unwrap();
+        tokio::fs::write(cmds_dir.join("review.md"), "Review everything")
+            .await
+            .unwrap();
+
+        // Configure git user for commit
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                work_dir.to_str().unwrap(),
+                "config",
+                "user.email",
+                "test@test.com",
+            ])
+            .output()
+            .await;
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                work_dir.to_str().unwrap(),
+                "config",
+                "user.name",
+                "Test",
+            ])
+            .output()
+            .await;
+        let _ = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "add", "-f", "."])
+            .output()
+            .await;
+        let output = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "commit", "-m", "init"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "push"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Use a temp workspace dir for the clone target
+        let workspace = base.join("workspace");
+        let result = initialize_repo(
+            workspace.to_str().unwrap(),
+            Some(bare_dir.to_str().unwrap()),
+        )
+        .await;
+        assert!(result.is_ok(), "initialize_repo failed: {:?}", result);
+        let resp = result.unwrap();
+        assert!(resp.cwd.ends_with("/test-repo"));
+        assert!(resp.error.is_none());
+
+        // Verify CLAUDE.md was found
+        let prompt = resp.exported_system_prompt.unwrap();
+        assert_eq!(prompt.file_name, "CLAUDE.md");
+        assert!(prompt.content.contains("Test instructions"));
+
+        // Verify skill was found
+        assert_eq!(resp.exported_skills.len(), 1);
+        assert_eq!(resp.exported_skills[0].name, "review");
+        assert!(resp.exported_skills[0]
+            .content
+            .contains("Review everything"));
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn initialize_repo_missing_url_fails() {
+        let result = initialize_repo("/tmp/sandbox-test-missing", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("repo_url"));
+    }
+
+    #[tokio::test]
+    async fn initialize_repo_bad_url_fails() {
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-bad-url");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+
+        let result = initialize_repo(
+            dir.to_str().unwrap(),
+            Some("https://invalid.example.com/nonexistent/repo.git"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("git clone failed"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
