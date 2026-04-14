@@ -90,16 +90,19 @@ impl Agents {
             .workspace_id(workspace_id)
             .agent_role(agent_role)
             .name(name)
-            .authz_scopes(authz_scopes.clone())
+            .authz_scopes(authz_scopes)
             .build()
             .expect("NewAgent build");
 
         let agent = self.repo.create_in_op(op, new_agent).await?;
 
-        let scope_refs: Vec<&str> = authz_scopes.iter().map(String::as_str).collect();
+        // Build the prompt's `tools` array from the registry as if the
+        // agent were calling them — it will, with these same scopes, once
+        // the session is live.
+        let agent_subject = agent.auth_subject();
         let tools: Vec<llm::prompt::Tool> = self
             .toolsets
-            .top_level_tools(&scope_refs)
+            .top_level_tools(&agent_subject)
             .map(|t| llm::prompt::Tool::from(t.as_ref()))
             .collect();
 
