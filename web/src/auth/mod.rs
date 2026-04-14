@@ -116,7 +116,7 @@ async fn resolve_auth_context(
                         return AuthSubject::Agent(
                             agent.workspace_id,
                             agent.id,
-                            vec!["agent".to_string()],
+                            vec![domain::primitives::AuthScope::from("agent")],
                         );
                     }
                 }

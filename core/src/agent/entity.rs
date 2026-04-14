@@ -1,7 +1,7 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::primitives::{AgentId, AuthSubject, UserId, WorkspaceId};
+use crate::primitives::{AgentId, AuthScope, AuthSubject, UserId, WorkspaceId};
 use es_entity::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
@@ -20,7 +20,7 @@ pub enum AgentEvent {
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: String,
-        authz_scopes: Vec<String>,
+        authz_scopes: Vec<AuthScope>,
     },
 }
 
@@ -31,7 +31,7 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_role: AgentRole,
     pub name: String,
-    pub authz_scopes: Vec<String>,
+    pub authz_scopes: Vec<AuthScope>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -90,7 +90,7 @@ pub struct NewAgent {
     pub(super) agent_role: AgentRole,
     #[builder(setter(into))]
     pub(super) name: String,
-    pub(super) authz_scopes: Vec<String>,
+    pub(super) authz_scopes: Vec<AuthScope>,
 }
 
 impl NewAgent {

@@ -1,4 +1,4 @@
-use super::{AgentId, McpCredsId, UserId, UserMessageSource, WorkspaceId};
+use super::{AgentId, AuthScope, McpCredsId, UserId, UserMessageSource, WorkspaceId};
 
 /// Unified authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
@@ -6,14 +6,14 @@ pub enum AuthSubject {
     /// Authenticated via session cookie (human user in browser).
     User(UserId),
     /// Authenticated via bearer token issued to a user (exported agent credential).
-    ExportedAgent(UserId, McpCredsId, Vec<String>),
+    ExportedAgent(UserId, McpCredsId, Vec<AuthScope>),
     /// Agent acting within its workspace without user attribution.
-    Agent(WorkspaceId, AgentId, Vec<String>),
+    Agent(WorkspaceId, AgentId, Vec<AuthScope>),
     /// Agent acting within its workspace on behalf of a known user — used
     /// when the agent's tool calls are triggered by a request that itself
     /// originated from a `User` or `ExportedAgent`. Carries enough context
     /// to attribute downstream actions back to the originating user.
-    AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<String>),
+    AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<AuthScope>),
     /// No authentication provided.
     Anonymous,
 }
@@ -42,7 +42,7 @@ impl AuthSubject {
     }
 
     /// Return the scopes associated with this auth subject.
-    pub fn scopes(&self) -> &[String] {
+    pub fn scopes(&self) -> &[AuthScope] {
         match self {
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
@@ -59,7 +59,7 @@ impl AuthSubject {
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
             | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => {
-                scopes.iter().any(|s| s == scope)
+                scopes.iter().any(|s| s.as_str() == scope)
             }
             AuthSubject::Anonymous => false,
         }

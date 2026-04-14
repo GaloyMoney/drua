@@ -14,7 +14,7 @@ pub enum McpCredsEvent {
         owner: McpCredsOwner,
         name: String,
         token_hash: String,
-        scopes: Vec<String>,
+        scopes: Vec<AuthScope>,
     },
     Revoked {
         revoked_at: chrono::DateTime<chrono::Utc>,
@@ -28,7 +28,7 @@ pub struct McpCreds {
     pub owner: McpCredsOwner,
     pub name: String,
     pub(crate) token_hash: String,
-    pub scopes: Vec<String>,
+    pub scopes: Vec<AuthScope>,
     #[builder(setter(strip_option), default)]
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     events: EntityEvents<McpCredsEvent>,
@@ -109,7 +109,7 @@ pub struct NewMcpCreds {
     pub(super) name: String,
     #[builder(setter(into))]
     pub(crate) token_hash: String,
-    pub(super) scopes: Vec<String>,
+    pub(super) scopes: Vec<AuthScope>,
 }
 
 impl NewMcpCreds {
@@ -139,7 +139,7 @@ impl IntoEvents<McpCredsEvent> for NewMcpCreds {
 mod tests {
     use es_entity::{Idempotent, IntoEvents as _, TryFromEvents as _};
 
-    use crate::primitives::{McpCredsId, McpCredsOwner, UserId};
+    use crate::primitives::{AuthScope, McpCredsId, McpCredsOwner, UserId};
 
     use super::{McpCreds, NewMcpCreds};
 
@@ -151,7 +151,7 @@ mod tests {
             })
             .name("test-creds")
             .token_hash("hash123")
-            .scopes(vec!["read".to_string(), "write".to_string()])
+            .scopes(vec![AuthScope::from("read"), AuthScope::from("write")])
             .build()
             .unwrap();
 
@@ -162,7 +162,10 @@ mod tests {
     fn mcp_creds_hydration() {
         let creds = new_mcp_creds();
         assert_eq!(creds.name, "test-creds");
-        assert_eq!(creds.scopes, vec!["read", "write"]);
+        assert_eq!(
+            creds.scopes,
+            vec![AuthScope::from("read"), AuthScope::from("write")]
+        );
         assert!(!creds.is_revoked());
     }
 

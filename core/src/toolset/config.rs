@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::primitives::AuthScope;
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ToolSetsConfig {
     #[serde(default)]
@@ -36,7 +38,7 @@ pub struct McpUpstreamConfig {
     pub allowed_tools: Option<Vec<String>>,
     /// Scopes required to access this upstream. Empty means unrestricted.
     #[serde(default)]
-    pub required_scopes: Option<Vec<String>>,
+    pub required_scopes: Option<Vec<AuthScope>>,
 }
 
 fn default_auth_header_name() -> String {
