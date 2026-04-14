@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-load sandbox-light-helpers
+load sandbox-helpers
 
 setup_file() {
   start_sandbox_server
@@ -12,7 +12,7 @@ teardown_file() {
 
 # ── Health check ─────────────────────────────────────────────────────
 
-@test "sandbox-light: GET /health returns 200" {
+@test "sandbox: GET /health returns 200" {
   run curl -sf "$(sandbox_url)/health"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -21,7 +21,7 @@ teardown_file() {
 
 # ── Bash tool ────────────────────────────────────────────────────────
 
-@test "sandbox-light: bash executes a simple command" {
+@test "sandbox: bash executes a simple command" {
   RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"echo hello world"}}')
   echo "$RESP"
 
@@ -29,7 +29,7 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "hello world"
 }
 
-@test "sandbox-light: bash returns error on non-zero exit" {
+@test "sandbox: bash returns error on non-zero exit" {
   RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"exit 42"}}')
   echo "$RESP"
 
@@ -37,7 +37,7 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "Exit code 42"
 }
 
-@test "sandbox-light: bash restart returns success" {
+@test "sandbox: bash restart returns success" {
   RESP=$(sandbox_execute '{"tool":"bash","input":{"restart":true}}')
   echo "$RESP"
 
@@ -45,7 +45,7 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "restarted"
 }
 
-@test "sandbox-light: bash missing command returns error" {
+@test "sandbox: bash missing command returns error" {
   RESP=$(sandbox_execute '{"tool":"bash","input":{}}')
   echo "$RESP"
 
@@ -53,7 +53,7 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "command"
 }
 
-@test "sandbox-light: bash captures stderr" {
+@test "sandbox: bash captures stderr" {
   RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"echo out; echo err >&2"}}')
   echo "$RESP"
 
@@ -64,7 +64,7 @@ teardown_file() {
 
 # ── Text editor: create ──────────────────────────────────────────────
 
-@test "sandbox-light: text editor creates a file" {
+@test "sandbox: text editor creates a file" {
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"create\",\"path\":\"$SANDBOX_WORK/created.txt\",\"file_text\":\"line one\nline two\nline three\"}}")
   echo "$RESP"
 
@@ -77,7 +77,7 @@ teardown_file() {
   grep -q "line three" "$SANDBOX_WORK/created.txt"
 }
 
-@test "sandbox-light: text editor creates nested directories" {
+@test "sandbox: text editor creates nested directories" {
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"create\",\"path\":\"$SANDBOX_WORK/deep/nested/dir/file.txt\",\"file_text\":\"nested content\"}}")
   echo "$RESP"
 
@@ -87,7 +87,7 @@ teardown_file() {
 
 # ── Text editor: view (file) ────────────────────────────────────────
 
-@test "sandbox-light: text editor views a file with line numbers" {
+@test "sandbox: text editor views a file with line numbers" {
   # Create file first
   echo -e "alpha\nbeta\ngamma" > "$SANDBOX_WORK/viewme.txt"
 
@@ -100,7 +100,7 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "3: gamma"
 }
 
-@test "sandbox-light: text editor views a file with view_range" {
+@test "sandbox: text editor views a file with view_range" {
   echo -e "a\nb\nc\nd\ne" > "$SANDBOX_WORK/range.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"view\",\"path\":\"$SANDBOX_WORK/range.txt\",\"view_range\":[2,4]}}")
@@ -116,7 +116,7 @@ teardown_file() {
   ! echo "$OUTPUT" | grep -q "5: e"
 }
 
-@test "sandbox-light: text editor view nonexistent file returns error" {
+@test "sandbox: text editor view nonexistent file returns error" {
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"view\",\"path\":\"$SANDBOX_WORK/no_such_file.txt\"}}")
   echo "$RESP"
 
@@ -125,7 +125,7 @@ teardown_file() {
 
 # ── Text editor: view (directory) ────────────────────────────────────
 
-@test "sandbox-light: text editor views a directory" {
+@test "sandbox: text editor views a directory" {
   mkdir -p "$SANDBOX_WORK/listdir/subdir"
   echo "x" > "$SANDBOX_WORK/listdir/file_a.txt"
   echo "y" > "$SANDBOX_WORK/listdir/file_b.txt"
@@ -141,7 +141,7 @@ teardown_file() {
 
 # ── Text editor: str_replace ─────────────────────────────────────────
 
-@test "sandbox-light: text editor str_replace succeeds on unique match" {
+@test "sandbox: text editor str_replace succeeds on unique match" {
   echo "hello world" > "$SANDBOX_WORK/replace.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"str_replace\",\"path\":\"$SANDBOX_WORK/replace.txt\",\"old_str\":\"hello world\",\"new_str\":\"hello rust\"}}")
@@ -152,7 +152,7 @@ teardown_file() {
   grep -q "hello rust" "$SANDBOX_WORK/replace.txt"
 }
 
-@test "sandbox-light: text editor str_replace fails on no match" {
+@test "sandbox: text editor str_replace fails on no match" {
   echo "hello world" > "$SANDBOX_WORK/replace_nomatch.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"str_replace\",\"path\":\"$SANDBOX_WORK/replace_nomatch.txt\",\"old_str\":\"nonexistent\",\"new_str\":\"whatever\"}}")
@@ -162,7 +162,7 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "No match found"
 }
 
-@test "sandbox-light: text editor str_replace fails on multiple matches" {
+@test "sandbox: text editor str_replace fails on multiple matches" {
   echo -e "foo bar foo" > "$SANDBOX_WORK/replace_multi.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"str_replace\",\"path\":\"$SANDBOX_WORK/replace_multi.txt\",\"old_str\":\"foo\",\"new_str\":\"baz\"}}")
@@ -174,7 +174,7 @@ teardown_file() {
 
 # ── Text editor: insert ──────────────────────────────────────────────
 
-@test "sandbox-light: text editor insert at beginning of file" {
+@test "sandbox: text editor insert at beginning of file" {
   echo -e "line one\nline two" > "$SANDBOX_WORK/insert.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"insert\",\"path\":\"$SANDBOX_WORK/insert.txt\",\"insert_line\":0,\"new_str\":\"header\"}}")
@@ -188,7 +188,7 @@ teardown_file() {
   [ "$HEAD" = "header" ]
 }
 
-@test "sandbox-light: text editor insert in middle of file" {
+@test "sandbox: text editor insert in middle of file" {
   echo -e "first\nthird" > "$SANDBOX_WORK/insert_mid.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"insert\",\"path\":\"$SANDBOX_WORK/insert_mid.txt\",\"insert_line\":1,\"new_str\":\"second\"}}")
@@ -206,7 +206,7 @@ teardown_file() {
 
 # ── Unknown tool ─────────────────────────────────────────────────────
 
-@test "sandbox-light: unknown tool returns error" {
+@test "sandbox: unknown tool returns error" {
   RESP=$(sandbox_execute '{"tool":"unknown_tool","input":{}}')
   echo "$RESP"
 
@@ -214,16 +214,129 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "Unknown tool"
 }
 
+# ── Initialize: scratch ──────────────────────────────────────────────
+
+@test "sandbox: POST /initialize scratch returns workspace cwd" {
+  RESP=$(sandbox_initialize '{"mode":"scratch"}')
+  echo "$RESP"
+
+  CWD=$(echo "$RESP" | jq -r '.cwd')
+  [ "$CWD" = "$SANDBOX_WORK" ]
+  echo "$RESP" | jq -e '.exported_system_prompt == null'
+  echo "$RESP" | jq -e '.exported_skills == []'
+  echo "$RESP" | jq -e '.error == null'
+}
+
+# ── Initialize: repo ────────────────────────────────────────────────
+
+@test "sandbox: POST /initialize repo clones and returns cwd" {
+  # Create a local bare repo to clone
+  BARE_DIR="$BATS_FILE_TMPDIR/init-test-bare.git"
+  WORK_DIR="$BATS_FILE_TMPDIR/init-test-work"
+  rm -rf "$BARE_DIR" "$WORK_DIR"
+
+  git init --bare "$BARE_DIR"
+  git clone "$BARE_DIR" "$WORK_DIR"
+  echo "hello" > "$WORK_DIR/README.md"
+  git -C "$WORK_DIR" config user.email "test@test.com"
+  git -C "$WORK_DIR" config user.name "Test"
+  git -C "$WORK_DIR" add -A
+  git -C "$WORK_DIR" commit -m "init"
+  git -C "$WORK_DIR" push
+
+  RESP=$(sandbox_initialize "{\"mode\":\"repo\",\"repo_url\":\"$BARE_DIR\"}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.error == null'
+  CWD=$(echo "$RESP" | jq -r '.cwd')
+  echo "cwd=$CWD"
+  [[ "$CWD" == *"/repos/init-test-bare" ]]
+  # Verify the cloned directory actually exists
+  [ -d "$CWD" ]
+}
+
+@test "sandbox: POST /initialize repo returns CLAUDE.md when present" {
+  BARE_DIR="$BATS_FILE_TMPDIR/init-claude-bare.git"
+  WORK_DIR="$BATS_FILE_TMPDIR/init-claude-work"
+  rm -rf "$BARE_DIR" "$WORK_DIR"
+
+  git init --bare "$BARE_DIR"
+  git clone "$BARE_DIR" "$WORK_DIR"
+  echo "# My Instructions" > "$WORK_DIR/CLAUDE.md"
+  git -C "$WORK_DIR" config user.email "test@test.com"
+  git -C "$WORK_DIR" config user.name "Test"
+  git -C "$WORK_DIR" add -A
+  git -C "$WORK_DIR" commit -m "init"
+  git -C "$WORK_DIR" push
+
+  RESP=$(sandbox_initialize "{\"mode\":\"repo\",\"repo_url\":\"$BARE_DIR\"}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.error == null'
+  echo "$RESP" | jq -e '.exported_system_prompt != null'
+  echo "$RESP" | jq -e '.exported_system_prompt.file_name == "CLAUDE.md"'
+  echo "$RESP" | jq -r '.exported_system_prompt.content' | grep -q "My Instructions"
+}
+
+@test "sandbox: POST /initialize repo returns skills from .claude/commands/" {
+  BARE_DIR="$BATS_FILE_TMPDIR/init-skills-bare.git"
+  WORK_DIR="$BATS_FILE_TMPDIR/init-skills-work"
+  rm -rf "$BARE_DIR" "$WORK_DIR"
+
+  git init --bare "$BARE_DIR"
+  git clone "$BARE_DIR" "$WORK_DIR"
+  mkdir -p "$WORK_DIR/.claude/commands"
+  echo "Review the code carefully" > "$WORK_DIR/.claude/commands/review.md"
+  echo "Deploy to production" > "$WORK_DIR/.claude/commands/deploy.md"
+  git -C "$WORK_DIR" config user.email "test@test.com"
+  git -C "$WORK_DIR" config user.name "Test"
+  git -C "$WORK_DIR" add -f .
+  git -C "$WORK_DIR" commit -m "init"
+  git -C "$WORK_DIR" push
+
+  RESP=$(sandbox_initialize "{\"mode\":\"repo\",\"repo_url\":\"$BARE_DIR\"}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.error == null'
+  SKILLS_COUNT=$(echo "$RESP" | jq '.exported_skills | length')
+  [ "$SKILLS_COUNT" -eq 2 ]
+  echo "$RESP" | jq -e '.exported_skills[] | select(.name == "review") | .content' | grep -q "Review the code"
+  echo "$RESP" | jq -e '.exported_skills[] | select(.name == "deploy") | .content' | grep -q "Deploy to production"
+}
+
+@test "sandbox: POST /initialize repo with bad URL returns error" {
+  RESP=$(sandbox_initialize '{"mode":"repo","repo_url":"https://invalid.example.com/no/repo.git"}')
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.error != null'
+  echo "$RESP" | jq -r '.error' | grep -qi "clone"
+}
+
+@test "sandbox: POST /initialize missing mode returns 422" {
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "$(sandbox_url)/initialize" \
+    -H "Content-Type: application/json" -d '{}')
+  [ "$HTTP_CODE" = "422" ]
+}
+
+@test "sandbox: POST /initialize unknown mode returns error" {
+  RESP=$(sandbox_initialize '{"mode":"unknown"}')
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.error != null'
+  echo "$RESP" | jq -r '.error' | grep -q "Unknown mode"
+}
+
 # ── Error paths ──────────────────────────────────────────────────────
 
-@test "sandbox-light: POST /execute with invalid JSON returns 400" {
+@test "sandbox: POST /execute with invalid JSON returns 400" {
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$(sandbox_url)/execute" \
     -H "Content-Type: application/json" -d 'not-json')
   [ "$HTTP_CODE" = "400" ]
 }
 
-@test "sandbox-light: GET unknown route returns 404" {
+@test "sandbox: GET unknown route returns 404" {
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$(sandbox_url)/nonexistent")
   [ "$HTTP_CODE" = "404" ]
 }

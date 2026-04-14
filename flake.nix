@@ -123,7 +123,6 @@
 
           exec bats bats/*.bats
         '';
-        agentHarness = import ./images/sandbox-base/harness.nix { inherit pkgs; };
       in
       {
         checks = {
@@ -175,61 +174,13 @@
           in "${wrapped}/bin/run-bats";
         };
 
-        apps.harness-bats = {
-          type = "app";
-          program = let
-            agentHarnessWrapper = pkgs.writeShellScriptBin "agent-harness" ''
-              exec ${pkgs.nodejs_22}/bin/node ${agentHarness}/lib/index.js "$@"
-            '';
-            wrapped = pkgs.writeShellScriptBin "run-harness-bats" ''
-              set -euo pipefail
-              export TERM="''${TERM:-dumb}"
-              export AGENT_HARNESS_BIN="${agentHarnessWrapper}/bin/agent-harness"
-              export PATH="${pkgs.lib.makeBinPath [
-                pkgs.bats
-                pkgs.jq
-                pkgs.curl
-                pkgs.coreutils
-                pkgs.gawk
-                pkgs.gnugrep
-                pkgs.nodejs_22
-                pkgs.git
-                pkgs.cacert
-                pkgs.shadow
-              ]}:$PATH"
-
-              # Claude Code CLI refuses --dangerously-skip-permissions as root.
-              # Drop to a non-root user when running in CI.
-              if [ "$(id -u)" = "0" ]; then
-                useradd -m testuser 2>/dev/null || true
-                chown -R testuser: . 2>/dev/null || true
-                TESTUSER_UID=$(id -u testuser)
-                TESTUSER_GID=$(id -g testuser)
-                exec ${pkgs.util-linux}/bin/setpriv \
-                  --reuid="$TESTUSER_UID" \
-                  --regid="$TESTUSER_GID" \
-                  --init-groups \
-                  env \
-                    ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-                    AGENT_HARNESS_BIN="$AGENT_HARNESS_BIN" \
-                    TERM="$TERM" \
-                    PATH="$PATH" \
-                    HOME=/home/testuser \
-                  bats bats/harness.bats
-              fi
-
-              exec bats bats/harness.bats
-            '';
-          in "${wrapped}/bin/run-harness-bats";
-        };
-
-        apps.sandbox-light-bats = {
+        apps.sandbox-bats = {
           type = "app";
           program = let
             sandboxToolServerWrapper = pkgs.writeShellScriptBin "sandbox-tool-server" ''
               exec ${self.packages.${system}.sandbox-tool-server}/bin/sandbox-tool-server "$@"
             '';
-            wrapped = pkgs.writeShellScriptBin "run-sandbox-light-bats" ''
+            wrapped = pkgs.writeShellScriptBin "run-sandbox-bats" ''
               set -euo pipefail
               export TERM="''${TERM:-dumb}"
               export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerWrapper}/bin/sandbox-tool-server"
@@ -240,11 +191,12 @@
                 pkgs.coreutils
                 pkgs.gawk
                 pkgs.gnugrep
+                pkgs.git
               ]}:$PATH"
 
-              exec bats bats/sandbox-light.bats
+              exec bats bats/sandbox.bats
             '';
-          in "${wrapped}/bin/run-sandbox-light-bats";
+          in "${wrapped}/bin/run-sandbox-bats";
         };
 
         apps.prep-code-assistant = {
@@ -307,15 +259,13 @@
           };
         };
 
-        packages.sandbox-base-image = import ./images/sandbox-base/default.nix { inherit pkgs; };
-
         packages.sandbox-tool-server = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "sandbox-tool-server";
           cargoExtraArgs = "-p sandbox-tool-server";
         });
 
-        packages.sandbox-light-image = import ./images/sandbox-light/default.nix {
+        packages.sandbox-image = import ./images/sandbox/default.nix {
           inherit pkgs;
           sandbox-tool-server = self.packages.${system}.sandbox-tool-server;
         };

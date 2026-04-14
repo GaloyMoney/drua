@@ -12,13 +12,12 @@ start_sandbox_server() {
   mkdir -p "$SANDBOX_WORK"
 
   export PORT="$SERVER_PORT"
-  # Text editor commands operate on files inside the workspace.
-  cd "$SANDBOX_WORK"
+  export WORKSPACE_ROOT="$SANDBOX_WORK"
 
+  # Run from REPO_ROOT so `cargo run` (the default binary) can find Cargo.toml.
+  cd "$REPO_ROOT"
   $SANDBOX_TOOL_SERVER_BIN > "$SERVER_LOG" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
-
-  cd "$REPO_ROOT"
 
   # Wait for server to be ready
   for _i in $(seq 1 60); do
@@ -60,6 +59,16 @@ sandbox_execute() {
   local body="$1"
   curl -sf --max-time 30 \
     -X POST "$(sandbox_url)/execute" \
+    -H "Content-Type: application/json" \
+    -d "$body"
+}
+
+# Post to the /initialize endpoint.
+# Usage: sandbox_initialize '{"mode":"scratch"}'
+sandbox_initialize() {
+  local body="$1"
+  curl -sf --max-time 30 \
+    -X POST "$(sandbox_url)/initialize" \
     -H "Content-Type: application/json" \
     -d "$body"
 }

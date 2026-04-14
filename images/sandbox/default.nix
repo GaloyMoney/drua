@@ -43,7 +43,7 @@ let
   '';
 in
 pkgs.dockerTools.buildLayeredImage {
-  name = "sandbox-light";
+  name = "sandbox";
   tag = "latest";
   contents = [
     passwd
