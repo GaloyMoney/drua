@@ -29,7 +29,7 @@ impl McpCredentials {
         user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
         token_hash: impl Into<String> + std::fmt::Debug,
-        scopes: Vec<String>,
+        scopes: Vec<AuthScope>,
     ) -> Result<McpCreds, McpCredsError> {
         let new_creds = NewMcpCreds::builder()
             .owner(McpCredsOwner::User { user_id })
@@ -51,7 +51,7 @@ impl McpCredentials {
         owner: impl Into<McpCredsOwner> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         token_hash: impl Into<String> + std::fmt::Debug,
-        scopes: Vec<String>,
+        scopes: Vec<AuthScope>,
     ) -> Result<McpCreds, McpCredsError> {
         let new_creds = NewMcpCreds::builder()
             .owner(owner.into())

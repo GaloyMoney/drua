@@ -2,9 +2,11 @@
 //! domain. Folded back into core when the standalone `primitives` and
 //! `agent` crates were dissolved.
 
+mod auth_scope;
 pub mod auth_subject;
 mod chat_output_event;
 
+pub use auth_scope::AuthScope;
 pub use auth_subject::AuthSubject;
 pub use chat_output_event::ChatOutputEvent;
 

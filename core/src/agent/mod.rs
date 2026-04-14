@@ -11,18 +11,18 @@ use crate::toolset::ToolSets;
 /// Default authorization scopes granted to an agent when it's created.
 /// Eventually this will move into role-config, but for now it's hard-wired:
 /// `WorkspaceLead` gets read+write on its own workspace.
-fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<String> {
+fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
     match role {
         AgentRole::WorkspaceLead => vec![
-            format!("ws:{workspace_id}:read"),
-            format!("ws:{workspace_id}:write"),
+            AuthScope::from(format!("ws:{workspace_id}:read")),
+            AuthScope::from(format!("ws:{workspace_id}:write")),
         ],
     }
 }
 
 use tracing::instrument;
 
-use crate::primitives::{AgentId, AuthSubject, ChatOutputEvent, WorkspaceId};
+use crate::primitives::{AgentId, AuthScope, AuthSubject, ChatOutputEvent, WorkspaceId};
 pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;

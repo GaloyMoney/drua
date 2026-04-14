@@ -11,6 +11,7 @@ use rmcp::{
 };
 
 use crate::auth::AuthSubject;
+use crate::primitives::AuthScope;
 
 use super::super::{McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError};
 
@@ -20,7 +21,7 @@ pub struct UpstreamToolSet {
     category: String,
     category_description: String,
     /// Scopes required to see / invoke this upstream. Empty = unrestricted.
-    required_scopes: Vec<String>,
+    required_scopes: Vec<AuthScope>,
     tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,
 }
@@ -128,6 +129,8 @@ impl SearchableToolSet for UpstreamToolSet {
     }
 }
 
-fn has_required_scopes(required: &[String], subject: &AuthSubject) -> bool {
-    required.iter().all(|scope| subject.has_scope(scope))
+fn has_required_scopes(required: &[AuthScope], subject: &AuthSubject) -> bool {
+    required
+        .iter()
+        .all(|scope| subject.has_scope(scope.as_str()))
 }

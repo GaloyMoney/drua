@@ -168,7 +168,7 @@ async fn create_mcp_creds(
     let (raw_token, token_hash) = generate_token();
 
     let scopes = if form.admin.as_deref() == Some("true") {
-        vec!["admin".to_string()]
+        vec![domain::primitives::AuthScope::from("admin")]
     } else {
         vec![]
     };
