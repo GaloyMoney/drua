@@ -134,7 +134,7 @@ kubernetes-mcp-server:
       - name: readonly
         rules:
           - apiGroups: [""]
-            resources: [pods, pods/log, services, events, namespaces, nodes, endpoints, persistentvolumeclaims, replicationcontrollers]
+            resources: [pods, pods/log, services, events, namespaces, nodes, endpoints, persistentvolumeclaims, replicationcontrollers, configmaps]
             verbs: [get, list, watch]
           - apiGroups: [""]
             resources: [nodes/proxy]

@@ -97,3 +97,14 @@ data:
       client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}
       installation_id: {{ .Values.galoyAgents.config.githubApp.installationId | quote }}
     {{- end }}
+    {{- if .Values.sandbox.namespace }}
+    # Sandbox provisioning. Without this section the binary defaults to
+    # SandboxBackendConfig::Local which tries to `cargo run` the
+    # sandbox-tool-server — fine for local dev, broken in the prod image
+    # (no cargo, no source). Render the K8s backend whenever the chart
+    # has the sandbox subchart configured.
+    sandbox:
+      backend: k8s
+      namespace: {{ .Values.sandbox.namespace | quote }}
+      template_name: {{ .Values.sandbox.templateName | quote }}
+    {{- end }}

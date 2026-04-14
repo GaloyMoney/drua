@@ -31,7 +31,10 @@ impl Default for SandboxBackendConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SandboxConfig {
-    #[serde(default)]
+    /// Flattened so the YAML is `sandbox.backend: k8s` (with sibling
+    /// `namespace` / `template_name`) instead of the previous nested
+    /// `sandbox.backend.backend: k8s`.
+    #[serde(default, flatten)]
     pub backend: SandboxBackendConfig,
     /// For local mode: parent of the `.sandboxes/` directory. Defaults to `.`.
     #[serde(default = "default_local_repo_root")]

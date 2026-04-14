@@ -24,13 +24,11 @@ sandbox:
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.
   #
   # Swap to k8s with:
-  #   backend:
-  #     backend: k8s
-  #     namespace: galoy-agents-sandboxes
-  #     template_name: agent-sandbox
-  backend:
-    backend: local
-    sandbox_spawn_cmd: "cargo run -q -p sandbox-tool-server --"
+  #   backend: k8s
+  #   namespace: galoy-agents-sandboxes
+  #   template_name: agent-sandbox
+  backend: local
+  sandbox_spawn_cmd: "cargo run -q -p sandbox-tool-server --"
   local_repo_root: "."
 
 toolsets:
