@@ -201,6 +201,22 @@ impl std::fmt::Display for InteractionOutcome {
     }
 }
 
+/// Accumulated audit fields collected via [`EventContext`] during a request.
+///
+/// Each field is optional — callers record fields progressively via the
+/// type-safe `Audit::record_*` helpers and a final `Audit::collect_context`
+/// reads the snapshot before persistence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditContextData {
+    pub subject: Option<AuditSubject>,
+    pub interaction_type: Option<InteractionType>,
+    pub action: Option<String>,
+    pub outcome: Option<InteractionOutcome>,
+    pub duration_ms: Option<u64>,
+    pub tokens_returned: Option<u64>,
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// A recorded audit entry.
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
