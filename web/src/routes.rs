@@ -536,6 +536,7 @@ async fn workspaces_page(State(state): State<AppState>, session: Session) -> Res
         workspaces: workspaces.iter().map(workspace_to_view).collect(),
         selected_workspace: None,
         selected_workspace_id: String::new(),
+        lead_agent: None,
         agents: vec![],
         selected_agent_id: String::new(),
     }
@@ -620,7 +621,6 @@ async fn workspace_detail(
 
     WorkspaceDetailTemplate {
         workspace: workspace_to_view(&ws),
-        lead_agent,
         lead_agent,
         agents: agent_views,
     }
@@ -855,7 +855,6 @@ async fn workspace_skills_page(
     WorkspaceSkillsPageTemplate {
         workspace: workspace_to_view(&ws),
         lead_agent,
-        lead_agent,
         agents: agent_views,
         skills: skills.iter().map(skill_to_view).collect(),
     }
@@ -882,7 +881,6 @@ async fn workspace_skill_new(
 
     WorkspaceSkillNewTemplate {
         workspace: workspace_to_view(&ws),
-        lead_agent,
         lead_agent,
         agents: agent_views,
     }
@@ -950,7 +948,6 @@ async fn workspace_skill_edit(
 
     WorkspaceSkillEditTemplate {
         workspace: workspace_to_view(&ws),
-        lead_agent,
         lead_agent,
         agents: agent_views,
         skill: skill_to_view(&skill),
@@ -1371,12 +1368,12 @@ async fn workspace_agent_create(
         .filter(|s| !s.is_empty())
         .and_then(|sb| sb.parse::<uuid::Uuid>().ok())
         .map(SandboxId::from)
-        .and_then(|sb| {
+        .map(|sb| {
             let mode = match form.attach_mode.as_deref().unwrap_or("read") {
                 "write" => SandboxAgentMode::Write,
                 _ => SandboxAgentMode::Read,
             };
-            Some((sb, mode))
+            (sb, mode)
         });
 
     match state
