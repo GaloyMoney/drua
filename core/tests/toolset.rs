@@ -1,3 +1,4 @@
+use galoy_agents_core::primitives::AuthSubject;
 use galoy_agents_core::toolset::*;
 
 #[tokio::test]
@@ -27,10 +28,10 @@ async fn init_toolsets() {
     };
     let toolsets = ToolSets::init(config, None).await.unwrap();
 
-    // The unauthenticated `Anonymous` subject only sees built-ins that don't
-    // require scopes — search/describe/call_tool. Make sure init succeeded
-    // and the registry has the upstream loaded.
-    let scopes: Vec<&str> = vec![];
-    let visible: Vec<_> = toolsets.top_level_tools(&scopes).collect();
+    // Anonymous subject still sees the unrestricted builtins — the new
+    // trait defaults `is_visible` to `true`. Make sure init succeeded and
+    // the registry exposes the catalog meta-tools.
+    let subject = AuthSubject::Anonymous;
+    let visible: Vec<_> = toolsets.top_level_tools(&subject).collect();
     assert!(visible.iter().any(|t| t.name() == "search_tools"));
 }

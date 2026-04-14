@@ -133,22 +133,21 @@ impl ToolSets {
         lines.join("\n")
     }
 
-    /// Top-level tools visible to a caller with the given `scopes`. A tool is
-    /// included if its `is_authorized(scopes, None)` returns `true` — i.e. it
-    /// can be invoked for at least *some* arguments. Used to populate prompt
-    /// `tools` arrays and the MCP `list_tools` response.
+    /// Top-level tools visible to the given `subject`. A tool is included
+    /// iff its [`TopLevelTool::is_visible`] returns `true`. Used to populate
+    /// prompt `tools` arrays and the MCP `list_tools` response.
     pub fn top_level_tools<'a>(
         &'a self,
-        scopes: &'a [&'a str],
+        subject: &'a AuthSubject,
     ) -> impl Iterator<Item = &'a Arc<dyn TopLevelTool>> + 'a {
         self.top_level
             .values()
-            .filter(move |t| t.is_authorized(scopes, None))
+            .filter(move |t| t.is_visible(subject))
     }
 
-    /// Look up and execute a top-level tool by name. Performs scope check +
-    /// dispatch + audit so the MCP server's `call_tool` RPC can delegate
-    /// straight here.
+    /// Look up and execute a top-level tool by name. Runs
+    /// [`TopLevelTool::can_execute`] + dispatch + audit so the MCP server's
+    /// `call_tool` RPC can delegate straight here.
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -160,9 +159,8 @@ impl ToolSets {
             .get(name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?;
 
-        let scopes: Vec<&str> = subject.scopes().iter().map(String::as_str).collect();
-        if !tool.is_authorized(&scopes, arguments.as_ref()) {
-            return Err(ToolSetsError::ToolNotFound(name.to_string()));
+        if !tool.can_execute(subject) {
+            return Err(ToolSetsError::Unauthorized);
         }
 
         let start = std::time::Instant::now();

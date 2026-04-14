@@ -25,11 +25,17 @@ pub trait TopLevelTool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> &serde_json::Value;
 
-    /// Decide whether a caller with the given `scopes` is allowed to invoke
-    /// this tool with `arguments`. Default: unrestricted. Override to make
-    /// argument-aware authorization decisions (e.g. `call_tool` checking the
-    /// inner toolset's required scopes).
-    fn is_authorized(&self, _scopes: &[&str], _arguments: Option<&JsonObject>) -> bool {
+    /// Whether this tool should appear in `list_tools` / prompt tool arrays
+    /// for the given subject. Default: always visible. Override to hide a
+    /// tool (e.g. admin-only controls) without blocking execution.
+    fn is_visible(&self, _subject: &AuthSubject) -> bool {
+        true
+    }
+
+    /// Whether the subject may actually invoke this tool. Default: yes.
+    /// `ToolSets::call_top_level_tool` enforces this before dispatch and
+    /// surfaces `ToolSetsError::Unauthorized` on `false`.
+    fn can_execute(&self, _subject: &AuthSubject) -> bool {
         true
     }
 

@@ -376,38 +376,6 @@ impl TopLevelTool for CallCatalogTool {
         &CALL_SCHEMA
     }
 
-    /// Authorization is delegated to the inner toolset: look up the requested
-    /// `tool_name`, fetch its `required_scopes`, and check those against the
-    /// caller's scopes. If the inner tool can't be found we let the call
-    /// proceed and surface the not-found error there.
-    ///
-    /// When `arguments` is `None` the caller is asking "is this tool visible
-    /// at all?" (e.g. `list_tools`, prompt-tools building). Answer yes —
-    /// the inner-tool-specific scope check only makes sense once a concrete
-    /// `tool_name` is provided at invocation time.
-    fn is_authorized(&self, scopes: &[&str], arguments: Option<&JsonObject>) -> bool {
-        let Some(tool_name) = arguments
-            .and_then(|a| a.get("tool_name"))
-            .and_then(|v| v.as_str())
-        else {
-            return true;
-        };
-        let lookup = {
-            let sets = self.sets.read().expect("toolset lock poisoned");
-            find_set(&sets, tool_name)
-        };
-        let Some((set, _, _)) = lookup else {
-            // Unknown tool — authorize so the call() path can return a
-            // structured ToolNotFound error.
-            return true;
-        };
-        let required = set.required_scopes();
-        if required.is_empty() {
-            return true;
-        }
-        required.iter().all(|s| scopes.contains(s))
-    }
-
     async fn call(&self, arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
         let mut args = arguments.unwrap_or_default();
         let tool_name = args

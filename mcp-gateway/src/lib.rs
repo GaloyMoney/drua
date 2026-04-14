@@ -90,11 +90,10 @@ impl ServerHandler for McpGateway {
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let auth = Self::require_auth(&ctx)?;
-        let scopes: Vec<&str> = auth.scopes().iter().map(String::as_str).collect();
         let tools: Vec<Tool> = self
             .app
             .toolsets()
-            .top_level_tools(&scopes)
+            .top_level_tools(auth)
             .map(to_mcp_tool)
             .collect();
         Ok(ListToolsResult {
