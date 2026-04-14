@@ -34,6 +34,7 @@ pub struct Sandboxes {
 }
 
 impl Sandboxes {
+    // @@ pass audit
     pub async fn init(pool: &sqlx::PgPool, config: SandboxConfig) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
             SandboxBackendConfig::Local { sandbox_spawn_cmd } => Arc::new(LocalAdminClient::new(
@@ -225,6 +226,33 @@ impl Sandboxes {
             }
         }
         Ok(all)
+    }
+
+    /// Bring a [`SandboxState::Suspended`] sandbox back to life. Transitions
+    /// the entity to `Provisioning` and re-runs the creation lifecycle:
+    /// admin recreates the pod/process (reusing the retained PVC / local
+    /// workspace dir), then `/initialize` is called again. The server's
+    /// `/initialize` is idempotent — it overwrites the GitHub token and
+    /// skips re-cloning when the repo is already on disk.
+    #[instrument(name = "domain.sandbox.restart", skip(self))]
+    pub async fn restart(
+        &self,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<Sandbox, SandboxError> {
+        let id = id.into();
+        let mut op = self.repo.begin_op().await?;
+        let mut sandbox = self.repo.find_by_id(id).await?;
+        if sandbox
+            .transition_to(SandboxState::Provisioning)
+            .did_execute()
+        {
+            self.repo.update_in_op(&mut op, &mut sandbox).await?;
+        }
+        op.commit().await?;
+        // Re-use the same background lifecycle the initial create goes
+        // through — admin.create_sandbox → wait_ready → /initialize → Ready.
+        self.spawn_sandbox_creation(id);
+        Ok(sandbox)
     }
 
     #[instrument(name = "domain.sandbox.suspend", skip(self))]

@@ -19,6 +19,20 @@ agents:
             You are the workspace lead agent. You coordinate tasks,
             answer questions, and use the available tools to help the
             user accomplish their goals. Be concise and action-oriented.
+sandbox:
+  # Local mode spawns the sandbox tool server as a child process per sandbox.
+  # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.
+  #
+  # Swap to k8s with:
+  #   backend:
+  #     backend: k8s
+  #     namespace: galoy-agents-sandboxes
+  #     template_name: agent-sandbox
+  backend:
+    backend: local
+    sandbox_spawn_cmd: "cargo run -q -p sandbox-tool-server --"
+  local_repo_root: "."
+
 toolsets:
   code_assistant:
     db_path: "./data/code-assistant.db"

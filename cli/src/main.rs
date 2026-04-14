@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         prompt_executor: config.prompt_executor_config(),
         toolsets: config.toolsets.clone(),
         encryption: Default::default(),
+        sandbox: config.sandbox.clone(),
         github_app: github_app_config,
     };
 

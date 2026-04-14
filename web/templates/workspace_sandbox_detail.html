@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+
+{% block title %}{{ sandbox.name }} — {{ workspace.name }} — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .ws-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .ws-back:hover { color: var(--pico-primary); }
+  .ws-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .ws-mode-header h4 { margin: 0; font-size: 1rem; }
+  .ws-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ws-settings-btn:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover,
+  .agent-item.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .sandbox-field {
+    display: grid;
+    grid-template-columns: 10rem 1fr;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    gap: 1rem;
+  }
+  .sandbox-field:last-of-type { border-bottom: none; }
+  .sandbox-field dt { font-weight: 600; color: var(--pico-muted-color); }
+  .sandbox-field dd { margin: 0; }
+  .export-block {
+    margin-top: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--pico-code-background-color);
+    border-radius: var(--pico-border-radius);
+    border: 1px solid var(--pico-muted-border-color);
+  }
+  .export-block summary { cursor: pointer; font-weight: 600; }
+  .export-block pre {
+    margin: 0.75rem 0 0 0;
+    max-height: 24rem;
+    overflow: auto;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/workspaces" class="ws-back">&larr; Workspaces</a>
+<div class="ws-mode-header">
+  <h4>{{ workspace.name }}</h4>
+  <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn" title="Workspace settings">&#9881;</a>
+</div>
+
+{% if !agents.is_empty() %}
+<div class="section-label">Agents</div>
+{% for agent in agents %}
+<a href="/workspaces/{{ workspace.id }}/chat?agent={{ agent.id }}" class="agent-item">
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<div class="section-label">Agents</div>
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item active">Sandboxes</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<a href="/workspaces/{{ workspace.id }}/sandboxes" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Sandboxes</a>
+<h2>{{ sandbox.name }}</h2>
+
+<dl>
+  <div class="sandbox-field">
+    <dt>State</dt>
+    <dd><code>{{ sandbox.state }}</code></dd>
+  </div>
+  <div class="sandbox-field">
+    <dt>Mode</dt>
+    <dd>
+      {{ sandbox.mode_label }}
+      {% match sandbox.repo_url %}
+        {% when Some with (url) %}
+          <br><small><code>{{ url }}</code></small>
+        {% when None %}
+      {% endmatch %}
+    </dd>
+  </div>
+  <div class="sandbox-field">
+    <dt>CPU</dt>
+    <dd><code>{{ sandbox.cpu }}</code></dd>
+  </div>
+  <div class="sandbox-field">
+    <dt>Memory</dt>
+    <dd><code>{{ sandbox.memory }}</code></dd>
+  </div>
+  <div class="sandbox-field">
+    <dt>Disk</dt>
+    <dd><code>{{ sandbox.disk_size }}</code></dd>
+  </div>
+</dl>
+
+{% if sandbox.exported_system_prompt.is_some() || !sandbox.exported_skills.is_empty() %}
+<h3>Exports</h3>
+<p><small>Discovered in the cloned repo by <code>/initialize</code>.</small></p>
+
+{% match sandbox.exported_system_prompt %}
+  {% when Some with (file) %}
+    <details class="export-block" open>
+      <summary>System prompt — <code>{{ file.file_name }}</code></summary>
+      <pre>{{ file.content }}</pre>
+    </details>
+  {% when None %}
+{% endmatch %}
+
+{% for skill in sandbox.exported_skills %}
+<details class="export-block">
+  <summary>Skill — <code>{{ skill.name }}</code></summary>
+  <pre>{{ skill.content }}</pre>
+</details>
+{% endfor %}
+{% endif %}
+
+<hr>
+{% if sandbox.state == "suspended" %}
+<form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/restart" style="display: inline;">
+  <button type="submit">Restart Sandbox</button>
+</form>
+{% else %}
+<details>
+  <summary>Danger Zone</summary>
+  <form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/suspend" style="display: inline;">
+    <button
+      type="submit"
+      onclick="return confirm('Suspend this sandbox? The underlying pod/process will be deleted; workspace state is retained.')"
+      class="secondary outline"
+      style="color: var(--pico-color-red-500, #c62828);"
+    >
+      Suspend Sandbox
+    </button>
+  </form>
+</details>
+{% endif %}
+
+<footer>
+  <small>Created: {{ sandbox.created_at }} | ID: <code>{{ sandbox.id }}</code></small>
+</footer>
+{% endblock %}

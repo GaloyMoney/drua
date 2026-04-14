@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use galoy_agents_core::agent::AgentsConfig;
 use galoy_agents_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
+use galoy_agents_core::sandbox::SandboxConfig;
 use galoy_agents_core::toolset::ToolSetsConfig;
 use galoy_agents_web::auth::config::AuthConfig;
 
@@ -20,6 +21,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub toolsets: ToolSetsConfig,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     #[serde(default)]
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(skip)]

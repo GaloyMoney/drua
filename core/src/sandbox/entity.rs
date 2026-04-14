@@ -27,6 +27,18 @@ pub enum SandboxState {
     Suspended,
 }
 
+impl core::fmt::Display for SandboxState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            SandboxState::Provisioning => "provisioning",
+            SandboxState::Initializing => "initializing",
+            SandboxState::Ready => "ready",
+            SandboxState::Suspended => "suspended",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[es_event(id = "SandboxId")]

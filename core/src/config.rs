@@ -4,6 +4,7 @@ use crate::agent::AgentsConfig;
 use crate::encryption::EncryptionKey;
 use crate::github_app::GitHubAppConfig;
 use crate::prompt_executor::PromptExecutorConfig;
+use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -16,6 +17,8 @@ pub struct AppConfig {
     pub toolsets: ToolSetsConfig,
     #[serde(default)]
     pub encryption: EncryptionConfig,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     /// Optional GitHub App config for token auto-provisioning.
     /// When set, sandbox agents receive a `github-token` file secret.
     #[serde(default)]

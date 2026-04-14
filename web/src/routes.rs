@@ -19,7 +19,8 @@ use galoy_agents_core as domain;
 use domain::auth::AuthSubject;
 use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{AgentId, McpCredsId, SkillId, UserId, WorkspaceSecretId};
+use domain::primitives::{AgentId, McpCredsId, SandboxId, SkillId, UserId, WorkspaceSecretId};
+use domain::sandbox::{SandboxMode, SandboxSpecs};
 
 use crate::templates::*;
 use crate::AppState;
@@ -73,6 +74,24 @@ pub fn router() -> Router<AppState> {
         .route(
             "/workspaces/{id}/skills/{skill_id}/delete",
             post(workspace_skill_delete),
+        )
+        .route("/workspaces/{id}/sandboxes", get(workspace_sandboxes_page))
+        .route(
+            "/workspaces/{id}/sandboxes/new",
+            get(workspace_sandbox_new),
+        )
+        .route("/workspaces/{id}/sandboxes", post(workspace_sandbox_create))
+        .route(
+            "/workspaces/{id}/sandboxes/{sandbox_id}",
+            get(workspace_sandbox_detail),
+        )
+        .route(
+            "/workspaces/{id}/sandboxes/{sandbox_id}/suspend",
+            post(workspace_sandbox_suspend),
+        )
+        .route(
+            "/workspaces/{id}/sandboxes/{sandbox_id}/restart",
+            post(workspace_sandbox_restart),
         )
 }
 
@@ -1089,6 +1108,269 @@ async fn workspace_skill_delete(
     }
 
     Redirect::to(&format!("/workspaces/{id}/skills")).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Sandboxes
+// ---------------------------------------------------------------------------
+
+fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
+    let (mode_label, repo_url) = match &s.mode {
+        SandboxMode::Scratch => ("Scratch".to_string(), None),
+        SandboxMode::Repo { repo_url } => ("Repo".to_string(), Some(repo_url.clone())),
+    };
+
+    let exported_system_prompt = s.exported_system_prompt.as_ref().map(|f| ExportedFileView {
+        file_name: f.file_name.clone(),
+        content: f.content.clone(),
+    });
+    let exported_skills: Vec<ExportedSkillView> = s
+        .exported_skills
+        .iter()
+        .map(|sk| ExportedSkillView {
+            name: sk.name.clone(),
+            content: sk.content.clone(),
+        })
+        .collect();
+
+    let exports_summary = match (exported_system_prompt.is_some(), exported_skills.len()) {
+        (false, 0) => "—".to_string(),
+        (true, 0) => "system prompt".to_string(),
+        (false, 1) => "1 skill".to_string(),
+        (false, n) => format!("{n} skills"),
+        (true, 1) => "system prompt + 1 skill".to_string(),
+        (true, n) => format!("system prompt + {n} skills"),
+    };
+
+    SandboxView {
+        id: s.id.to_string(),
+        workspace_id: s.workspace_id.to_string(),
+        name: s.name.clone(),
+        state: s.state.to_string(),
+        mode_label,
+        repo_url,
+        cpu: s.specs.cpu.clone(),
+        memory: s.specs.memory.clone(),
+        disk_size: s.specs.disk_size.clone(),
+        created_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+        exports_summary,
+        exported_system_prompt,
+        exported_skills,
+    }
+}
+
+async fn workspace_sidebar_context(
+    state: &AppState,
+    workspace_id: domain::primitives::WorkspaceId,
+) -> Vec<AgentView> {
+    let agents = state
+        .app
+        .agents()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+    agents
+        .iter()
+        .map(|a| AgentView {
+            id: a.id.to_string(),
+            name: a.name.clone(),
+        })
+        .collect()
+}
+
+#[instrument(name = "web.workspace_sandboxes_page", skip_all)]
+async fn workspace_sandboxes_page(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+
+    let sandboxes = state
+        .app
+        .sandboxes()
+        .list_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    WorkspaceSandboxesPageTemplate {
+        workspace: workspace_to_view(&ws),
+        agents: agent_views,
+        sandboxes: sandboxes.iter().map(sandbox_to_view).collect(),
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.workspace_sandbox_new", skip_all)]
+async fn workspace_sandbox_new(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+
+    WorkspaceSandboxNewTemplate {
+        workspace: workspace_to_view(&ws),
+        agents: agent_views,
+    }
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateSandboxForm {
+    name: String,
+    mode: String,
+    #[serde(default)]
+    repo_url: Option<String>,
+    cpu: String,
+    memory: String,
+    disk_size: String,
+}
+
+#[instrument(name = "web.workspace_sandbox_create", skip_all)]
+async fn workspace_sandbox_create(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<CreateSandboxForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+
+    let mode = match form.mode.as_str() {
+        "scratch" => SandboxMode::Scratch,
+        "repo" => {
+            let repo_url = form
+                .repo_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            match repo_url {
+                Some(repo_url) => SandboxMode::Repo { repo_url },
+                None => {
+                    tracing::warn!("repo mode requires a non-empty repo_url");
+                    return Redirect::to(&format!("/workspaces/{id}/sandboxes/new"))
+                        .into_response();
+                }
+            }
+        }
+        other => {
+            tracing::warn!(mode = %other, "unknown sandbox mode");
+            return Redirect::to(&format!("/workspaces/{id}/sandboxes/new")).into_response();
+        }
+    };
+
+    let specs = SandboxSpecs {
+        cpu: form.cpu,
+        memory: form.memory,
+        disk_size: form.disk_size,
+    };
+
+    if let Err(e) = state
+        .app
+        .sandboxes()
+        .create(workspace_id, form.name, specs, mode)
+        .await
+    {
+        tracing::error!(error = %e, "Failed to create sandbox");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Redirect::to(&format!("/workspaces/{id}/sandboxes")).into_response()
+}
+
+#[instrument(name = "web.workspace_sandbox_detail", skip_all)]
+async fn workspace_sandbox_detail(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let sandbox_id = SandboxId::from(sandbox_id);
+    let sandbox = match state.app.sandboxes().find_by_id(sandbox_id).await {
+        Ok(s) => s,
+        Err(_) => return Redirect::to(&format!("/workspaces/{id}/sandboxes")).into_response(),
+    };
+
+    let agent_views = workspace_sidebar_context(&state, workspace_id).await;
+
+    WorkspaceSandboxDetailTemplate {
+        workspace: workspace_to_view(&ws),
+        agents: agent_views,
+        sandbox: sandbox_to_view(&sandbox),
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.workspace_sandbox_suspend", skip_all)]
+async fn workspace_sandbox_suspend(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let sandbox_id = SandboxId::from(sandbox_id);
+    if let Err(e) = state.app.sandboxes().suspend(sandbox_id).await {
+        tracing::error!(error = %e, "Failed to suspend sandbox");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Redirect::to(&format!("/workspaces/{id}/sandboxes/{sandbox_id}")).into_response()
+}
+
+#[instrument(name = "web.workspace_sandbox_restart", skip_all)]
+async fn workspace_sandbox_restart(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let sandbox_id = SandboxId::from(sandbox_id);
+    if let Err(e) = state.app.sandboxes().restart(sandbox_id).await {
+        tracing::error!(error = %e, "Failed to restart sandbox");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Redirect::to(&format!("/workspaces/{id}/sandboxes/{sandbox_id}")).into_response()
 }
 
 // ---------------------------------------------------------------------------

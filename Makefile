@@ -19,7 +19,10 @@ reset-deps: clean-deps start-deps setup-db
 sqlx-prepare:
 	DATABASE_URL=$(PG_CON) cargo sqlx prepare --workspace -- --all-targets
 
-run-server:
+build-sandbox:
+	cargo build -p sandbox-tool-server
+
+run-server: build-sandbox
 	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p galoy-agents-cli
 
 nix-run-server:

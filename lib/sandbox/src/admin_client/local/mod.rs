@@ -88,6 +88,9 @@ impl LocalAdminClient {
         let workspace = sandbox_dir.join("workspace");
         let secrets_dir = sandbox_dir.join("secrets");
         let github_token_path = secrets_dir.join("github-token");
+        // Suppress unused warning when the child spawn fails — the dir is
+        // still useful context for error messages.
+        let _ = sandbox_dir;
 
         create_dir_all(&workspace).await?;
         create_dir_all(&secrets_dir).await?;
@@ -95,13 +98,17 @@ impl LocalAdminClient {
         let port = allocate_port()?;
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // Intentionally don't override `current_dir`: inheriting the
+        // parent's cwd lets the default `cargo run -q -p sandbox-tool-server`
+        // spawn command find the Cargo workspace when galoy-agents is run
+        // from the repo root. The server locates its workspace via the
+        // `WORKSPACE_ROOT` env var rather than cwd.
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(&self.config.sandbox_spawn_cmd)
             .env("PORT", port.to_string())
             .env("WORKSPACE_ROOT", &workspace)
             .env("GITHUB_TOKEN_PATH", &github_token_path)
-            .current_dir(&sandbox_dir)
             .kill_on_drop(true);
 
         let child = cmd.spawn().map_err(AdminError::Spawn)?;
