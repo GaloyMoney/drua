@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}New Skill — Galoy Agents{% endblock %}
+
+{% block nav_workspaces %}class="active"{% endblock %}
+
+{% block content %}
+<h2>New Skill</h2>
+
+<form method="post" action="/workspaces/{{ workspace_id }}/skills">
+  <label>
+    Name
+    <input type="text" name="name" required placeholder="e.g. code-review">
+  </label>
+  <label>
+    Description
+    <input type="text" name="description" placeholder="Short description of what this skill does">
+  </label>
+  <label>
+    Body
+    <textarea name="body" rows="12" required placeholder="Markdown prompt text for the skill..."></textarea>
+  </label>
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Create Skill</button>
+    <a href="/workspaces/{{ workspace_id }}" role="button" class="outline">Cancel</a>
+  </div>
+</form>
+{% endblock %}

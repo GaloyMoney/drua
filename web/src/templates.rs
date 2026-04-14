@@ -123,6 +123,39 @@ pub struct WorkspaceDetailTemplate {
     pub agents: Vec<AgentView>,
 }
 
+// ── Skills ────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub struct SkillView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_skills_list.html")]
+pub struct WorkspaceSkillsListTemplate {
+    #[allow(dead_code)]
+    pub workspace_id: String,
+    pub skills: Vec<SkillView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_skill_new.html")]
+pub struct WorkspaceSkillNewTemplate {
+    pub workspace_id: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_skill_edit.html")]
+pub struct WorkspaceSkillEditTemplate {
+    pub workspace_id: String,
+    pub skill: SkillView,
+}
+
 // ── Workspace Secrets ────────────────────────────────────────────────
 
 pub struct WorkspaceSecretView {

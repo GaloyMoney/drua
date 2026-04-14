@@ -19,7 +19,7 @@ use galoy_agents_core as domain;
 use domain::auth::AuthSubject;
 use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{AgentId, McpCredsId, UserId, WorkspaceSecretId};
+use domain::primitives::{AgentId, McpCredsId, SkillId, UserId, WorkspaceSecretId};
 
 use crate::templates::*;
 use crate::AppState;
@@ -58,6 +58,21 @@ pub fn router() -> Router<AppState> {
         .route(
             "/workspaces/{id}/secrets/{secret_id}/delete",
             post(workspace_secret_delete),
+        )
+        .route("/workspaces/{id}/skills/list", get(workspace_skills_list))
+        .route("/workspaces/{id}/skills/new", get(workspace_skill_new))
+        .route("/workspaces/{id}/skills", post(workspace_skill_create))
+        .route(
+            "/workspaces/{id}/skills/{skill_id}",
+            get(workspace_skill_edit),
+        )
+        .route(
+            "/workspaces/{id}/skills/{skill_id}",
+            post(workspace_skill_update),
+        )
+        .route(
+            "/workspaces/{id}/skills/{skill_id}/delete",
+            post(workspace_skill_delete),
         )
 }
 
@@ -834,6 +849,181 @@ async fn workspace_secret_delete(
     {
         Ok(secrets) => WorkspaceSecretsListTemplate {
             secrets: secrets.iter().map(secret_to_view).collect(),
+        }
+        .into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Skills
+// ---------------------------------------------------------------------------
+
+fn skill_to_view(s: &domain::skill::Skill) -> SkillView {
+    SkillView {
+        id: s.id.to_string(),
+        workspace_id: s.workspace_id.to_string(),
+        name: s.name.clone(),
+        description: s.description.clone(),
+        body: s.body.clone(),
+        created_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+#[instrument(name = "web.workspace_skills_list", skip_all)]
+async fn workspace_skills_list(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    match state.app.skills().list_by_workspace_id(workspace_id).await {
+        Ok(skills) => WorkspaceSkillsListTemplate {
+            workspace_id: workspace_id.to_string(),
+            skills: skills.iter().map(skill_to_view).collect(),
+        }
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list workspace skills");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.workspace_skill_new", skip_all)]
+async fn workspace_skill_new(session: Session, Path(id): Path<uuid::Uuid>) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    WorkspaceSkillNewTemplate {
+        workspace_id: id.to_string(),
+    }
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateSkillForm {
+    name: String,
+    description: String,
+    body: String,
+}
+
+#[instrument(name = "web.workspace_skill_create", skip_all)]
+async fn workspace_skill_create(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<CreateSkillForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let new_skill = domain::skill::NewSkill::builder()
+        .workspace_id(workspace_id)
+        .name(form.name)
+        .description(form.description)
+        .body(form.body)
+        .build()
+        .expect("Could not build new skill");
+
+    if let Err(e) = state.app.skills().create(new_skill).await {
+        tracing::error!(error = %e, "Failed to create skill");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Redirect::to(&format!("/workspaces/{id}")).into_response()
+}
+
+#[instrument(name = "web.workspace_skill_edit", skip_all)]
+async fn workspace_skill_edit(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let skill_id = SkillId::from(skill_id);
+    let skill = match state.app.skills().find_by_id(skill_id).await {
+        Ok(s) => s,
+        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
+    };
+
+    WorkspaceSkillEditTemplate {
+        workspace_id: id.to_string(),
+        skill: skill_to_view(&skill),
+    }
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateSkillForm {
+    name: String,
+    description: String,
+    body: String,
+}
+
+#[instrument(name = "web.workspace_skill_update", skip_all)]
+async fn workspace_skill_update(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Form(form): Form<UpdateSkillForm>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    let skill_id = SkillId::from(skill_id);
+    let mut skill = match state.app.skills().find_by_id(skill_id).await {
+        Ok(s) => s,
+        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
+    };
+
+    if skill
+        .update(Some(form.name), Some(form.description), Some(form.body))
+        .did_execute()
+    {
+        if let Err(e) = state.app.skills().update(&mut skill).await {
+            tracing::error!(error = %e, "Failed to update skill");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    Redirect::to(&format!("/workspaces/{id}")).into_response()
+}
+
+#[instrument(name = "web.workspace_skill_delete", skip_all)]
+async fn workspace_skill_delete(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    if extract_user_id(&session).await.is_none() {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let skill_id = SkillId::from(skill_id);
+
+    if let Err(e) = state.app.skills().delete(skill_id).await {
+        tracing::error!(error = %e, "Failed to delete skill");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return updated list
+    match state.app.skills().list_by_workspace_id(workspace_id).await {
+        Ok(skills) => WorkspaceSkillsListTemplate {
+            workspace_id: workspace_id.to_string(),
+            skills: skills.iter().map(skill_to_view).collect(),
         }
         .into_response(),
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),

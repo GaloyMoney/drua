@@ -8,6 +8,7 @@ pub mod github_app;
 pub mod mcp_creds;
 pub mod primitives;
 pub mod prompt_executor;
+pub mod skill;
 pub mod toolset;
 pub mod user;
 pub mod workspace;
@@ -23,6 +24,7 @@ use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
 use prompt_executor::PromptExecutor;
+use skill::Skills;
 use toolset::{CodeAssistantToolSet, ToolSets, ToolSetsError};
 use user::Users;
 use workspace::Workspaces;
@@ -38,6 +40,7 @@ pub struct App {
     toolsets: Arc<ToolSets>,
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
+    skills: Skills,
     github_app: Option<GitHubAppTokenProvider>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
@@ -109,6 +112,7 @@ impl App {
 
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
+        let skills = Skills::new(pool);
 
         // Optionally initialize GitHub App token provider from AppConfig.
         // If configured, verify it works by generating a token — crash on failure
@@ -139,6 +143,7 @@ impl App {
             toolsets,
             workspaces,
             workspace_secrets,
+            skills,
             github_app,
             _prompt_executor: prompt_executor,
         })
@@ -174,6 +179,10 @@ impl App {
 
     pub fn workspace_secrets(&self) -> &WorkspaceSecrets {
         &self.workspace_secrets
+    }
+
+    pub fn skills(&self) -> &Skills {
+        &self.skills
     }
 
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
