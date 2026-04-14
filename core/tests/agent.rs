@@ -16,7 +16,11 @@ async fn pool() -> sqlx::PgPool {
     sqlx::PgPool::connect(&url).await.expect("connect to pg")
 }
 
+// Requires a live Postgres at $DATABASE_URL — skipped by default.
+// Run locally with `cargo nextest run -- --include-ignored` (or `cargo test
+// -- --ignored`) once you've started the dev DB.
 #[tokio::test]
+#[ignore = "requires Postgres at $DATABASE_URL"]
 async fn send_message_round_trip_via_prompt_channel() {
     let pool = pool().await;
 
@@ -147,6 +151,7 @@ impl TopLevelTool for PingTool {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres at $DATABASE_URL"]
 async fn send_message_dispatches_registered_tool_call() {
     let pool = pool().await;
 
