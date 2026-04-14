@@ -208,7 +208,10 @@
       <div class="chat-layout">
         <div class="chat-header">
           <div>
-            <h3>{{ sel.name }}</h3>
+            {% match selected_agent %}
+              {% when Some(sa) %}<h3>{{ sa.name }}</h3>
+              {% when None %}<h3>{{ sel.name }}</h3>
+            {% endmatch %}
             <small>Agent chat</small>
           </div>
           <a href="/workspaces/{{ selected_workspace_id }}/agents/{{ selected_agent_id }}"

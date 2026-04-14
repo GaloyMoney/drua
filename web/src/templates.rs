@@ -312,6 +312,10 @@ pub struct WorkspaceHubTemplate {
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub selected_agent_id: String,
+    /// The agent the chat view is rendering for. Used to show that
+    /// agent's name in the chat header so it updates when the user
+    /// switches between agents (instead of showing the workspace name).
+    pub selected_agent: Option<AgentView>,
 }
 
 #[derive(Template, WebTemplate)]

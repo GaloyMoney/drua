@@ -539,6 +539,7 @@ async fn workspaces_page(State(state): State<AppState>, session: Session) -> Res
         lead_agent: None,
         agents: vec![],
         selected_agent_id: String::new(),
+        selected_agent: None,
     }
     .into_response()
 }
@@ -1605,7 +1606,14 @@ async fn workspace_chat(
             .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead),
     };
 
-    let selected_agent_id = selected_agent.map(|a| a.id.to_string()).unwrap_or_default();
+    let selected_agent_view = selected_agent.map(|a| AgentView {
+        id: a.id.to_string(),
+        name: a.name.clone(),
+    });
+    let selected_agent_id = selected_agent_view
+        .as_ref()
+        .map(|v| v.id.clone())
+        .unwrap_or_default();
 
     // Split lead out so the sidebar can render it above the "Agents" header.
     let mut lead_agent: Option<AgentView> = None;
@@ -1629,6 +1637,7 @@ async fn workspace_chat(
         lead_agent,
         agents: agent_views,
         selected_agent_id,
+        selected_agent: selected_agent_view,
     }
     .into_response()
 }
