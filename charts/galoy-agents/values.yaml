@@ -33,8 +33,12 @@ galoyAgents:
       githubRedirectUri: ""
       githubAllowedTeams: []
     ## Per-role defaults applied when an agent with that role is created.
-    ## `workspaceLead` is the only role today and is REQUIRED — the binary
-    ## refuses to start if `agents.builtin_roles.workspace_lead` is missing.
+    ## `workspaceLead` is REQUIRED — the binary refuses to start if
+    ## `agents.builtin_roles.workspace_lead` is missing.
+    ## `agent` is optional; when absent the generic `Agent` role falls
+    ## back to `workspaceLead`'s config, which means the agent ends up
+    ## introducing itself as the workspace lead. Provide a dedicated
+    ## `agent:` block below to avoid that.
     agents:
       workspaceLead:
         model: "claude-haiku-4-5-20251001"
@@ -47,6 +51,15 @@ galoyAgents:
           You are the workspace lead agent. You coordinate tasks,
           answer questions, and use the available tools to help the
           user accomplish their goals. Be concise and action-oriented.
+      agent:
+        model: "claude-haiku-4-5-20251001"
+        maxTokens: 4096
+        resetTimeDeltaSeconds: 600
+        systemPrompt: |
+          You are an agent operating inside a Galoy Agents workspace.
+          You work on the tasks assigned to you and, when attached to
+          a sandbox, you run commands and edit files inside it. Be
+          concise and action-oriented.
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"
     concourse:

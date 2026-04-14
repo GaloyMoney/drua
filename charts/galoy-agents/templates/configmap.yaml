@@ -31,6 +31,18 @@ data:
             - type: text
               text: |-
                 {{- .Values.galoyAgents.config.agents.workspaceLead.systemPrompt | nindent 16 }}
+        {{- with .Values.galoyAgents.config.agents.agent }}
+        agent:
+          model: {{ .model | quote }}
+          max_tokens: {{ .maxTokens }}
+          {{- with .resetTimeDeltaSeconds }}
+          reset_time_delta_seconds: {{ . }}
+          {{- end }}
+          system:
+            - type: text
+              text: |-
+                {{- .systemPrompt | nindent 16 }}
+        {{- end }}
     toolsets:
       code_assistant:
         db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}
