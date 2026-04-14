@@ -59,6 +59,10 @@ pub struct AuditContextData {
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
     pub interaction_type: Option<InteractionType>,
+    /// Sandbox targeted by this interaction. Set by sandbox-service
+    /// methods via [`crate::audit::Audit::record_sandbox_id`] so audit
+    /// log queries can filter by sandbox.
+    pub sandbox_id: Option<SandboxId>,
     pub action: Option<String>,
     pub outcome: Option<InteractionOutcome>,
     pub duration_ms: Option<u64>,
@@ -80,6 +84,8 @@ pub struct AuditLogQuery {
     pub acting_agent_id: Option<AgentId>,
     /// Exclude entries by this agent (e.g. to hide the caller's own logs).
     pub exclude_agent_id: Option<AgentId>,
+    /// Only entries for this sandbox.
+    pub sandbox_id: Option<SandboxId>,
     /// Substring match on the `action` column.
     pub action: Option<String>,
     /// Substring match on the `outcome` column (e.g. "success", "error").
@@ -98,6 +104,7 @@ pub struct AuditEntry {
     pub workspace_id: Option<WorkspaceId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
+    pub sandbox_id: Option<SandboxId>,
     pub interaction_type: String,
     pub action: String,
     pub metadata: serde_json::Value,

@@ -203,6 +203,7 @@ fn parse_query(arguments: &Option<JsonObject>) -> AuditLogQuery {
 
     let acting_user_id = parse_uuid_field(args, "user_id");
     let acting_agent_id = parse_uuid_field(args, "agent_id");
+    let sandbox_id = parse_uuid_field(args, "sandbox_id");
 
     let error = args
         .and_then(|a| a.get("errors_only"))
@@ -215,6 +216,7 @@ fn parse_query(arguments: &Option<JsonObject>) -> AuditLogQuery {
         outcome,
         acting_user_id: acting_user_id.map(crate::primitives::UserId::from),
         acting_agent_id: acting_agent_id.map(crate::primitives::AgentId::from),
+        sandbox_id: sandbox_id.map(crate::primitives::SandboxId::from),
         error,
         ..Default::default()
     }
@@ -259,6 +261,11 @@ fn common_schema_properties() -> serde_json::Value {
             "type": "string",
             "format": "uuid",
             "description": "Filter by acting agent ID."
+        },
+        "sandbox_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Filter by sandbox ID."
         },
         "limit": {
             "type": "integer",
