@@ -1198,6 +1198,7 @@ async fn api_agent_message(
             .app
             .slash_commands()
             .process(source, agent_id, &auth, body.prompt)
+            .await
     } else {
         match state
             .app
@@ -1220,14 +1221,17 @@ async fn api_agent_message(
         let mut rx = rx;
         while let Some(event) = rx.recv().await {
             let event_name = match &event {
-                domain::agent::AgentMessageEvent::UserMessage { .. } => "user_message",
-                domain::agent::AgentMessageEvent::AssistantText { .. } => "assistant_text",
-                domain::agent::AgentMessageEvent::Thinking { .. } => "thinking",
-                domain::agent::AgentMessageEvent::ToolCall { .. } => "tool_call",
-                domain::agent::AgentMessageEvent::ToolResult { .. } => "tool_result",
-                domain::agent::AgentMessageEvent::Done { .. } => "done",
-                domain::agent::AgentMessageEvent::Error { .. } => "error",
-                domain::agent::AgentMessageEvent::Service { .. } => "service",
+                domain::primitives::ChatOutputEvent::UserMessage { .. } => "user_message",
+                domain::primitives::ChatOutputEvent::AssistantText { .. } => "assistant_text",
+                domain::primitives::ChatOutputEvent::Thinking { .. } => "thinking",
+                domain::primitives::ChatOutputEvent::ToolCall { .. } => "tool_call",
+                domain::primitives::ChatOutputEvent::ToolResult { .. } => "tool_result",
+                domain::primitives::ChatOutputEvent::AssistantDone { .. } => "assistant_done",
+                domain::primitives::ChatOutputEvent::SlashCommandOutput { .. } => {
+                    "slash_command_output"
+                }
+                domain::primitives::ChatOutputEvent::Error { .. } => "error",
+                domain::primitives::ChatOutputEvent::Service { .. } => "service",
             };
             let data = serde_json::to_string(&event).unwrap_or_default();
             let sse_event = Event::default().event(event_name).data(data);

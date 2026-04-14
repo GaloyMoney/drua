@@ -21,6 +21,7 @@ pub enum SlashCommandOutput {
 /// Unlike [`TopLevelTool`](crate::toolset::TopLevelTool) which is invoked by
 /// the LLM, slash commands are typed by the user in the chat UI and handled
 /// entirely server-side without any LLM interaction.
+#[async_trait::async_trait]
 pub trait SlashCommand: Send + Sync {
     /// The command name without the leading `/` (e.g. `"ping"`).
     fn name(&self) -> &str;
@@ -29,7 +30,7 @@ pub trait SlashCommand: Send + Sync {
     fn description(&self) -> &str;
 
     /// Execute the command and return output.
-    fn execute(
+    async fn execute(
         &self,
         ctx: &SlashCommandContext,
         args: &str,
