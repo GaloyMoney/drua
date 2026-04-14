@@ -16,11 +16,8 @@ pub trait AdminClient: Send + Sync {
     /// [`Sandbox`] may not yet be ready (k8s in particular needs a follow-up
     /// [`Self::wait_sandbox_ready`] before its `base_url` is populated).
     /// The local backend returns a ready sandbox and ignores `specs`.
-    async fn create_sandbox(
-        &self,
-        name: &str,
-        specs: &SandboxSpecs,
-    ) -> Result<Sandbox, AdminError>;
+    async fn create_sandbox(&self, name: &str, specs: &SandboxSpecs)
+        -> Result<Sandbox, AdminError>;
 
     /// Delete a sandbox by name. Returns [`AdminError::NotFound`] if no
     /// such sandbox is tracked / exists.

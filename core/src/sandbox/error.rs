@@ -2,9 +2,7 @@ use thiserror::Error;
 
 use sandbox::AdminError;
 
-use super::repo::{
-    SandboxCreateError, SandboxFindError, SandboxModifyError, SandboxQueryError,
-};
+use super::repo::{SandboxCreateError, SandboxFindError, SandboxModifyError, SandboxQueryError};
 
 #[derive(Error, Debug)]
 pub enum SandboxError {

@@ -964,18 +964,21 @@ mod tests {
         let dir = std::env::temp_dir().join("sandbox-test-skills-anthropic");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let skills_dir = dir.join(".claude").join("skills");
-        tokio::fs::create_dir_all(skills_dir.join("lana-qa")).await.unwrap();
-        tokio::fs::create_dir_all(skills_dir.join("lana-review")).await.unwrap();
-        tokio::fs::create_dir_all(skills_dir.join("no-skill-md")).await.unwrap();
+        tokio::fs::create_dir_all(skills_dir.join("lana-qa"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(skills_dir.join("lana-review"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(skills_dir.join("no-skill-md"))
+            .await
+            .unwrap();
         tokio::fs::write(skills_dir.join("lana-qa").join("SKILL.md"), "QA checks")
             .await
             .unwrap();
-        tokio::fs::write(
-            skills_dir.join("lana-review").join("SKILL.md"),
-            "Review PR",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(skills_dir.join("lana-review").join("SKILL.md"), "Review PR")
+            .await
+            .unwrap();
 
         let skills = scan_skills(&dir).await;
         assert_eq!(skills.len(), 2, "only dirs containing SKILL.md count");
@@ -995,7 +998,9 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
 
         let skills_dir = dir.join(".claude").join("skills");
-        tokio::fs::create_dir_all(skills_dir.join("shared")).await.unwrap();
+        tokio::fs::create_dir_all(skills_dir.join("shared"))
+            .await
+            .unwrap();
         tokio::fs::write(skills_dir.join("shared").join("SKILL.md"), "from skills")
             .await
             .unwrap();
