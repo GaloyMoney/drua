@@ -188,7 +188,6 @@ impl From<&AuthSubject> for AuditSubject {
 pub enum InteractionOutcome {
     Success,
     Error { message: String },
-    Unauthorized,
 }
 
 impl std::fmt::Display for InteractionOutcome {
@@ -196,7 +195,6 @@ impl std::fmt::Display for InteractionOutcome {
         match self {
             InteractionOutcome::Success => write!(f, "success"),
             InteractionOutcome::Error { .. } => write!(f, "error"),
-            InteractionOutcome::Unauthorized => write!(f, "unauthorized"),
         }
     }
 }
