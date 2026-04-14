@@ -66,18 +66,21 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
         let response = next.run(request).await;
         Audit::record_duration(start);
 
+        // Derive outcome from HTTP status, but never overwrite a more
+        // specific outcome already recorded by an inner handler.
         let status = response.status();
-        if status.is_success() || status.is_redirection() {
-            // Use _if_unset so inner handlers (e.g. MCP tool errors
-            // returned as HTTP 200) are not overwritten.
-            Audit::record_outcome_if_unset(InteractionOutcome::Success);
+        let fallback = if status.is_success() || status.is_redirection() {
+            InteractionOutcome::Success
         } else if status == axum::http::StatusCode::UNAUTHORIZED
             || status == axum::http::StatusCode::FORBIDDEN
         {
-            Audit::record_error("unauthorized");
+            InteractionOutcome::Unauthorized
         } else {
-            Audit::record_error(status.to_string());
-        }
+            InteractionOutcome::Error {
+                message: status.to_string(),
+            }
+        };
+        Audit::record_outcome_if_unset(fallback);
 
         if let Some(state) = app_state {
             state.app.audit().record_from_context();
