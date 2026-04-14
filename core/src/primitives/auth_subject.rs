@@ -53,14 +53,12 @@ impl AuthSubject {
 
     /// Check whether this auth subject carries the given scope.
     /// Users (session-based) implicitly have all scopes.
-    pub fn has_scope(&self, scope: &str) -> bool {
+    pub fn has_scope(&self, scope: &AuthScope) -> bool {
         match self {
             AuthSubject::User(_) => true,
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => {
-                scopes.iter().any(|s| s.matches_str(scope))
-            }
+            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes.contains(scope),
             AuthSubject::Anonymous => false,
         }
     }
