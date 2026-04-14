@@ -1,15 +1,16 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE reports SET title = $2 WHERE id = $1",
+  "query": "UPDATE sandboxes SET workspace_id = $2, name = $3 WHERE id = $1",
   "describe": {
     "columns": [],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid",
         "Varchar"
       ]
     },
     "nullable": []
   },
-  "hash": "51924e0cde648ba84947f6b05cddd9ee177893e49e497ac83b4196e3bb256611"
+  "hash": "6047ff030334e2f1a5acdf7245289b21b3a1d28b68c280460725d6ad80a738c3"
 }
