@@ -34,7 +34,6 @@ pub struct Sandboxes {
 }
 
 impl Sandboxes {
-    // @@ pass audit
     pub async fn init(pool: &sqlx::PgPool, config: SandboxConfig) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
             SandboxBackendConfig::Local { sandbox_spawn_cmd } => Arc::new(LocalAdminClient::new(
