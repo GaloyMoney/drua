@@ -110,7 +110,11 @@ resource "google_container_node_pool" "gvisor" {
   }
 
   node_config {
-    machine_type = "e2-standard-2"
+    # 4 vCPU / 16 GiB to fit a single largeish sandbox per node with
+    # headroom; gvisor adds ~10-15% overhead. Was e2-standard-2 (2 vCPU /
+    # 8 GiB) which couldn't fit non-trivial sandboxes alongside system
+    # daemons.
+    machine_type = "e2-standard-4"
 
     sandbox_config {
       sandbox_type = "gvisor"
