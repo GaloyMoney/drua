@@ -10,11 +10,12 @@ pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
-    AgentAttachSandbox, AgentCreate, AgentDetachSandbox, AllLogs, Bash, CallCatalogTool,
-    CreateSandbox, DescribeCatalogTool, GetSandbox, GlobTool, Grep, InspectSandbox, ListAgents,
-    ListSandboxes, Ls, Ping, Read, SearchCatalog, TextEditor, WorkspaceAgentAttachSandbox,
-    WorkspaceAgentCreate, WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
-    WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
+    AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminAllLogs,
+    AdminCreateSandbox, AdminGetSandbox, AdminInspectSandbox, AdminListAgents, AdminListSandboxes,
+    Bash, CallCatalogTool, DescribeCatalogTool, GlobTool, Grep, Ls, Ping, Read, SearchCatalog,
+    TextEditor, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate, WorkspaceAgentDetachSandbox,
+    WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceInspectSandbox, WorkspaceListAgents,
+    WorkspaceListSandboxes, WorkspaceLog,
 };
 pub use traits::*;
 

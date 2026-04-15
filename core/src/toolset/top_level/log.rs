@@ -83,11 +83,11 @@ impl TopLevelTool for WorkspaceLog {
 // all_logs
 // ---------------------------------------------------------------------------
 
-pub struct AllLogs {
+pub struct AdminAllLogs {
     audit: Arc<Audit>,
 }
 
-impl AllLogs {
+impl AdminAllLogs {
     pub fn new(audit: Arc<Audit>) -> Self {
         Self { audit }
     }
@@ -102,9 +102,9 @@ static ALL_LOGS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for AllLogs {
+impl TopLevelTool for AdminAllLogs {
     fn name(&self) -> &str {
-        "query_audit_log"
+        "admin_query_audit_log"
     }
 
     fn description(&self) -> &str {

@@ -81,11 +81,11 @@ impl TopLevelTool for WorkspaceInspectSandbox {
 // inspect_sandbox (admin)
 // ---------------------------------------------------------------------------
 
-pub struct InspectSandbox {
+pub struct AdminInspectSandbox {
     sandboxes: Sandboxes,
 }
 
-impl InspectSandbox {
+impl AdminInspectSandbox {
     pub fn new(sandboxes: Sandboxes) -> Self {
         Self { sandboxes }
     }
@@ -94,9 +94,9 @@ impl InspectSandbox {
 static ADMIN_INSPECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(inspect_schema);
 
 #[async_trait::async_trait]
-impl TopLevelTool for InspectSandbox {
+impl TopLevelTool for AdminInspectSandbox {
     fn name(&self) -> &str {
-        "inspect_sandbox"
+        "admin_inspect_sandbox"
     }
 
     fn description(&self) -> &str {

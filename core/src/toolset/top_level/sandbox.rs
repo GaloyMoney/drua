@@ -112,11 +112,11 @@ impl TopLevelTool for WorkspaceCreateSandbox {
 // create_sandbox (admin)
 // ---------------------------------------------------------------------------
 
-pub struct CreateSandbox {
+pub struct AdminCreateSandbox {
     sandboxes: Sandboxes,
 }
 
-impl CreateSandbox {
+impl AdminCreateSandbox {
     pub fn new(sandboxes: Sandboxes) -> Self {
         Self { sandboxes }
     }
@@ -163,9 +163,9 @@ static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for CreateSandbox {
+impl TopLevelTool for AdminCreateSandbox {
     fn name(&self) -> &str {
-        "create_sandbox"
+        "admin_create_sandbox"
     }
 
     fn description(&self) -> &str {
@@ -272,11 +272,11 @@ impl TopLevelTool for WorkspaceListSandboxes {
 // list_sandboxes (admin)
 // ---------------------------------------------------------------------------
 
-pub struct ListSandboxes {
+pub struct AdminListSandboxes {
     sandboxes: Sandboxes,
 }
 
-impl ListSandboxes {
+impl AdminListSandboxes {
     pub fn new(sandboxes: Sandboxes) -> Self {
         Self { sandboxes }
     }
@@ -298,9 +298,9 @@ static ADMIN_LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for ListSandboxes {
+impl TopLevelTool for AdminListSandboxes {
     fn name(&self) -> &str {
-        "list_sandboxes"
+        "admin_list_sandboxes"
     }
 
     fn description(&self) -> &str {
@@ -419,20 +419,20 @@ impl TopLevelTool for WorkspaceGetSandbox {
 // get_sandbox (admin)
 // ---------------------------------------------------------------------------
 
-pub struct GetSandbox {
+pub struct AdminGetSandbox {
     sandboxes: Sandboxes,
 }
 
-impl GetSandbox {
+impl AdminGetSandbox {
     pub fn new(sandboxes: Sandboxes) -> Self {
         Self { sandboxes }
     }
 }
 
 #[async_trait::async_trait]
-impl TopLevelTool for GetSandbox {
+impl TopLevelTool for AdminGetSandbox {
     fn name(&self) -> &str {
-        "get_sandbox"
+        "admin_get_sandbox"
     }
 
     fn description(&self) -> &str {

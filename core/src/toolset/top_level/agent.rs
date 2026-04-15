@@ -12,7 +12,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::auth::AuthSubject;
 use crate::primitives::{AgentId, SandboxId, WorkspaceId};
-use crate::sandbox::SandboxAgentMode;
+use crate::sandbox::{SandboxAgentMode, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -96,11 +96,11 @@ impl TopLevelTool for WorkspaceAgentCreate {
 // create_agent (admin)
 // ---------------------------------------------------------------------------
 
-pub struct AgentCreate {
+pub struct AdminAgentCreate {
     agents: Arc<Agents>,
 }
 
-impl AgentCreate {
+impl AdminAgentCreate {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
@@ -126,9 +126,9 @@ static ADMIN_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(||
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for AgentCreate {
+impl TopLevelTool for AdminAgentCreate {
     fn name(&self) -> &str {
-        "create_agent"
+        "admin_create_agent"
     }
 
     fn description(&self) -> &str {
@@ -177,11 +177,12 @@ impl TopLevelTool for AgentCreate {
 
 pub struct WorkspaceAgentAttachSandbox {
     agents: Arc<Agents>,
+    sandboxes: Sandboxes,
 }
 
 impl WorkspaceAgentAttachSandbox {
-    pub fn new(agents: Arc<Agents>) -> Self {
-        Self { agents }
+    pub fn new(agents: Arc<Agents>, sandboxes: Sandboxes) -> Self {
+        Self { agents, sandboxes }
     }
 }
 
@@ -237,10 +238,20 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let args = arguments.as_ref();
         let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
         let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
         let mode = parse_sandbox_mode(args);
+
+        let sandbox = self
+            .sandboxes
+            .find_by_id(sandbox_id)
+            .await
+            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+        if sandbox.workspace_id != workspace_id {
+            return Err(ToolSetsError::Unauthorized);
+        }
 
         let agent = self
             .agents
@@ -258,11 +269,11 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
 // attach_sandbox (admin)
 // ---------------------------------------------------------------------------
 
-pub struct AgentAttachSandbox {
+pub struct AdminAgentAttachSandbox {
     agents: Arc<Agents>,
 }
 
-impl AgentAttachSandbox {
+impl AdminAgentAttachSandbox {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
@@ -294,9 +305,9 @@ static ADMIN_ATTACH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for AgentAttachSandbox {
+impl TopLevelTool for AdminAgentAttachSandbox {
     fn name(&self) -> &str {
-        "attach_sandbox"
+        "admin_attach_sandbox"
     }
 
     fn description(&self) -> &str {
@@ -350,11 +361,12 @@ impl TopLevelTool for AgentAttachSandbox {
 
 pub struct WorkspaceAgentDetachSandbox {
     agents: Arc<Agents>,
+    sandboxes: Sandboxes,
 }
 
 impl WorkspaceAgentDetachSandbox {
-    pub fn new(agents: Arc<Agents>) -> Self {
-        Self { agents }
+    pub fn new(agents: Arc<Agents>, sandboxes: Sandboxes) -> Self {
+        Self { agents, sandboxes }
     }
 }
 
@@ -419,6 +431,15 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
             return Err(ToolSetsError::Unauthorized);
         }
 
+        let sandbox = self
+            .sandboxes
+            .find_by_id(sandbox_id)
+            .await
+            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+        if sandbox.workspace_id != workspace_id {
+            return Err(ToolSetsError::Unauthorized);
+        }
+
         let agent = self
             .agents
             .detach_sandbox(subject, agent_id, sandbox_id)
@@ -435,20 +456,20 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
 // detach_sandbox (admin)
 // ---------------------------------------------------------------------------
 
-pub struct AgentDetachSandbox {
+pub struct AdminAgentDetachSandbox {
     agents: Arc<Agents>,
 }
 
-impl AgentDetachSandbox {
+impl AdminAgentDetachSandbox {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
 }
 
 #[async_trait::async_trait]
-impl TopLevelTool for AgentDetachSandbox {
+impl TopLevelTool for AdminAgentDetachSandbox {
     fn name(&self) -> &str {
-        "detach_sandbox"
+        "admin_detach_sandbox"
     }
 
     fn description(&self) -> &str {
@@ -555,11 +576,11 @@ impl TopLevelTool for WorkspaceListAgents {
 // list_agents (admin)
 // ---------------------------------------------------------------------------
 
-pub struct ListAgents {
+pub struct AdminListAgents {
     agents: Arc<Agents>,
 }
 
-impl ListAgents {
+impl AdminListAgents {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
@@ -581,9 +602,9 @@ static ADMIN_LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| 
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for ListAgents {
+impl TopLevelTool for AdminListAgents {
     fn name(&self) -> &str {
-        "list_agents"
+        "admin_list_agents"
     }
 
     fn description(&self) -> &str {
