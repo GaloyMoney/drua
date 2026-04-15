@@ -8,6 +8,10 @@ pub enum ToolSetsError {
     Service(#[from] rmcp::service::ServiceError),
     #[error("ToolSetsError - InvalidHeader: {0}")]
     InvalidHeader(String),
+    #[error("ToolSetsError - MissingJwtSigner: upstream {upstream} has kind=remote_proxy but no McpJwt signer is configured")]
+    MissingJwtSigner { upstream: String },
+    #[error("ToolSetsError - JwtMint: {0}")]
+    JwtMint(#[from] crate::mcp_jwt::McpJwtError),
     #[error("ToolSetsError - ToolNotFound: {0}")]
     ToolNotFound(String),
     #[error("ToolSetsError - MissingArgument: {0}")]

@@ -77,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let mcp_jwt_config = config.mcp_jwt_config();
+
     let app_config = galoy_agents_core::AppConfig {
         agents: config.agents.clone(),
         prompt_executor: config.prompt_executor_config(),
@@ -84,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         encryption: Default::default(),
         sandbox: config.sandbox.clone(),
         github_app: github_app_config,
+        mcp_jwt: mcp_jwt_config,
     };
 
     let app = galoy_agents_core::App::init(&pool, app_config).await?;

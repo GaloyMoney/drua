@@ -33,6 +33,7 @@ pub struct IndexParams {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
+        .route("/.well-known/jwks.json", get(jwks_endpoint))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/mcp-creds", get(mcp_creds_list))
         .route("/mcp-creds/create", post(create_mcp_creds))
@@ -104,6 +105,17 @@ pub fn router() -> Router<AppState> {
             "/workspaces/{id}/agents/{agent_id}/detach_sandbox",
             post(workspace_agent_detach_sandbox),
         )
+}
+
+/// JWKS endpoint consumed by remote Envoys to verify JWTs minted by
+/// `RemoteProxyToolSet`. Returns an empty keyset (HTTP 200 with
+/// `{"keys": []}`) when the signer is not configured so probes don't 500.
+#[instrument(name = "web.jwks", skip_all)]
+async fn jwks_endpoint(State(state): State<AppState>) -> Response {
+    match state.app.mcp_jwt() {
+        Some(signer) => Json(signer.jwks()).into_response(),
+        None => Json(serde_json::json!({ "keys": [] })).into_response(),
+    }
 }
 
 async fn extract_user_id(session: &Session) -> Option<UserId> {

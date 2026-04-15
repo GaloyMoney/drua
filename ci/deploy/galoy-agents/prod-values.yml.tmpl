@@ -24,11 +24,29 @@ galoyAgents:
       enabled: true
       clientId: "Iv23liCAm3yHFqmGmayW"
       installationId: "123146136"
+    mcpJwt:
+      enabled: true
+      issuer: "galoy-agents"
+      kid: "primary"
     mcpUpstreams:
       - name: honeycomb
         url: https://mcp.honeycomb.io/mcp
         category: observability
         categoryDescription: "Distributed traces, SLOs, and query analysis"
+      - name: galoy_staging_k8s
+        url: https://mcp.staging.galoy.io/k8s/
+        kind:
+          type: remote_proxy
+          audience: mcp.staging.galoy.io
+        category: infrastructure
+        categoryDescription: "Kubernetes API for galoy-staging (read-only)"
+      - name: galoy_staging_db
+        url: https://mcp.staging.galoy.io/db/
+        kind:
+          type: remote_proxy
+          audience: mcp.staging.galoy.io
+        category: database
+        categoryDescription: "Postgres for galoy-staging (read-only)"
       - name: github
         url: https://api.githubcopilot.com/mcp/readonly
         toolPrefix: github

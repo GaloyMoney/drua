@@ -6,6 +6,7 @@ mod config;
 pub mod encryption;
 pub mod github_app;
 pub mod mcp_creds;
+pub mod mcp_jwt;
 pub mod primitives;
 pub mod prompt_executor;
 pub mod sandbox;
@@ -24,6 +25,7 @@ use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
+use mcp_jwt::McpJwtSigner;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
@@ -52,6 +54,7 @@ pub struct App {
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
+    mcp_jwt: Option<Arc<McpJwtSigner>>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
     _prompt_executor: Arc<PromptExecutor>,
@@ -99,7 +102,24 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let mut toolsets = ToolSets::init(config.toolsets).await?;
+
+        // Optionally initialize the MCP JWT signer. Required when any
+        // `RemoteProxy` upstream is configured — their `init` will fail
+        // loudly otherwise.
+        let mcp_jwt = match config.mcp_jwt {
+            Some(ref cfg) => {
+                let signer = McpJwtSigner::new(cfg)
+                    .map_err(|e| AppError::McpJwt(format!("failed to initialize: {e}")))?;
+                tracing::info!("MCP JWT signer initialized");
+                Some(Arc::new(signer))
+            }
+            None => {
+                tracing::info!("MCP JWT signer not configured — remote MCP proxies disabled");
+                None
+            }
+        };
+
+        let mut toolsets = ToolSets::init(config.toolsets, mcp_jwt.clone()).await?;
         if let Some(ca) = code_assistant.as_ref() {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }
@@ -207,6 +227,7 @@ impl App {
             skills,
             sandboxes,
             github_app,
+            mcp_jwt,
             _prompt_executor: prompt_executor,
         })
     }
@@ -254,6 +275,10 @@ impl App {
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
         self.github_app.as_deref()
     }
+
+    pub fn mcp_jwt(&self) -> Option<&McpJwtSigner> {
+        self.mcp_jwt.as_deref()
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -268,6 +293,8 @@ pub enum AppError {
     CodeAssistant(String),
     #[error("AppError - GitHubApp: {0}")]
     GitHubApp(String),
+    #[error("AppError - McpJwt: {0}")]
+    McpJwt(String),
     #[error("AppError - PromptExecutor: {0}")]
     PromptExecutor(String),
     #[error("AppError - Sandbox: {0}")]

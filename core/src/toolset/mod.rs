@@ -26,6 +26,7 @@ use rmcp::model::{CallToolResult, JsonObject};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::mcp_jwt::McpJwtSigner;
 
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
@@ -35,11 +36,29 @@ pub struct ToolSets {
 
 impl ToolSets {
     #[tracing::instrument(name = "toolset.init", skip_all)]
-    pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
+    pub async fn init(
+        config: ToolSetsConfig,
+        jwt_signer: Option<Arc<McpJwtSigner>>,
+    ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            match UpstreamToolSet::init(upstream).await {
+            let init_result: Result<Arc<dyn SearchableToolSet>, ToolSetsError> =
+                match &upstream.kind {
+                    McpUpstreamKind::Http => UpstreamToolSet::init(upstream)
+                        .await
+                        .map(|ts| Arc::new(ts) as Arc<dyn SearchableToolSet>),
+                    McpUpstreamKind::RemoteProxy { audience } => match jwt_signer.as_deref() {
+                        Some(signer) => RemoteProxyToolSet::init(upstream, audience, signer)
+                            .await
+                            .map(|ts| Arc::new(ts) as Arc<dyn SearchableToolSet>),
+                        None => Err(ToolSetsError::MissingJwtSigner {
+                            upstream: upstream.name.clone(),
+                        }),
+                    },
+                };
+
+            match init_result {
                 Ok(ts) => {
                     tracing::info!(
                         name = %upstream.name,
@@ -47,7 +66,7 @@ impl ToolSets {
                         tools = ts.tools().len(),
                         "MCP upstream toolset initialized"
                     );
-                    sets.push(Arc::new(ts));
+                    sets.push(ts);
                 }
                 Err(e) => {
                     tracing::warn!(name = %upstream.name, error = %e, "Failed to initialize MCP upstream, skipping");

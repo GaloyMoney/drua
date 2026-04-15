@@ -5,8 +5,11 @@
 
 pub mod code_assistant;
 pub mod concourse;
+mod jwt_http_client;
+pub mod remote_proxy;
 pub mod upstream;
 
 pub use code_assistant::CodeAssistantToolSet;
 pub use concourse::ConcourseToolSet;
+pub use remote_proxy::RemoteProxyToolSet;
 pub use upstream::*;

@@ -57,6 +57,13 @@ data:
       {{- range .Values.galoyAgents.config.mcpUpstreams }}
         - name: {{ .name | quote }}
           url: {{ .url | quote }}
+          {{- if .kind }}
+          kind:
+            type: {{ .kind.type | quote }}
+            {{- if eq .kind.type "remote_proxy" }}
+            audience: {{ .kind.audience | quote }}
+            {{- end }}
+          {{- end }}
           {{- if .authHeaderName }}
           auth_header_name: {{ .authHeaderName | quote }}
           {{- end }}
@@ -108,6 +115,11 @@ data:
     github_app:
       client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}
       installation_id: {{ .Values.galoyAgents.config.githubApp.installationId | quote }}
+    {{- end }}
+    {{- if .Values.galoyAgents.config.mcpJwt.enabled }}
+    mcp_jwt:
+      issuer: {{ .Values.galoyAgents.config.mcpJwt.issuer | quote }}
+      kid: {{ .Values.galoyAgents.config.mcpJwt.kid | quote }}
     {{- end }}
     {{- if .Values.sandbox.namespace }}
     # Sandbox provisioning. Without this section the binary defaults to

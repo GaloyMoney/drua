@@ -98,6 +98,31 @@ galoyAgents:
       enabled: false
       clientId: ""
       installationId: ""
+    ## MCP JWT signer for outbound `RemoteProxy` upstreams (e.g. the
+    ## galoy-agents-proxy sidecar deployed per target deployment).
+    ## When enabled, galoy-agents signs outbound MCP calls with an RS256
+    ## JWT and exposes the matching public key at `/.well-known/jwks.json`.
+    ## The PEM private key is read from the main galoy-agents secret
+    ## (key: mcp-jwt-private-key).
+    mcpJwt:
+      enabled: false
+      issuer: "galoy-agents"
+      kid: "primary"
+    ## Example RemoteProxy entries (append to mcpUpstreams above):
+    ##   - name: "galoy_staging_k8s"
+    ##     url: "https://mcp.staging.galoy.io/k8s/"
+    ##     kind:
+    ##       type: "remote_proxy"
+    ##       audience: "mcp.staging.galoy.io"
+    ##     category: "infrastructure"
+    ##     categoryDescription: "Kubernetes API for galoy-staging"
+    ##   - name: "galoy_staging_db"
+    ##     url: "https://mcp.staging.galoy.io/db/"
+    ##     kind:
+    ##       type: "remote_proxy"
+    ##       audience: "mcp.staging.galoy.io"
+    ##     category: "database"
+    ##     categoryDescription: "Postgres (read-only) for galoy-staging"
   secrets:
     create: true
     pgCon: ""
@@ -105,6 +130,9 @@ galoyAgents:
     concourseUsername: ""
     concoursePassword: ""
     anthropicApiKey: ""
+    ## PEM-encoded RSA private key used by the MCP JWT signer.
+    ## Required when galoyAgents.config.mcpJwt.enabled=true.
+    mcpJwtPrivateKey: ""
     annotations:
   codeAssistant:
     indexHash: "0cc441e047500f2708e11a018482376181f1b6d53e046895e51985cc1a2ec0be"

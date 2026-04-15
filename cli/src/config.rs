@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use galoy_agents_core::agent::AgentsConfig;
+use galoy_agents_core::mcp_jwt::McpJwtConfig;
 use galoy_agents_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
 use galoy_agents_core::sandbox::SandboxConfig;
 use galoy_agents_core::toolset::ToolSetsConfig;
@@ -25,6 +26,8 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub github_app: Option<GitHubAppCliConfig>,
+    #[serde(default)]
+    pub mcp_jwt: Option<McpJwtCliConfig>,
     #[serde(skip)]
     pub anthropic_api_key: String,
 }
@@ -70,6 +73,34 @@ pub struct GitHubAppCliConfig {
     /// Filesystem path to the PEM private key (loaded from env: GITHUB_APP_PRIVATE_KEY_PATH).
     #[serde(skip)]
     pub private_key_path: String,
+}
+
+/// MCP JWT signer config from the YAML config file.
+/// `private_key_path` is loaded from env (MCP_JWT_PRIVATE_KEY_PATH) to
+/// point at the K8s secret mount.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpJwtCliConfig {
+    #[serde(default)]
+    pub issuer: String,
+    #[serde(default)]
+    pub kid: String,
+    #[serde(skip)]
+    pub private_key_path: String,
+}
+
+impl McpJwtCliConfig {
+    fn to_core(&self) -> Option<McpJwtConfig> {
+        if self.issuer.is_empty() || self.kid.is_empty() || self.private_key_path.is_empty() {
+            None
+        } else {
+            Some(McpJwtConfig {
+                issuer: self.issuer.clone(),
+                kid: self.kid.clone(),
+                private_key_path: self.private_key_path.clone(),
+            })
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -185,7 +216,18 @@ impl Config {
             }
         }
 
+        // MCP JWT signer private key path from env (K8s secret mount)
+        if let Some(ref mut jwt) = config.mcp_jwt {
+            if let Ok(val) = std::env::var("MCP_JWT_PRIVATE_KEY_PATH") {
+                jwt.private_key_path = val;
+            }
+        }
+
         Ok(config)
+    }
+
+    pub fn mcp_jwt_config(&self) -> Option<McpJwtConfig> {
+        self.mcp_jwt.as_ref().and_then(|c| c.to_core())
     }
 
     pub fn auth_config(&self) -> AuthConfig {

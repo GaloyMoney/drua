@@ -17,6 +17,7 @@ async fn init_toolsets() {
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),
+            kind: Default::default(),
             auth_header,
             auth_header_name: "authorization".to_string(),
             category: Some("observability".to_string()),
@@ -26,7 +27,7 @@ async fn init_toolsets() {
             required_scopes: None,
         }],
     };
-    let toolsets = ToolSets::init(config).await.unwrap();
+    let toolsets = ToolSets::init(config, None).await.unwrap();
 
     // Anonymous subject still sees the unrestricted builtins — the new
     // trait defaults `is_visible` to `true`. Make sure init succeeded and

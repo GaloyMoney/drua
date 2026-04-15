@@ -121,6 +121,11 @@ spec:
           mountPath: /secrets/github-app
           readOnly: true
         {{- end }}
+        {{- if .Values.galoyAgents.config.mcpJwt.enabled }}
+        - name: mcp-jwt-key
+          mountPath: /secrets/mcp-jwt
+          readOnly: true
+        {{- end }}
         env:
         - name: GALOY_AGENTS_CONFIG
           value: "/config/galoy-agents.yml"
@@ -166,6 +171,10 @@ spec:
         - name: GITHUB_APP_PRIVATE_KEY_PATH
           value: "/secrets/github-app/private-key.pem"
         {{- end }}
+        {{- if .Values.galoyAgents.config.mcpJwt.enabled }}
+        - name: MCP_JWT_PRIVATE_KEY_PATH
+          value: "/secrets/mcp-jwt/private-key.pem"
+        {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef:
@@ -191,5 +200,13 @@ spec:
           secretName: {{ template "galoyAgents.fullname" . }}
           items:
             - key: "github-app-private-key"
+              path: "private-key.pem"
+      {{- end }}
+      {{- if .Values.galoyAgents.config.mcpJwt.enabled }}
+      - name: mcp-jwt-key
+        secret:
+          secretName: {{ template "galoyAgents.fullname" . }}
+          items:
+            - key: "mcp-jwt-private-key"
               path: "private-key.pem"
       {{- end }}

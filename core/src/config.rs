@@ -3,6 +3,7 @@ use serde::Deserialize;
 use crate::agent::AgentsConfig;
 use crate::encryption::EncryptionKey;
 use crate::github_app::GitHubAppConfig;
+use crate::mcp_jwt::McpJwtConfig;
 use crate::prompt_executor::PromptExecutorConfig;
 use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
@@ -23,6 +24,11 @@ pub struct AppConfig {
     /// When set, sandbox agents receive a `github-token` file secret.
     #[serde(default)]
     pub github_app: Option<GitHubAppConfig>,
+    /// Optional MCP JWT signer config. Required when any `RemoteProxy`
+    /// upstream is configured; those upstreams sign outbound calls with
+    /// this key and expose the matching public key at `/.well-known/jwks.json`.
+    #[serde(default)]
+    pub mcp_jwt: Option<McpJwtConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
