@@ -56,7 +56,7 @@ impl McpGateway {
             .and_then(|parts| parts.extensions.get::<AuthSubject>());
         match auth {
             Some(auth @ AuthSubject::ExportedAgent(_, _, _))
-            | Some(auth @ AuthSubject::Agent(_, _, _)) => Ok(auth),
+            | Some(auth @ AuthSubject::Agent(_, _)) => Ok(auth),
             _ => Err(ErrorData::new(
                 ErrorCode::INVALID_REQUEST,
                 "Authentication required: provide a valid Bearer token",

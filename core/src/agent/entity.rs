@@ -83,13 +83,13 @@ impl Agent {
     /// workspace + id, carrying the scopes persisted on the `Initialized`
     /// event. Use when no originating user can be attributed.
     pub fn auth_subject(&self) -> AuthSubject {
-        AuthSubject::Agent(self.workspace_id, self.id, self.scopes_vec())
+        AuthSubject::Agent(self.id, self.scopes_vec())
     }
 
     /// Same as [`Self::auth_subject`] but tagged with the user that triggered
     /// the agent's work, so downstream actions can be attributed back to them.
     pub fn auth_subject_for_user(&self, user_id: UserId) -> AuthSubject {
-        AuthSubject::AgentOnBehalfOfUser(user_id, self.workspace_id, self.id, self.scopes_vec())
+        AuthSubject::AgentOnBehalfOfUser(user_id, self.id, self.scopes_vec())
     }
 
     /// Apply a batch of scope additions/removals as a single

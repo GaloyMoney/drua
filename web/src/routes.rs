@@ -1761,7 +1761,12 @@ async fn api_agent_secrets(
 ) -> Response {
     // Only allow Agent auth (SA token from sandbox pods)
     let (workspace_id, jwt_agent_id) = match &auth {
-        AuthSubject::Agent(workspace_id, agent_id, _) => (*workspace_id, *agent_id),
+        AuthSubject::Agent(agent_id, _) => {
+            let workspace_id = auth
+                .workspace_id()
+                .expect("Agent always has workspace scope");
+            (workspace_id, *agent_id)
+        }
         _ => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 

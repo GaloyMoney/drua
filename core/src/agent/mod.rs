@@ -303,8 +303,7 @@ impl Agents {
         // rejected.
         match &subject {
             AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
-            AuthSubject::Agent(ws, _, _) | AuthSubject::AgentOnBehalfOfUser(_, ws, _, _)
-                if *ws == agent.workspace_id => {}
+            _ if subject.workspace_id() == Some(agent.workspace_id) => {}
             _ => return Err(AgentError::Unauthorized),
         }
 
