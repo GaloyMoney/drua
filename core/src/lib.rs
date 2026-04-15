@@ -10,7 +10,6 @@ pub mod primitives;
 pub mod prompt_executor;
 pub mod sandbox;
 pub mod skill;
-pub mod slash_command;
 pub mod toolset;
 pub mod user;
 pub mod workspace;
@@ -28,7 +27,6 @@ use mcp_creds::McpCredentials;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
-use slash_command::SlashCommands;
 use toolset::{
     AllLogs, Bash, CodeAssistantToolSet, TextEditor, ToolSets, ToolSetsError, WorkspaceLog,
 };
@@ -44,7 +42,6 @@ pub struct App {
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
     toolsets: Arc<ToolSets>,
-    slash_commands: Arc<SlashCommands>,
     workspaces: Workspaces,
     workspace_secrets: WorkspaceSecrets,
     skills: Skills,
@@ -112,7 +109,6 @@ impl App {
         let prompt_executor = Arc::new(prompt_executor);
 
         let mcp_creds = McpCredentials::new(pool);
-        let slash_commands = Arc::new(slash_command::default_registry());
 
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
@@ -167,7 +163,6 @@ impl App {
             audit,
             code_assistant,
             toolsets,
-            slash_commands,
             workspaces,
             workspace_secrets,
             skills,
@@ -195,10 +190,6 @@ impl App {
 
     pub fn code_assistant(&self) -> Option<&CodeAssistant> {
         self.code_assistant.as_deref()
-    }
-
-    pub fn slash_commands(&self) -> &SlashCommands {
-        &self.slash_commands
     }
 
     pub fn toolsets(&self) -> &ToolSets {

@@ -1,8 +1,7 @@
 use serde::Serialize;
 
-/// Event streamed back to callers while an agent processes a message
-/// or a slash command is executed. Carried over an mpsc channel and
-/// serialized as SSE on the web layer.
+/// Event streamed back to callers while an agent processes a message.
+/// Carried over an mpsc channel and serialized as SSE on the web layer.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatOutputEvent {
@@ -33,9 +32,6 @@ pub enum ChatOutputEvent {
         duration_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
-    },
-    SlashCommandOutput {
-        text: String,
     },
     Error {
         message: String,

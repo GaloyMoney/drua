@@ -1700,28 +1700,17 @@ async fn api_agent_message(
 
     let agent_id = AgentId::from(id);
 
-    // Slash commands are handled entirely server-side — no LLM, no session
-    // persistence. Route them through the slash command registry and return
-    // events via the same SSE channel shape.
-    let rx = if domain::slash_command::SlashCommands::is_slash_command(&body.prompt) {
-        state
-            .app
-            .slash_commands()
-            .process(&auth, agent_id, body.prompt)
-            .await
-    } else {
-        match state
-            .app
-            .agents()
-            .send_message(auth, agent_id, body.prompt)
-            .await
-        {
-            Ok(rx) => rx,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to send message to agent");
-                let body = serde_json::json!({ "error": e.to_string() });
-                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
-            }
+    let rx = match state
+        .app
+        .agents()
+        .send_message(auth, agent_id, body.prompt)
+        .await
+    {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to send message to agent");
+            let body = serde_json::json!({ "error": e.to_string() });
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
         }
     };
 
@@ -1737,9 +1726,6 @@ async fn api_agent_message(
                 domain::primitives::ChatOutputEvent::ToolCall { .. } => "tool_call",
                 domain::primitives::ChatOutputEvent::ToolResult { .. } => "tool_result",
                 domain::primitives::ChatOutputEvent::AssistantDone { .. } => "assistant_done",
-                domain::primitives::ChatOutputEvent::SlashCommandOutput { .. } => {
-                    "slash_command_output"
-                }
                 domain::primitives::ChatOutputEvent::Error { .. } => "error",
                 domain::primitives::ChatOutputEvent::Service { .. } => "service",
             };
