@@ -18,110 +18,6 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn can_write_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceWrite(ws)))
-}
-
-fn can_read_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
-}
-
-fn parse_uuid_field(args: Option<&JsonObject>, key: &str) -> Option<uuid::Uuid> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-}
-
-fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
-    parse_uuid_field(args, key).ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-fn parse_agent_role(args: Option<&JsonObject>) -> AgentRole {
-    args.and_then(|a| a.get("role"))
-        .and_then(|v| v.as_str())
-        .map(|s| match s {
-            "workspace_lead" => AgentRole::WorkspaceLead,
-            _ => AgentRole::Agent,
-        })
-        .unwrap_or(AgentRole::Agent)
-}
-
-fn parse_sandbox_mode(args: Option<&JsonObject>) -> SandboxAgentMode {
-    args.and_then(|a| a.get("mode"))
-        .and_then(|v| v.as_str())
-        .map(|s| match s {
-            "write" => SandboxAgentMode::Write,
-            _ => SandboxAgentMode::Read,
-        })
-        .unwrap_or(SandboxAgentMode::Read)
-}
-
-/// Format a list of agents as a human-/LLM-readable text table.
-fn format_agents(agents: &[Agent]) -> String {
-    if agents.is_empty() {
-        return "No agents found.".to_string();
-    }
-
-    let mut lines = Vec::with_capacity(agents.len() + 2);
-    lines.push(format!(
-        "{:<38} {:<20} {:<16} {:<38}",
-        "ID", "NAME", "ROLE", "SANDBOX"
-    ));
-    lines.push("-".repeat(116));
-
-    for a in agents {
-        let sandbox = match &a.attached_sandbox {
-            Some((sid, mode)) => format!("{sid} ({mode:?})"),
-            None => "—".to_string(),
-        };
-        let role = match a.agent_role {
-            AgentRole::WorkspaceLead => "workspace_lead",
-            AgentRole::Agent => "agent",
-        };
-        lines.push(format!(
-            "{:<38} {:<20} {:<16} {:<38}",
-            a.id,
-            truncate(&a.name, 20),
-            role,
-            sandbox,
-        ));
-    }
-
-    lines.join("\n")
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
-}
-
-/// Format a single agent as a detailed text block.
-fn format_agent(a: &Agent) -> String {
-    let role = match a.agent_role {
-        AgentRole::WorkspaceLead => "workspace_lead",
-        AgentRole::Agent => "agent",
-    };
-    let sandbox = match &a.attached_sandbox {
-        Some((sid, mode)) => format!("{sid} ({mode:?})"),
-        None => "none".to_string(),
-    };
-    format!(
-        "Agent created.\n  id: {}\n  name: {}\n  role: {}\n  workspace: {}\n  sandbox: {}",
-        a.id, a.name, role, a.workspace_id, sandbox
-    )
-}
-
-// ---------------------------------------------------------------------------
 // workspace_create_agent
 // ---------------------------------------------------------------------------
 
@@ -544,8 +440,6 @@ impl AgentDetachSandbox {
     }
 }
 
-// Re-uses WS_DETACH_SCHEMA — same fields.
-
 #[async_trait::async_trait]
 impl TopLevelTool for AgentDetachSandbox {
     fn name(&self) -> &str {
@@ -601,6 +495,12 @@ impl WorkspaceListAgents {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
+
+    fn can_read_workspace(subject: &AuthSubject) -> bool {
+        subject
+            .workspace_id()
+            .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
+    }
 }
 
 static WS_LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -626,11 +526,11 @@ impl TopLevelTool for WorkspaceListAgents {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        Self::can_read_workspace(subject)
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        Self::can_read_workspace(subject)
     }
 
     async fn call(
@@ -720,5 +620,98 @@ impl TopLevelTool for ListAgents {
         Ok(CallToolResult::success(vec![Content::text(format_agents(
             &agents,
         ))]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn can_write_workspace(subject: &AuthSubject) -> bool {
+    subject
+        .workspace_id()
+        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceWrite(ws)))
+}
+
+fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
+}
+
+fn parse_agent_role(args: Option<&JsonObject>) -> AgentRole {
+    args.and_then(|a| a.get("role"))
+        .and_then(|v| v.as_str())
+        .map(|s| match s {
+            "workspace_lead" => AgentRole::WorkspaceLead,
+            _ => AgentRole::Agent,
+        })
+        .unwrap_or(AgentRole::Agent)
+}
+
+fn parse_sandbox_mode(args: Option<&JsonObject>) -> SandboxAgentMode {
+    args.and_then(|a| a.get("mode"))
+        .and_then(|v| v.as_str())
+        .map(|s| match s {
+            "write" => SandboxAgentMode::Write,
+            _ => SandboxAgentMode::Read,
+        })
+        .unwrap_or(SandboxAgentMode::Read)
+}
+
+fn format_agent(a: &Agent) -> String {
+    let role = match a.agent_role {
+        AgentRole::WorkspaceLead => "workspace_lead",
+        AgentRole::Agent => "agent",
+    };
+    let sandbox = match &a.attached_sandbox {
+        Some((sid, mode)) => format!("{sid} ({mode:?})"),
+        None => "none".to_string(),
+    };
+    format!(
+        "Agent created.\n  id: {}\n  name: {}\n  role: {}\n  workspace: {}\n  sandbox: {}",
+        a.id, a.name, role, a.workspace_id, sandbox
+    )
+}
+
+fn format_agents(agents: &[Agent]) -> String {
+    if agents.is_empty() {
+        return "No agents found.".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(agents.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<20} {:<16} {:<38}",
+        "ID", "NAME", "ROLE", "SANDBOX"
+    ));
+    lines.push("-".repeat(116));
+
+    for a in agents {
+        let sandbox = match &a.attached_sandbox {
+            Some((sid, mode)) => format!("{sid} ({mode:?})"),
+            None => "—".to_string(),
+        };
+        let role = match a.agent_role {
+            AgentRole::WorkspaceLead => "workspace_lead",
+            AgentRole::Agent => "agent",
+        };
+        lines.push(format!(
+            "{:<38} {:<20} {:<16} {:<38}",
+            a.id,
+            truncate(&a.name, 20),
+            role,
+            sandbox,
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
     }
 }
