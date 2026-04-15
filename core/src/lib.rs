@@ -28,11 +28,12 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AgentAttachSandbox, AgentCreate, AgentDetachSandbox, AllLogs, Bash, CodeAssistantToolSet,
-    CreateSandbox, GetSandbox, GlobTool, Grep, InspectSandbox, ListAgents, ListSandboxes, Ls, Read,
-    TextEditor, ToolSets, ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
-    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
-    WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
+    AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminAllLogs,
+    AdminCreateSandbox, AdminGetSandbox, AdminInspectSandbox, AdminListAgents, AdminListSandboxes,
+    Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets, ToolSetsError,
+    WorkspaceAgentAttachSandbox, WorkspaceAgentCreate, WorkspaceAgentDetachSandbox,
+    WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceInspectSandbox, WorkspaceListAgents,
+    WorkspaceListSandboxes, WorkspaceLog,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -103,7 +104,7 @@ impl App {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }
         toolsets.register_top_level(WorkspaceLog::new(Arc::clone(&audit)));
-        toolsets.register_top_level(AllLogs::new(Arc::clone(&audit)));
+        toolsets.register_top_level(AdminAllLogs::new(Arc::clone(&audit)));
         toolsets.set_audit(Arc::clone(&audit));
 
         // Spawn the prompt executor and hand its request channel to the
@@ -168,21 +169,27 @@ impl App {
         // are available. Uses interior-mutable `register_top_level` so the
         // already-Arc'd toolsets can be extended.
         toolsets.register_top_level(WorkspaceAgentCreate::new(Arc::clone(&agents)));
-        toolsets.register_top_level(AgentCreate::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceAgentAttachSandbox::new(Arc::clone(&agents)));
-        toolsets.register_top_level(AgentAttachSandbox::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceAgentDetachSandbox::new(Arc::clone(&agents)));
-        toolsets.register_top_level(AgentDetachSandbox::new(Arc::clone(&agents)));
+        toolsets.register_top_level(AdminAgentCreate::new(Arc::clone(&agents)));
+        toolsets.register_top_level(WorkspaceAgentAttachSandbox::new(
+            Arc::clone(&agents),
+            sandboxes.clone(),
+        ));
+        toolsets.register_top_level(AdminAgentAttachSandbox::new(Arc::clone(&agents)));
+        toolsets.register_top_level(WorkspaceAgentDetachSandbox::new(
+            Arc::clone(&agents),
+            sandboxes.clone(),
+        ));
+        toolsets.register_top_level(AdminAgentDetachSandbox::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceListAgents::new(Arc::clone(&agents)));
-        toolsets.register_top_level(ListAgents::new(Arc::clone(&agents)));
+        toolsets.register_top_level(AdminListAgents::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceCreateSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(CreateSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(AdminCreateSandbox::new(sandboxes.clone()));
         toolsets.register_top_level(WorkspaceListSandboxes::new(sandboxes.clone()));
-        toolsets.register_top_level(ListSandboxes::new(sandboxes.clone()));
+        toolsets.register_top_level(AdminListSandboxes::new(sandboxes.clone()));
         toolsets.register_top_level(WorkspaceGetSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(GetSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(AdminGetSandbox::new(sandboxes.clone()));
         toolsets.register_top_level(WorkspaceInspectSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(InspectSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(AdminInspectSandbox::new(sandboxes.clone()));
 
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
