@@ -87,11 +87,11 @@ impl TopLevelTool for Bash {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from WorkspaceLead — leads orchestrate other agents and
-        // never attach a sandbox themselves, so a sandbox-backed tool is
-        // dead weight on their prompt. Other agents see it whether or
-        // not they're attached, so the model can ask to attach.
-        subject.is_agent() && !subject.is_workspace_lead()
+        // Hidden from workspace admins — they orchestrate other agents
+        // and never attach a sandbox themselves, so a sandbox-backed
+        // tool is dead weight on their prompt. Other agents see it
+        // whether or not they're attached, so the model can ask to attach.
+        subject.is_agent() && !subject.is_workspace_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {

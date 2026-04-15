@@ -64,8 +64,8 @@ impl TopLevelTool for Read {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from WorkspaceLead — see bash.rs.
-        subject.is_agent() && !subject.is_workspace_lead()
+        // Hidden from workspace admins — see bash.rs.
+        subject.is_agent() && !subject.is_workspace_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {

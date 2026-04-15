@@ -101,8 +101,8 @@ impl TopLevelTool for Grep {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // See bash.rs: hidden from WorkspaceLead.
-        subject.is_agent() && !subject.is_workspace_lead()
+        // See bash.rs: hidden from workspace admins.
+        subject.is_agent() && !subject.is_workspace_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {

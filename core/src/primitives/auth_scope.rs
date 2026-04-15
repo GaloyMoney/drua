@@ -13,13 +13,14 @@ use super::{SandboxId, WorkspaceId};
 pub enum AuthScope {
     /// Full administrative access.
     Admin,
-    /// The subject is the lead agent of a specific workspace.
-    /// Currently the only workspace-level scope: gates workspace
-    /// management tools (list/create/update agents and sandboxes,
-    /// query audit logs, etc.) and is checked by per-tool visibility
-    /// to *hide* sandbox-backed filesystem tools (leads orchestrate;
-    /// they don't run inside a sandbox themselves).
-    WorkspaceLead(WorkspaceId),
+    /// The subject is an admin of a specific workspace (granted to the
+    /// `WorkspaceLead` agent role today). Currently the only
+    /// workspace-level scope: gates workspace management tools
+    /// (list/create/update agents and sandboxes, query audit logs, etc.)
+    /// and is checked by per-tool visibility to *hide* sandbox-backed
+    /// filesystem tools (admins orchestrate; they don't run inside a
+    /// sandbox themselves).
+    WorkspaceAdmin(WorkspaceId),
     /// Full use access — the agent may invoke any sandbox tool, including
     /// state-mutating ones (e.g. the `bash` top-level tool). Granted on a
     /// `Write` attach.
@@ -39,7 +40,7 @@ impl fmt::Display for AuthScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthScope::Admin => f.write_str("admin"),
-            AuthScope::WorkspaceLead(id) => write!(f, "ws:{id}:lead"),
+            AuthScope::WorkspaceAdmin(id) => write!(f, "ws:{id}:admin"),
             AuthScope::SandboxUseAll(id) => write!(f, "sandbox:{id}:use_all"),
             AuthScope::SandboxUseReadOnly(id) => write!(f, "sandbox:{id}:use_read_only"),
             AuthScope::Raw(s) => f.write_str(s),
@@ -55,11 +56,11 @@ impl FromStr for AuthScope {
             return Ok(AuthScope::Admin);
         }
 
-        // Parse "ws:{uuid}:lead"
+        // Parse "ws:{uuid}:admin"
         if let Some(rest) = s.strip_prefix("ws:") {
-            if let Some(uuid_str) = rest.strip_suffix(":lead") {
+            if let Some(uuid_str) = rest.strip_suffix(":admin") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
-                    return Ok(AuthScope::WorkspaceLead(WorkspaceId::from(uuid)));
+                    return Ok(AuthScope::WorkspaceAdmin(WorkspaceId::from(uuid)));
                 }
             }
         }
@@ -136,7 +137,7 @@ mod tests {
         let sb_id = test_sandbox_id();
         let variants = vec![
             AuthScope::Admin,
-            AuthScope::WorkspaceLead(ws_id),
+            AuthScope::WorkspaceAdmin(ws_id),
             AuthScope::SandboxUseAll(sb_id),
             AuthScope::SandboxUseReadOnly(sb_id),
             AuthScope::Raw("custom:thing".to_owned()),
@@ -185,8 +186,8 @@ mod tests {
     fn display_workspace_scopes() {
         let ws_id = test_workspace_id();
         assert_eq!(
-            AuthScope::WorkspaceLead(ws_id).to_string(),
-            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:lead"
+            AuthScope::WorkspaceAdmin(ws_id).to_string(),
+            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
         );
     }
 
@@ -199,10 +200,10 @@ mod tests {
     #[test]
     fn from_str_workspace() {
         let ws_id = test_workspace_id();
-        let lead: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:lead"
+        let admin: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
             .parse()
             .unwrap();
-        assert_eq!(lead, AuthScope::WorkspaceLead(ws_id));
+        assert_eq!(admin, AuthScope::WorkspaceAdmin(ws_id));
     }
 
     #[test]
@@ -219,10 +220,10 @@ mod tests {
         assert_ne!(AuthScope::Admin, AuthScope::Raw("admin".to_owned()));
 
         assert_eq!(
-            AuthScope::WorkspaceLead(ws_id),
-            AuthScope::WorkspaceLead(ws_id)
+            AuthScope::WorkspaceAdmin(ws_id),
+            AuthScope::WorkspaceAdmin(ws_id)
         );
-        assert_ne!(AuthScope::WorkspaceLead(ws_id), AuthScope::Admin);
+        assert_ne!(AuthScope::WorkspaceAdmin(ws_id), AuthScope::Admin);
 
         assert_eq!(
             AuthScope::Raw("custom".to_owned()),
@@ -242,8 +243,8 @@ mod tests {
         let variants = vec![
             (AuthScope::Admin, r#""admin""#),
             (
-                AuthScope::WorkspaceLead(ws_id),
-                r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:lead""#,
+                AuthScope::WorkspaceAdmin(ws_id),
+                r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin""#,
             ),
             (AuthScope::Raw("custom".to_owned()), r#""custom""#),
         ];

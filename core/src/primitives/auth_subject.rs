@@ -74,13 +74,13 @@ impl AuthSubject {
         self.has_scope(&AuthScope::Admin)
     }
 
-    /// True if the subject is the lead of its workspace. Currently used
+    /// True if the subject is an admin of its workspace. Currently used
     /// as the single workspace-level permission check by every workspace
     /// management tool — `WorkspaceRead` / `WorkspaceWrite` were
-    /// collapsed into [`AuthScope::WorkspaceLead`] for simplicity.
+    /// collapsed into [`AuthScope::WorkspaceAdmin`] for simplicity.
     pub fn can_read_workspace(&self) -> bool {
         self.workspace_id()
-            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceLead(ws)))
+            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceAdmin(ws)))
     }
 
     /// Identical to [`Self::can_read_workspace`] for now — both gate on
@@ -119,13 +119,14 @@ impl AuthSubject {
         )
     }
 
-    /// True when the subject carries an [`AuthScope::WorkspaceLead`] for
-    /// any workspace. Used by sandbox-backed tools to hide themselves
-    /// from leads (leads orchestrate; they don't run inside sandboxes).
-    pub fn is_workspace_lead(&self) -> bool {
+    /// True when the subject carries an [`AuthScope::WorkspaceAdmin`]
+    /// for any workspace. Used by sandbox-backed tools to hide
+    /// themselves from admins (admins orchestrate; they don't run
+    /// inside sandboxes).
+    pub fn is_workspace_admin(&self) -> bool {
         self.scopes()
             .iter()
-            .any(|s| matches!(s, AuthScope::WorkspaceLead(_)))
+            .any(|s| matches!(s, AuthScope::WorkspaceAdmin(_)))
     }
 
     /// First sandbox the subject can read from. `SandboxUseAll` always
