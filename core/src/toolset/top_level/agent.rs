@@ -1,9 +1,8 @@
 //! Agent management tools: workspace-scoped and admin-scoped wrappers for
 //! creating agents, listing agents, and attaching/detaching sandboxes.
 //!
-//! Workspace-scoped tools require `WorkspaceWrite` (or `WorkspaceRead` for
-//! listing) on the caller's workspace.  Admin-scoped tools require the
-//! `Admin` scope.
+//! Workspace-scoped tools require the `WorkspaceLead` scope on the
+//! caller's workspace.  Admin-scoped tools require the `Admin` scope.
 
 use std::sync::{Arc, LazyLock};
 

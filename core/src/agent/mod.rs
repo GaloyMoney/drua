@@ -11,20 +11,15 @@ use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
-/// Eventually this will move into role-config, but for now it's hard-wired:
-/// both built-in roles get read+write on their own workspace; the lead
-/// also gets the [`AuthScope::WorkspaceLead`] role marker so per-tool
-/// visibility can hide tools that aren't useful to it (e.g. the
-/// sandbox-backed filesystem tools).
+/// `WorkspaceLead` gets the workspace-level scope (the only one for now);
+/// non-leads get nothing from this function — they pick up
+/// `SandboxUseAll` / `SandboxUseReadOnly` later when they're attached to
+/// a sandbox via [`Agent::sandbox_attached`].
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
-    let mut scopes = vec![
-        AuthScope::WorkspaceRead(workspace_id),
-        AuthScope::WorkspaceWrite(workspace_id),
-    ];
-    if matches!(role, AgentRole::WorkspaceLead) {
-        scopes.push(AuthScope::WorkspaceLead(workspace_id));
+    match role {
+        AgentRole::WorkspaceLead => vec![AuthScope::WorkspaceLead(workspace_id)],
+        AgentRole::Agent => Vec::new(),
     }
-    scopes
 }
 
 /// Recognise a slash-skill invocation: the entire (trimmed) prompt is
@@ -219,7 +214,7 @@ impl Agents {
     }
 
     /// Attach a sandbox to an agent in `mode` (Read or Write). The subject
-    /// must hold [`AuthScope::WorkspaceWrite`] on the agent's workspace.
+    /// must hold [`AuthScope::WorkspaceLead`] on the agent's workspace.
     /// Re-attach with a different mode is allowed (downgrade unconditional;
     /// upgrade to Write succeeds only if no other agent currently holds
     /// Write — see [`crate::sandbox::Sandbox::attach_agent`]). After the
@@ -237,7 +232,7 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         let workspace_id = agent.workspace_id;
 
-        if !subject.has_any(&[AuthScope::Admin, AuthScope::WorkspaceWrite(workspace_id)]) {
+        if !subject.has_any(&[AuthScope::Admin, AuthScope::WorkspaceLead(workspace_id)]) {
             return Err(AgentError::Unauthorized);
         }
 
@@ -272,7 +267,7 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         if !subject.has_any(&[
             AuthScope::Admin,
-            AuthScope::WorkspaceWrite(agent.workspace_id),
+            AuthScope::WorkspaceLead(agent.workspace_id),
         ]) {
             return Err(AgentError::Unauthorized);
         }

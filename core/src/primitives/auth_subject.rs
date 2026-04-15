@@ -74,16 +74,21 @@ impl AuthSubject {
         self.has_scope(&AuthScope::Admin)
     }
 
-    /// True if the subject is in a workspace and carries `WorkspaceRead` for it.
+    /// True if the subject is the lead of its workspace. Currently used
+    /// as the single workspace-level permission check by every workspace
+    /// management tool — `WorkspaceRead` / `WorkspaceWrite` were
+    /// collapsed into [`AuthScope::WorkspaceLead`] for simplicity.
     pub fn can_read_workspace(&self) -> bool {
         self.workspace_id()
-            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceRead(ws)))
+            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceLead(ws)))
     }
 
-    /// True if the subject is in a workspace and carries `WorkspaceWrite` for it.
+    /// Identical to [`Self::can_read_workspace`] for now — both gate on
+    /// the lead scope. Kept as a separate name so call sites that mean
+    /// "this is a write-side check" stay readable; can diverge later if
+    /// we re-introduce a finer-grained scope.
     pub fn can_write_workspace(&self) -> bool {
-        self.workspace_id()
-            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceWrite(ws)))
+        self.can_read_workspace()
     }
 
     /// Check whether this auth subject carries the given scope.

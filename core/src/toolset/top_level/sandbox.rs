@@ -1,9 +1,8 @@
 //! Sandbox management tools: workspace-scoped and admin-scoped wrappers for
 //! creating, listing, and inspecting sandboxes.
 //!
-//! Workspace-scoped tools require `WorkspaceWrite` (or `WorkspaceRead` for
-//! listing/get) on the caller's workspace.  Admin-scoped tools require the
-//! `Admin` scope.
+//! Workspace-scoped tools require the `WorkspaceLead` scope on the
+//! caller's workspace.  Admin-scoped tools require the `Admin` scope.
 
 use std::sync::LazyLock;
 

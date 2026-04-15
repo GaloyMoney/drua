@@ -1,7 +1,7 @@
 //! `workspace_log` and `all_logs` — audit log query tools.
 //!
 //! `workspace_log` returns entries scoped to the caller's workspace and
-//! requires the `WorkspaceRead` scope.  It automatically excludes the
+//! requires the `WorkspaceLead` scope.  It automatically excludes the
 //! calling agent's own entries so an agent doesn't see its own tool calls.
 //!
 //! `all_logs` is admin-only and returns entries across all workspaces.
