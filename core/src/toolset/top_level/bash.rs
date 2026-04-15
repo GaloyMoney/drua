@@ -24,7 +24,6 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::is_agent_subject;
 
 pub struct Bash {
     sandboxes: Sandboxes,
@@ -88,14 +87,14 @@ impl TopLevelTool for Bash {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        is_agent_subject(subject)
+        subject.is_agent()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
         // Visible-but-unauthorized when an agent has no attachment yet —
         // the model gets a clear `Unauthorized` error from dispatch
         // instead of the tool silently disappearing.
-        is_agent_subject(subject) && sandbox_use_id(subject).is_some()
+        subject.is_agent() && sandbox_use_id(subject).is_some()
     }
 
     async fn call(

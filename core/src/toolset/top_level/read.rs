@@ -15,7 +15,6 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{is_agent_subject, readable_sandbox_id};
 
 pub struct Read {
     sandboxes: Sandboxes,
@@ -65,11 +64,11 @@ impl TopLevelTool for Read {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        is_agent_subject(subject)
+        subject.is_agent()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        is_agent_subject(subject) && readable_sandbox_id(subject).is_some()
+        subject.is_agent() && subject.readable_sandbox_id().is_some()
     }
 
     async fn call(
@@ -77,7 +76,7 @@ impl TopLevelTool for Read {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let sandbox_id = readable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?;
+        let sandbox_id = subject.readable_sandbox_id().ok_or(ToolSetsError::Unauthorized)?;
         let args = arguments.unwrap_or_default();
 
         let path = args
