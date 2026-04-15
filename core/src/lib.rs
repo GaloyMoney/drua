@@ -30,6 +30,7 @@ use skill::Skills;
 use toolset::{
     AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminAllLogs,
     AdminCreateSandbox, AdminGetSandbox, AdminInspectSandbox, AdminListAgents, AdminListSandboxes,
+    AdminWorkspaceCreate, AdminWorkspaceList,
     Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets, ToolSetsError,
     WorkspaceAgentAttachSandbox, WorkspaceAgentCreate, WorkspaceAgentDetachSandbox,
     WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceInspectSandbox, WorkspaceListAgents,
@@ -192,6 +193,8 @@ impl App {
         toolsets.register_top_level(AdminInspectSandbox::new(sandboxes.clone()));
 
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
+        toolsets.register_top_level(AdminWorkspaceCreate::new(workspaces.clone()));
+        toolsets.register_top_level(AdminWorkspaceList::new(workspaces.clone()));
 
         Ok(Self {
             users: Users::new(pool),

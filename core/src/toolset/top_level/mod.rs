@@ -12,6 +12,7 @@ mod ping;
 mod read;
 mod sandbox;
 mod text_editor;
+mod workspace;
 
 pub use agent::{
     AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminListAgents,
@@ -32,3 +33,4 @@ pub use sandbox::{
     WorkspaceGetSandbox, WorkspaceListSandboxes,
 };
 pub use text_editor::TextEditor;
+pub use workspace::{AdminWorkspaceCreate, AdminWorkspaceList};

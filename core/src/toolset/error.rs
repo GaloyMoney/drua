@@ -24,6 +24,8 @@ pub enum ToolSetsError {
     Agent(String),
     #[error("ToolSetsError - Sandbox: {0}")]
     Sandbox(String),
+    #[error("ToolSetsError - Workspace: {0}")]
+    Workspace(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }
