@@ -29,8 +29,6 @@ pub enum SandboxError {
     },
     #[error("SandboxError - write slot already taken by agent {current_writer}")]
     WriteSlotTaken { current_writer: AgentId },
-    #[error(
-        "SandboxError - sandbox is in {state} state and has no live instance (must be Ready)"
-    )]
+    #[error("SandboxError - sandbox is in {state} state and has no live instance (must be Ready)")]
     NotReady { state: String },
 }
