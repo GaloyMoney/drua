@@ -11,7 +11,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::auth::AuthSubject;
-use crate::primitives::{AgentId, AuthScope, SandboxId, WorkspaceId};
+use crate::primitives::{AgentId, SandboxId, WorkspaceId};
 use crate::sandbox::SandboxAgentMode;
 
 use super::super::error::ToolSetsError;
@@ -38,11 +38,6 @@ static WS_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "name": {
                 "type": "string",
                 "description": "Display name for the new agent."
-            },
-            "role": {
-                "type": "string",
-                "enum": ["agent", "workspace_lead"],
-                "description": "Agent role. Defaults to 'agent'."
             }
         },
         "required": ["name"],
@@ -65,11 +60,11 @@ impl TopLevelTool for WorkspaceAgentCreate {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     async fn call(
@@ -84,11 +79,10 @@ impl TopLevelTool for WorkspaceAgentCreate {
             .and_then(|a| a.get("name"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?;
-        let role = parse_agent_role(args);
 
         let agent = self
             .agents
-            .create(workspace_id, role, name, None)
+            .create(workspace_id, AgentRole::Agent, name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -124,11 +118,6 @@ static ADMIN_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(||
             "name": {
                 "type": "string",
                 "description": "Display name for the new agent."
-            },
-            "role": {
-                "type": "string",
-                "enum": ["agent", "workspace_lead"],
-                "description": "Agent role. Defaults to 'agent'."
             }
         },
         "required": ["workspace_id", "name"],
@@ -151,11 +140,11 @@ impl TopLevelTool for AgentCreate {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -169,11 +158,10 @@ impl TopLevelTool for AgentCreate {
             .and_then(|a| a.get("name"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?;
-        let role = parse_agent_role(args);
 
         let agent = self
             .agents
-            .create(workspace_id, role, name, None)
+            .create(workspace_id, AgentRole::Agent, name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -237,11 +225,11 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     async fn call(
@@ -320,11 +308,11 @@ impl TopLevelTool for AgentAttachSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -335,7 +323,14 @@ impl TopLevelTool for AgentAttachSandbox {
         let args = arguments.as_ref();
         let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
         let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
-        let mode = parse_sandbox_mode(args);
+        let mode = args
+            .and_then(|a| a.get("mode"))
+            .and_then(|v| v.as_str())
+            .map(|s| match s {
+                "write" => SandboxAgentMode::Write,
+                _ => SandboxAgentMode::Read,
+            })
+            .unwrap_or(SandboxAgentMode::Read);
 
         let agent = self
             .agents
@@ -398,11 +393,11 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     async fn call(
@@ -410,9 +405,19 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let args = arguments.as_ref();
         let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
         let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+
+        let existing = self
+            .agents
+            .find_by_id(agent_id)
+            .await
+            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+        if existing.workspace_id != workspace_id {
+            return Err(ToolSetsError::Unauthorized);
+        }
 
         let agent = self
             .agents
@@ -455,11 +460,11 @@ impl TopLevelTool for AgentDetachSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -495,12 +500,6 @@ impl WorkspaceListAgents {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
-
-    fn can_read_workspace(subject: &AuthSubject) -> bool {
-        subject
-            .workspace_id()
-            .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
-    }
 }
 
 static WS_LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -526,11 +525,11 @@ impl TopLevelTool for WorkspaceListAgents {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        Self::can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        Self::can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     async fn call(
@@ -596,11 +595,11 @@ impl TopLevelTool for ListAgents {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -627,27 +626,11 @@ impl TopLevelTool for ListAgents {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn can_write_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceWrite(ws)))
-}
-
 fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
     args.and_then(|a| a.get(key))
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<uuid::Uuid>().ok())
         .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-fn parse_agent_role(args: Option<&JsonObject>) -> AgentRole {
-    args.and_then(|a| a.get("role"))
-        .and_then(|v| v.as_str())
-        .map(|s| match s {
-            "workspace_lead" => AgentRole::WorkspaceLead,
-            _ => AgentRole::Agent,
-        })
-        .unwrap_or(AgentRole::Agent)
 }
 
 fn parse_sandbox_mode(args: Option<&JsonObject>) -> SandboxAgentMode {

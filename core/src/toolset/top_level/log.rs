@@ -10,12 +10,10 @@ use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
-use crate::audit::{Audit, AuditEntry, AuditLogQuery};
-use crate::auth::AuthSubject;
-use crate::primitives::AuthScope;
-
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use crate::audit::{Audit, AuditEntry, AuditLogQuery};
+use crate::auth::AuthSubject;
 
 // ---------------------------------------------------------------------------
 // workspace_log
@@ -55,11 +53,11 @@ impl TopLevelTool for WorkspaceLog {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     async fn call(
@@ -118,11 +116,11 @@ impl TopLevelTool for AllLogs {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -142,13 +140,6 @@ impl TopLevelTool for AllLogs {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Check whether the subject has `WorkspaceRead` for its workspace.
-fn can_read_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
-}
 
 /// Format audit entries as a human-/LLM-readable text table.
 fn format_entries(entries: &[AuditEntry]) -> String {

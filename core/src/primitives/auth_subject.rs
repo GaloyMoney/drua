@@ -69,6 +69,23 @@ impl AuthSubject {
         }
     }
 
+    /// True if the subject has the `Admin` scope.
+    pub fn is_admin(&self) -> bool {
+        self.has_scope(&AuthScope::Admin)
+    }
+
+    /// True if the subject is in a workspace and carries `WorkspaceRead` for it.
+    pub fn can_read_workspace(&self) -> bool {
+        self.workspace_id()
+            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceRead(ws)))
+    }
+
+    /// True if the subject is in a workspace and carries `WorkspaceWrite` for it.
+    pub fn can_write_workspace(&self) -> bool {
+        self.workspace_id()
+            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceWrite(ws)))
+    }
+
     /// Check whether this auth subject carries the given scope.
     /// Users (session-based) implicitly have all scopes.
     pub fn has_scope(&self, scope: &AuthScope) -> bool {

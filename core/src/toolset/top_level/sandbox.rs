@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use crate::auth::AuthSubject;
-use crate::primitives::{AuthScope, SandboxId, WorkspaceId};
+use crate::primitives::{SandboxId, WorkspaceId};
 use crate::sandbox::{Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
@@ -27,12 +27,6 @@ pub struct WorkspaceCreateSandbox {
 impl WorkspaceCreateSandbox {
     pub fn new(sandboxes: Sandboxes) -> Self {
         Self { sandboxes }
-    }
-
-    fn can_write_workspace(subject: &AuthSubject) -> bool {
-        subject
-            .workspace_id()
-            .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceWrite(ws)))
     }
 }
 
@@ -86,11 +80,11 @@ impl TopLevelTool for WorkspaceCreateSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        Self::can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        Self::can_write_workspace(subject)
+        subject.can_write_workspace()
     }
 
     async fn call(
@@ -183,11 +177,11 @@ impl TopLevelTool for CreateSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -248,11 +242,11 @@ impl TopLevelTool for WorkspaceListSandboxes {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     async fn call(
@@ -318,11 +312,11 @@ impl TopLevelTool for ListSandboxes {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -389,11 +383,11 @@ impl TopLevelTool for WorkspaceGetSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_read_workspace(subject)
+        subject.can_read_workspace()
     }
 
     async fn call(
@@ -450,11 +444,11 @@ impl TopLevelTool for GetSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.has_scope(&AuthScope::Admin)
+        subject.is_admin()
     }
 
     async fn call(
@@ -480,12 +474,6 @@ impl TopLevelTool for GetSandbox {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn can_read_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
-}
 
 fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
     args.and_then(|a| a.get(key))
