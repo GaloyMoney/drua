@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::primitives::SandboxId;
 use crate::sandbox::error::SandboxError;
+use crate::skill::SkillError;
 
 use super::repo::{AgentCreateError, AgentFindError, AgentModifyError, AgentQueryError};
 use super::session::error::AgentSessionError;
@@ -22,6 +23,8 @@ pub enum AgentError {
     Session(#[from] AgentSessionError),
     #[error("AgentError - Sandbox: {0}")]
     Sandbox(#[from] SandboxError),
+    #[error("AgentError - Skill: {0}")]
+    Skill(#[from] SkillError),
     #[error("AgentError - prompt request channel closed")]
     PromptRequestChannelClosed,
     #[error("AgentError - role not configured: {0:?}")]
