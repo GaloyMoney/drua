@@ -1,0 +1,297 @@
+//! Sandbox inspection tools: read-only access to any sandbox's filesystem.
+//!
+//! `workspace_inspect_sandbox` lets a workspace reader run read-only tools
+//! (grep, glob, read, ls) against any sandbox within their workspace.
+//! `inspect_sandbox` is the admin variant with no workspace constraint.
+
+use std::sync::LazyLock;
+
+use rmcp::model::{CallToolResult, Content, JsonObject};
+use sandbox::instance_client::ExecuteRequest;
+
+use crate::auth::AuthSubject;
+use crate::primitives::SandboxId;
+use crate::sandbox::Sandboxes;
+
+use super::super::error::ToolSetsError;
+use super::super::traits::TopLevelTool;
+
+// ---------------------------------------------------------------------------
+// workspace_inspect_sandbox
+// ---------------------------------------------------------------------------
+
+pub struct WorkspaceInspectSandbox {
+    sandboxes: Sandboxes,
+}
+
+impl WorkspaceInspectSandbox {
+    pub fn new(sandboxes: Sandboxes) -> Self {
+        Self { sandboxes }
+    }
+}
+
+static WS_INSPECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(inspect_schema);
+
+#[async_trait::async_trait]
+impl TopLevelTool for WorkspaceInspectSandbox {
+    fn name(&self) -> &str {
+        "workspace_inspect_sandbox"
+    }
+
+    fn description(&self) -> &str {
+        "Run a read-only tool (grep, glob, read, ls) against any sandbox \
+         in the caller's workspace."
+    }
+
+    fn input_schema(&self) -> &serde_json::Value {
+        &WS_INSPECT_SCHEMA
+    }
+
+    fn is_visible(&self, subject: &AuthSubject) -> bool {
+        subject.can_read_workspace()
+    }
+
+    fn can_execute(&self, subject: &AuthSubject) -> bool {
+        subject.can_read_workspace()
+    }
+
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let args = arguments.as_ref();
+        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+
+        let sandbox = self
+            .sandboxes
+            .find_by_id(sandbox_id)
+            .await
+            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+        if sandbox.workspace_id != workspace_id {
+            return Err(ToolSetsError::Unauthorized);
+        }
+
+        execute_inspect(&self.sandboxes, sandbox_id, args).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// inspect_sandbox (admin)
+// ---------------------------------------------------------------------------
+
+pub struct InspectSandbox {
+    sandboxes: Sandboxes,
+}
+
+impl InspectSandbox {
+    pub fn new(sandboxes: Sandboxes) -> Self {
+        Self { sandboxes }
+    }
+}
+
+static ADMIN_INSPECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(inspect_schema);
+
+#[async_trait::async_trait]
+impl TopLevelTool for InspectSandbox {
+    fn name(&self) -> &str {
+        "inspect_sandbox"
+    }
+
+    fn description(&self) -> &str {
+        "Run a read-only tool (grep, glob, read, ls) against any sandbox (admin)."
+    }
+
+    fn input_schema(&self) -> &serde_json::Value {
+        &ADMIN_INSPECT_SCHEMA
+    }
+
+    fn is_visible(&self, subject: &AuthSubject) -> bool {
+        subject.is_admin()
+    }
+
+    fn can_execute(&self, subject: &AuthSubject) -> bool {
+        subject.is_admin()
+    }
+
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let args = arguments.as_ref();
+        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+
+        execute_inspect(&self.sandboxes, sandbox_id, args).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
+}
+
+fn inspect_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "sandbox_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "ID of the sandbox to inspect."
+            },
+            "tool": {
+                "type": "string",
+                "enum": ["grep", "glob", "read", "ls"],
+                "description": "Read-only tool to run against the sandbox."
+            },
+            "arguments": {
+                "type": "object",
+                "description": "Tool-specific arguments passed through to the sandbox. \
+                    grep: {pattern, path?, glob?, output_mode?, ...}. \
+                    glob: {pattern, path?}. \
+                    read: {path, offset?, limit?}. \
+                    ls: {path, ignore?}."
+            }
+        },
+        "required": ["sandbox_id", "tool", "arguments"],
+        "additionalProperties": false,
+    })
+}
+
+/// Shared execution logic for both workspace and admin inspect tools.
+async fn execute_inspect(
+    sandboxes: &Sandboxes,
+    sandbox_id: SandboxId,
+    args: Option<&JsonObject>,
+) -> Result<CallToolResult, ToolSetsError> {
+    let tool_name = args
+        .and_then(|a| a.get("tool"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ToolSetsError::MissingArgument("tool".to_string()))?;
+
+    let tool_args = args
+        .and_then(|a| a.get("arguments"))
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    // Extract LS ignore list before the match moves tool_args.
+    let ls_ignore: Vec<String> = if tool_name == "ls" {
+        tool_args
+            .get("ignore")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let req = match tool_name {
+        "grep" => ExecuteRequest {
+            tool: "Grep".to_string(),
+            input: serde_json::Value::Object(tool_args),
+        },
+        "glob" => ExecuteRequest {
+            tool: "Glob".to_string(),
+            input: serde_json::Value::Object(tool_args),
+        },
+        "read" => build_read_request(&tool_args)?,
+        "ls" => build_ls_request(&tool_args)?,
+        _ => {
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "unknown inspect tool: {tool_name} (expected grep, glob, read, or ls)"
+            )))
+        }
+    };
+
+    let client = sandboxes
+        .instance_client_for(sandbox_id)
+        .await
+        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+
+    match client.execute(&req).await {
+        Ok(resp) => {
+            let mut output = resp.output;
+
+            // LS: apply client-side ignore filter
+            if tool_name == "ls" && !ls_ignore.is_empty() {
+                output = output
+                    .lines()
+                    .filter(|line| {
+                        let name = line.trim_end_matches('/');
+                        !ls_ignore.iter().any(|ig| ig == name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+
+            let content = vec![Content::text(output)];
+            if resp.is_error {
+                Ok(CallToolResult::error(content))
+            } else {
+                Ok(CallToolResult::success(content))
+            }
+        }
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+            "sandbox /execute call failed: {e}"
+        ))])),
+    }
+}
+
+/// Translate `{path, offset?, limit?}` into the text editor's `view` command.
+fn build_read_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError> {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ToolSetsError::MissingArgument("path".to_string()))?;
+
+    let mut input = serde_json::json!({
+        "command": "view",
+        "path": path,
+    });
+
+    let offset = args.get("offset").and_then(|v| v.as_i64());
+    let limit = args.get("limit").and_then(|v| v.as_i64());
+
+    if offset.is_some() || limit.is_some() {
+        let start = offset.unwrap_or(0) + 1; // 0-based → 1-based
+        let end = match limit {
+            Some(l) => start + l - 1,
+            None => -1, // EOF
+        };
+        input["view_range"] = serde_json::json!([start, end]);
+    }
+
+    Ok(ExecuteRequest {
+        tool: "str_replace_based_edit_tool".to_string(),
+        input,
+    })
+}
+
+/// Translate `{path, ignore?}` into the text editor's `view` command on a directory.
+fn build_ls_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError> {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ToolSetsError::MissingArgument("path".to_string()))?;
+
+    Ok(ExecuteRequest {
+        tool: "str_replace_based_edit_tool".to_string(),
+        input: serde_json::json!({
+            "command": "view",
+            "path": path,
+        }),
+    })
+}
