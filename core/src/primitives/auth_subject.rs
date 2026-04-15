@@ -1,4 +1,4 @@
-use super::{AgentId, AuthScope, McpCredsId, UserId, UserMessageSource, WorkspaceId};
+use super::{AgentId, AuthScope, McpCredsId, SandboxId, UserId, UserMessageSource, WorkspaceId};
 
 /// Unified authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
@@ -85,6 +85,26 @@ impl AuthSubject {
     /// checks like "Admin OR WorkspaceWrite(ws)".
     pub fn has_any(&self, scopes: &[AuthScope]) -> bool {
         scopes.iter().any(|s| self.has_scope(s))
+    }
+
+    /// True when the subject is an agent — i.e. `Agent` or
+    /// `AgentOnBehalfOfUser`. Used by sandbox-backed tools to decide
+    /// visibility (other subject kinds should never see sandbox tools).
+    pub fn is_agent(&self) -> bool {
+        matches!(
+            self,
+            AuthSubject::Agent(_, _, _) | AuthSubject::AgentOnBehalfOfUser(_, _, _, _)
+        )
+    }
+
+    /// First sandbox the subject can read from. `SandboxUseAll` always
+    /// implies `SandboxUseReadOnly`, so we accept either. Returns `None`
+    /// when the subject has no sandbox attachment at all.
+    pub fn readable_sandbox_id(&self) -> Option<SandboxId> {
+        self.scopes().iter().find_map(|s| match s {
+            AuthScope::SandboxUseAll(id) | AuthScope::SandboxUseReadOnly(id) => Some(*id),
+            _ => None,
+        })
     }
 
     /// Convert the subject into the principal that should be recorded as the

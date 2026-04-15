@@ -25,7 +25,6 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{is_agent_subject, readable_sandbox_id};
 
 pub struct TextEditor {
     sandboxes: Sandboxes,
@@ -118,14 +117,14 @@ impl TopLevelTool for TextEditor {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        is_agent_subject(subject)
+        subject.is_agent()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
         // Permissive at dispatch — allow if the subject can read *or*
         // write any sandbox. Per-command authz happens inside `call()`
         // once we know whether the request is mutating.
-        is_agent_subject(subject) && readable_sandbox_id(subject).is_some()
+        subject.is_agent() && subject.readable_sandbox_id().is_some()
     }
 
     async fn call(
@@ -144,7 +143,7 @@ impl TopLevelTool for TextEditor {
         let sandbox_id = if command_is_mutating(command) {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
-            readable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
+            subject.readable_sandbox_id().ok_or(ToolSetsError::Unauthorized)?
         };
 
         let client = self
