@@ -28,7 +28,8 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AllLogs, Bash, CodeAssistantToolSet, TextEditor, ToolSets, ToolSetsError, WorkspaceLog,
+    AllLogs, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets,
+    ToolSetsError, WorkspaceLog,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -145,6 +146,10 @@ impl App {
         // toolsets in Arc.
         toolsets.register_top_level(Bash::new(sandboxes.clone()));
         toolsets.register_top_level(TextEditor::new(sandboxes.clone()));
+        toolsets.register_top_level(Grep::new(sandboxes.clone()));
+        toolsets.register_top_level(GlobTool::new(sandboxes.clone()));
+        toolsets.register_top_level(Read::new(sandboxes.clone()));
+        toolsets.register_top_level(Ls::new(sandboxes.clone()));
         let toolsets = Arc::new(toolsets);
 
         let agents = Arc::new(Agents::new(

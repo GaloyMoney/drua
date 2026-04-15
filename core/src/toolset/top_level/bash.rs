@@ -24,6 +24,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::is_agent_subject;
 
 pub struct Bash {
     sandboxes: Sandboxes,
@@ -55,15 +56,6 @@ static BASH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "additionalProperties": false,
     })
 });
-
-/// True for `Agent` and `AgentOnBehalfOfUser`. Other subjects (User,
-/// ExportedAgent, Anonymous) shouldn't even see the tool exists.
-fn is_agent_subject(subject: &AuthSubject) -> bool {
-    matches!(
-        subject,
-        AuthSubject::Agent(_, _, _) | AuthSubject::AgentOnBehalfOfUser(_, _, _, _)
-    )
-}
 
 /// First [`SandboxId`] from a `SandboxUseAll` scope on the subject — i.e.
 /// the sandbox the agent is currently attached to as a writer. We expect
