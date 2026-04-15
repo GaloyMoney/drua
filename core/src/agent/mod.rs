@@ -12,14 +12,19 @@ use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
 /// Eventually this will move into role-config, but for now it's hard-wired:
-/// both built-in roles get read+write on their own workspace.
+/// both built-in roles get read+write on their own workspace; the lead
+/// also gets the [`AuthScope::WorkspaceLead`] role marker so per-tool
+/// visibility can hide tools that aren't useful to it (e.g. the
+/// sandbox-backed filesystem tools).
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
-    match role {
-        AgentRole::WorkspaceLead | AgentRole::Agent => vec![
-            AuthScope::WorkspaceRead(workspace_id),
-            AuthScope::WorkspaceWrite(workspace_id),
-        ],
+    let mut scopes = vec![
+        AuthScope::WorkspaceRead(workspace_id),
+        AuthScope::WorkspaceWrite(workspace_id),
+    ];
+    if matches!(role, AgentRole::WorkspaceLead) {
+        scopes.push(AuthScope::WorkspaceLead(workspace_id));
     }
+    scopes
 }
 
 /// Recognise a slash-skill invocation: the entire (trimmed) prompt is

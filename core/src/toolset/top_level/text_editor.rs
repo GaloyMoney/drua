@@ -117,7 +117,8 @@ impl TopLevelTool for TextEditor {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_agent()
+        // See bash.rs: leads don't run inside sandboxes, hide it.
+        subject.is_agent() && !subject.is_workspace_lead()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {

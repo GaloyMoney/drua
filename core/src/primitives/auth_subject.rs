@@ -114,6 +114,15 @@ impl AuthSubject {
         )
     }
 
+    /// True when the subject carries an [`AuthScope::WorkspaceLead`] for
+    /// any workspace. Used by sandbox-backed tools to hide themselves
+    /// from leads (leads orchestrate; they don't run inside sandboxes).
+    pub fn is_workspace_lead(&self) -> bool {
+        self.scopes()
+            .iter()
+            .any(|s| matches!(s, AuthScope::WorkspaceLead(_)))
+    }
+
     /// First sandbox the subject can read from. `SandboxUseAll` always
     /// implies `SandboxUseReadOnly`, so we accept either. Returns `None`
     /// when the subject has no sandbox attachment at all.

@@ -60,7 +60,8 @@ impl TopLevelTool for GlobTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_agent()
+        // Hidden from WorkspaceLead — see bash.rs.
+        subject.is_agent() && !subject.is_workspace_lead()
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {

@@ -17,6 +17,12 @@ pub enum AuthScope {
     WorkspaceRead(WorkspaceId),
     /// Write access scoped to a specific workspace.
     WorkspaceWrite(WorkspaceId),
+    /// The subject is the lead agent of a specific workspace. Used as a
+    /// role marker (not a permission) so per-tool visibility can hide
+    /// tools that aren't useful to a lead — e.g. the sandbox-backed
+    /// filesystem tools, since leads orchestrate other agents and
+    /// never run inside a sandbox themselves.
+    WorkspaceLead(WorkspaceId),
     /// Full use access — the agent may invoke any sandbox tool, including
     /// state-mutating ones (e.g. the `bash` top-level tool). Granted on a
     /// `Write` attach.
@@ -38,6 +44,7 @@ impl fmt::Display for AuthScope {
             AuthScope::Admin => f.write_str("admin"),
             AuthScope::WorkspaceRead(id) => write!(f, "ws:{id}:read"),
             AuthScope::WorkspaceWrite(id) => write!(f, "ws:{id}:write"),
+            AuthScope::WorkspaceLead(id) => write!(f, "ws:{id}:lead"),
             AuthScope::SandboxUseAll(id) => write!(f, "sandbox:{id}:use_all"),
             AuthScope::SandboxUseReadOnly(id) => write!(f, "sandbox:{id}:use_read_only"),
             AuthScope::Raw(s) => f.write_str(s),
@@ -53,7 +60,7 @@ impl FromStr for AuthScope {
             return Ok(AuthScope::Admin);
         }
 
-        // Parse "ws:{uuid}:read" / "ws:{uuid}:write"
+        // Parse "ws:{uuid}:read" / ":write" / ":lead"
         if let Some(rest) = s.strip_prefix("ws:") {
             if let Some(uuid_str) = rest.strip_suffix(":read") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
@@ -62,6 +69,10 @@ impl FromStr for AuthScope {
             } else if let Some(uuid_str) = rest.strip_suffix(":write") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::WorkspaceWrite(WorkspaceId::from(uuid)));
+                }
+            } else if let Some(uuid_str) = rest.strip_suffix(":lead") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::WorkspaceLead(WorkspaceId::from(uuid)));
                 }
             }
         }
@@ -140,6 +151,7 @@ mod tests {
             AuthScope::Admin,
             AuthScope::WorkspaceRead(ws_id),
             AuthScope::WorkspaceWrite(ws_id),
+            AuthScope::WorkspaceLead(ws_id),
             AuthScope::SandboxUseAll(sb_id),
             AuthScope::SandboxUseReadOnly(sb_id),
             AuthScope::Raw("custom:thing".to_owned()),
