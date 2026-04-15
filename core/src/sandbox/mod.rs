@@ -299,6 +299,31 @@ impl Sandboxes {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
 
+    /// Resolve a live [`InstanceClient`] for the sandbox identified by `id`.
+    ///
+    /// Loads the entity, asks the admin client for the current
+    /// `base_url`, and wraps it. Returns [`SandboxError::NotReady`] when
+    /// the entity isn't in [`SandboxState::Ready`] (the only state where
+    /// a `base_url` is guaranteed). Used by tools that act inside the
+    /// sandbox (e.g. the `bash` top-level tool).
+    #[instrument(name = "domain.sandbox.instance_client_for", skip(self))]
+    pub async fn instance_client_for(
+        &self,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<InstanceClient, SandboxError> {
+        let id = id.into();
+        let sandbox = self.repo.find_by_id(id).await?;
+        if sandbox.state != SandboxState::Ready {
+            return Err(SandboxError::NotReady {
+                state: sandbox.state.to_string(),
+            });
+        }
+        let view = self.admin.get_sandbox(&sandbox.resource_name()).await?;
+        InstanceClient::from_sandbox(&view).ok_or_else(|| SandboxError::NotReady {
+            state: "ready (no base_url reported)".to_string(),
+        })
+    }
+
     #[instrument(name = "domain.sandbox.list_for_workspace", skip(self))]
     pub async fn list_for_workspace(
         &self,

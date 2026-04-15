@@ -17,10 +17,13 @@ pub enum AuthScope {
     WorkspaceRead(WorkspaceId),
     /// Write access scoped to a specific workspace.
     WorkspaceWrite(WorkspaceId),
-    /// Read access scoped to a specific sandbox (granted via attach).
-    SandboxRead(SandboxId),
-    /// Write access scoped to a specific sandbox (granted via attach as writer).
-    SandboxWrite(SandboxId),
+    /// Full use access — the agent may invoke any sandbox tool, including
+    /// state-mutating ones (e.g. the `bash` top-level tool). Granted on a
+    /// `Write` attach.
+    SandboxUseAll(SandboxId),
+    /// Read-only use access — the agent may invoke sandbox tools that
+    /// don't modify state. Granted on a `Read` attach.
+    SandboxUseReadOnly(SandboxId),
     /// Catch-all for scope strings that don't (yet) have a dedicated variant.
     Raw(String),
 }
@@ -35,8 +38,8 @@ impl fmt::Display for AuthScope {
             AuthScope::Admin => f.write_str("admin"),
             AuthScope::WorkspaceRead(id) => write!(f, "ws:{id}:read"),
             AuthScope::WorkspaceWrite(id) => write!(f, "ws:{id}:write"),
-            AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
-            AuthScope::SandboxWrite(id) => write!(f, "sandbox:{id}:write"),
+            AuthScope::SandboxUseAll(id) => write!(f, "sandbox:{id}:use_all"),
+            AuthScope::SandboxUseReadOnly(id) => write!(f, "sandbox:{id}:use_read_only"),
             AuthScope::Raw(s) => f.write_str(s),
         }
     }
@@ -63,15 +66,15 @@ impl FromStr for AuthScope {
             }
         }
 
-        // Parse "sandbox:{uuid}:read" / "sandbox:{uuid}:write"
+        // Parse "sandbox:{uuid}:use_all" / ":use_read_only"
         if let Some(rest) = s.strip_prefix("sandbox:") {
-            if let Some(uuid_str) = rest.strip_suffix(":read") {
+            if let Some(uuid_str) = rest.strip_suffix(":use_all") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
-                    return Ok(AuthScope::SandboxRead(SandboxId::from(uuid)));
+                    return Ok(AuthScope::SandboxUseAll(SandboxId::from(uuid)));
                 }
-            } else if let Some(uuid_str) = rest.strip_suffix(":write") {
+            } else if let Some(uuid_str) = rest.strip_suffix(":use_read_only") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
-                    return Ok(AuthScope::SandboxWrite(SandboxId::from(uuid)));
+                    return Ok(AuthScope::SandboxUseReadOnly(SandboxId::from(uuid)));
                 }
             }
         }
@@ -137,8 +140,8 @@ mod tests {
             AuthScope::Admin,
             AuthScope::WorkspaceRead(ws_id),
             AuthScope::WorkspaceWrite(ws_id),
-            AuthScope::SandboxRead(sb_id),
-            AuthScope::SandboxWrite(sb_id),
+            AuthScope::SandboxUseAll(sb_id),
+            AuthScope::SandboxUseReadOnly(sb_id),
             AuthScope::Raw("custom:thing".to_owned()),
         ];
 
@@ -153,27 +156,27 @@ mod tests {
     fn display_sandbox_scopes() {
         let sb_id = test_sandbox_id();
         assert_eq!(
-            AuthScope::SandboxRead(sb_id).to_string(),
-            "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:read"
+            AuthScope::SandboxUseAll(sb_id).to_string(),
+            "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:use_all"
         );
         assert_eq!(
-            AuthScope::SandboxWrite(sb_id).to_string(),
-            "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:write"
+            AuthScope::SandboxUseReadOnly(sb_id).to_string(),
+            "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:use_read_only"
         );
     }
 
     #[test]
     fn from_str_sandbox() {
         let sb_id = test_sandbox_id();
-        let read: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:read"
+        let all: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:use_all"
             .parse()
             .unwrap();
-        assert_eq!(read, AuthScope::SandboxRead(sb_id));
+        assert_eq!(all, AuthScope::SandboxUseAll(sb_id));
 
-        let write: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:write"
+        let ro: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:use_read_only"
             .parse()
             .unwrap();
-        assert_eq!(write, AuthScope::SandboxWrite(sb_id));
+        assert_eq!(ro, AuthScope::SandboxUseReadOnly(sb_id));
     }
 
     #[test]

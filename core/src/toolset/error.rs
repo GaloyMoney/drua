@@ -20,6 +20,8 @@ pub enum ToolSetsError {
     CodeAssistant(String),
     #[error("ToolSetsError - Audit: {0}")]
     Audit(#[from] crate::audit::AuditError),
+    #[error("ToolSetsError - Sandbox: {0}")]
+    Sandbox(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

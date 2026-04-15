@@ -10,7 +10,7 @@ pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
-    AllLogs, CallCatalogTool, DescribeCatalogTool, Ping, SearchCatalog, WorkspaceLog,
+    AllLogs, Bash, CallCatalogTool, DescribeCatalogTool, Ping, SearchCatalog, WorkspaceLog,
 };
 pub use traits::*;
 
