@@ -17,93 +17,6 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn can_write_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceWrite(ws)))
-}
-
-fn can_read_workspace(subject: &AuthSubject) -> bool {
-    subject
-        .workspace_id()
-        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
-}
-
-fn parse_uuid_field(args: Option<&JsonObject>, key: &str) -> Option<uuid::Uuid> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-}
-
-fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
-    parse_uuid_field(args, key).ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-/// Format a list of sandboxes as a human-/LLM-readable text table.
-fn format_sandboxes(sandboxes: &[Sandbox]) -> String {
-    if sandboxes.is_empty() {
-        return "No sandboxes found.".to_string();
-    }
-
-    let mut lines = Vec::with_capacity(sandboxes.len() + 2);
-    lines.push(format!(
-        "{:<38} {:<20} {:<14} {:<10} {:<8}",
-        "ID", "NAME", "STATE", "MODE", "AGENTS"
-    ));
-    lines.push("-".repeat(94));
-
-    for s in sandboxes {
-        let mode = format!("{:?}", s.mode);
-        lines.push(format!(
-            "{:<38} {:<20} {:<14} {:<10} {:<8}",
-            s.id,
-            truncate(&s.name, 20),
-            s.state.to_string(),
-            truncate(&mode, 10),
-            s.attached_agents.len(),
-        ));
-    }
-
-    lines.join("\n")
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
-}
-
-/// Format a single sandbox as a detailed text block.
-fn format_sandbox(s: &Sandbox) -> String {
-    let agents: Vec<String> = s
-        .attached_agents
-        .iter()
-        .map(|(id, mode)| format!("  {id} ({mode:?})"))
-        .collect();
-    let agents_str = if agents.is_empty() {
-        "  none".to_string()
-    } else {
-        agents.join("\n")
-    };
-    let error_str = s
-        .last_error
-        .as_deref()
-        .map(|e| format!("\n  last_error: {e}"))
-        .unwrap_or_default();
-    format!(
-        "Sandbox:\n  id: {}\n  name: {}\n  workspace: {}\n  state: {}\n  mode: {:?}\n  specs: cpu={}, mem={}, disk={}{}\n  attached_agents:\n{}",
-        s.id, s.name, s.workspace_id, s.state, s.mode,
-        s.specs.cpu, s.specs.memory, s.specs.disk_size,
-        error_str, agents_str,
-    )
-}
-
-// ---------------------------------------------------------------------------
 // workspace_create_sandbox
 // ---------------------------------------------------------------------------
 
@@ -114,6 +27,12 @@ pub struct WorkspaceCreateSandbox {
 impl WorkspaceCreateSandbox {
     pub fn new(sandboxes: Sandboxes) -> Self {
         Self { sandboxes }
+    }
+
+    fn can_write_workspace(subject: &AuthSubject) -> bool {
+        subject
+            .workspace_id()
+            .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceWrite(ws)))
     }
 }
 
@@ -167,11 +86,11 @@ impl TopLevelTool for WorkspaceCreateSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        Self::can_write_workspace(subject)
     }
 
     fn can_execute(&self, subject: &AuthSubject) -> bool {
-        can_write_workspace(subject)
+        Self::can_write_workspace(subject)
     }
 
     async fn call(
@@ -492,7 +411,6 @@ impl TopLevelTool for WorkspaceGetSandbox {
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
-        // Verify the sandbox belongs to the caller's workspace.
         if sandbox.workspace_id != workspace_id {
             return Err(ToolSetsError::Unauthorized);
         }
@@ -516,8 +434,6 @@ impl GetSandbox {
         Self { sandboxes }
     }
 }
-
-// Re-uses WS_GET_SANDBOX_SCHEMA — same field.
 
 #[async_trait::async_trait]
 impl TopLevelTool for GetSandbox {
@@ -562,8 +478,21 @@ impl TopLevelTool for GetSandbox {
 }
 
 // ---------------------------------------------------------------------------
-// Shared create-args parser
+// Helpers
 // ---------------------------------------------------------------------------
+
+fn can_read_workspace(subject: &AuthSubject) -> bool {
+    subject
+        .workspace_id()
+        .is_some_and(|ws| subject.has_scope(&AuthScope::WorkspaceRead(ws)))
+}
+
+fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
+}
 
 fn parse_sandbox_create_args(
     args: Option<&JsonObject>,
@@ -616,4 +545,63 @@ fn parse_sandbox_create_args(
     };
 
     Ok((name, specs, mode))
+}
+
+fn format_sandbox(s: &Sandbox) -> String {
+    let agents: Vec<String> = s
+        .attached_agents
+        .iter()
+        .map(|(id, mode)| format!("  {id} ({mode:?})"))
+        .collect();
+    let agents_str = if agents.is_empty() {
+        "  none".to_string()
+    } else {
+        agents.join("\n")
+    };
+    let error_str = s
+        .last_error
+        .as_deref()
+        .map(|e| format!("\n  last_error: {e}"))
+        .unwrap_or_default();
+    format!(
+        "Sandbox:\n  id: {}\n  name: {}\n  workspace: {}\n  state: {}\n  mode: {:?}\n  specs: cpu={}, mem={}, disk={}{}\n  attached_agents:\n{}",
+        s.id, s.name, s.workspace_id, s.state, s.mode,
+        s.specs.cpu, s.specs.memory, s.specs.disk_size,
+        error_str, agents_str,
+    )
+}
+
+fn format_sandboxes(sandboxes: &[Sandbox]) -> String {
+    if sandboxes.is_empty() {
+        return "No sandboxes found.".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(sandboxes.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<20} {:<14} {:<10} {:<8}",
+        "ID", "NAME", "STATE", "MODE", "AGENTS"
+    ));
+    lines.push("-".repeat(94));
+
+    for s in sandboxes {
+        let mode = format!("{:?}", s.mode);
+        lines.push(format!(
+            "{:<38} {:<20} {:<14} {:<10} {:<8}",
+            s.id,
+            truncate(&s.name, 20),
+            s.state.to_string(),
+            truncate(&mode, 10),
+            s.attached_agents.len(),
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }
