@@ -25,6 +25,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{is_agent_subject, readable_sandbox_id};
 
 pub struct TextEditor {
     sandboxes: Sandboxes,
@@ -84,28 +85,10 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-/// True for `Agent` and `AgentOnBehalfOfUser`. Other subjects shouldn't
-/// even see the tool exists.
-fn is_agent_subject(subject: &AuthSubject) -> bool {
-    matches!(
-        subject,
-        AuthSubject::Agent(_, _, _) | AuthSubject::AgentOnBehalfOfUser(_, _, _, _)
-    )
-}
-
 /// First sandbox the subject can write to (full UseAll attach).
 fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
     subject.scopes().iter().find_map(|s| match s {
         AuthScope::SandboxUseAll(id) => Some(*id),
-        _ => None,
-    })
-}
-
-/// First sandbox the subject can read from — UseAll always implies
-/// UseReadOnly, so we accept either.
-fn readable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
-    subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUseAll(id) | AuthScope::SandboxUseReadOnly(id) => Some(*id),
         _ => None,
     })
 }
