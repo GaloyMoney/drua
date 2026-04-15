@@ -76,7 +76,9 @@ impl TopLevelTool for Read {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let sandbox_id = subject.readable_sandbox_id().ok_or(ToolSetsError::Unauthorized)?;
+        let sandbox_id = subject
+            .readable_sandbox_id()
+            .ok_or(ToolSetsError::Unauthorized)?;
         let args = arguments.unwrap_or_default();
 
         let path = args

@@ -143,7 +143,9 @@ impl TopLevelTool for TextEditor {
         let sandbox_id = if command_is_mutating(command) {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
-            subject.readable_sandbox_id().ok_or(ToolSetsError::Unauthorized)?
+            subject
+                .readable_sandbox_id()
+                .ok_or(ToolSetsError::Unauthorized)?
         };
 
         let client = self
