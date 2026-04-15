@@ -112,7 +112,6 @@ impl App {
 
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
-        let skills = Skills::new(pool);
 
         // Optionally initialize GitHub App token provider from AppConfig.
         // If configured, verify it works by generating a token — crash on failure
@@ -138,6 +137,7 @@ impl App {
         };
 
         let sandboxes = Sandboxes::init(pool, config.sandbox, github_app.clone()).await?;
+        let skills = Skills::new(pool, sandboxes.clone());
 
         // Sandbox-backed tools (Bash, TextEditor) need the sandboxes
         // service to resolve the running pod for an attached agent —
@@ -153,6 +153,7 @@ impl App {
             Arc::clone(&toolsets),
             prompt_tx,
             sandboxes.clone(),
+            skills.clone(),
         ));
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 

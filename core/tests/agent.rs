@@ -48,7 +48,8 @@ async fn send_message_round_trip_via_prompt_channel() {
     let sandboxes = Sandboxes::init(&pool, SandboxConfig::default(), None)
         .await
         .expect("init sandboxes");
-    let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes);
+    let skills = galoy_agents_core::skill::Skills::new(&pool, sandboxes.clone());
+    let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes, skills);
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead", None)
@@ -183,7 +184,8 @@ async fn send_message_dispatches_registered_tool_call() {
     let sandboxes = Sandboxes::init(&pool, SandboxConfig::default(), None)
         .await
         .expect("init sandboxes");
-    let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes);
+    let skills = galoy_agents_core::skill::Skills::new(&pool, sandboxes.clone());
+    let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes, skills);
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead", None)

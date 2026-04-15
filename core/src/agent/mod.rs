@@ -7,6 +7,7 @@ pub mod session;
 use std::sync::Arc;
 
 use crate::audit::Audit;
+use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
@@ -36,6 +37,7 @@ pub struct Agents {
     repo: AgentRepo,
     sessions: Sessions,
     sandboxes: Sandboxes,
+    skills: Skills,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -48,15 +50,21 @@ impl Agents {
         toolsets: Arc<ToolSets>,
         prompt_requests: llm::PromptRequestChannel,
         sandboxes: Sandboxes,
+        skills: Skills,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
             sessions: Sessions::new(pool),
             sandboxes,
+            skills,
             config,
             toolsets,
             prompt_requests,
         }
+    }
+
+    pub fn skills(&self) -> &Skills {
+        &self.skills
     }
 
     #[instrument(name = "domain.agent.create", skip(self))]

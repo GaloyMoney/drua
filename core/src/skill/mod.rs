@@ -5,6 +5,7 @@ pub(crate) mod repo;
 use tracing::instrument;
 
 pub use crate::primitives::*;
+use crate::sandbox::Sandboxes;
 pub use entity::*;
 pub use error::*;
 use repo::*;
@@ -12,12 +13,17 @@ use repo::*;
 #[derive(Clone)]
 pub struct Skills {
     repo: SkillRepo,
+    sandboxes: Sandboxes,
 }
 
 impl Skills {
-    pub fn new(pool: &sqlx::PgPool) -> Self {
+    pub fn new(pool: &sqlx::PgPool, sandboxes: Sandboxes) -> Self {
         let repo = SkillRepo::new(pool);
-        Self { repo }
+        Self { repo, sandboxes }
+    }
+
+    pub fn sandboxes(&self) -> &Sandboxes {
+        &self.sandboxes
     }
 
     #[instrument(name = "skill.create", skip_all)]
