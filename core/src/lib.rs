@@ -29,7 +29,9 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use slash_command::SlashCommands;
-use toolset::{AllLogs, Bash, CodeAssistantToolSet, ToolSets, ToolSetsError, WorkspaceLog};
+use toolset::{
+    AllLogs, Bash, CodeAssistantToolSet, TextEditor, ToolSets, ToolSetsError, WorkspaceLog,
+};
 use user::Users;
 use workspace::Workspaces;
 use workspace_secret::WorkspaceSecrets;
@@ -141,10 +143,12 @@ impl App {
 
         let sandboxes = Sandboxes::init(pool, config.sandbox, github_app.clone()).await?;
 
-        // Bash needs the sandboxes service to resolve the running pod
-        // for an attached agent — register it after sandboxes is up but
-        // before we wrap the toolsets in Arc.
+        // Sandbox-backed tools (Bash, TextEditor) need the sandboxes
+        // service to resolve the running pod for an attached agent —
+        // register them after sandboxes is up but before we wrap the
+        // toolsets in Arc.
         toolsets.register_top_level(Bash::new(sandboxes.clone()));
+        toolsets.register_top_level(TextEditor::new(sandboxes.clone()));
         let toolsets = Arc::new(toolsets);
 
         let agents = Arc::new(Agents::new(
