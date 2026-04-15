@@ -163,6 +163,10 @@
           type = "app";
           program = let
             wrapped = pkgs.writeShellScriptBin "run-bats" ''
+              # ripgrep is required by the sandbox server's Grep / Glob
+              # handlers — bats/sandbox.bats spawns sandbox-tool-server
+              # via this PATH so `rg` has to be present here too (the
+              # production sandbox image bakes it in separately).
               export PATH="${pkgs.lib.makeBinPath [
                 bats-runner
                 galoy-agents
@@ -177,6 +181,7 @@
                 pkgs.procps
                 pkgs.util-linux
                 pkgs.git
+                pkgs.ripgrep
               ]}:$PATH"
               exec bats-runner
             '';
