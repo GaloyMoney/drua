@@ -71,6 +71,14 @@ impl Agent {
         self.authz_scopes.iter().cloned().collect()
     }
 
+    /// The id of the sandbox this agent is currently attached to, if any.
+    /// Strips the [`SandboxAgentMode`] for callers that only care which
+    /// sandbox the agent is targeting (e.g. resolving the fallback for
+    /// [`Skills::find_by_name`](crate::skill::Skills::find_by_name)).
+    pub fn attached_sandbox_id(&self) -> Option<SandboxId> {
+        self.attached_sandbox.map(|(id, _)| id)
+    }
+
     /// The auth subject this agent acts as when invoking tools — its own
     /// workspace + id, carrying the scopes persisted on the `Initialized`
     /// event. Use when no originating user can be attributed.

@@ -332,13 +332,9 @@ impl Agents {
         // event and return early — sending the literal `/foo` to the
         // LLM is rarely what the user wanted.
         let prompt = if let Some(skill_name) = parse_slash_skill(&prompt) {
-            let attached_sandbox_id = agent_subject.scopes().iter().find_map(|s| match s {
-                AuthScope::SandboxUseAll(id) | AuthScope::SandboxUseReadOnly(id) => Some(*id),
-                _ => None,
-            });
             match self
                 .skills
-                .find_by_name(skill_name, attached_sandbox_id)
+                .find_by_name(skill_name, agent.attached_sandbox_id())
                 .await?
             {
                 Some(body) => body,
