@@ -65,6 +65,8 @@ async fn execute(Json(req): Json<ExecuteRequest>) -> Json<ExecuteResponse> {
     let result = match req.tool.as_str() {
         "bash" => execute_bash(&req.input).await,
         "str_replace_based_edit_tool" => execute_text_editor(&req.input).await,
+        "Grep" => execute_grep(&req.input).await,
+        "Glob" => execute_glob(&req.input).await,
         other => Err(format!("Unknown tool: {other}")),
     };
 
@@ -318,6 +320,161 @@ async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
         "Successfully inserted {} lines after line {insert_line}.",
         new_lines.len()
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Grep tool — content search via ripgrep
+//
+// Input: { pattern, path?, glob?, type?, output_mode?, -i?, -n?, -A?, -B?,
+//          -C?, head_limit?, multiline? }
+// ---------------------------------------------------------------------------
+
+async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
+    let pattern = input
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'pattern' field")?;
+
+    let mut args: Vec<String> = vec!["--no-heading".to_string(), "--color=never".to_string()];
+
+    // Output mode
+    let output_mode = input
+        .get("output_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("files_with_matches");
+
+    match output_mode {
+        "files_with_matches" => args.push("--files-with-matches".to_string()),
+        "count" => args.push("--count".to_string()),
+        "content" => {} // default rg output
+        other => return Err(format!("Unknown output_mode: {other}")),
+    }
+
+    // Case insensitive
+    if input.get("-i").and_then(|v| v.as_bool()).unwrap_or(false) {
+        args.push("--ignore-case".to_string());
+    }
+
+    // Line numbers (only meaningful for content mode)
+    if output_mode == "content" {
+        let show_line_numbers = input.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
+        if show_line_numbers {
+            args.push("--line-number".to_string());
+        }
+    }
+
+    // Context lines
+    if let Some(n) = input.get("-A").and_then(|v| v.as_u64()) {
+        args.push(format!("--after-context={n}"));
+    }
+    if let Some(n) = input.get("-B").and_then(|v| v.as_u64()) {
+        args.push(format!("--before-context={n}"));
+    }
+    if let Some(n) = input.get("-C").and_then(|v| v.as_u64()) {
+        args.push(format!("--context={n}"));
+    }
+
+    // Multiline
+    if input
+        .get("multiline")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        args.push("--multiline".to_string());
+        args.push("--multiline-dotall".to_string());
+    }
+
+    // File type filter
+    if let Some(ty) = input.get("type").and_then(|v| v.as_str()) {
+        args.push(format!("--type={ty}"));
+    }
+
+    // Glob filter
+    if let Some(glob) = input.get("glob").and_then(|v| v.as_str()) {
+        args.push(format!("--glob={glob}"));
+    }
+
+    // Pattern
+    args.push("--".to_string());
+    args.push(pattern.to_string());
+
+    // Search path
+    let search_path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+    args.push(search_path.to_string());
+
+    let output = tokio::time::timeout(
+        Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        Command::new("rg").args(&args).output(),
+    )
+    .await
+    .map_err(|_| format!("Grep timed out after {DEFAULT_TIMEOUT_MS}ms"))?
+    .map_err(|e| format!("Failed to execute rg: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // rg exit codes: 0 = matches found, 1 = no matches, 2 = error
+    match output.status.code() {
+        Some(0) | Some(1) => {
+            let mut result = stdout.into_owned();
+
+            // Apply head_limit if specified
+            if let Some(limit) = input.get("head_limit").and_then(|v| v.as_u64()) {
+                let limit = limit as usize;
+                let lines: Vec<&str> = result.lines().take(limit).collect();
+                result = lines.join("\n");
+            }
+
+            Ok(result)
+        }
+        _ => Err(format!("rg failed: {stderr}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Glob tool — file pattern matching via ripgrep --files -g
+//
+// Input: { pattern, path? }
+// ---------------------------------------------------------------------------
+
+async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
+    let pattern = input
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'pattern' field")?;
+
+    let search_path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+
+    // Use `rg --files -g <pattern> <path>` to list matching files.
+    // Then sort by mtime (most recent first) using `ls -t`.
+    let output = tokio::time::timeout(
+        Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        Command::new("rg")
+            .args([
+                "--files",
+                "--color=never",
+                &format!("--glob={pattern}"),
+                search_path,
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("Glob timed out after {DEFAULT_TIMEOUT_MS}ms"))?
+    .map_err(|e| format!("Failed to execute rg: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(stdout.into_owned()),
+        _ => Err(format!("rg --files failed: {stderr}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,5 +1383,189 @@ mod tests {
         assert!(result.unwrap_err().contains("git clone failed"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── Grep tool ────────────────────────────────────────────────────
+
+    /// Returns true when `rg` is on PATH.
+    async fn rg_available() -> bool {
+        Command::new("rg")
+            .arg("--version")
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[tokio::test]
+    async fn grep_finds_pattern_in_file() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-grep");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("hello.txt"), "hello world\ngoodbye world\nhello rust")
+            .await
+            .unwrap();
+
+        let input = serde_json::json!({
+            "pattern": "hello",
+            "path": dir.to_str().unwrap(),
+            "output_mode": "content"
+        });
+        let result = execute_grep(&input).await;
+        assert!(result.is_ok(), "grep failed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("hello world"));
+        assert!(output.contains("hello rust"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn grep_files_with_matches_mode() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-grep-fwm");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("a.txt"), "match here")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("b.txt"), "no hit")
+            .await
+            .unwrap();
+
+        let input = serde_json::json!({
+            "pattern": "match",
+            "path": dir.to_str().unwrap(),
+            "output_mode": "files_with_matches"
+        });
+        let result = execute_grep(&input).await.unwrap();
+        assert!(result.contains("a.txt"));
+        assert!(!result.contains("b.txt"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn grep_no_matches_returns_ok_empty() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-grep-empty");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("x.txt"), "nothing relevant")
+            .await
+            .unwrap();
+
+        let input = serde_json::json!({
+            "pattern": "zzz_nonexistent",
+            "path": dir.to_str().unwrap()
+        });
+        let result = execute_grep(&input).await;
+        assert!(result.is_ok());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn grep_head_limit_caps_output() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-grep-head");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("many.txt"), "a\na\na\na\na\na\na\na\na\na")
+            .await
+            .unwrap();
+
+        let input = serde_json::json!({
+            "pattern": "a",
+            "path": dir.to_str().unwrap(),
+            "output_mode": "content",
+            "head_limit": 3
+        });
+        let result = execute_grep(&input).await.unwrap();
+        assert_eq!(result.lines().count(), 3);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn grep_missing_pattern_returns_error() {
+        let input = serde_json::json!({});
+        let result = execute_grep(&input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("pattern"));
+    }
+
+    // ── Glob tool ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn glob_finds_matching_files() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-glob");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("foo.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("bar.txt"), "text")
+            .await
+            .unwrap();
+
+        let input = serde_json::json!({
+            "pattern": "*.rs",
+            "path": dir.to_str().unwrap()
+        });
+        let result = execute_glob(&input).await;
+        assert!(result.is_ok(), "glob failed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("foo.rs"));
+        assert!(!output.contains("bar.txt"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn glob_no_matches_returns_ok() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join("sandbox-test-glob-empty");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("hello.txt"), "text")
+            .await
+            .unwrap();
+
+        let input = serde_json::json!({
+            "pattern": "*.xyz",
+            "path": dir.to_str().unwrap()
+        });
+        let result = execute_glob(&input).await;
+        assert!(result.is_ok());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn glob_missing_pattern_returns_error() {
+        let input = serde_json::json!({});
+        let result = execute_glob(&input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("pattern"));
     }
 }

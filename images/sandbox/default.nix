@@ -56,6 +56,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.findutils
     pkgs.gnused
     pkgs.gnugrep
+    pkgs.ripgrep
     gitCredentialHelper
     gitconfig
     sandbox-tool-server
