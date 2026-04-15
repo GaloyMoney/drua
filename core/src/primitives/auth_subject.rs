@@ -16,7 +16,7 @@ pub enum AuthSubject {
     /// originated from a `User` or `ExportedAgent`. Carries enough context
     /// to attribute downstream actions back to the originating user.
     /// The workspace is recoverable from scopes via [`Self::workspace_id`].
-    AgentOnBehalfOfUser(UserId, AgentId, Vec<AuthScope>),
+    AgentOnBehalfOfUser(AgentId, UserId, Vec<AuthScope>),
     /// No authentication provided.
     Anonymous,
 }
@@ -39,7 +39,7 @@ impl AuthSubject {
         match self {
             AuthSubject::User(user_id) => Some(*user_id),
             AuthSubject::ExportedAgent(user_id, _, _) => Some(*user_id),
-            AuthSubject::AgentOnBehalfOfUser(user_id, _, _) => Some(*user_id),
+            AuthSubject::AgentOnBehalfOfUser(_, user_id, _) => Some(*user_id),
             AuthSubject::Agent(_, _) | AuthSubject::Anonymous => None,
         }
     }
@@ -59,7 +59,7 @@ impl AuthSubject {
     pub fn acting_agent_id(&self) -> Option<AgentId> {
         match self {
             AuthSubject::Agent(agent_id, _) => Some(*agent_id),
-            AuthSubject::AgentOnBehalfOfUser(_, agent_id, _) => Some(*agent_id),
+            AuthSubject::AgentOnBehalfOfUser(agent_id, _, _) => Some(*agent_id),
             _ => None,
         }
     }
@@ -139,7 +139,7 @@ impl AuthSubject {
                 user_id: *user_id,
                 creds_id: *creds_id,
             },
-            AuthSubject::Agent(agent_id, _) | AuthSubject::AgentOnBehalfOfUser(_, agent_id, _) => {
+            AuthSubject::Agent(agent_id, _) | AuthSubject::AgentOnBehalfOfUser(agent_id, _, _) => {
                 UserMessageSource::Agent {
                     agent_id: *agent_id,
                 }

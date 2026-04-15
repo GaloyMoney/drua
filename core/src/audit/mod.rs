@@ -44,7 +44,7 @@ impl Audit {
                 ctx.workspace_id = auth.workspace_id();
                 ctx.acting_agent_id = Some(*agent_id);
             }
-            AuthSubject::AgentOnBehalfOfUser(user_id, agent_id, _) => {
+            AuthSubject::AgentOnBehalfOfUser(agent_id, user_id, _) => {
                 ctx.acting_agent_id = Some(*agent_id);
                 ctx.workspace_id = auth.workspace_id();
                 ctx.on_behalf_of_user_id = Some(*user_id);
