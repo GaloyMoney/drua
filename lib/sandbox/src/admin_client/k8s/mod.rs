@@ -311,7 +311,20 @@ impl K8sAdminClient {
     #[instrument(name = "sandbox.admin.k8s.delete_sandbox", skip_all, fields(%name))]
     pub async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
-        sandboxes.delete(name, &DeleteParams::default()).await?;
+        // Mirror the 404→NotFound mapping in `get_sandbox` /
+        // `wait_sandbox_ready` so callers can distinguish "wasn't there"
+        // from genuine API failures. Skipping this caused the
+        // delete-then-create lifecycle to surface 404 as a generic
+        // `AdminError::Kube` and abort every fresh provisioning attempt.
+        sandboxes
+            .delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| match &e {
+                kube::Error::Api(resp) if resp.code == 404 => {
+                    AdminError::NotFound(name.to_string())
+                }
+                _ => AdminError::Kube(e),
+            })?;
         tracing::info!(sandbox = %name, "Sandbox deleted");
         Ok(())
     }
