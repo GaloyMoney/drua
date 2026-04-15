@@ -29,10 +29,10 @@ use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
     AgentAttachSandbox, AgentCreate, AgentDetachSandbox, AllLogs, Bash, CodeAssistantToolSet,
-    CreateSandbox, GetSandbox, GlobTool, Grep, ListAgents, ListSandboxes, Ls, Read, TextEditor,
-    ToolSets, ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
-    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceListAgents,
-    WorkspaceListSandboxes, WorkspaceLog,
+    CreateSandbox, GetSandbox, GlobTool, Grep, InspectSandbox, ListAgents, ListSandboxes, Ls, Read,
+    TextEditor, ToolSets, ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
+    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
+    WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -181,6 +181,8 @@ impl App {
         toolsets.register_top_level(ListSandboxes::new(sandboxes.clone()));
         toolsets.register_top_level(WorkspaceGetSandbox::new(sandboxes.clone()));
         toolsets.register_top_level(GetSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(WorkspaceInspectSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(InspectSandbox::new(sandboxes.clone()));
 
         let workspaces = Workspaces::new(pool, Arc::clone(&agents));
 
