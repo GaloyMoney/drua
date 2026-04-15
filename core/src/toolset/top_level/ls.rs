@@ -73,7 +73,9 @@ impl TopLevelTool for Ls {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let sandbox_id = subject.readable_sandbox_id().ok_or(ToolSetsError::Unauthorized)?;
+        let sandbox_id = subject
+            .readable_sandbox_id()
+            .ok_or(ToolSetsError::Unauthorized)?;
         let args = arguments.unwrap_or_default();
 
         let path = args
@@ -97,15 +99,11 @@ impl TopLevelTool for Ls {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let output = if let Some(ignore_list) = args
-                    .get("ignore")
-                    .and_then(|v| v.as_array())
+                let output = if let Some(ignore_list) =
+                    args.get("ignore").and_then(|v| v.as_array())
                 {
                     // Filter out entries matching the ignore list
-                    let ignore: Vec<&str> = ignore_list
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .collect();
+                    let ignore: Vec<&str> = ignore_list.iter().filter_map(|v| v.as_str()).collect();
                     resp.output
                         .lines()
                         .filter(|line| {
