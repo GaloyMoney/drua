@@ -299,6 +299,18 @@ impl Sandboxes {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
 
+    /// Like [`Self::find_by_id`] but returns `Ok(None)` instead of an
+    /// error when no sandbox with that id exists. Used by callers that
+    /// treat absence as a normal control-flow signal (e.g. skill lookup
+    /// falling back across sandboxes).
+    #[instrument(name = "domain.sandbox.maybe_find_by_id", skip(self))]
+    pub async fn maybe_find_by_id(
+        &self,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<Option<Sandbox>, SandboxError> {
+        Ok(self.repo.maybe_find_by_id(id.into()).await?)
+    }
+
     /// Resolve a live [`InstanceClient`] for the sandbox identified by `id`.
     ///
     /// Loads the entity, asks the admin client for the current

@@ -141,6 +141,19 @@ impl Sandbox {
         format!("sb-{}", self.id)
     }
 
+    /// Look up an exported skill by name and return its body. Exported
+    /// skills are populated by `/initialize` from the cloned repo's
+    /// `.claude/commands/*.md`; this is the read-side counterpart used
+    /// by [`Skills::find_by_name`](super::super::skill::Skills::find_by_name)
+    /// to fall back to in-sandbox skills when no DB-registered match
+    /// exists.
+    pub fn find_skill(&self, name: &str) -> Option<String> {
+        self.exported_skills
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.content.clone())
+    }
+
     /// Idempotent transition to [`SandboxState::Provisioning`]. Used when
     /// `restart()` re-runs the lifecycle from a `Suspended` or `Errored`
     /// sandbox; clears `last_error` so a stale failure isn't shown after

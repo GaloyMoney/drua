@@ -12,4 +12,6 @@ pub enum SkillError {
     Find(#[from] SkillFindError),
     #[error("SkillError - Query: {0}")]
     Query(#[from] SkillQueryError),
+    #[error("SkillError - SandboxLookup: {0}")]
+    SandboxLookup(String),
 }

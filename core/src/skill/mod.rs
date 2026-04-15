@@ -47,6 +47,47 @@ impl Skills {
         Ok(self.repo.find_by_id(id).await?)
     }
 
+    /// Resolve a skill by name and return its body, falling back to the
+    /// optionally-supplied sandbox's exported skills when there's no
+    /// match in the repo.
+    ///
+    /// Lookup order:
+    /// 1. `repo.maybe_find_by_name(name)` — workspace-scoped registered skills
+    ///    (see the `idx_skills_workspace_name` unique index in the migration).
+    /// 2. If `sandbox_id` is `Some`, load the sandbox and scan its
+    ///    `exported_skills` (populated by `/initialize` from the cloned
+    ///    repo's `.claude/commands/*.md`) for a matching `name`.
+    ///
+    /// Returns `Ok(None)` when neither source matches; returns errors
+    /// only on actual repo / sandbox-lookup failures.
+    #[instrument(name = "skill.find_by_name", skip_all, fields(name = %name, sandbox_id))]
+    pub async fn find_by_name(
+        &self,
+        name: &str,
+        sandbox_id: Option<SandboxId>,
+    ) -> Result<Option<String>, SkillError> {
+        if let Some(skill) = self.repo.maybe_find_by_name(name.to_string()).await? {
+            return Ok(Some(skill.body));
+        }
+
+        if let Some(sandbox_id) = sandbox_id {
+            tracing::Span::current().record("sandbox_id", sandbox_id.to_string());
+            // `maybe_find_by_id` returns `None` for a missing sandbox —
+            // skill lookup treats that as "no fallback available" rather
+            // than an error.
+            let sandbox = self
+                .sandboxes
+                .maybe_find_by_id(sandbox_id)
+                .await
+                .map_err(|e| SkillError::SandboxLookup(e.to_string()))?;
+            if let Some(body) = sandbox.and_then(|s| s.find_skill(name)) {
+                return Ok(Some(body));
+            }
+        }
+
+        Ok(None)
+    }
+
     #[instrument(name = "skill.list_by_workspace_id", skip_all)]
     pub async fn list_by_workspace_id(
         &self,
