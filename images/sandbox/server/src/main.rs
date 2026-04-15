@@ -399,10 +399,7 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
     args.push(pattern.to_string());
 
     // Search path
-    let search_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     args.push(search_path.to_string());
 
     let output = tokio::time::timeout(
@@ -446,10 +443,7 @@ async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing 'pattern' field")?;
 
-    let search_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
     // Use `rg --files -g <pattern> <path>` to list matching files.
     // Then sort by mtime (most recent first) using `ls -t`.
@@ -1405,9 +1399,12 @@ mod tests {
         let dir = std::env::temp_dir().join("sandbox-test-grep");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        tokio::fs::write(dir.join("hello.txt"), "hello world\ngoodbye world\nhello rust")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            dir.join("hello.txt"),
+            "hello world\ngoodbye world\nhello rust",
+        )
+        .await
+        .unwrap();
 
         let input = serde_json::json!({
             "pattern": "hello",
@@ -1435,9 +1432,7 @@ mod tests {
         tokio::fs::write(dir.join("a.txt"), "match here")
             .await
             .unwrap();
-        tokio::fs::write(dir.join("b.txt"), "no hit")
-            .await
-            .unwrap();
+        tokio::fs::write(dir.join("b.txt"), "no hit").await.unwrap();
 
         let input = serde_json::json!({
             "pattern": "match",
@@ -1521,9 +1516,7 @@ mod tests {
         tokio::fs::write(dir.join("foo.rs"), "fn main() {}")
             .await
             .unwrap();
-        tokio::fs::write(dir.join("bar.txt"), "text")
-            .await
-            .unwrap();
+        tokio::fs::write(dir.join("bar.txt"), "text").await.unwrap();
 
         let input = serde_json::json!({
             "pattern": "*.rs",

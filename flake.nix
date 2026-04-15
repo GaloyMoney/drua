@@ -193,6 +193,9 @@
               set -euo pipefail
               export TERM="''${TERM:-dumb}"
               export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerWrapper}/bin/sandbox-tool-server"
+              # ripgrep is required by the Grep / Glob server handlers —
+              # the sandbox image bakes it in, but the bats runner spawns
+              # the binary out-of-image so we have to add it explicitly.
               export PATH="${pkgs.lib.makeBinPath [
                 pkgs.bats
                 pkgs.jq
@@ -201,6 +204,7 @@
                 pkgs.gawk
                 pkgs.gnugrep
                 pkgs.git
+                pkgs.ripgrep
               ]}:$PATH"
 
               exec bats bats/sandbox.bats
