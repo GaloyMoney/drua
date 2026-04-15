@@ -204,6 +204,126 @@ teardown_file() {
   echo "$CONTENT" | tail -1 | grep -q "third"
 }
 
+# ── Grep tool ────────────────────────────────────────────────────────
+
+@test "sandbox: Grep finds pattern in files" {
+  mkdir -p "$SANDBOX_WORK/grep-test"
+  echo -e "hello world\ngoodbye world\nhello rust" > "$SANDBOX_WORK/grep-test/sample.txt"
+  echo -e "no match here" > "$SANDBOX_WORK/grep-test/other.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Grep\",\"input\":{\"pattern\":\"hello\",\"path\":\"$SANDBOX_WORK/grep-test\",\"output_mode\":\"content\"}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | grep -q "hello world"
+  echo "$RESP" | jq -r '.output' | grep -q "hello rust"
+}
+
+@test "sandbox: Grep files_with_matches mode returns filenames" {
+  mkdir -p "$SANDBOX_WORK/grep-fwm"
+  echo "match me" > "$SANDBOX_WORK/grep-fwm/a.txt"
+  echo "no hit" > "$SANDBOX_WORK/grep-fwm/b.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Grep\",\"input\":{\"pattern\":\"match\",\"path\":\"$SANDBOX_WORK/grep-fwm\",\"output_mode\":\"files_with_matches\"}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | grep -q "a.txt"
+  ! echo "$RESP" | jq -r '.output' | grep -q "b.txt"
+}
+
+@test "sandbox: Grep no matches returns empty" {
+  mkdir -p "$SANDBOX_WORK/grep-empty"
+  echo "nothing relevant" > "$SANDBOX_WORK/grep-empty/x.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Grep\",\"input\":{\"pattern\":\"zzz_nonexistent\",\"path\":\"$SANDBOX_WORK/grep-empty\"}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+}
+
+@test "sandbox: Grep with head_limit caps output" {
+  mkdir -p "$SANDBOX_WORK/grep-head"
+  printf '%s\n' a a a a a a a a a a > "$SANDBOX_WORK/grep-head/many.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Grep\",\"input\":{\"pattern\":\"a\",\"path\":\"$SANDBOX_WORK/grep-head\",\"output_mode\":\"content\",\"head_limit\":3}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+  LINE_COUNT=$(echo "$RESP" | jq -r '.output' | wc -l | tr -d ' ')
+  [ "$LINE_COUNT" -le 4 ]  # 3 lines + possible trailing newline
+}
+
+@test "sandbox: Grep missing pattern returns error" {
+  RESP=$(sandbox_execute '{"tool":"Grep","input":{}}')
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == true'
+  echo "$RESP" | jq -r '.output' | grep -q "pattern"
+}
+
+@test "sandbox: Grep case insensitive flag works" {
+  mkdir -p "$SANDBOX_WORK/grep-ci"
+  echo "Hello World" > "$SANDBOX_WORK/grep-ci/mixed.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Grep\",\"input\":{\"pattern\":\"hello\",\"path\":\"$SANDBOX_WORK/grep-ci\",\"output_mode\":\"content\",\"-i\":true}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | grep -q "Hello World"
+}
+
+# ── Glob tool ────────────────────────────────────────────────────────
+
+@test "sandbox: Glob finds matching files" {
+  mkdir -p "$SANDBOX_WORK/glob-test"
+  echo "fn main() {}" > "$SANDBOX_WORK/glob-test/foo.rs"
+  echo "text" > "$SANDBOX_WORK/glob-test/bar.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Glob\",\"input\":{\"pattern\":\"*.rs\",\"path\":\"$SANDBOX_WORK/glob-test\"}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | grep -q "foo.rs"
+  ! echo "$RESP" | jq -r '.output' | grep -q "bar.txt"
+}
+
+@test "sandbox: Glob no matches returns empty" {
+  mkdir -p "$SANDBOX_WORK/glob-empty"
+  echo "text" > "$SANDBOX_WORK/glob-empty/hello.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Glob\",\"input\":{\"pattern\":\"*.xyz\",\"path\":\"$SANDBOX_WORK/glob-empty\"}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+}
+
+@test "sandbox: Glob missing pattern returns error" {
+  RESP=$(sandbox_execute '{"tool":"Glob","input":{}}')
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == true'
+  echo "$RESP" | jq -r '.output' | grep -q "pattern"
+}
+
+@test "sandbox: Glob recursive pattern works" {
+  mkdir -p "$SANDBOX_WORK/glob-deep/sub/nested"
+  echo "a" > "$SANDBOX_WORK/glob-deep/top.rs"
+  echo "b" > "$SANDBOX_WORK/glob-deep/sub/mid.rs"
+  echo "c" > "$SANDBOX_WORK/glob-deep/sub/nested/deep.rs"
+  echo "d" > "$SANDBOX_WORK/glob-deep/sub/nested/other.txt"
+
+  RESP=$(sandbox_execute "{\"tool\":\"Glob\",\"input\":{\"pattern\":\"**/*.rs\",\"path\":\"$SANDBOX_WORK/glob-deep\"}}")
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == false'
+  OUTPUT=$(echo "$RESP" | jq -r '.output')
+  echo "$OUTPUT" | grep -q "top.rs"
+  echo "$OUTPUT" | grep -q "mid.rs"
+  echo "$OUTPUT" | grep -q "deep.rs"
+  ! echo "$OUTPUT" | grep -q "other.txt"
+}
+
 # ── Unknown tool ─────────────────────────────────────────────────────
 
 @test "sandbox: unknown tool returns error" {
