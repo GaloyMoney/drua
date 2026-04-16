@@ -4,7 +4,7 @@
 //! Workspace-scoped tools require the `WorkspaceAdmin` scope on the
 //! caller's workspace.  Admin-scoped tools require the `Admin` scope.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
@@ -20,11 +20,11 @@ use super::super::traits::TopLevelTool;
 // ---------------------------------------------------------------------------
 
 pub struct WorkspaceCreateSandbox {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceCreateSandbox {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }
@@ -112,11 +112,11 @@ impl TopLevelTool for WorkspaceCreateSandbox {
 // ---------------------------------------------------------------------------
 
 pub struct AdminCreateSandbox {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl AdminCreateSandbox {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }
@@ -209,11 +209,11 @@ impl TopLevelTool for AdminCreateSandbox {
 // ---------------------------------------------------------------------------
 
 pub struct WorkspaceListSandboxes {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceListSandboxes {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }
@@ -272,11 +272,11 @@ impl TopLevelTool for WorkspaceListSandboxes {
 // ---------------------------------------------------------------------------
 
 pub struct AdminListSandboxes {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl AdminListSandboxes {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }
@@ -343,11 +343,11 @@ impl TopLevelTool for AdminListSandboxes {
 // ---------------------------------------------------------------------------
 
 pub struct WorkspaceGetSandbox {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceGetSandbox {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }
@@ -419,11 +419,11 @@ impl TopLevelTool for WorkspaceGetSandbox {
 // ---------------------------------------------------------------------------
 
 pub struct AdminGetSandbox {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl AdminGetSandbox {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }

@@ -45,11 +45,23 @@ async fn send_message_round_trip_via_prompt_channel() {
             .expect("init toolsets"),
     );
 
-    let sandboxes = Sandboxes::init(&pool, SandboxConfig::default(), None)
-        .await
-        .expect("init sandboxes");
-    let skills = galoy_agents_core::skill::Skills::new(&pool, sandboxes.clone());
-    let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes, skills);
+    let sandboxes = Arc::new(
+        Sandboxes::init(&pool, SandboxConfig::default(), None)
+            .await
+            .expect("init sandboxes"),
+    );
+    let skills = Arc::new(galoy_agents_core::skill::Skills::new(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+    );
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead", None)
@@ -181,11 +193,23 @@ async fn send_message_dispatches_registered_tool_call() {
     toolsets.register_top_level(PingTool::new());
     let toolsets = Arc::new(toolsets);
 
-    let sandboxes = Sandboxes::init(&pool, SandboxConfig::default(), None)
-        .await
-        .expect("init sandboxes");
-    let skills = galoy_agents_core::skill::Skills::new(&pool, sandboxes.clone());
-    let agents = Agents::new(&pool, config, toolsets, prompt_tx, sandboxes, skills);
+    let sandboxes = Arc::new(
+        Sandboxes::init(&pool, SandboxConfig::default(), None)
+            .await
+            .expect("init sandboxes"),
+    );
+    let skills = Arc::new(galoy_agents_core::skill::Skills::new(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+    );
 
     let agent = agents
         .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead", None)

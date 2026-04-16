@@ -50,8 +50,8 @@ use session::Sessions;
 pub struct Agents {
     repo: AgentRepo,
     sessions: Sessions,
-    sandboxes: Sandboxes,
-    skills: Skills,
+    sandboxes: Arc<Sandboxes>,
+    skills: Arc<Skills>,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -63,8 +63,8 @@ impl Agents {
         config: AgentsConfig,
         toolsets: Arc<ToolSets>,
         prompt_requests: llm::PromptRequestChannel,
-        sandboxes: Sandboxes,
-        skills: Skills,
+        sandboxes: Arc<Sandboxes>,
+        skills: Arc<Skills>,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),

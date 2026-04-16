@@ -13,7 +13,7 @@
 //!   has no write attachment yet, so the model can ask to attach and try
 //!   again instead of being baffled by a missing tool.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
@@ -26,11 +26,11 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 
 pub struct Bash {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl Bash {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }

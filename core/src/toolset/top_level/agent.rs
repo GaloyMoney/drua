@@ -176,11 +176,11 @@ impl TopLevelTool for AdminAgentCreate {
 
 pub struct WorkspaceAgentAttachSandbox {
     agents: Arc<Agents>,
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceAgentAttachSandbox {
-    pub fn new(agents: Arc<Agents>, sandboxes: Sandboxes) -> Self {
+    pub fn new(agents: Arc<Agents>, sandboxes: Arc<Sandboxes>) -> Self {
         Self { agents, sandboxes }
     }
 }
@@ -360,11 +360,11 @@ impl TopLevelTool for AdminAgentAttachSandbox {
 
 pub struct WorkspaceAgentDetachSandbox {
     agents: Arc<Agents>,
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceAgentDetachSandbox {
-    pub fn new(agents: Arc<Agents>, sandboxes: Sandboxes) -> Self {
+    pub fn new(agents: Arc<Agents>, sandboxes: Arc<Sandboxes>) -> Self {
         Self { agents, sandboxes }
     }
 }

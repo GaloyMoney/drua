@@ -41,17 +41,17 @@ use workspace_secret::WorkspaceSecrets;
 
 #[derive(Clone)]
 pub struct App {
-    users: Users,
-    mcp_creds: McpCredentials,
+    users: Arc<Users>,
+    mcp_creds: Arc<McpCredentials>,
     agents: Arc<Agents>,
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
     toolsets: Arc<ToolSets>,
-    workspaces: Workspaces,
-    workspace_secrets: WorkspaceSecrets,
-    skills: Skills,
-    sandboxes: Sandboxes,
-    github_app: Option<GitHubAppTokenProvider>,
+    workspaces: Arc<Workspaces>,
+    workspace_secrets: Arc<WorkspaceSecrets>,
+    skills: Arc<Skills>,
+    sandboxes: Arc<Sandboxes>,
+    github_app: Option<Arc<GitHubAppTokenProvider>>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
     _prompt_executor: Arc<PromptExecutor>,
@@ -133,7 +133,7 @@ impl App {
                     .await
                     .map_err(|e| AppError::GitHubApp(format!("startup token check failed: {e}")))?;
                 tracing::info!("GitHub App token provider initialized and verified");
-                Some(provider)
+                Some(Arc::new(provider))
             }
             None => {
                 tracing::info!("GitHub App not configured — token auto-provisioning disabled");
@@ -141,19 +141,19 @@ impl App {
             }
         };
 
-        let sandboxes = Sandboxes::init(pool, config.sandbox, github_app.clone()).await?;
-        let skills = Skills::new(pool, sandboxes.clone());
+        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
+        let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes)));
 
         // Sandbox-backed tools (Bash, TextEditor) need the sandboxes
         // service to resolve the running pod for an attached agent —
         // register them after sandboxes is up but before we wrap the
         // toolsets in Arc.
-        toolsets.register_top_level(Bash::new(sandboxes.clone()));
-        toolsets.register_top_level(TextEditor::new(sandboxes.clone()));
-        toolsets.register_top_level(Grep::new(sandboxes.clone()));
-        toolsets.register_top_level(GlobTool::new(sandboxes.clone()));
-        toolsets.register_top_level(Read::new(sandboxes.clone()));
-        toolsets.register_top_level(Ls::new(sandboxes.clone()));
+        toolsets.register_top_level(Bash::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(TextEditor::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(GlobTool::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(Read::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
         let agents = Arc::new(Agents::new(
@@ -161,8 +161,8 @@ impl App {
             config.agents,
             Arc::clone(&toolsets),
             prompt_tx,
-            sandboxes.clone(),
-            skills.clone(),
+            Arc::clone(&sandboxes),
+            Arc::clone(&skills),
         ));
 
         // Register agent & sandbox management tools now that both services
@@ -172,38 +172,38 @@ impl App {
         toolsets.register_top_level(AdminAgentCreate::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceAgentAttachSandbox::new(
             Arc::clone(&agents),
-            sandboxes.clone(),
+            Arc::clone(&sandboxes),
         ));
         toolsets.register_top_level(AdminAgentAttachSandbox::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceAgentDetachSandbox::new(
             Arc::clone(&agents),
-            sandboxes.clone(),
+            Arc::clone(&sandboxes),
         ));
         toolsets.register_top_level(AdminAgentDetachSandbox::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceListAgents::new(Arc::clone(&agents)));
         toolsets.register_top_level(AdminListAgents::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceCreateSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(AdminCreateSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(WorkspaceListSandboxes::new(sandboxes.clone()));
-        toolsets.register_top_level(AdminListSandboxes::new(sandboxes.clone()));
-        toolsets.register_top_level(WorkspaceGetSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(AdminGetSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(WorkspaceInspectSandbox::new(sandboxes.clone()));
-        toolsets.register_top_level(AdminInspectSandbox::new(sandboxes.clone()));
+        toolsets.register_top_level(WorkspaceCreateSandbox::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(AdminCreateSandbox::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(WorkspaceListSandboxes::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(AdminListSandboxes::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(WorkspaceGetSandbox::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(AdminGetSandbox::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(WorkspaceInspectSandbox::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(AdminInspectSandbox::new(Arc::clone(&sandboxes)));
 
-        let workspaces = Workspaces::new(pool, Arc::clone(&agents));
-        toolsets.register_top_level(AdminWorkspaceCreate::new(workspaces.clone()));
-        toolsets.register_top_level(AdminWorkspaceList::new(workspaces.clone()));
+        let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
+        toolsets.register_top_level(AdminWorkspaceCreate::new(Arc::clone(&workspaces)));
+        toolsets.register_top_level(AdminWorkspaceList::new(Arc::clone(&workspaces)));
 
         Ok(Self {
-            users: Users::new(pool),
-            mcp_creds,
+            users: Arc::new(Users::new(pool)),
+            mcp_creds: Arc::new(mcp_creds),
             agents: Arc::clone(&agents),
             audit,
             code_assistant,
             toolsets,
             workspaces,
-            workspace_secrets,
+            workspace_secrets: Arc::new(workspace_secrets),
             skills,
             sandboxes,
             github_app,
@@ -252,7 +252,7 @@ impl App {
     }
 
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
-        self.github_app.as_ref()
+        self.github_app.as_deref()
     }
 }
 
