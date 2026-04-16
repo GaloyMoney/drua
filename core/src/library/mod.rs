@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use sqlx::PgPool;
 
-use self::job::ImportLibCommitsJobInitializer;
+use self::job::{ImportLibCommitsJobInitializer, ImportRuntimeCommitsJobInitializer};
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct LibraryConfig {
@@ -34,17 +34,31 @@ pub struct Library {
 
 impl Library {
     pub fn new(pool: &PgPool, config: &LibraryConfig, jobs: &mut ::job::Jobs) -> Self {
-        let initializer = ImportLibCommitsJobInitializer::new(pool, config);
-        let spawner = jobs.add_initializer(initializer);
-        // Spawn as unique-per-type so only one instance ever runs.
+        let lib_init = ImportLibCommitsJobInitializer::new(pool, config);
+        let lib_spawner = jobs.add_initializer(lib_init);
         tokio::spawn(async move {
-            if let Err(e) = spawner
+            if let Err(e) = lib_spawner
                 .spawn_unique(::job::JobId::new(), ImportLibCommitsJobInitializer::cfg())
                 .await
             {
                 tracing::error!(error = %e, "Failed to spawn import-lib-commits job");
             }
         });
+
+        let runtime_init = ImportRuntimeCommitsJobInitializer::new(pool, config);
+        let runtime_spawner = jobs.add_initializer(runtime_init);
+        tokio::spawn(async move {
+            if let Err(e) = runtime_spawner
+                .spawn_unique(
+                    ::job::JobId::new(),
+                    ImportRuntimeCommitsJobInitializer::cfg(),
+                )
+                .await
+            {
+                tracing::error!(error = %e, "Failed to spawn import-runtime-commits job");
+            }
+        });
+
         Self { pool: pool.clone() }
     }
 }
