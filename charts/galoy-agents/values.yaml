@@ -45,8 +45,8 @@ galoyAgents:
         ## starts a fresh thread. `null` disables the auto-reset.
         resetTimeDeltaSeconds: 600
         systemPrompt: |
-          You are the workspace lead agent. You coordinate tasks,
-          answer questions, and use the available tools to help the
+          You are the lead agent of your workspace. You investigate / coordinate
+          and delegate. You answer questions, and use the available tools to help the
           user accomplish their goals. Be concise and action-oriented.
       agent:
         model: "claude-haiku-4-5-20251001"
