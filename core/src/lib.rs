@@ -5,6 +5,7 @@ pub mod code_assistant;
 mod config;
 pub mod encryption;
 pub mod github_app;
+pub mod library;
 pub mod mcp_creds;
 pub mod primitives;
 pub mod prompt_executor;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 
 use agent::Agents;
 use audit::Audit;
+use library::Library;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use mcp_creds::McpCredentials;
@@ -54,6 +56,7 @@ pub struct App {
     /// previous tunnel when a new connector registers the same
     /// `deployment_id`. See [`tunnel::TunnelRegistry`].
     tunnels: Arc<tunnel::TunnelRegistry>,
+    library: Library,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
     _prompt_executor: Arc<PromptExecutor>,
@@ -186,6 +189,18 @@ impl App {
             Arc::clone(&workspaces),
         ));
 
+        let job_config = job::JobSvcConfig::builder()
+            .pool(pool.clone())
+            .build()
+            .expect("Failed to build JobSvcConfig");
+        let mut jobs = job::Jobs::init(job_config)
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
+        let library = Library::new(pool, &mut jobs);
+        jobs.start_poll()
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
+
         Ok(Self {
             users: Arc::new(Users::new(pool)),
             mcp_creds: Arc::new(mcp_creds),
@@ -199,6 +214,7 @@ impl App {
             sandboxes,
             github_app,
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
+            library,
             _prompt_executor: prompt_executor,
         })
     }
@@ -250,6 +266,10 @@ impl App {
     pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
         &self.tunnels
     }
+
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -268,4 +288,6 @@ pub enum AppError {
     PromptExecutor(String),
     #[error("AppError - Sandbox: {0}")]
     Sandbox(#[from] sandbox::error::SandboxError),
+    #[error("AppError - Job: {0}")]
+    Job(String),
 }
