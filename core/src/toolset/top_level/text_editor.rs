@@ -43,45 +43,45 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     // model already knows the built-in's shape, so detailed per-command
     // schemas would be redundant.
     serde_json::json!({
-            "type": "object",
-    tep        "properties": {
-                "command": {
-                    "type": "string",
-                    "enum": ["view", "create", "str_replace", "insert"],
-                    "description": "Which editor operation to perform."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Absolute path to the file or directory inside the sandbox workspace."
-                },
-                "view_range": {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "minItems": 2,
-                    "maxItems": 2,
-                    "description": "[start, end] line range for `view`. -1 for end means EOF. Optional."
-                },
-                "file_text": {
-                    "type": "string",
-                    "description": "Full file contents for `create`."
-                },
-                "old_str": {
-                    "type": "string",
-                    "description": "Substring to replace for `str_replace`. Must appear exactly once."
-                },
-                "new_str": {
-                    "type": "string",
-                    "description": "Replacement text for `str_replace`, or text to insert for `insert`."
-                },
-                "insert_line": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Line number after which to insert text for `insert`. 0 = beginning of file."
-                }
+    "type": "object",
+    "properties": {
+            "command": {
+                "type": "string",
+                "enum": ["view", "create", "str_replace", "insert"],
+                "description": "Which editor operation to perform."
             },
-            "required": ["command", "path"],
-            "additionalProperties": false,
-        })
+            "path": {
+                "type": "string",
+                "description": "Absolute path to the file or directory inside the sandbox workspace."
+            },
+            "view_range": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "minItems": 2,
+                "maxItems": 2,
+                "description": "[start, end] line range for `view`. -1 for end means EOF. Optional."
+            },
+            "file_text": {
+                "type": "string",
+                "description": "Full file contents for `create`."
+            },
+            "old_str": {
+                "type": "string",
+                "description": "Substring to replace for `str_replace`. Must appear exactly once."
+            },
+            "new_str": {
+                "type": "string",
+                "description": "Replacement text for `str_replace`, or text to insert for `insert`."
+            },
+            "insert_line": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Line number after which to insert text for `insert`. 0 = beginning of file."
+            }
+        },
+        "required": ["command", "path"],
+        "additionalProperties": false,
+    })
 });
 
 /// First sandbox the subject can write to (full UseAll attach).
