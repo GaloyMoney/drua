@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use job::*;
@@ -11,11 +12,17 @@ pub struct ImportLibCommitsConfig {}
 
 pub struct ImportLibCommitsJobInitializer {
     pool: PgPool,
+    repo_path: PathBuf,
+    repo_url: Option<String>,
 }
 
 impl ImportLibCommitsJobInitializer {
-    pub fn new(pool: &PgPool) -> Self {
-        Self { pool: pool.clone() }
+    pub fn new(pool: &PgPool, config: &super::super::LibraryConfig) -> Self {
+        Self {
+            pool: pool.clone(),
+            repo_path: config.repo_path(),
+            repo_url: config.repo_url.clone(),
+        }
     }
 
     pub fn cfg() -> ImportLibCommitsConfig {
@@ -37,6 +44,8 @@ impl JobInitializer for ImportLibCommitsJobInitializer {
     ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
         Ok(Box::new(ImportLibCommitsRunner {
             pool: self.pool.clone(),
+            repo_path: self.repo_path.clone(),
+            repo_url: self.repo_url.clone(),
         }))
     }
 }
@@ -44,6 +53,10 @@ impl JobInitializer for ImportLibCommitsJobInitializer {
 struct ImportLibCommitsRunner {
     #[allow(dead_code)]
     pool: PgPool,
+    #[allow(dead_code)]
+    repo_path: PathBuf,
+    #[allow(dead_code)]
+    repo_url: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -58,6 +71,7 @@ impl JobRunner for ImportLibCommitsRunner {
                 break;
             }
 
+            // TODO: ensure bare clone at self.repo_path (clone from repo_url or local path)
             // TODO: git fetch, diff refs, walk new commits, store in PG
 
             tokio::time::sleep(POLL_INTERVAL).await;

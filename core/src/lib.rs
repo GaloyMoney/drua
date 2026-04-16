@@ -196,7 +196,7 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::new(pool, &mut jobs);
+        let library = Library::new(pool, &config.library, &mut jobs);
         jobs.start_poll()
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
