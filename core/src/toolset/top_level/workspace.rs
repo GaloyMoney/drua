@@ -6,7 +6,7 @@
 //! there's no workspace-scoped variant here — workspace creation is
 //! above a workspace (chicken-and-egg).
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
@@ -22,11 +22,11 @@ use super::super::traits::TopLevelTool;
 // ---------------------------------------------------------------------------
 
 pub struct AdminWorkspaceCreate {
-    workspaces: Workspaces,
+    workspaces: Arc<Workspaces>,
 }
 
 impl AdminWorkspaceCreate {
-    pub fn new(workspaces: Workspaces) -> Self {
+    pub fn new(workspaces: Arc<Workspaces>) -> Self {
         Self { workspaces }
     }
 }
@@ -112,11 +112,11 @@ impl TopLevelTool for AdminWorkspaceCreate {
 // ---------------------------------------------------------------------------
 
 pub struct AdminWorkspaceList {
-    workspaces: Workspaces,
+    workspaces: Arc<Workspaces>,
 }
 
 impl AdminWorkspaceList {
-    pub fn new(workspaces: Workspaces) -> Self {
+    pub fn new(workspaces: Arc<Workspaces>) -> Self {
         Self { workspaces }
     }
 }

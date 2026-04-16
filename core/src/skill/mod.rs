@@ -2,6 +2,8 @@ mod entity;
 pub mod error;
 pub(crate) mod repo;
 
+use std::sync::Arc;
+
 use tracing::instrument;
 
 pub use crate::primitives::*;
@@ -13,11 +15,11 @@ use repo::*;
 #[derive(Clone)]
 pub struct Skills {
     repo: SkillRepo,
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl Skills {
-    pub fn new(pool: &sqlx::PgPool, sandboxes: Sandboxes) -> Self {
+    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>) -> Self {
         let repo = SkillRepo::new(pool);
         Self { repo, sandboxes }
     }

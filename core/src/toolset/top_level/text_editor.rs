@@ -14,7 +14,7 @@
 //!   attachments calling a write command (clear error, model can ask to
 //!   upgrade the attachment).
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
@@ -27,11 +27,11 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 
 pub struct TextEditor {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl TextEditor {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }

@@ -4,7 +4,7 @@
 //! (grep, glob, read, ls) against any sandbox within their workspace.
 //! `inspect_sandbox` is the admin variant with no workspace constraint.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
@@ -21,11 +21,11 @@ use super::super::traits::TopLevelTool;
 // ---------------------------------------------------------------------------
 
 pub struct WorkspaceInspectSandbox {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceInspectSandbox {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }
@@ -82,11 +82,11 @@ impl TopLevelTool for WorkspaceInspectSandbox {
 // ---------------------------------------------------------------------------
 
 pub struct AdminInspectSandbox {
-    sandboxes: Sandboxes,
+    sandboxes: Arc<Sandboxes>,
 }
 
 impl AdminInspectSandbox {
-    pub fn new(sandboxes: Sandboxes) -> Self {
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
         Self { sandboxes }
     }
 }

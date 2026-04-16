@@ -36,14 +36,14 @@ use crate::primitives::*;
 pub struct Sandboxes {
     repo: SandboxRepo,
     admin: Arc<dyn AdminClient>,
-    github_app: Option<GitHubAppTokenProvider>,
+    github_app: Option<Arc<GitHubAppTokenProvider>>,
 }
 
 impl Sandboxes {
     pub async fn init(
         pool: &sqlx::PgPool,
         config: SandboxConfig,
-        github_app: Option<GitHubAppTokenProvider>,
+        github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
             SandboxBackendConfig::Local { sandbox_spawn_cmd } => Arc::new(LocalAdminClient::new(
