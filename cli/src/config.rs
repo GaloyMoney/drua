@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Context;
 use serde::Deserialize;
 
 use galoy_agents_core::agent::AgentsConfig;
@@ -142,7 +143,11 @@ pub struct EnvSecrets {
 }
 
 impl Config {
-    pub fn try_new(path: impl AsRef<Path>, secrets: EnvSecrets) -> anyhow::Result<Self> {
+    pub fn try_new(
+        path: impl AsRef<Path>,
+        secrets: EnvSecrets,
+        config_overrides: &[String],
+    ) -> anyhow::Result<Self> {
         let config_file = std::fs::read_to_string(&path).map_err(|e| {
             anyhow::anyhow!(
                 "Couldn't read config file {:?}: {}",
@@ -151,7 +156,17 @@ impl Config {
             )
         })?;
 
-        let mut config: Config = serde_yaml::from_str(&config_file)
+        let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(&config_file)
+            .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
+
+        for override_str in config_overrides {
+            let (key, value) = override_str.split_once('=').context(format!(
+                "Invalid override format '{override_str}', expected KEY=VALUE"
+            ))?;
+            apply_yaml_override(&mut yaml_value, key, value)?;
+        }
+
+        let mut config: Config = serde_yaml::from_value(yaml_value)
             .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
 
         config.db.pg_con = secrets.pg_con;
@@ -199,4 +214,30 @@ impl Config {
             github_allowed_teams: self.oauth.github_allowed_teams.clone(),
         }
     }
+}
+
+fn apply_yaml_override(
+    root: &mut serde_yaml::Value,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let parts: Vec<&str> = key.split('.').collect();
+    let mut current = root;
+
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            let parsed_value = serde_yaml::from_str(value)
+                .unwrap_or_else(|_| serde_yaml::Value::String(value.to_string()));
+            current[*part] = parsed_value;
+        } else {
+            if !current.get(*part).is_some_and(|v| v.is_mapping()) {
+                current[*part] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            }
+            current = current
+                .get_mut(*part)
+                .context(format!("Failed to traverse config key '{key}'"))?;
+        }
+    }
+
+    Ok(())
 }

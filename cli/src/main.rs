@@ -28,6 +28,11 @@ struct Cli {
     /// Anthropic API key for the light agent runtime.
     #[arg(long, env = "ANTHROPIC_API_KEY", default_value = "")]
     anthropic_api_key: String,
+
+    /// Override values in the YAML config file using dot-separated paths.
+    /// Example: --set oauth.login=dev
+    #[clap(long = "set", value_name = "KEY=VALUE")]
+    config_overrides: Vec<String>,
 }
 
 #[tokio::main]
@@ -57,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
             github_allowed_teams: allowed_teams,
             anthropic_api_key: cli.anthropic_api_key,
         },
+        &cli.config_overrides,
     )?;
 
     let pool = sqlx::PgPool::connect(&config.db.pg_con).await?;
