@@ -24,10 +24,11 @@
           Login as Dev User
         </button>
       </form>
-      {% endif %}
-      <a href="/auth/github" role="button" {% if dev_auth %}class="secondary"{% endif %} style="display: block; text-align: center;">
+      {% else %}
+      <a href="/auth/github" role="button" style="display: block; text-align: center;">
         Sign in with GitHub
       </a>
+      {% endif %}
     </article>
   </main>
 </body>
