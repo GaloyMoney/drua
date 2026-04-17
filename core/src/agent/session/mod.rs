@@ -1,5 +1,8 @@
 mod entity;
 pub mod error;
+mod message;
+mod new_entity;
+mod new_thread;
 pub mod repo;
 mod thread;
 
