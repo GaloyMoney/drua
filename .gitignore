@@ -18,3 +18,4 @@ code-assistant/models/
 .playwright-mcp/
 test-sandbox.sh
 .sandboxes/
+.bacon-locations
