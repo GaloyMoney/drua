@@ -14,4 +14,6 @@ pub enum AgentSessionError {
     Find(#[from] AgentSessionFindError),
     #[error("AgentSessionError - cannot append a user message after another user message")]
     ConsecutiveUserMessages,
+    #[error("AgentSessionError - thread not found")]
+    ThreadNotFound,
 }

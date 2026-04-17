@@ -9,63 +9,21 @@ use es_entity::*;
 use super::{
     error::AgentSessionError,
     message::*,
-    thread::{NewSessionThread, SessionThread, SessionThreadId, ThreadStartReason},
+    metadata::*,
+    new_thread::*,
+    settings::*,
     AgentSessionId,
 };
 
 // ============================================================================
-// Supporting types
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelSettings {
-    pub model: String,
-    pub max_tokens: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadSimplificationSettings {
-    pub simplify_after_idle_seconds: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    Stop,
-    Length,
-    ToolUse,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssistantResponseMetadata {
-    pub api: String,
-    pub model: String,
-    pub usage: Usage,
-    pub cost: Cost,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Usage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-    pub total_tokens: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Cost {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
-    pub total: f64,
-}
-
-// ============================================================================
 // Events
 // ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreadStartReason {
+    InitialThread,
+}
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -79,14 +37,25 @@ pub enum AgentSessionEvent {
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     },
-    UserBlocksAdded {
-        blocks: Vec<UserBlock>,
+    ThreadStarted {
+        thread_id: SessionThreadId,
+        start_reason: ThreadStartReason,
+    },
+    UserPromptAdded {
+        thread_id: SessionThreadId,
+        source: UserMessageSource,
+        text: String,
     },
     AssistantResponseReceived {
+        thread_id: SessionThreadId,
         content: Vec<AssistantBlock>,
         stop_reason: StopReason,
         error_message: Option<String>,
         metadata: AssistantResponseMetadata,
+    },
+    PromptSent {
+        thread_id: SessionThreadId,
+        // prompt <- leave blank for now
     },
 }
 
@@ -95,12 +64,88 @@ pub enum AgentSessionEvent {
 pub struct AgentSession {
     pub id: AgentSessionId,
     pub agent_id: AgentId,
-    // #[builder(default = "SessionThreadId::from(uuid::Uuid::nil())")]
-    // current_thread: SessionThreadId,
+
+    #[builder(default = "SessionThreadId::from(uuid::Uuid::nil())")]
+    current_thread: SessionThreadId,
+
     events: EntityEvents<AgentSessionEvent>,
-    // #[es_entity(nested)]
-    // #[builder(default)]
-    // pub(super) threads: Nested<SessionThread>,
+
+    #[es_entity(nested)]
+    #[builder(default)]
+    pub(super) threads: Nested<SessionThread>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TargetThread {
+    Main,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolUseRequest {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub enum AgentSessionResponse {
+    PromptPending,
+    AwaitingAssistantResponse,
+}
+
+impl AgentSession {
+    pub fn add_user_message(
+        &mut self,
+        target: TargetThread,
+        source: UserMessageSource,
+        prompt: String,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let thread_id = match target {
+            TargetThread::Main => self.current_thread,
+        };
+        self.events.push(AgentSessionEvent::UserPromptAdded {
+            thread_id,
+            source,
+            text: prompt,
+        });
+        let thread = self
+            .threads
+            .get_persisted(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        if thread.is_user_turn() {
+            Ok(AgentSessionResponse::PromptPending)
+        } else {
+            Ok(AgentSessionResponse::AwaitingAssistantResponse)
+        }
+    }
+
+    pub fn next_prompt(&mut self, target: TargetThread) -> Result<Prompt, AgentSessionError> {
+        let _thread_id = match target {
+            TargetThread::Main => self.current_thread,
+        };
+        // TODO: lookup thread, collect pending user messages since last PromptSent
+        unimplemented!()
+    }
+
+    pub fn init_initial_thread(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: AgentSessionEvent::ThreadStarted { .. }
+        );
+        let thread_id = SessionThreadId::new();
+        let new_thread = NewSessionThread::builder()
+            .id(thread_id)
+            .session_id(self.id)
+            .build()
+            .expect("NewSessionThread build");
+        self.threads.add_new(new_thread);
+        self.events.push(AgentSessionEvent::ThreadStarted {
+            thread_id,
+            start_reason: ThreadStartReason::InitialThread,
+        });
+        self.current_thread = thread_id;
+        Idempotent::Executed(())
+    }
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {
@@ -114,112 +159,18 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::Initialized { id, agent_id, .. } => {
                     builder = builder.id(*id).agent_id(*agent_id);
                 }
-                AgentSessionEvent::UserBlocksAdded { .. } => {}
+                AgentSessionEvent::ThreadStarted { thread_id, .. } => {
+                    builder = builder.current_thread(*thread_id);
+                }
+                AgentSessionEvent::UserPromptAdded { .. } => {}
                 AgentSessionEvent::AssistantResponseReceived { .. } => {}
+                AgentSessionEvent::PromptSent { .. } => {}
             }
         }
 
         builder.events(events).build()
     }
 }
-
-// impl AgentSession {
-//     /// Push the initial thread. Idempotent — if a thread has already been
-//     /// started this is a no-op.
-//     pub fn init_initial_thread(&mut self) -> Idempotent<()> {
-//         idempotency_guard!(
-//             self.events.iter_all().rev(),
-//             already_applied: AgentSessionEvent::ThreadStarted { .. }
-//         );
-//         self.start_new_thread(ThreadStartReason::InitialThread);
-//         Idempotent::Executed(())
-//     }
-
-//     /// Push a new thread carrying the session's current model/system/tools/
-//     /// max_tokens, emit the `ThreadStarted` event, and switch
-//     /// `current_thread` to it. Used both for the initial thread and for
-//     /// time-delta-driven resets.
-//     fn start_new_thread(&mut self, start_reason: ThreadStartReason) {
-//         let thread_id = SessionThreadId::new();
-//         let new_thread = NewSessionThread::builder()
-//             .id(thread_id)
-//             .session_id(self.id)
-//             .start_reason(start_reason)
-//             .model(self.model.clone())
-//             .system(self.system.clone())
-//             .tools(self.tools.clone())
-//             .max_tokens(self.max_tokens)
-//             .build()
-//             .expect("NewSessionThread build");
-//         self.threads.add_new(new_thread);
-
-//         self.events.push(AgentSessionEvent::ThreadStarted {
-//             thread_id,
-//             start_reason,
-//         });
-//         self.current_thread = thread_id;
-//     }
-
-//     fn current_thread(&mut self) -> &mut SessionThread {
-//         self.threads
-//             .get_persisted_mut(&self.current_thread)
-//             .expect("current thread present in nested collection")
-//     }
-
-//     pub fn add_user_message(
-//         &mut self,
-//         now: DateTime<Utc>,
-//         source: UserMessageSource,
-//         prompt: String,
-//     ) -> Result<Idempotent<llm::Prompt>, AgentSessionError> {
-//         self.current_thread().add_user_message(source, prompt)
-//     }
-
-//     pub fn add_prompt_response(
-//         &mut self,
-//         response: llm::PromptResponse,
-//     ) -> Vec<llm::RequestToolUse> {
-//         self.current_thread().add_prompt_response(response)
-//     }
-
-//     pub fn add_tool_results(&mut self, results: Vec<llm::ToolUseResult>) -> llm::Prompt {
-//         self.current_thread().add_tool_results(results)
-//     }
-// }
-
-// impl TryFromEvents<AgentSessionEvent> for AgentSession {
-//     fn try_from_events(
-//         events: EntityEvents<AgentSessionEvent>,
-//     ) -> Result<Self, EntityHydrationError> {
-//         let mut builder = AgentSessionBuilder::default();
-
-//         for event in events.iter_all() {
-//             match event {
-//                 AgentSessionEvent::Initialized {
-//                     id,
-//                     agent_id,
-//                     model,
-//                     system,
-//                     tools,
-//                     max_tokens,
-//                 } => {
-//                     builder = builder
-//                         .id(*id)
-//                         .agent_id(*agent_id)
-//                         .model(model.clone())
-//                         .system(system.clone())
-//                         .tools(tools.clone())
-//                         .max_tokens(*max_tokens)
-//                 }
-//                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
-//                     builder = builder.current_thread(*thread_id);
-//                 }
-//             }
-//         }
-
-//         builder.events(events).build()
-//     }
-// }
 
 #[derive(Debug, Builder)]
 pub struct NewAgentSession {
@@ -253,5 +204,79 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
                 tool_defs: self.tool_defs,
             }],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::primitives::UserId;
+    use es_entity::{Idempotent, IntoEvents as _, TryFromEvents as _};
+
+    use super::*;
+
+    fn new_session() -> AgentSession {
+        let new = NewAgentSession::builder()
+            .agent_id(AgentId::new())
+            .model_settings(ModelSettings {
+                model: "test-model".into(),
+                max_tokens: 1024,
+            })
+            .thread_simplification_settings(ThreadSimplificationSettings {
+                simplify_after_idle_seconds: None,
+            })
+            .system_blocks(vec![])
+            .tool_defs(vec![])
+            .build()
+            .expect("NewAgentSession build");
+        AgentSession::try_from_events(new.into_events()).expect("hydrate")
+    }
+
+    /// Simulate a persist→reload cycle for nested threads.
+    /// Drains "new" threads, round-trips them through events, and loads
+    /// them into the "persisted" bucket so `get_persisted` can find them.
+    fn hydrate_threads(session: &mut AgentSession) {
+        let new_threads = session
+            .threads
+            .new_entities_mut()
+            .drain(..)
+            .map(|new| {
+                SessionThread::try_from_events(new.into_events()).expect("hydrate thread")
+            })
+            .collect::<Vec<_>>();
+        session.threads.load(new_threads);
+    }
+
+    fn user_source() -> UserMessageSource {
+        UserMessageSource::User {
+            user_id: UserId::new(),
+        }
+    }
+
+    #[test]
+    fn init_initial_thread_is_idempotent() {
+        let mut session = new_session();
+
+        let first = session.init_initial_thread();
+        assert!(matches!(first, Idempotent::Executed(())));
+
+        let second = session.init_initial_thread();
+        assert!(matches!(second, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn add_user_message_returns_prompt_pending_on_user_turn() {
+        let mut session = new_session();
+        let _ = session.init_initial_thread();
+        hydrate_threads(&mut session);
+
+        let result = session.add_user_message(
+            TargetThread::Main,
+            user_source(),
+            "Hello".into(),
+        );
+        assert!(
+            matches!(result, Ok(AgentSessionResponse::PromptPending)),
+            "expected PromptPending on fresh thread (user turn); got {result:?}"
+        );
     }
 }

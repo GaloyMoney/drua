@@ -68,3 +68,13 @@ pub enum AssistantBlock {
         signature: Option<String>,
     },
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    Stop,
+    Length,
+    ToolUse,
+    Error,
+}
+
