@@ -15,6 +15,6 @@ runs:
     - uses: cachix/cachix-action@v17
       if: inputs.cachix_auth_token != ''
       with:
-        name: galoy-agents
+        name: galoy-agents-github-action
         authToken: ${{ inputs.cachix_auth_token }}
         skipPush: false
