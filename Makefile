@@ -2,15 +2,20 @@ PG_CON ?= postgres://user:password@localhost:5432/galoy_agents
 GITHUB_CLIENT_SECRET ?= dev-secret
 ANTHROPIC_API_KEY ?= $(shell echo $$ANTHROPIC_API_KEY)
 
+# ── Container engine ─────────────────────────────────────────────────────────────
+# Set by the nix devShell shellHook. Override with: make start ENGINE_DEFAULT=docker
+ENGINE_DEFAULT ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
+COMPOSE_CMD = $(ENGINE_DEFAULT) compose
+
 clean-deps:
-	docker compose down -v
+	$(COMPOSE_CMD) down -v
 
 start-deps:
-	docker compose up -d
+	$(COMPOSE_CMD) up -d
 
 setup-db:
 	@echo "Waiting for PostgreSQL..."
-	@until docker compose exec postgres pg_isready -U user -d galoy_agents > /dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE_CMD) exec postgres pg_isready -U user -d galoy_agents > /dev/null 2>&1; do sleep 1; done
 	@echo "PostgreSQL ready"
 	DATABASE_URL=$(PG_CON) cargo sqlx migrate run --source core/migrations
 
