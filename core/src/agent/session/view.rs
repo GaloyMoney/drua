@@ -161,7 +161,7 @@ impl<'a> MaterializedSession<'a> {
         }
     }
 
-    pub fn into_prompt_definition(self) -> PromptDefinition {
+    pub fn initial_prompt_definition(self) -> PromptDefinition {
         let system_view = self.system_since_last_breakpoint();
         let tool_definitions_view = self.tools_since_last_breakpoint();
         let initial_user_messages = self.all_user_messages();
@@ -187,10 +187,10 @@ pub(super) enum MessageView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PromptDefinition {
-    model: String,
-    system_view: SystemView,
-    tool_definitions_view: ToolDefinitionsView,
-    messages: Vec<MessageView>,
+    pub(super) model: String,
+    pub(super) system_view: SystemView,
+    pub(super) tool_definitions_view: ToolDefinitionsView,
+    pub(super) messages: Vec<MessageView>,
 }
 
 impl PromptDefinition {
