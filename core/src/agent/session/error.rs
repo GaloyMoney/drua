@@ -18,4 +18,6 @@ pub enum AgentSessionError {
     ThreadNotFound,
     #[error("AgentSessionError - received assistant response but it is not the assistant's turn")]
     NotAssistantTurn,
+    #[error("AgentSessionError - received tool results but no tool use is pending")]
+    NotToolUseTurn,
 }
