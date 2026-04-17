@@ -137,8 +137,57 @@ impl AgentSession {
             });
             return prompt_definition.into_prompt(target, &self.events);
         }
-        // TODO: build prompt for existing thread
-        unimplemented!()
+        let thread_id = thread_id.unwrap();
+
+        // Collect UserMessageIndexes since last PromptSent for this thread (scan backwards)
+        let total_user_msgs = self
+            .events
+            .iter_all()
+            .filter(|e| matches!(e, AgentSessionEvent::UserInputAdded { .. }))
+            .count();
+        let mut user_msg_counter = total_user_msgs;
+        let mut pending_indexes = Vec::new();
+        for event in self.events.iter_all().rev() {
+            match event {
+                AgentSessionEvent::PromptSent { thread_id: tid, .. } if *tid == thread_id => {
+                    break;
+                }
+                AgentSessionEvent::UserInputAdded {
+                    target: msg_target, ..
+                } => {
+                    user_msg_counter -= 1;
+                    let targets_this = match msg_target {
+                        TargetThread::Main => self.current_main_thread == Some(thread_id),
+                        TargetThread::Id(id) => *id == thread_id,
+                    };
+                    if targets_this {
+                        pending_indexes.push(UserMessageIndex::new(user_msg_counter));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pending_indexes.reverse();
+
+        let user_messages_view = UserMessagesView {
+            indexes: pending_indexes,
+        };
+
+        let thread = self
+            .threads
+            .get_persisted_mut(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        thread.add_user_message(user_messages_view);
+        let prompt_definition = thread.prompt_definition();
+
+        let user_messages_view = prompt_definition.user_messages_view();
+        self.events.push(AgentSessionEvent::PromptSent {
+            thread_id,
+            prompt_definition: prompt_definition.clone(),
+            user_messages_view,
+        });
+
+        prompt_definition.into_prompt(target, &self.events)
     }
 
     pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) {
@@ -159,6 +208,14 @@ impl AgentSession {
         error_message: Option<String>,
         metadata: AssistantResponseMetadata,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let thread = self
+            .threads
+            .get_persisted(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        if thread.is_user_turn() {
+            return Err(AgentSessionError::NotAssistantTurn);
+        }
+
         self.events
             .push(AgentSessionEvent::AssistantResponseReceived {
                 thread_id,
@@ -176,15 +233,41 @@ impl AgentSession {
             .ok_or(AgentSessionError::ThreadNotFound)?;
         thread.add_assistant_message(view);
 
-        Ok(AgentSessionResponse::Done)
+        // Check if user input arrived after the last prompt was sent for this thread
+        let has_pending_input = self
+            .events
+            .iter_all()
+            .rev()
+            .take_while(|e| {
+                !matches!(e, AgentSessionEvent::PromptSent { thread_id: tid, .. } if *tid == thread_id)
+            })
+            .any(|e| match e {
+                AgentSessionEvent::UserInputAdded { target, .. } => match target {
+                    TargetThread::Main => self.current_main_thread == Some(thread_id),
+                    TargetThread::Id(id) => *id == thread_id,
+                },
+                _ => false,
+            });
+
+        if has_pending_input {
+            let target = if self.current_main_thread == Some(thread_id) {
+                TargetThread::Main
+            } else {
+                TargetThread::Id(thread_id)
+            };
+            Ok(AgentSessionResponse::PromptPending { target })
+        } else {
+            Ok(AgentSessionResponse::Done)
+        }
     }
 
     fn create_initial_thread(&mut self) -> PromptDefinition {
-        let prompt_definition = self.materialize().into_prompt_definition();
+        let prompt_definition = self.materialize().initial_prompt_definition();
         let thread_id = SessionThreadId::new();
         let new_thread = NewSessionThread::builder()
             .id(thread_id)
             .session_id(self.id)
+            .model(prompt_definition.model.clone())
             .system_view(prompt_definition.system_view().clone())
             .tool_definitions_view(prompt_definition.tool_definitions_view().clone())
             .initial_user_messages(prompt_definition.user_messages_view())
@@ -327,6 +410,21 @@ mod tests {
         session.threads.load(new_threads);
     }
 
+    fn dummy_metadata() -> AssistantResponseMetadata {
+        AssistantResponseMetadata {
+            api: "test".into(),
+            model: "test-model".into(),
+            usage: Usage {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 0,
+            },
+            cost: Cost::default(),
+        }
+    }
+
     fn user_source() -> UserMessageSource {
         UserMessageSource::User {
             user_id: UserId::new(),
@@ -383,22 +481,96 @@ mod tests {
                 }],
                 StopReason::Stop,
                 None,
-                AssistantResponseMetadata {
-                    api: "test".into(),
-                    model: "test-model".into(),
-                    usage: Usage {
-                        input: 10,
-                        output: 5,
-                        cache_read: 0,
-                        cache_write: 0,
-                        total_tokens: 15,
-                    },
-                    cost: Cost::default(),
-                },
+                dummy_metadata(),
             )
             .unwrap();
 
         assert!(matches!(result, AgentSessionResponse::Done));
+
+        // Second response on same thread should fail — it's now user's turn
+        let result = session.assistant_response_received(
+            thread_id,
+            vec![AssistantBlock::Text {
+                text: "Unexpected".into(),
+            }],
+            StopReason::Stop,
+            None,
+            dummy_metadata(),
+        );
+        assert!(matches!(result, Err(AgentSessionError::NotAssistantTurn)));
+    }
+
+    #[test]
+    fn assistant_response_returns_prompt_pending_when_user_input_queued() {
+        let mut session = new_session();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        // User sends follow-up while assistant is working
+        let result = session
+            .add_user_input(TargetThread::Main, user_source(), "Also check X".into())
+            .unwrap();
+        assert!(matches!(
+            result,
+            AgentSessionResponse::AwaitingAssistantResponse
+        ));
+
+        // Assistant responds — should signal PromptPending because of queued input
+        let result = session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "Hi there!".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            AgentSessionResponse::PromptPending {
+                target: TargetThread::Main
+            }
+        ));
+
+        // Now call next_prompt — should build prompt with the queued message
+        let prompt = session
+            .next_prompt(TargetThread::Main)
+            .expect("next_prompt for existing thread");
+
+        // Prompt should contain the full conversation: initial user, assistant, follow-up
+        assert_eq!(prompt.messages.len(), 3);
+        match &prompt.messages[0] {
+            Message::User { content } => {
+                assert_eq!(content.len(), 1);
+                assert!(matches!(&content[0], UserBlock::Text { text } if text == "Hello"));
+            }
+            _ => panic!("expected User message"),
+        }
+        match &prompt.messages[1] {
+            Message::Assistant { content } => {
+                assert_eq!(content.len(), 1);
+                assert!(
+                    matches!(&content[0], AssistantBlock::Text { text } if text == "Hi there!")
+                );
+            }
+            _ => panic!("expected Assistant message"),
+        }
+        match &prompt.messages[2] {
+            Message::User { content } => {
+                assert_eq!(content.len(), 1);
+                assert!(matches!(&content[0], UserBlock::Text { text } if text == "Also check X"));
+            }
+            _ => panic!("expected User message"),
+        }
     }
 
     #[test]

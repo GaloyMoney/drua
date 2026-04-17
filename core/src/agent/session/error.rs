@@ -16,4 +16,6 @@ pub enum AgentSessionError {
     ConsecutiveUserMessages,
     #[error("AgentSessionError - thread not found")]
     ThreadNotFound,
+    #[error("AgentSessionError - received assistant response but it is not the assistant's turn")]
+    NotAssistantTurn,
 }
