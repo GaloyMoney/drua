@@ -120,12 +120,17 @@ fn mcp_creds_to_view(creds: &McpCreds) -> McpCredsView {
 }
 
 #[instrument(name = "web.index", skip_all)]
-async fn index(session: Session, Query(params): Query<IndexParams>) -> Response {
+async fn index(
+    State(state): State<AppState>,
+    session: Session,
+    Query(params): Query<IndexParams>,
+) -> Response {
     if extract_user_id(&session).await.is_some() {
         return Redirect::to("/dashboard").into_response();
     }
     LoginTemplate {
         error: params.error,
+        dev_auth: state.login == crate::auth::config::LoginMethod::Dev,
     }
     .into_response()
 }

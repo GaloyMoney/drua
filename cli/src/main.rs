@@ -17,7 +17,7 @@ struct Cli {
     pg_con: String,
 
     /// GitHub OAuth client secret
-    #[arg(long, env = "GITHUB_CLIENT_SECRET")]
+    #[arg(long, env = "GITHUB_CLIENT_SECRET", default_value = "")]
     github_client_secret: String,
 
     /// Comma-separated list of allowed GitHub teams (org/team-slug format).
@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
     let mut app_state = galoy_agents_web::AppState::new(
         app,
         oauth_client,
+        auth_config.login,
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
     );

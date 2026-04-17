@@ -18,7 +18,14 @@
         {{ msg }}
       </div>
       {% endif %}
-      <a href="/auth/github" role="button" style="display: block; text-align: center;">
+      {% if dev_auth %}
+      <form method="post" action="/auth/dev">
+        <button type="submit" style="display: block; width: 100%; text-align: center;">
+          Login as Dev User
+        </button>
+      </form>
+      {% endif %}
+      <a href="/auth/github" role="button" {% if dev_auth %}class="secondary"{% endif %} style="display: block; text-align: center;">
         Sign in with GitHub
       </a>
     </article>

@@ -15,6 +15,7 @@ pub struct McpCredsView {
 #[template(path = "login.html")]
 pub struct LoginTemplate {
     pub error: Option<String>,
+    pub dev_auth: bool,
 }
 
 #[derive(Template, WebTemplate)]
