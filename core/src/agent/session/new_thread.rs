@@ -26,6 +26,9 @@ pub enum SessionThreadEvent {
         tool_definitions_view: ToolDefinitionsView,
         initial_user_messages: UserMessagesView,
     },
+    AssistantTurn {
+        assistant_message_view: AssistantMessageView,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -42,6 +45,13 @@ impl SessionThread {
     pub fn is_user_turn(&self) -> bool {
         self.turn == NextTurn::User
     }
+
+    pub fn add_assistant_message(&mut self, assistant_message_view: AssistantMessageView) {
+        self.events.push(SessionThreadEvent::AssistantTurn {
+            assistant_message_view,
+        });
+        self.turn = NextTurn::User;
+    }
 }
 
 impl TryFromEvents<SessionThreadEvent> for SessionThread {
@@ -54,6 +64,9 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
             match event {
                 SessionThreadEvent::Initialized { id, session_id, .. } => {
                     builder = builder.id(*id).session_id(*session_id);
+                }
+                SessionThreadEvent::AssistantTurn { .. } => {
+                    builder = builder.turn(NextTurn::User);
                 }
             }
         }

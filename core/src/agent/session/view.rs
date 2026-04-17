@@ -2,11 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::EntityEvents;
 
-use super::{
-    error::AgentSessionError,
-    message::*,
-    new_entity::AgentSessionEvent,
-};
+use super::{error::AgentSessionError, message::*, new_entity::AgentSessionEvent};
 
 // ============================================================================
 // Index types
@@ -39,6 +35,15 @@ impl UserMessageIndex {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantMessageIndex(pub(super) usize);
+
+impl AssistantMessageIndex {
+    pub(super) fn new(idx: usize) -> Self {
+        Self(idx)
+    }
+}
+
 // ============================================================================
 // View types (persisted on threads)
 // ============================================================================
@@ -58,6 +63,11 @@ pub struct UserMessagesView {
     pub(super) indexes: Vec<UserMessageIndex>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantMessageView {
+    pub(super) indexes: Vec<AssistantMessageIndex>,
+}
+
 // ============================================================================
 // MaterializedSession
 // ============================================================================
@@ -71,6 +81,8 @@ pub(super) struct MaterializedSession<'a> {
     tool_breakpoints: Vec<ToolDefinitionIndex>,
     user_message_count: usize,
     user_message_indexes: Vec<UserMessageIndex>,
+    assistant_block_count: usize,
+    assistant_breakpoints: Vec<AssistantMessageIndex>,
 }
 
 impl<'a> MaterializedSession<'a> {
@@ -83,6 +95,8 @@ impl<'a> MaterializedSession<'a> {
             tool_breakpoints: Vec::new(),
             user_message_count: 0,
             user_message_indexes: Vec::new(),
+            assistant_block_count: 0,
+            assistant_breakpoints: Vec::new(),
         }
     }
 
@@ -102,6 +116,25 @@ impl<'a> MaterializedSession<'a> {
         let idx = UserMessageIndex(self.user_message_count);
         self.user_message_count += 1;
         self.user_message_indexes.push(idx);
+    }
+
+    pub fn push_assistant_blocks(&mut self, block_count: usize) {
+        self.assistant_breakpoints
+            .push(AssistantMessageIndex(self.assistant_block_count));
+        self.assistant_block_count += block_count;
+    }
+
+    pub fn assistant_blocks_since_last_breakpoint(&self) -> AssistantMessageView {
+        let start = self
+            .assistant_breakpoints
+            .last()
+            .map(|idx| idx.0)
+            .unwrap_or(0);
+        AssistantMessageView {
+            indexes: (start..self.assistant_block_count)
+                .map(AssistantMessageIndex)
+                .collect(),
+        }
     }
 
     fn system_since_last_breakpoint(&self) -> SystemView {
@@ -149,6 +182,7 @@ impl<'a> MaterializedSession<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum MessageView {
     User(UserMessagesView),
+    Assistant(AssistantMessageView),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +207,7 @@ impl PromptDefinition {
         for msg in &self.messages {
             match msg {
                 MessageView::User(view) => indexes.extend_from_slice(&view.indexes),
+                MessageView::Assistant(_) => {}
             }
         }
         UserMessagesView { indexes }
@@ -180,11 +215,13 @@ impl PromptDefinition {
 
     pub fn into_prompt(
         self,
+        target_thread: TargetThread,
         events: &EntityEvents<AgentSessionEvent>,
     ) -> Result<Prompt, AgentSessionError> {
         let mut all_system_blocks = Vec::new();
         let mut all_tool_defs = Vec::new();
         let mut all_user_texts = Vec::new();
+        let mut all_assistant_blocks: Vec<AssistantBlock> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -202,8 +239,11 @@ impl PromptDefinition {
                 AgentSessionEvent::ToolDefsUpdated { tool_defs } => {
                     all_tool_defs.extend(tool_defs.iter().cloned());
                 }
-                AgentSessionEvent::UserPromptAdded { text, .. } => {
+                AgentSessionEvent::UserInputAdded { text, .. } => {
                     all_user_texts.push(text.clone());
+                }
+                AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                    all_assistant_blocks.extend(content.iter().cloned());
                 }
                 _ => {}
             }
@@ -236,10 +276,19 @@ impl PromptDefinition {
                         .collect();
                     messages.push(Message::User { content });
                 }
+                MessageView::Assistant(assistant_view) => {
+                    let content = assistant_view
+                        .indexes
+                        .iter()
+                        .map(|idx| all_assistant_blocks[idx.0].clone())
+                        .collect();
+                    messages.push(Message::Assistant { content });
+                }
             }
         }
 
         Ok(Prompt {
+            target_thread,
             model: self.model,
             system,
             tools,
