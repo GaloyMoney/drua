@@ -4,6 +4,7 @@ mod message;
 mod metadata;
 mod new_entity;
 mod new_thread;
+mod view;
 pub mod repo;
 mod settings;
 mod thread;

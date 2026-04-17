@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use super::view::*;
 use super::AgentSessionId;
 
 es_entity::entity_id! { SessionThreadId }
@@ -11,7 +12,7 @@ es_entity::entity_id! { SessionThreadId }
 #[serde(rename_all = "snake_case")]
 pub enum NextTurn {
     User,
-    Agent,
+    Assistant,
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,9 @@ pub enum SessionThreadEvent {
     Initialized {
         id: SessionThreadId,
         session_id: AgentSessionId,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        initial_user_messages: UserMessagesView,
     },
 }
 
@@ -29,7 +33,7 @@ pub enum SessionThreadEvent {
 pub struct SessionThread {
     pub id: SessionThreadId,
     pub session_id: AgentSessionId,
-    #[builder(default = "NextTurn::User")]
+    #[builder(default = "NextTurn::Assistant")]
     turn: NextTurn,
     events: EntityEvents<SessionThreadEvent>,
 }
@@ -48,9 +52,7 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
 
         for event in events.iter_all() {
             match event {
-                SessionThreadEvent::Initialized {
-                    id, session_id, ..
-                } => {
+                SessionThreadEvent::Initialized { id, session_id, .. } => {
                     builder = builder.id(*id).session_id(*session_id);
                 }
             }
@@ -65,6 +67,9 @@ pub struct NewSessionThread {
     #[builder(setter(into))]
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
+    pub(super) system_view: SystemView,
+    pub(super) tool_definitions_view: ToolDefinitionsView,
+    pub(super) initial_user_messages: UserMessagesView,
 }
 
 impl NewSessionThread {
@@ -82,6 +87,9 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             [SessionThreadEvent::Initialized {
                 id: self.id,
                 session_id: self.session_id,
+                system_view: self.system_view,
+                tool_definitions_view: self.tool_definitions_view,
+                initial_user_messages: self.initial_user_messages,
             }],
         )
     }
