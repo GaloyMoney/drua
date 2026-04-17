@@ -6,9 +6,9 @@
 //! returning a single `PromptResponse`.
 
 mod convert;
-mod sse;
+pub mod sse;
 mod stream;
-mod types;
+pub mod types;
 
 use thiserror::Error;
 use tracing::instrument;
@@ -126,5 +126,53 @@ impl AnthropicClient {
         }
 
         Ok(accumulated_to_response(accumulator.finish()))
+    }
+
+    /// Issue a streaming Messages API request, yielding raw SSE events via
+    /// channel. Caller is responsible for parsing/accumulating. Ping events
+    /// are filtered out.
+    #[instrument(name = "anthropic_client.send_prompt_streaming", skip_all)]
+    pub async fn send_prompt_streaming(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<sse::SseEvent, AnthropicError>>, AnthropicError>
+    {
+        let request_body = prompt_to_request(prompt);
+
+        let resp = self
+            .http
+            .post(API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .header("accept", "text/event-stream")
+            .header("content-type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let message = resp.text().await.unwrap_or_default();
+            return Err(AnthropicError::Api {
+                status: status.as_u16(),
+                message,
+            });
+        }
+
+        let byte_stream = resp.bytes_stream();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<sse::SseEvent, AnthropicError>>(128);
+        tokio::spawn(async move {
+            let tx_ref = &tx;
+            let _ = parse_sse_stream(byte_stream, |event: sse::SseEvent| {
+                if event.event == "ping" {
+                    return Ok(());
+                }
+                tx_ref
+                    .try_send(Ok(event))
+                    .map_err(|e| SseError::Processing(e.to_string()))
+            })
+            .await;
+        });
+        Ok(rx)
     }
 }

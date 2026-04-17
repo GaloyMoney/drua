@@ -176,7 +176,7 @@ impl ExecutorState {
                 match model.client {
                     ProviderClient::Anthropic(client) => {
                         tokio::spawn(async move {
-                            evaluate_with_anthropic(
+                            evaluate_with_anthropic_streaming(
                                 client,
                                 request.prompt,
                                 request.response_channel,
@@ -190,16 +190,135 @@ impl ExecutorState {
     }
 }
 
-async fn evaluate_with_anthropic(
+#[instrument(name = "domain.prompt_executor.evaluate_streaming", skip_all)]
+async fn evaluate_with_anthropic_streaming(
     client: AnthropicClient,
     prompt: Prompt,
     response: PromptResponseChannel,
 ) {
-    let outcome = client
-        .send_prompt(&prompt)
-        .await
-        .map_err(|e| PromptError::Provider(e.to_string()));
-    let _ = response.send(outcome);
+    let (delta_tx, delta_rx) = mpsc::channel(128);
+
+    // Send StreamHandle immediately so agent loop can start consuming.
+    if response
+        .send(Ok(llm::PromptResult::Stream(llm::StreamHandle {
+            rx: delta_rx,
+        })))
+        .is_err()
+    {
+        return; // caller dropped
+    }
+
+    // Start streaming from Anthropic.
+    match client.send_prompt_streaming(&prompt).await {
+        Ok(mut sse_rx) => {
+            while let Some(sse_result) = sse_rx.recv().await {
+                match sse_result {
+                    Ok(sse_event) => match map_sse_to_delta(&sse_event.data) {
+                        Ok(Some(delta)) => {
+                            if delta_tx.send(Ok(delta)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => {} // ping or unknown event
+                        Err(e) => {
+                            let _ = delta_tx.send(Err(PromptError::Provider(e))).await;
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        let _ = delta_tx
+                            .send(Err(PromptError::Provider(e.to_string())))
+                            .await;
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let _ = delta_tx
+                .send(Err(PromptError::Provider(e.to_string())))
+                .await;
+        }
+    }
+}
+
+fn map_sse_to_delta(data: &str) -> Result<Option<llm::stream::StreamDelta>, String> {
+    use anthropic_client::types::*;
+    use llm::stream::{ContentBlockType, StreamDelta};
+
+    let event: AnthropicStreamEvent =
+        serde_json::from_str(data).map_err(|e| format!("JSON parse: {e}"))?;
+    Ok(match event {
+        AnthropicStreamEvent::MessageStart { message } => {
+            let input_tokens = message.usage.map(|u| u.input as u32).unwrap_or(0);
+            Some(StreamDelta::MessageStart { input_tokens })
+        }
+        AnthropicStreamEvent::ContentBlockStart {
+            index,
+            content_block,
+        } => {
+            let block_type = match content_block {
+                AnthropicContentBlock::Text => ContentBlockType::Text,
+                AnthropicContentBlock::ToolUse { id, name } => ContentBlockType::ToolUse {
+                    id: id.unwrap_or_default(),
+                    name: name.unwrap_or_default(),
+                },
+                AnthropicContentBlock::Thinking => ContentBlockType::Thinking,
+            };
+            Some(StreamDelta::ContentBlockStart {
+                index: index as usize,
+                block_type,
+            })
+        }
+        AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+            let idx = index as usize;
+            match delta {
+                AnthropicDelta::TextDelta { text } => text.map(|t| StreamDelta::TextDelta {
+                    index: idx,
+                    text: t,
+                }),
+                AnthropicDelta::ThinkingDelta { thinking } => {
+                    thinking.map(|t| StreamDelta::ThinkingDelta {
+                        index: idx,
+                        text: t,
+                    })
+                }
+                AnthropicDelta::InputJsonDelta { partial_json } => {
+                    partial_json.map(|j| StreamDelta::InputJsonDelta {
+                        index: idx,
+                        partial_json: j,
+                    })
+                }
+                AnthropicDelta::SignatureDelta { signature } => {
+                    signature.map(|s| StreamDelta::SignatureDelta {
+                        index: idx,
+                        signature: s,
+                    })
+                }
+            }
+        }
+        AnthropicStreamEvent::ContentBlockStop { index } => Some(StreamDelta::ContentBlockStop {
+            index: index as usize,
+        }),
+        AnthropicStreamEvent::MessageDelta { delta, usage } => {
+            let stop_reason = delta.stop_reason.map(|sr| match sr {
+                AnthropicStopReason::EndTurn => llm::StopReason::EndTurn,
+                AnthropicStopReason::MaxTokens => llm::StopReason::MaxTokens,
+                AnthropicStopReason::ToolUse => llm::StopReason::ToolUse,
+                AnthropicStopReason::StopSequence => llm::StopReason::StopSequence,
+            });
+            let output_tokens = usage.map(|u| u.output_tokens as u32).unwrap_or(0);
+            Some(StreamDelta::MessageDelta {
+                stop_reason,
+                output_tokens,
+            })
+        }
+        AnthropicStreamEvent::MessageStop => Some(StreamDelta::MessageStop),
+        AnthropicStreamEvent::Error { error } => Some(StreamDelta::Error {
+            message: error.message,
+        }),
+        AnthropicStreamEvent::Ping => None,
+    })
 }
 
 #[derive(Clone)]

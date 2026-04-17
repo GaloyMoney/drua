@@ -40,23 +40,37 @@ async fn anthropic_round_trip_via_executor() {
     let (request, response_rx) = PromptRequest::new(prompt);
     prompt_tx.send(request).await.expect("dispatch request");
 
-    let result = response_rx
+    let prompt_result = response_rx
         .await
         .expect("response channel closed without sending")
         .expect("anthropic returned an error");
 
+    // Streaming path: consume deltas into a complete response.
+    let response = match prompt_result {
+        llm::PromptResult::Stream(handle) => {
+            let mut acc = llm::stream::StreamAccumulator::new();
+            let mut rx = handle.rx;
+            while let Some(event) = rx.recv().await {
+                let delta = event.expect("stream delta error");
+                acc.process(&delta);
+            }
+            acc.finish()
+        }
+        llm::PromptResult::Complete(r) => r,
+    };
+
     assert!(
-        !result.content.is_empty(),
+        !response.content.is_empty(),
         "expected at least one content block in the response"
     );
     assert!(
-        result.usage.input_tokens > 0,
+        response.usage.input_tokens > 0,
         "expected non-zero input_tokens, got {:?}",
-        result.usage
+        response.usage
     );
     assert!(
-        result.usage.output_tokens > 0,
+        response.usage.output_tokens > 0,
         "expected non-zero output_tokens, got {:?}",
-        result.usage
+        response.usage
     );
 }

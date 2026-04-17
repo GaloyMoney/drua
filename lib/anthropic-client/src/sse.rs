@@ -7,8 +7,8 @@
 use futures::StreamExt;
 
 /// A parsed SSE event with its type and data payload.
-#[derive(Debug)]
-pub(crate) struct SseEvent {
+#[derive(Debug, Clone)]
+pub struct SseEvent {
     /// Event type (from "event:" field, defaults to "message").
     pub event: String,
     /// Event data (from "data:" field(s), joined with newlines).
@@ -21,7 +21,7 @@ pub(crate) struct SseEvent {
 /// complete event. This is a pull-based approach that processes the entire
 /// stream — appropriate because `send_prompt` needs the final accumulated
 /// result anyway.
-pub(crate) async fn parse_sse_stream<S, B, F>(mut stream: S, mut handler: F) -> Result<(), SseError>
+pub async fn parse_sse_stream<S, B, F>(mut stream: S, mut handler: F) -> Result<(), SseError>
 where
     S: futures::Stream<Item = Result<B, reqwest::Error>> + Unpin,
     B: AsRef<[u8]>,
@@ -124,7 +124,7 @@ fn parse_single_event(text: &str) -> Option<SseEvent> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SseError {
+pub enum SseError {
     #[error("HTTP stream error: {0}")]
     Http(reqwest::Error),
     #[error("Event processing error: {0}")]

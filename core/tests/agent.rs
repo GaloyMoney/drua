@@ -6,7 +6,7 @@ use galoy_agents_core::primitives::{AuthSubject, ChatOutputEvent, UserId, Worksp
 use galoy_agents_core::sandbox::{SandboxConfig, Sandboxes};
 use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
-use llm::{PromptRequest, PromptResponse, Usage};
+use llm::{PromptRequest, PromptResponse, PromptResult, Usage};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use tokio::sync::mpsc;
 
@@ -83,7 +83,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     let request = prompt_rx.recv().await.expect("prompt request dispatched");
     request
         .response_channel
-        .send(Ok(PromptResponse {
+        .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::Text {
                 text: "Hi user".to_string(),
                 cache_control: None,
@@ -93,7 +93,7 @@ async fn send_message_round_trip_via_prompt_channel() {
                 output_tokens: 3,
             },
             stop_reason: None,
-        }))
+        })))
         .expect("send response");
 
     // Drain the ChatOutputEvent channel until the forwarder closes it.
@@ -239,7 +239,7 @@ async fn send_message_dispatches_registered_tool_call() {
     );
     request
         .response_channel
-        .send(Ok(PromptResponse {
+        .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::ToolUse {
                 id: "tu_1".to_string(),
                 name: "ping".to_string(),
@@ -251,7 +251,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 output_tokens: 4,
             },
             stop_reason: None,
-        }))
+        })))
         .expect("send first response");
 
     // Second turn: the agent should now dispatch a follow-up request that
@@ -262,7 +262,7 @@ async fn send_message_dispatches_registered_tool_call() {
         .expect("second prompt request after tool result");
     request
         .response_channel
-        .send(Ok(PromptResponse {
+        .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::Text {
                 text: "all done".to_string(),
                 cache_control: None,
@@ -272,7 +272,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 output_tokens: 2,
             },
             stop_reason: None,
-        }))
+        })))
         .expect("send second response");
 
     let mut events = Vec::new();

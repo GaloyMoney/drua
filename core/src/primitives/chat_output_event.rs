@@ -20,6 +20,22 @@ pub enum ChatOutputEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<serde_json::Value>,
     },
+    /// Incremental text token from a streaming assistant response.
+    TextDelta {
+        text: String,
+    },
+    /// Incremental thinking token from a streaming assistant response.
+    ThinkingDelta {
+        text: String,
+    },
+    /// Signals the start of a tool call in a streaming response.
+    ToolCallStart {
+        name: String,
+    },
+    /// Incremental tool-call input JSON fragment.
+    ToolCallInputDelta {
+        partial_json: String,
+    },
     ToolResult {
         name: String,
         is_error: bool,
