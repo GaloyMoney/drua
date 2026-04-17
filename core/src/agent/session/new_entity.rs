@@ -32,20 +32,20 @@ pub enum AgentSessionEvent {
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     },
-    ThreadStarted {
-        thread_id: SessionThreadId,
-        start_reason: ThreadStartReason,
-    },
     ToolDefsUpdated {
         tool_defs: Vec<ToolDefinition>,
     },
     SystemBlocksUpdated {
         system_blocks: Vec<SystemBlock>,
     },
-    UserPromptAdded {
+    UserInputAdded {
         target: TargetThread,
         source: UserMessageSource,
         text: String,
+    },
+    ThreadStarted {
+        thread_id: SessionThreadId,
+        start_reason: ThreadStartReason,
     },
     PromptSent {
         thread_id: SessionThreadId,
@@ -77,13 +77,6 @@ pub struct AgentSession {
     pub(super) threads: Nested<SessionThread>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TargetThread {
-    Main,
-    Id(SessionThreadId),
-}
-
 #[derive(Debug, Clone)]
 pub struct ToolUseRequest {
     pub id: String,
@@ -95,16 +88,17 @@ pub struct ToolUseRequest {
 pub enum AgentSessionResponse {
     PromptPending { target: TargetThread },
     AwaitingAssistantResponse,
+    Done,
 }
 
 impl AgentSession {
-    pub fn add_user_message(
+    pub fn add_user_input(
         &mut self,
         target: TargetThread,
         source: UserMessageSource,
         prompt: String,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
-        self.events.push(AgentSessionEvent::UserPromptAdded {
+        self.events.push(AgentSessionEvent::UserInputAdded {
             target,
             source,
             text: prompt,
@@ -141,7 +135,7 @@ impl AgentSession {
                 prompt_definition: prompt_definition.clone(),
                 user_messages_view,
             });
-            return prompt_definition.into_prompt(&self.events);
+            return prompt_definition.into_prompt(target, &self.events);
         }
         // TODO: build prompt for existing thread
         unimplemented!()
@@ -155,6 +149,34 @@ impl AgentSession {
     pub fn update_system_blocks(&mut self, system_blocks: Vec<SystemBlock>) {
         self.events
             .push(AgentSessionEvent::SystemBlocksUpdated { system_blocks });
+    }
+
+    pub fn assistant_response_received(
+        &mut self,
+        thread_id: SessionThreadId,
+        content: Vec<AssistantBlock>,
+        stop_reason: StopReason,
+        error_message: Option<String>,
+        metadata: AssistantResponseMetadata,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        self.events
+            .push(AgentSessionEvent::AssistantResponseReceived {
+                thread_id,
+                content,
+                stop_reason,
+                error_message,
+                metadata,
+            });
+
+        let view = self.materialize().assistant_blocks_since_last_breakpoint();
+
+        let thread = self
+            .threads
+            .get_persisted_mut(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        thread.add_assistant_message(view);
+
+        Ok(AgentSessionResponse::Done)
     }
 
     fn create_initial_thread(&mut self) -> PromptDefinition {
@@ -197,8 +219,11 @@ impl AgentSession {
                 AgentSessionEvent::SystemBlocksUpdated { system_blocks } => {
                     materialized.push_system_blocks(system_blocks.iter());
                 }
-                AgentSessionEvent::UserPromptAdded { .. } => {
+                AgentSessionEvent::UserInputAdded { .. } => {
                     materialized.push_user_message();
+                }
+                AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                    materialized.push_assistant_blocks(content.len());
                 }
                 _ => {}
             }
@@ -221,7 +246,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_main_thread(Some(*thread_id));
                 }
-                AgentSessionEvent::UserPromptAdded { .. } => {}
+                AgentSessionEvent::UserInputAdded { .. } => {}
                 AgentSessionEvent::AssistantResponseReceived { .. } => {}
                 AgentSessionEvent::ToolDefsUpdated { .. } => {}
                 AgentSessionEvent::SystemBlocksUpdated { .. } => {}
@@ -313,7 +338,7 @@ mod tests {
         let mut session = new_session();
         assert!(session.current_main_thread.is_none());
 
-        let result = session.add_user_message(TargetThread::Main, user_source(), "Hello".into());
+        let result = session.add_user_input(TargetThread::Main, user_source(), "Hello".into());
         assert!(matches!(
             result,
             Ok(AgentSessionResponse::PromptPending {
@@ -328,12 +353,52 @@ mod tests {
 
         let messages = ["Hello", "How are you?", "Tell me about Rust"];
         for msg in messages {
-            let result = session.add_user_message(TargetThread::Main, user_source(), msg.into());
+            let result = session.add_user_input(TargetThread::Main, user_source(), msg.into());
             assert!(
                 matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
                 "expected PromptPending for '{msg}'; got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn assistant_text_response_flips_thread_to_user_turn() {
+        let mut session = new_session();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session
+            .next_prompt(TargetThread::Main)
+            .expect("next_prompt should succeed");
+
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        let result = session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "Hi there!".into(),
+                }],
+                StopReason::Stop,
+                None,
+                AssistantResponseMetadata {
+                    api: "test".into(),
+                    model: "test-model".into(),
+                    usage: Usage {
+                        input: 10,
+                        output: 5,
+                        cache_read: 0,
+                        cache_write: 0,
+                        total_tokens: 15,
+                    },
+                    cost: Cost::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(result, AgentSessionResponse::Done));
     }
 
     #[test]
@@ -350,10 +415,10 @@ mod tests {
         }]);
 
         session
-            .add_user_message(TargetThread::Main, user_source(), "Hello".into())
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
             .unwrap();
         session
-            .add_user_message(
+            .add_user_input(
                 TargetThread::Main,
                 user_source(),
                 "What's the weather?".into(),
@@ -391,7 +456,7 @@ mod tests {
         hydrate_threads(&mut session);
 
         let result =
-            session.add_user_message(TargetThread::Main, user_source(), "Another message".into());
+            session.add_user_input(TargetThread::Main, user_source(), "Another message".into());
         assert!(matches!(
             result,
             Ok(AgentSessionResponse::AwaitingAssistantResponse)

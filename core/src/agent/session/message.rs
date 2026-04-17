@@ -1,7 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+use super::new_thread::SessionThreadId;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TargetThread {
+    Main,
+    Id(SessionThreadId),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
+    pub target_thread: TargetThread,
     pub model: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system: Vec<SystemBlock>,
@@ -77,4 +87,3 @@ pub enum StopReason {
     ToolUse,
     Error,
 }
-
