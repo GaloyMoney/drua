@@ -305,6 +305,8 @@
             pkgs.postgresql
             pkgs.pkg-config
             pkgs.docker-compose
+            pkgs.podman
+            pkgs.podman-compose
             pkgs.opentofu
             pkgs.ytt
             pkgs.kubernetes-helm
@@ -317,7 +319,17 @@
           ];
 
           shellHook = ''
-            echo "galoy-agents dev shell loaded"
+            # Container engine auto-detection
+            unset DOCKER_HOST
+            if [[ -n "''${ENGINE_DEFAULT:-}" ]]; then
+              :
+            elif command -v podman &>/dev/null && ! command -v docker &>/dev/null; then
+              export ENGINE_DEFAULT=podman
+            else
+              export ENGINE_DEFAULT=docker
+            fi
+
+            echo "galoy-agents dev shell loaded (engine: $ENGINE_DEFAULT)"
           '';
         };
       }
