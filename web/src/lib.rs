@@ -9,7 +9,7 @@ use galoy_agents_core as domain;
 
 use domain::App;
 
-use auth::config::OAuthClient;
+use auth::config::{LoginMethod, OAuthClient};
 use auth::sa_token::SaTokenValidator;
 use domain::code_assistant::CodeAssistant;
 
@@ -18,6 +18,7 @@ use domain::code_assistant::CodeAssistant;
 pub struct AppState {
     pub app: App,
     pub oauth_client: OAuthClient,
+    pub login: LoginMethod,
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
     pub code_assistant: Option<CodeAssistant>,
@@ -29,6 +30,7 @@ impl AppState {
     pub fn new(
         app: App,
         oauth_client: OAuthClient,
+        login: LoginMethod,
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
     ) -> Self {
@@ -36,6 +38,7 @@ impl AppState {
         Self {
             app,
             oauth_client,
+            login,
             mcp_endpoint,
             github_allowed_teams,
             code_assistant,

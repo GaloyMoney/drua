@@ -6,7 +6,7 @@ use galoy_agents_core::agent::AgentsConfig;
 use galoy_agents_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
 use galoy_agents_core::sandbox::SandboxConfig;
 use galoy_agents_core::toolset::ToolSetsConfig;
-use galoy_agents_web::auth::config::AuthConfig;
+use galoy_agents_web::auth::config::{AuthConfig, LoginMethod};
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,6 +116,8 @@ impl Default for ServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
     #[serde(default)]
+    pub login: LoginMethod,
+    #[serde(default)]
     pub github_redirect_uri: String,
     #[serde(default)]
     pub github_client_id: String,
@@ -190,6 +192,7 @@ impl Config {
 
     pub fn auth_config(&self) -> AuthConfig {
         AuthConfig {
+            login: self.oauth.login.clone(),
             github_client_id: self.oauth.github_client_id.clone(),
             github_client_secret: self.oauth.github_client_secret.clone(),
             github_redirect_uri: self.oauth.github_redirect_uri.clone(),

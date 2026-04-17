@@ -4,7 +4,13 @@ mod oauth;
 pub mod sa_token;
 pub mod session_store;
 
-use axum::{extract::Request, middleware::Next, response::Response, routing::get, Router};
+use axum::{
+    extract::{Request, State},
+    middleware::Next,
+    response::Response,
+    routing::{get, post},
+    Router,
+};
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -19,11 +25,12 @@ use domain::primitives::UserId;
 
 use crate::AppState;
 
-/// Build the router for GitHub OAuth endpoints.
+/// Build the router for GitHub OAuth and dev-login endpoints.
 pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route("/auth/github", get(oauth::github_redirect))
         .route("/auth/github/callback", get(oauth::github_callback))
+        .route("/auth/dev", post(dev_login))
         .route("/auth/logout", get(logout))
 }
 
@@ -128,6 +135,35 @@ async fn resolve_auth_context(
     }
 
     AuthSubject::Anonymous
+}
+
+#[instrument(name = "web.auth.dev_login", skip_all)]
+async fn dev_login(
+    State(state): State<AppState>,
+    session: Session,
+) -> Result<axum::response::Redirect, AuthError> {
+    if state.login != crate::auth::config::LoginMethod::Dev {
+        return Err(AuthError::OAuth("Dev login is not enabled".into()));
+    }
+
+    let dev_github_id = "dev-local";
+    let user = match state.app.users().find_by_github_id(dev_github_id).await? {
+        Some(user) => user,
+        None => {
+            state
+                .app
+                .users()
+                .create_from_github_login(
+                    dev_github_id.to_string(),
+                    Some("dev@localhost".to_string()),
+                    Some("Dev User".to_string()),
+                )
+                .await?
+        }
+    };
+
+    session.insert("user_id", user.id).await?;
+    Ok(axum::response::Redirect::to("/"))
 }
 
 #[instrument(name = "web.auth.logout", skip_all)]

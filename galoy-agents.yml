@@ -4,6 +4,7 @@ server:
   secure_cookies: false
   mcp_endpoint: "http://localhost:4200/mcp"
 oauth:
+  login: github
   github_client_id: "Ov23li9ZTNnKjiTRwDcb"
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []

@@ -3,6 +3,7 @@ use oauth2::{
     RevocationErrorResponseType, StandardErrorResponse, StandardRevocableToken,
     StandardTokenIntrospectionResponse, StandardTokenResponse, TokenUrl,
 };
+use serde::Deserialize;
 
 const GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -24,8 +25,17 @@ pub type OAuthClient = oauth2::Client<
     EndpointSet,
 >;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoginMethod {
+    Dev,
+    #[default]
+    GitHub,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
+    pub login: LoginMethod,
     pub github_client_id: String,
     pub github_client_secret: String,
     pub github_redirect_uri: String,
