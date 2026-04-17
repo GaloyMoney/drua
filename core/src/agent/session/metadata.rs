@@ -25,3 +25,20 @@ pub struct Cost {
     pub cache_write: f64,
     pub total: f64,
 }
+
+impl From<llm::response::Usage> for AssistantResponseMetadata {
+    fn from(usage: llm::response::Usage) -> Self {
+        Self {
+            api: String::new(),
+            model: String::new(),
+            usage: Usage {
+                input: usage.input_tokens as u64,
+                output: usage.output_tokens as u64,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: (usage.input_tokens + usage.output_tokens) as u64,
+            },
+            cost: Cost::default(),
+        }
+    }
+}

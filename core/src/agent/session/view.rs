@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::EntityEvents;
 
-use super::{error::AgentSessionError, message::*, new_entity::AgentSessionEvent};
+use super::{entity::AgentSessionEvent, error::AgentSessionError, message::*};
 
 // ============================================================================
 // Index types
@@ -11,20 +11,8 @@ use super::{error::AgentSessionError, message::*, new_entity::AgentSessionEvent}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemBlockIndex(usize);
 
-impl SystemBlockIndex {
-    pub(super) fn new(idx: usize) -> Self {
-        Self(idx)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDefinitionIndex(usize);
-
-impl ToolDefinitionIndex {
-    pub(super) fn new(idx: usize) -> Self {
-        Self(idx)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMessageIndex(usize);
@@ -38,11 +26,8 @@ impl UserMessageIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssistantMessageIndex(pub(super) usize);
 
-impl AssistantMessageIndex {
-    pub(super) fn new(idx: usize) -> Self {
-        Self(idx)
-    }
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultIndex(pub(super) usize);
 
 // ============================================================================
 // View types (persisted on threads)
@@ -68,6 +53,11 @@ pub struct AssistantMessageView {
     pub(super) indexes: Vec<AssistantMessageIndex>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultsView {
+    pub(super) indexes: Vec<ToolResultIndex>,
+}
+
 // ============================================================================
 // MaterializedSession
 // ============================================================================
@@ -75,6 +65,7 @@ pub struct AssistantMessageView {
 #[derive(Debug)]
 pub(super) struct MaterializedSession<'a> {
     model: &'a str,
+    max_tokens: u32,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
     tool_defs: Vec<&'a ToolDefinition>,
@@ -83,12 +74,15 @@ pub(super) struct MaterializedSession<'a> {
     user_message_indexes: Vec<UserMessageIndex>,
     assistant_block_count: usize,
     assistant_breakpoints: Vec<AssistantMessageIndex>,
+    tool_result_count: usize,
+    tool_result_breakpoints: Vec<ToolResultIndex>,
 }
 
 impl<'a> MaterializedSession<'a> {
-    pub fn init(model: &'a str) -> Self {
+    pub fn init(model: &'a str, max_tokens: u32) -> Self {
         Self {
             model,
+            max_tokens,
             system_blocks: Vec::new(),
             system_breakpoints: Vec::new(),
             tool_defs: Vec::new(),
@@ -97,6 +91,8 @@ impl<'a> MaterializedSession<'a> {
             user_message_indexes: Vec::new(),
             assistant_block_count: 0,
             assistant_breakpoints: Vec::new(),
+            tool_result_count: 0,
+            tool_result_breakpoints: Vec::new(),
         }
     }
 
@@ -137,6 +133,25 @@ impl<'a> MaterializedSession<'a> {
         }
     }
 
+    pub fn push_tool_results(&mut self, result_count: usize) {
+        self.tool_result_breakpoints
+            .push(ToolResultIndex(self.tool_result_count));
+        self.tool_result_count += result_count;
+    }
+
+    pub fn tool_results_since_last_breakpoint(&self) -> ToolResultsView {
+        let start = self
+            .tool_result_breakpoints
+            .last()
+            .map(|idx| idx.0)
+            .unwrap_or(0);
+        ToolResultsView {
+            indexes: (start..self.tool_result_count)
+                .map(ToolResultIndex)
+                .collect(),
+        }
+    }
+
     fn system_since_last_breakpoint(&self) -> SystemView {
         let start = self.system_breakpoints.last().map(|idx| idx.0).unwrap_or(0);
         SystemView {
@@ -167,6 +182,7 @@ impl<'a> MaterializedSession<'a> {
         let initial_user_messages = self.all_user_messages();
         PromptDefinition {
             model: self.model.to_string(),
+            max_tokens: self.max_tokens,
             system_view,
             tool_definitions_view,
             messages: vec![MessageView::User(initial_user_messages)],
@@ -180,14 +196,16 @@ impl<'a> MaterializedSession<'a> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum MessageView {
+pub enum MessageView {
     User(UserMessagesView),
     Assistant(AssistantMessageView),
+    ToolResults(ToolResultsView),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct PromptDefinition {
+pub struct PromptDefinition {
     pub(super) model: String,
+    pub(super) max_tokens: u32,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     pub(super) messages: Vec<MessageView>,
@@ -207,7 +225,7 @@ impl PromptDefinition {
         for msg in &self.messages {
             match msg {
                 MessageView::User(view) => indexes.extend_from_slice(&view.indexes),
-                MessageView::Assistant(_) => {}
+                MessageView::Assistant(_) | MessageView::ToolResults(_) => {}
             }
         }
         UserMessagesView { indexes }
@@ -222,6 +240,7 @@ impl PromptDefinition {
         let mut all_tool_defs = Vec::new();
         let mut all_user_texts = Vec::new();
         let mut all_assistant_blocks: Vec<AssistantBlock> = Vec::new();
+        let mut all_tool_results: Vec<ToolResultInput> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -244,6 +263,9 @@ impl PromptDefinition {
                 }
                 AgentSessionEvent::AssistantResponseReceived { content, .. } => {
                     all_assistant_blocks.extend(content.iter().cloned());
+                }
+                AgentSessionEvent::ToolResultsAdded { results, .. } => {
+                    all_tool_results.extend(results.iter().cloned());
                 }
                 _ => {}
             }
@@ -284,15 +306,51 @@ impl PromptDefinition {
                         .collect();
                     messages.push(Message::Assistant { content });
                 }
+                MessageView::ToolResults(tool_results_view) => {
+                    let content = tool_results_view
+                        .indexes
+                        .iter()
+                        .map(|idx| {
+                            let result = &all_tool_results[idx.0];
+                            UserBlock::ToolResult {
+                                tool_use_id: result.tool_use_id.clone(),
+                                content: vec![ToolResultBlock::Text {
+                                    text: result.content.clone(),
+                                }],
+                                is_error: result.is_error,
+                            }
+                        })
+                        .collect();
+                    messages.push(Message::User { content });
+                }
+            }
+        }
+
+        // Merge consecutive User messages (e.g. tool results followed by user text)
+        let mut merged: Vec<Message> = Vec::new();
+        for msg in messages {
+            match msg {
+                Message::User { content } => {
+                    if let Some(Message::User {
+                        content: existing, ..
+                    }) = merged.last_mut()
+                    {
+                        existing.extend(content);
+                    } else {
+                        merged.push(Message::User { content });
+                    }
+                }
+                other => merged.push(other),
             }
         }
 
         Ok(Prompt {
             target_thread,
             model: self.model,
+            max_tokens: self.max_tokens,
             system,
             tools,
-            messages,
+            messages: merged,
         })
     }
 }
@@ -322,7 +380,7 @@ mod tests {
         let tool_c = tool_def("tool_c");
         let tool_d = tool_def("tool_d");
 
-        let mut m = MaterializedSession::init("test-model");
+        let mut m = MaterializedSession::init("test-model", 8192);
         m.push_tool_defs([&tool_a, &tool_b].into_iter());
         m.push_tool_defs([&tool_c, &tool_d].into_iter());
 
@@ -336,7 +394,7 @@ mod tests {
         let block_b = system_block("Be concise.");
         let block_c = system_block("Use examples.");
 
-        let mut m = MaterializedSession::init("test-model");
+        let mut m = MaterializedSession::init("test-model", 8192);
         m.push_system_blocks([&block_a].into_iter());
         m.push_system_blocks([&block_b, &block_c].into_iter());
 

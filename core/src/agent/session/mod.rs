@@ -1,24 +1,24 @@
 mod entity;
 pub mod error;
-mod message;
+pub(super) mod message;
 mod metadata;
-mod new_entity;
-mod new_thread;
-mod view;
 pub mod repo;
 mod settings;
 mod thread;
+mod view;
 
 use tracing::instrument;
 
 use crate::primitives::{AgentId, UserMessageSource};
 pub use entity::*;
 use error::AgentSessionError;
+pub use message::TargetThread;
+use message::*;
+use metadata::*;
 use repo::AgentSessionRepo;
+pub use settings::*;
 
 es_entity::entity_id! { AgentSessionId }
-
-pub use llm::RequestToolUse;
 
 #[derive(Clone)]
 pub struct Sessions {
@@ -34,48 +34,85 @@ impl Sessions {
 
     #[instrument(
         name = "domain.agent_session.create_in_op",
-        skip(self, op, system, tools)
+        skip(self, op, system_blocks, tool_defs)
     )]
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         agent_id: AgentId,
-        model: impl Into<String> + std::fmt::Debug,
-        system: Vec<llm::prompt::SystemBlock>,
-        tools: Vec<llm::prompt::Tool>,
-        max_tokens: u32,
-        reset_time_delta_seconds: Option<crate::agent::ResetTimeDeltaSeconds>,
+        model_settings: ModelSettings,
+        thread_simplification_settings: ThreadSimplificationSettings,
+        system_blocks: Vec<SystemBlock>,
+        tool_defs: Vec<ToolDefinition>,
     ) -> Result<AgentSession, AgentSessionError> {
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
-            .model(model)
-            .system(system)
-            .tools(tools)
-            .max_tokens(max_tokens)
-            .reset_time_delta_seconds(reset_time_delta_seconds)
+            .model_settings(model_settings)
+            .thread_simplification_settings(thread_simplification_settings)
+            .system_blocks(system_blocks)
+            .tool_defs(tool_defs)
             .build()
             .expect("NewAgentSession build");
 
-        let mut session = self.repo.create_in_op(op, new_session).await?;
-        let _ = session.init_initial_thread();
-        self.repo.update_in_op(op, &mut session).await?;
+        let session = self.repo.create_in_op(op, new_session).await?;
         Ok(session)
     }
 
+    #[instrument(name = "domain.agent_session.add_user_input", skip(self, prompt))]
+    pub async fn add_user_input(
+        &self,
+        agent_id: AgentId,
+        target: TargetThread,
+        source: UserMessageSource,
+        prompt: String,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let response = session.add_user_input(target, source, prompt)?;
+        self.repo.update(&mut session).await?;
+        Ok(response)
+    }
+
+    #[instrument(name = "domain.agent_session.next_prompt", skip(self))]
+    pub async fn next_prompt(
+        &self,
+        agent_id: AgentId,
+        target: TargetThread,
+    ) -> Result<llm::Prompt, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let prompt = session.next_prompt(target)?;
+        self.repo.update(&mut session).await?;
+        Ok(prompt.into())
+    }
+
     #[instrument(
-        name = "domain.agent_session.add_prompt_response",
+        name = "domain.agent_session.assistant_response_received",
         skip(self, response)
     )]
-    pub async fn add_prompt_response(
+    pub async fn assistant_response_received(
         &self,
         agent_id: AgentId,
         response: llm::PromptResponse,
-    ) -> Result<Vec<llm::RequestToolUse>, AgentSessionError> {
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
         let mut session = self.repo.find_by_agent_id(agent_id).await?;
-        let next_tools = session.add_prompt_response(response);
+        let thread_id = session
+            .current_main_thread_id()
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+
+        let content: Vec<AssistantBlock> = response
+            .content
+            .into_iter()
+            .map(AssistantBlock::from)
+            .collect();
+        let stop_reason = response
+            .stop_reason
+            .map(StopReason::from)
+            .unwrap_or(StopReason::Stop);
+        let metadata = AssistantResponseMetadata::from(response.usage);
+
+        let result =
+            session.assistant_response_received(thread_id, content, stop_reason, None, metadata)?;
         self.repo.update(&mut session).await?;
-        Ok(next_tools)
+        Ok(result)
     }
 
     #[instrument(name = "domain.agent_session.add_tool_results", skip(self, results))]
@@ -83,11 +120,17 @@ impl Sessions {
         &self,
         agent_id: AgentId,
         results: Vec<llm::ToolUseResult>,
-    ) -> Result<llm::Prompt, AgentSessionError> {
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
         let mut session = self.repo.find_by_agent_id(agent_id).await?;
-        let prompt = session.add_tool_results(results);
+        let thread_id = session
+            .current_main_thread_id()
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+
+        let tool_results: Vec<ToolResultInput> =
+            results.into_iter().map(ToolResultInput::from).collect();
+        let result = session.add_tool_results(thread_id, tool_results)?;
         self.repo.update(&mut session).await?;
-        Ok(prompt)
+        Ok(result)
     }
 
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]
@@ -100,22 +143,5 @@ impl Sessions {
             .cascade_delete_for_agent_in_op(op, agent_id)
             .await?;
         Ok(())
-    }
-
-    #[instrument(name = "domain.agent_session.add_user_message", skip(self, prompt))]
-    pub async fn add_user_message(
-        &self,
-        agent_id: AgentId,
-        source: UserMessageSource,
-        prompt: String,
-    ) -> Result<Option<llm::Prompt>, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
-        match session.add_user_message(chrono::Utc::now(), source, prompt)? {
-            es_entity::Idempotent::Executed(prompt) => {
-                self.repo.update(&mut session).await?;
-                Ok(Some(prompt))
-            }
-            es_entity::Idempotent::AlreadyApplied => Ok(None),
-        }
     }
 }

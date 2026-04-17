@@ -10,6 +10,8 @@ pub struct Prompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 }
 
@@ -258,6 +260,7 @@ mod tests {
                 }),
                 cache_control: None,
             }],
+            tool_choice: None,
             max_tokens: Some(1024),
         }
     }
@@ -302,6 +305,7 @@ mod tests {
                 }],
             }],
             tools: vec![],
+            tool_choice: None,
             max_tokens: None,
         };
 
