@@ -7,7 +7,7 @@ pub mod session_store;
 use axum::{
     extract::{Request, State},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -20,9 +20,10 @@ pub use error::AuthError;
 use galoy_agents_core as domain;
 
 use domain::auth::AuthSubject;
-use domain::mcp_creds::token::hash_token;
+use domain::mcp_creds::token::{generate_token, hash_token};
 use domain::primitives::UserId;
 
+use crate::templates::{CliLoginTemplate, CliTokenTemplate};
 use crate::AppState;
 
 /// Build the router for GitHub OAuth and dev-login endpoints.
@@ -32,6 +33,7 @@ pub fn auth_router() -> Router<AppState> {
         .route("/auth/github/callback", get(oauth::github_callback))
         .route("/auth/dev", post(dev_login))
         .route("/auth/logout", get(logout))
+        .route("/auth/cli-login", get(cli_login))
 }
 
 /// Axum middleware that resolves [`AuthSubject`] and inserts it into request extensions.
@@ -163,11 +165,36 @@ async fn dev_login(
     };
 
     session.insert("user_id", user.id).await?;
-    Ok(axum::response::Redirect::to("/"))
+    let redirect_to = session
+        .remove::<String>("cli_return_to")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "/".to_string());
+    Ok(axum::response::Redirect::to(&redirect_to))
 }
 
 #[instrument(name = "web.auth.logout", skip_all)]
 async fn logout(session: Session) -> axum::response::Redirect {
     let _ = session.flush().await;
     axum::response::Redirect::to("/")
+}
+
+#[instrument(name = "web.auth.cli_login", skip_all)]
+async fn cli_login(State(state): State<AppState>, session: Session) -> Result<Response, AuthError> {
+    // If user is already logged in, auto-create a token and display it
+    if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
+        let (raw_token, token_hash) = generate_token();
+        state
+            .app
+            .mcp_creds()
+            .create_for_user(user_id, "cli", token_hash, vec![])
+            .await?;
+        return Ok(CliTokenTemplate { token: raw_token }.into_response());
+    }
+
+    // Not logged in — set return-to flag and show login buttons
+    session.insert("cli_return_to", "/auth/cli-login").await?;
+    let dev_auth = state.login == crate::auth::config::LoginMethod::Dev;
+    Ok(CliLoginTemplate { dev_auth }.into_response())
 }

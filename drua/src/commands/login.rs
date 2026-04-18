@@ -19,11 +19,11 @@ pub async fn run(server: Option<String>) -> Result<()> {
         .trim_end_matches('/')
         .to_string();
 
-    let creds_url = format!("{server_url}/dashboard/mcp-creds");
+    let creds_url = format!("{server_url}/auth/cli-login");
     println!("Opening browser to create an API token...");
     println!("  {creds_url}");
     println!();
-    println!("Log in with GitHub if prompted, then create a token.");
+    println!("Log in if prompted — a token will be generated automatically.");
     println!();
 
     let _ = open_browser(&creds_url);

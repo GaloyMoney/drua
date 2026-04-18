@@ -121,7 +121,13 @@ pub async fn github_callback(
         .removal()
         .build();
 
-    Ok((jar.add(remove_cookie), Redirect::temporary("/")))
+    let redirect_to = session
+        .remove::<String>("cli_return_to")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "/".to_string());
+    Ok((jar.add(remove_cookie), Redirect::temporary(&redirect_to)))
 }
 
 async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Error> {
