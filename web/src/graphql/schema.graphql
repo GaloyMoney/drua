@@ -3,6 +3,9 @@ type Mutation {
 	Placeholder — will be replaced with real mutations.
 	"""
 	ping: String!
+	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
+	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
+	workspaceUpdate(input: WorkspaceUpdateInput!): WorkspaceUpdatePayload!
 }
 
 type Query {
@@ -11,9 +14,53 @@ type Query {
 	"""
 	me: UUID
 	ping: String!
+	workspace(id: WorkspaceId!): Workspace
+	workspaces: [Workspace!]!
 }
 
+"""
+An ISO 8601 UTC timestamp (e.g., 2024-01-15T09:30:00Z). Always in UTC.
+"""
+scalar Timestamp
+
 scalar UUID
+
+type Workspace {
+	archivedAt: Timestamp
+	createdAt: Timestamp!
+	description: String
+	id: WorkspaceId!
+	name: String!
+}
+
+input WorkspaceCreateInput {
+	description: String
+	name: String!
+}
+
+type WorkspaceCreatePayload {
+	workspace: Workspace!
+}
+
+input WorkspaceDeleteInput {
+	id: WorkspaceId!
+}
+
+type WorkspaceDeletePayload {
+	workspace: Workspace!
+}
+
+scalar WorkspaceId
+
+input WorkspaceUpdateInput {
+	description: String
+	id: WorkspaceId!
+	name: String!
+}
+
+type WorkspaceUpdatePayload {
+	workspace: Workspace!
+}
 
 """
 Directs the executor to include this field or fragment only when the `if` argument is true.

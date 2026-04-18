@@ -4,6 +4,7 @@ mod mutation;
 pub(crate) mod primitives;
 mod query;
 mod types;
+mod workspace;
 
 use async_graphql::{extensions, EmptySubscription, Schema};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};

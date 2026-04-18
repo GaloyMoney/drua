@@ -38,3 +38,50 @@ teardown_file() {
   echo "$output"
   [[ "$output" == *'"ping":"pong"'* ]]
 }
+
+@test "graphql: workspace CRUD lifecycle" {
+  create_test_agent
+
+  # Create a workspace
+  run graphql_query 'mutation { workspaceCreate(input: { name: "test-ws", description: "A test workspace" }) { workspace { id name description createdAt } } }' "$AGENT_TOKEN"
+  echo "$output"
+  [[ "$output" == *'"name":"test-ws"'* ]]
+  [[ "$output" == *'"description":"A test workspace"'* ]]
+  [[ "$output" == *'"createdAt"'* ]]
+
+  # Extract workspace id
+  ws_id="$(echo "$output" | sed 's/.*"id":"\([^"]*\)".*/\1/')"
+  echo "workspace id: $ws_id"
+
+  # Query single workspace
+  run graphql_query "{ workspace(id: \"$ws_id\") { id name description } }"
+  echo "$output"
+  [[ "$output" == *'"name":"test-ws"'* ]]
+
+  # List workspaces
+  run graphql_query "{ workspaces { id name } }"
+  echo "$output"
+  [[ "$output" == *'"name":"test-ws"'* ]]
+
+  # Update workspace
+  run graphql_query "mutation { workspaceUpdate(input: { id: \"$ws_id\", name: \"renamed-ws\", description: \"updated\" }) { workspace { name description } } }" "$AGENT_TOKEN"
+  echo "$output"
+  [[ "$output" == *'"name":"renamed-ws"'* ]]
+  [[ "$output" == *'"description":"updated"'* ]]
+
+  # Delete workspace
+  run graphql_query "mutation { workspaceDelete(input: { id: \"$ws_id\" }) { workspace { id archivedAt } } }" "$AGENT_TOKEN"
+  echo "$output"
+  [[ "$output" == *'"archivedAt"'* ]]
+
+  # After deletion, workspace should not appear in list
+  run graphql_query "{ workspaces { id } }"
+  echo "$output"
+  [[ "$output" != *"$ws_id"* ]]
+}
+
+@test "graphql: workspace query returns null for unknown id" {
+  run graphql_query '{ workspace(id: "00000000-0000-0000-0000-000000000000") { id } }'
+  echo "$output"
+  [[ "$output" == *'"workspace":null'* ]]
+}
