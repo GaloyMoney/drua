@@ -188,5 +188,4 @@ mod tests {
         let decrypted = key.decrypt_string(rehydrated.encrypted_value()).unwrap();
         assert_eq!(decrypted, "v2");
     }
-
 }

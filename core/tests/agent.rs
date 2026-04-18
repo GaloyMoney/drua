@@ -18,6 +18,7 @@ async fn pool() -> sqlx::PgPool {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn send_message_round_trip_via_prompt_channel() {
     let pool = pool().await;
 
@@ -164,6 +165,7 @@ impl TopLevelTool for PingTool {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn send_message_dispatches_registered_tool_call() {
     let pool = pool().await;
 

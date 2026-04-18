@@ -165,7 +165,9 @@
           sqlx migrate run --source "$REPO_ROOT/core/migrations"
 
           cargo-nextest nextest run \
-            --archive-file ${integration-test-archive}/test-archive.tar.zst
+            --archive-file ${integration-test-archive}/test-archive.tar.zst \
+            --workspace-remap "$REPO_ROOT" \
+            --run-ignored ignored-only
         '';
 
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
