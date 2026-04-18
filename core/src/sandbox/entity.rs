@@ -12,7 +12,7 @@ use crate::primitives::*;
 /// Multiple agents may attach in [`SandboxAgentMode::Read`]; at most one
 /// agent may attach in [`SandboxAgentMode::Write`] at a time. The entity
 /// enforces this invariant in [`Sandbox::attach_agent`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxAgentMode {
     Read,

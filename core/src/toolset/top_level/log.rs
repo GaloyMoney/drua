@@ -9,11 +9,72 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{parse_params, schema_for};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
+use crate::primitives::{AgentId, SandboxId, UserId};
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AuditLogParams {
+    /// Substring filter on action (e.g. 'mcp', 'POST /workspaces').
+    action: Option<String>,
+    /// Substring filter on outcome (e.g. 'success', 'error').
+    outcome: Option<String>,
+    /// When true, return only entries that resulted in an error.
+    errors_only: Option<bool>,
+    /// Filter by acting user ID.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    user_id: Option<UserId>,
+    /// Filter by acting agent ID.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    agent_id: Option<AgentId>,
+    /// Filter by sandbox ID.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    sandbox_id: Option<SandboxId>,
+    /// Max entries to return (1-100, default 20).
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "super::liberal::deserialize_i64"
+    )]
+    limit: i64,
+}
+
+fn default_limit() -> i64 {
+    20
+}
+
+impl AuditLogParams {
+    fn into_query(self) -> AuditLogQuery {
+        let action = self
+            .action
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
+        let outcome = self
+            .outcome
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
+        let error = self.errors_only.and_then(|b| b.then_some(true));
+
+        AuditLogQuery {
+            limit: self.limit.clamp(1, 100),
+            action,
+            outcome,
+            acting_user_id: self.user_id,
+            acting_agent_id: self.agent_id,
+            sandbox_id: self.sandbox_id,
+            error,
+            ..Default::default()
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // workspace_log
@@ -29,13 +90,8 @@ impl WorkspaceLog {
     }
 }
 
-static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": common_schema_properties(),
-        "additionalProperties": false,
-    })
-});
+static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AuditLogParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceLog {
@@ -66,8 +122,9 @@ impl TopLevelTool for WorkspaceLog {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let params: AuditLogParams = parse_params(arguments)?;
 
-        let mut query = parse_query(&arguments);
+        let mut query = params.into_query();
         query.workspace_id = Some(workspace_id);
         query.exclude_agent_id = subject.acting_agent_id();
 
@@ -93,13 +150,7 @@ impl AdminAllLogs {
     }
 }
 
-static ALL_LOGS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": common_schema_properties(),
-        "additionalProperties": false,
-    })
-});
+static ALL_LOGS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AuditLogParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminAllLogs {
@@ -128,7 +179,8 @@ impl TopLevelTool for AdminAllLogs {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let query = parse_query(&arguments);
+        let params: AuditLogParams = parse_params(arguments)?;
+        let query = params.into_query();
         let entries = self.audit.find(&query).await?;
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -177,90 +229,4 @@ fn truncate(s: &str, max: usize) -> &str {
     } else {
         &s[..max]
     }
-}
-
-/// Parse common filter fields from tool arguments into an [`AuditLogQuery`].
-fn parse_query(arguments: &Option<JsonObject>) -> AuditLogQuery {
-    let args = arguments.as_ref();
-
-    let limit = args
-        .and_then(|a| a.get("limit"))
-        .and_then(|v| v.as_i64())
-        .map(|n| n.clamp(1, 100))
-        .unwrap_or(20);
-
-    let action = parse_ilike_field(args, "action");
-    let outcome = parse_ilike_field(args, "outcome");
-
-    let acting_user_id = parse_uuid_field(args, "user_id");
-    let acting_agent_id = parse_uuid_field(args, "agent_id");
-    let sandbox_id = parse_uuid_field(args, "sandbox_id");
-
-    let error = args
-        .and_then(|a| a.get("errors_only"))
-        .and_then(|v| v.as_bool())
-        .and_then(|b| b.then_some(true));
-
-    AuditLogQuery {
-        limit,
-        action,
-        outcome,
-        acting_user_id: acting_user_id.map(crate::primitives::UserId::from),
-        acting_agent_id: acting_agent_id.map(crate::primitives::AgentId::from),
-        sandbox_id: sandbox_id.map(crate::primitives::SandboxId::from),
-        error,
-        ..Default::default()
-    }
-}
-
-/// Read a string field and wrap it in `%…%` for ILIKE matching.
-fn parse_ilike_field(args: Option<&JsonObject>, key: &str) -> Option<String> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("%{s}%"))
-}
-
-/// Read a UUID string field.
-fn parse_uuid_field(args: Option<&JsonObject>, key: &str) -> Option<uuid::Uuid> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-}
-
-/// Shared input properties exposed by both tools.
-fn common_schema_properties() -> serde_json::Value {
-    serde_json::json!({
-        "action": {
-            "type": "string",
-            "description": "Substring filter on action (e.g. 'mcp', 'POST /workspaces')."
-        },
-        "outcome": {
-            "type": "string",
-            "description": "Substring filter on outcome (e.g. 'success', 'error')."
-        },
-        "errors_only": {
-            "type": "boolean",
-            "description": "When true, return only entries that resulted in an error."
-        },
-        "user_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Filter by acting user ID."
-        },
-        "agent_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Filter by acting agent ID."
-        },
-        "sandbox_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Filter by sandbox ID."
-        },
-        "limit": {
-            "type": "integer",
-            "description": "Max entries to return (1-100, default 20)."
-        }
-    })
 }

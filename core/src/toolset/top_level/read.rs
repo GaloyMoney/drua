@@ -9,12 +9,34 @@ use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
+use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{parse_params, schema_for};
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadParams {
+    /// Absolute path to the file inside the sandbox workspace.
+    path: String,
+    /// Line offset to start reading from (0-based). Optional.
+    #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
+    offset: Option<i64>,
+    /// Maximum number of lines to read. Optional.
+    #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
+    limit: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Tool
+// ---------------------------------------------------------------------------
 
 pub struct Read {
     sandboxes: Arc<Sandboxes>,
@@ -26,27 +48,7 @@ impl Read {
     }
 }
 
-static READ_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "Absolute path to the file inside the sandbox workspace."
-            },
-            "offset": {
-                "type": "integer",
-                "description": "Line offset to start reading from (0-based). Optional."
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of lines to read. Optional."
-            }
-        },
-        "required": ["path"],
-        "additionalProperties": false,
-    })
-});
+static READ_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ReadParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for Read {
@@ -80,26 +82,18 @@ impl TopLevelTool for Read {
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.unwrap_or_default();
-
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("path".to_string()))?;
+        let params: ReadParams = parse_params(arguments)?;
 
         // Translate offset/limit into the text editor's view_range [start, end]
         // where start is 1-based and end = -1 means EOF.
         let mut editor_input = serde_json::json!({
             "command": "view",
-            "path": path,
+            "path": params.path,
         });
 
-        let offset = args.get("offset").and_then(|v| v.as_i64());
-        let limit = args.get("limit").and_then(|v| v.as_i64());
-
-        if offset.is_some() || limit.is_some() {
-            let start = offset.unwrap_or(0) + 1; // 0-based offset → 1-based line
-            let end = match limit {
+        if params.offset.is_some() || params.limit.is_some() {
+            let start = params.offset.unwrap_or(0) + 1; // 0-based offset → 1-based line
+            let end = match params.limit {
                 Some(l) => start + l - 1,
                 None => -1, // EOF
             };

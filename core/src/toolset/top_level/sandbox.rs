@@ -7,6 +7,7 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 use crate::primitives::{SandboxId, WorkspaceId};
@@ -14,6 +15,103 @@ use crate::sandbox::{Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{parse_params, schema_for};
+
+// ---------------------------------------------------------------------------
+// Params structs
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SandboxCreateMode {
+    /// Empty workspace.
+    Scratch,
+    /// Clone a repository.
+    Repo,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct CreateSandboxParams {
+    /// Display name for the new sandbox.
+    name: String,
+    /// Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository.
+    mode: SandboxCreateMode,
+    /// Repository URL to clone (required when mode is 'repo').
+    repo_url: Option<String>,
+    /// Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'.
+    branch: Option<String>,
+    /// CPU resource spec (e.g. '500m'). Defaults to '500m'.
+    #[serde(default = "default_cpu")]
+    cpu: String,
+    /// Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'.
+    #[serde(default = "default_memory")]
+    memory: String,
+    /// Disk size spec (e.g. '10Gi'). Defaults to '10Gi'.
+    #[serde(default = "default_disk_size")]
+    disk_size: String,
+}
+
+impl CreateSandboxParams {
+    fn into_sandbox_args(
+        self,
+    ) -> Result<(String, sandbox::SandboxSpecs, sandbox::SandboxMode), ToolSetsError> {
+        let mode = match self.mode {
+            SandboxCreateMode::Repo => {
+                let repo_url = self.repo_url.ok_or_else(|| {
+                    ToolSetsError::InvalidArgument(
+                        "repo_url is required when mode is 'repo'".to_string(),
+                    )
+                })?;
+                sandbox::SandboxMode::Repo {
+                    repo_url,
+                    branch: self.branch,
+                }
+            }
+            SandboxCreateMode::Scratch => sandbox::SandboxMode::Scratch,
+        };
+
+        let specs = sandbox::SandboxSpecs {
+            cpu: self.cpu,
+            memory: self.memory,
+            disk_size: self.disk_size,
+        };
+
+        Ok((self.name, specs, mode))
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AdminCreateSandboxParams {
+    /// Workspace to create the sandbox in.
+    #[schemars(with = "uuid::Uuid")]
+    workspace_id: WorkspaceId,
+    #[serde(flatten)]
+    inner: CreateSandboxParams,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AdminListSandboxesParams {
+    /// Workspace to list sandboxes for.
+    #[schemars(with = "uuid::Uuid")]
+    workspace_id: WorkspaceId,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct GetSandboxParams {
+    /// ID of the sandbox to retrieve.
+    #[schemars(with = "uuid::Uuid")]
+    sandbox_id: SandboxId,
+}
+
+fn default_cpu() -> String {
+    "500m".to_string()
+}
+fn default_memory() -> String {
+    "512Mi".to_string()
+}
+fn default_disk_size() -> String {
+    "10Gi".to_string()
+}
 
 // ---------------------------------------------------------------------------
 // workspace_create_sandbox
@@ -29,44 +127,8 @@ impl WorkspaceCreateSandbox {
     }
 }
 
-static WS_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Display name for the new sandbox."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["scratch", "repo"],
-                "description": "Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository."
-            },
-            "repo_url": {
-                "type": "string",
-                "description": "Repository URL to clone (required when mode is 'repo')."
-            },
-            "branch": {
-                "type": "string",
-                "description": "Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'."
-            },
-            "cpu": {
-                "type": "string",
-                "description": "CPU resource spec (e.g. '500m'). Defaults to '500m'."
-            },
-            "memory": {
-                "type": "string",
-                "description": "Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'."
-            },
-            "disk_size": {
-                "type": "string",
-                "description": "Disk size spec (e.g. '10Gi'). Defaults to '10Gi'."
-            }
-        },
-        "required": ["name", "mode"],
-        "additionalProperties": false,
-    })
-});
+static WS_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<CreateSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceCreateSandbox {
@@ -96,8 +158,8 @@ impl TopLevelTool for WorkspaceCreateSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let (name, specs, mode) = parse_sandbox_create_args(args)?;
+        let params: CreateSandboxParams = parse_params(arguments)?;
+        let (name, specs, mode) = params.into_sandbox_args()?;
 
         let sandbox = self
             .sandboxes
@@ -125,49 +187,8 @@ impl AdminCreateSandbox {
     }
 }
 
-static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Workspace to create the sandbox in."
-            },
-            "name": {
-                "type": "string",
-                "description": "Display name for the new sandbox."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["scratch", "repo"],
-                "description": "Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository."
-            },
-            "repo_url": {
-                "type": "string",
-                "description": "Repository URL to clone (required when mode is 'repo')."
-            },
-            "branch": {
-                "type": "string",
-                "description": "Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'."
-            },
-            "cpu": {
-                "type": "string",
-                "description": "CPU resource spec (e.g. '500m'). Defaults to '500m'."
-            },
-            "memory": {
-                "type": "string",
-                "description": "Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'."
-            },
-            "disk_size": {
-                "type": "string",
-                "description": "Disk size spec (e.g. '10Gi'). Defaults to '10Gi'."
-            }
-        },
-        "required": ["workspace_id", "name", "mode"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AdminCreateSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminCreateSandbox {
@@ -196,13 +217,12 @@ impl TopLevelTool for AdminCreateSandbox {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let workspace_id: WorkspaceId = require_uuid_field(args, "workspace_id")?.into();
-        let (name, specs, mode) = parse_sandbox_create_args(args)?;
+        let params: AdminCreateSandboxParams = parse_params(arguments)?;
+        let (name, specs, mode) = params.inner.into_sandbox_args()?;
 
         let sandbox = self
             .sandboxes
-            .create(workspace_id, name, specs, mode)
+            .create(params.workspace_id, name, specs, mode)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -289,20 +309,8 @@ impl AdminListSandboxes {
     }
 }
 
-static ADMIN_LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Workspace to list sandboxes for."
-            }
-        },
-        "required": ["workspace_id"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AdminListSandboxesParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminListSandboxes {
@@ -331,12 +339,11 @@ impl TopLevelTool for AdminListSandboxes {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let workspace_id: WorkspaceId = require_uuid_field(args, "workspace_id")?.into();
+        let params: AdminListSandboxesParams = parse_params(arguments)?;
 
         let sandboxes = self
             .sandboxes
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -360,20 +367,8 @@ impl WorkspaceGetSandbox {
     }
 }
 
-static WS_GET_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "sandbox_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the sandbox to retrieve."
-            }
-        },
-        "required": ["sandbox_id"],
-        "additionalProperties": false,
-    })
-});
+static WS_GET_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<GetSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceGetSandbox {
@@ -403,12 +398,11 @@ impl TopLevelTool for WorkspaceGetSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: GetSandboxParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -463,12 +457,11 @@ impl TopLevelTool for AdminGetSandbox {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: GetSandboxParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -481,70 +474,6 @@ impl TopLevelTool for AdminGetSandbox {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-fn parse_sandbox_create_args(
-    args: Option<&JsonObject>,
-) -> Result<(String, sandbox::SandboxSpecs, sandbox::SandboxMode), ToolSetsError> {
-    let name = args
-        .and_then(|a| a.get("name"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?
-        .to_string();
-
-    let mode_str = args
-        .and_then(|a| a.get("mode"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolSetsError::MissingArgument("mode".to_string()))?;
-
-    let mode = match mode_str {
-        "repo" => {
-            let repo_url = args
-                .and_then(|a| a.get("repo_url"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ToolSetsError::MissingArgument("repo_url (required for mode=repo)".to_string())
-                })?
-                .to_string();
-            let branch = args
-                .and_then(|a| a.get("branch"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            sandbox::SandboxMode::Repo { repo_url, branch }
-        }
-        _ => sandbox::SandboxMode::Scratch,
-    };
-
-    let cpu = args
-        .and_then(|a| a.get("cpu"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("500m")
-        .to_string();
-    let memory = args
-        .and_then(|a| a.get("memory"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("512Mi")
-        .to_string();
-    let disk_size = args
-        .and_then(|a| a.get("disk_size"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("10Gi")
-        .to_string();
-
-    let specs = sandbox::SandboxSpecs {
-        cpu,
-        memory,
-        disk_size,
-    };
-
-    Ok((name, specs, mode))
-}
 
 fn format_sandbox(s: &Sandbox) -> String {
     let agents: Vec<String> = s

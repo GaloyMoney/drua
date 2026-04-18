@@ -1735,6 +1735,7 @@ dependencies = [
  "reqwest 0.13.2",
  "rmcp",
  "sandbox",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2",
@@ -4348,6 +4349,7 @@ dependencies = [
  "schemars_derive 0.8.22",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
