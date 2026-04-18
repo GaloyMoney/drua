@@ -167,7 +167,8 @@
           cargo-nextest nextest run \
             --archive-file ${integration-test-archive}/test-archive.tar.zst \
             --workspace-remap "$REPO_ROOT" \
-            --run-ignored ignored-only
+            --run-ignored ignored-only \
+            --test-threads 1 --leak-timeout 5s
         '';
 
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
