@@ -20,7 +20,7 @@ fn workspace_secrets(pool: &sqlx::PgPool) -> WorkspaceSecrets {
 async fn create_workspace(pool: &sqlx::PgPool) -> WorkspaceId {
     let id = WorkspaceId::new();
     sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES ($1, $2, NOW())")
-        .bind(&id)
+        .bind(id)
         .bind("test-workspace")
         .execute(pool)
         .await
