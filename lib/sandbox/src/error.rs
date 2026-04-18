@@ -30,6 +30,9 @@ pub enum AdminError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("Podman error: {0}")]
+    Podman(String),
 }
 
 /// Errors from [`crate::InstanceClient`] HTTP calls.

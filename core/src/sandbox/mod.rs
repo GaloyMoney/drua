@@ -9,7 +9,10 @@ use std::time::Duration;
 use es_entity::*;
 use tracing::instrument;
 
-use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, LocalSandboxConfig};
+use sandbox::admin_client::{
+    AdminClient, K8sAdminClient, LocalAdminClient, LocalSandboxConfig, PodmanAdminClient,
+    PodmanSandboxConfig,
+};
 use sandbox::instance_client::{InitializeRequest, InitializeResponse, InstanceClient};
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
@@ -70,6 +73,10 @@ impl Sandboxes {
                 }
                 Arc::new(client)
             }
+            SandboxBackendConfig::Podman { image, podman_bin } => Arc::new(PodmanAdminClient::new(
+                PodmanSandboxConfig { image, podman_bin },
+                &config.local_repo_root,
+            )),
         };
         Ok(Self {
             repo: SandboxRepo::new(pool),

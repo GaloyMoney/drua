@@ -27,6 +27,20 @@ pub enum SandboxBackendConfig {
         #[serde(default)]
         mount_path: Option<String>,
     },
+    Podman {
+        #[serde(default = "default_podman_image")]
+        image: String,
+        #[serde(default = "default_podman_bin")]
+        podman_bin: String,
+    },
+}
+
+fn default_podman_image() -> String {
+    "localhost/sandbox:latest".into()
+}
+
+fn default_podman_bin() -> String {
+    "podman".into()
 }
 
 impl Default for SandboxBackendConfig {
