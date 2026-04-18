@@ -19,6 +19,33 @@ impl PgSessionStore {
 
 #[async_trait]
 impl session_store::SessionStore for PgSessionStore {
+    async fn create(&self, record: &mut Record) -> session_store::Result<()> {
+        let data = serde_json::to_value(&record.data)
+            .map_err(|e| session_store::Error::Backend(e.to_string()))?;
+        let expiry = record.expiry_date.unix_timestamp();
+
+        // Try inserting; on ID collision, generate a new ID and retry.
+        loop {
+            let result = sqlx::query(
+                r#"INSERT INTO sessions (id, data, expiry_date)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (id) DO NOTHING"#,
+            )
+            .bind(record.id.to_string())
+            .bind(&data)
+            .bind(expiry)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| session_store::Error::Backend(e.to_string()))?;
+
+            if result.rows_affected() > 0 {
+                return Ok(());
+            }
+            // Collision (practically impossible with UUIDv4) — pick a new ID.
+            record.id = Id::default();
+        }
+    }
+
     async fn save(&self, record: &Record) -> session_store::Result<()> {
         let data = serde_json::to_value(&record.data)
             .map_err(|e| session_store::Error::Backend(e.to_string()))?;
