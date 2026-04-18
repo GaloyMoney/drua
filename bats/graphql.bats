@@ -50,7 +50,7 @@ teardown_file() {
   [[ "$output" == *'"createdAt"'* ]]
 
   # Extract workspace id
-  ws_id="$(echo "$output" | sed 's/.*"id":"\([^"]*\)".*/\1/')"
+  ws_id="$(echo "$output" | jq -r '.data.workspaceCreate.workspace.id')"
   echo "workspace id: $ws_id"
 
   # Query single workspace with lead agent
