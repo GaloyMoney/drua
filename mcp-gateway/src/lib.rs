@@ -39,7 +39,10 @@ impl McpGateway {
     /// (e.g. `https://dashboard.agents.galoy.io/mcp`). Its hostname is
     /// added to the `allowed_hosts` list so that rmcp's DNS-rebinding
     /// protection accepts incoming requests.
-    pub fn service(app: App, mcp_endpoint: &str) -> StreamableHttpService<Self, LocalSessionManager> {
+    pub fn service(
+        app: App,
+        mcp_endpoint: &str,
+    ) -> StreamableHttpService<Self, LocalSessionManager> {
         let mut config = StreamableHttpServerConfig::default();
         config.stateful_mode = false;
         config.json_response = true;
