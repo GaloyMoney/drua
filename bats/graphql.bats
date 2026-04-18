@@ -70,9 +70,9 @@ teardown_file() {
   [[ "$output" == *'"description":"updated"'* ]]
 
   # Delete workspace
-  run graphql_query "mutation { workspaceDelete(input: { id: \"$ws_id\" }) { workspace { id archivedAt } } }" "$AGENT_TOKEN"
+  run graphql_query "mutation { workspaceDelete(input: { id: \"$ws_id\" }) { workspace { id } } }" "$AGENT_TOKEN"
   echo "$output"
-  [[ "$output" == *'"archivedAt"'* ]]
+  [[ "$output" == *'"id"'* ]]
 
   # After deletion, workspace should not appear in list
   run graphql_query "{ workspaces { id } }"

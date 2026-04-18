@@ -23,9 +23,6 @@ impl Workspace {
         self.entity.created_at().into()
     }
 
-    async fn archived_at(&self) -> Option<Timestamp> {
-        self.entity.archived_at.map(Timestamp::from)
-    }
 }
 
 impl From<DomainWorkspace> for Workspace {

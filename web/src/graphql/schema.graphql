@@ -26,7 +26,6 @@ scalar Timestamp
 scalar UUID
 
 type Workspace {
-	archivedAt: Timestamp
 	createdAt: Timestamp!
 	description: String
 	id: WorkspaceId!
