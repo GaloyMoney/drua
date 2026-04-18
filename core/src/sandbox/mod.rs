@@ -56,19 +56,17 @@ impl Sandboxes {
                 storage_class,
                 mount_path,
             } => {
-                let mut client =
-                    K8sAdminClient::try_from_env(namespace, template_name).await?;
+                let mut client = K8sAdminClient::try_from_env(namespace, template_name).await?;
                 // Wire persistence so sandbox pods get a PVC-backed
                 // /workspace (or configured mount_path). Without this the
                 // pods use ephemeral storage and workspace state doesn't
                 // survive restarts.
                 if let (Some(sc), Some(mp)) = (storage_class, mount_path) {
-                    client = client.with_persistence(
-                        sandbox::admin_client::k8s::PersistenceConfig {
+                    client =
+                        client.with_persistence(sandbox::admin_client::k8s::PersistenceConfig {
                             storage_class: sc,
                             mount_path: mp,
-                        },
-                    );
+                        });
                 }
                 Arc::new(client)
             }
