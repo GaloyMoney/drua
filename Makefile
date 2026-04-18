@@ -36,5 +36,8 @@ nix-run-server:
 sdl-rust:
 	SQLX_OFFLINE=true cargo run --bin write_sdl > web/src/graphql/schema.graphql
 
+integration-tests: reset-deps
+	DATABASE_URL=$(PG_CON) cargo nextest run
+
 start: reset-deps
 	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p galoy-agents-cli -- --set oauth.login=dev $(ARGS)

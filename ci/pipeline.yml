@@ -7,6 +7,7 @@ groups:
 - name: galoy-agents
   jobs:
   - check-code
+  - test-integration
   - test-bats
   - test-sandbox
   - build-edge-image
@@ -40,6 +41,32 @@ jobs:
             cachix use $CACHIX_CACHE_NAME
             cachix watch-exec $CACHIX_CACHE_NAME -- nix flake check
 
+- name: test-integration
+  serial: true
+  plan:
+  - get: repo
+    trigger: true
+  - task: integration-tests
+    privileged: true
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_cachix_image_config()
+      inputs:
+      - name: repo
+      params:
+        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
+        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      run:
+        path: sh
+        args:
+          - -exc
+          - |
+            set -euo pipefail
+            cd repo
+            cachix use $CACHIX_CACHE_NAME
+            cachix watch-exec $CACHIX_CACHE_NAME -- \
+              nix run .#integration-tests
+
 - name: test-bats
   serial: true
   plan:
@@ -71,7 +98,7 @@ jobs:
   plan:
   - get: repo
     trigger: true
-    passed: [check-code, test-bats]
+    passed: [check-code, test-integration, test-bats]
   - task: build-image
     config:
       platform: linux

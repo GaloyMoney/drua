@@ -78,6 +78,7 @@
 
         galoy-agents = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
+          doCheck = false;
         });
 
         code-assistant-unwrapped = craneLib.buildPackage (commonArgs // {
@@ -118,6 +119,58 @@
           exec ${self.packages.${system}.sandbox-tool-server}/bin/sandbox-tool-server "$@"
         '';
 
+        integration-test-archive = craneLib.mkCargoDerivation (commonArgs // {
+          inherit cargoArtifacts;
+          pnameSuffix = "-nextest-archive";
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
+            pkgs.cargo-nextest
+          ];
+          buildPhaseCargoCommand = ''
+            cargo nextest archive --archive-file test-archive.tar.zst
+          '';
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp test-archive.tar.zst $out/
+          '';
+        });
+
+        integration-test-runner = pkgs.writeShellScriptBin "integration-test-runner" ''
+          set -euo pipefail
+
+          export TERM="''${TERM:-dumb}"
+          export REPO_ROOT="$(pwd)"
+          export PG_CON="postgres://user:password@localhost:5432/galoy_agents"
+          export DATABASE_URL="$PG_CON"
+          export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
+
+          cleanup() {
+            $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d postgres
+
+          echo "Waiting for PostgreSQL..."
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U user -d galoy_agents >/dev/null 2>&1; then
+              echo "PostgreSQL ready"
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "ERROR: PostgreSQL failed to start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          sqlx migrate run --source "$REPO_ROOT/core/migrations"
+
+          cargo-nextest nextest run \
+            --archive-file ${integration-test-archive}/test-archive.tar.zst \
+            --workspace-remap "$REPO_ROOT" \
+            --test-threads 1
+        '';
+
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
           set -euo pipefail
 
@@ -150,7 +203,7 @@
 
           nextest = craneLib.cargoNextest (commonArgs // {
             inherit cargoArtifacts;
-            cargoNextestExtraArgs = "--no-tests=pass";
+            cargoNextestExtraArgs = "--lib";
           });
 
           graphql-schema = pkgs.stdenv.mkDerivation {
@@ -246,6 +299,23 @@
               exec bats bats/sandbox.bats
             '';
           in "${wrapped}/bin/run-sandbox-bats";
+        };
+
+        apps.integration-tests = {
+          type = "app";
+          program = let
+            wrapped = pkgs.writeShellScriptBin "run-integration-tests" ''
+              export PATH="${pkgs.lib.makeBinPath [
+                integration-test-runner
+                podmanPkgs.podman-compose-runner
+                pkgs.cargo-nextest
+                pkgs.sqlx-cli
+                pkgs.postgresql
+                pkgs.coreutils
+              ]}:$PATH"
+              exec integration-test-runner
+            '';
+          in "${wrapped}/bin/run-integration-tests";
         };
 
         apps.prep-code-assistant = {
