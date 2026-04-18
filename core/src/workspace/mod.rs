@@ -89,6 +89,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.update", skip(self))]
     pub async fn update(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
@@ -102,6 +103,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.delete", skip(self))]
     pub async fn delete(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         let mut op = self.repo.begin_op().await?;

@@ -29,10 +29,10 @@ impl Mutation {
         ctx: &Context<'_>,
         input: WorkspaceUpdateInput,
     ) -> async_graphql::Result<WorkspaceUpdatePayload> {
-        let (app, _sub) = app_and_sub_from_ctx!(ctx);
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
         let ws = app
             .workspaces()
-            .update(input.id, input.name, input.description)
+            .update(sub, input.id, input.name, input.description)
             .await?;
         Ok(WorkspaceUpdatePayload::from(Workspace::from(ws)))
     }
@@ -42,8 +42,8 @@ impl Mutation {
         ctx: &Context<'_>,
         input: WorkspaceDeleteInput,
     ) -> async_graphql::Result<WorkspaceDeletePayload> {
-        let (app, _sub) = app_and_sub_from_ctx!(ctx);
-        let ws = app.workspaces().delete(input.id).await?;
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let ws = app.workspaces().delete(sub, input.id).await?;
         Ok(WorkspaceDeletePayload::from(Workspace::from(ws)))
     }
 }
