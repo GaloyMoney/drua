@@ -12,19 +12,17 @@ direnv allow          # loads the nix devShell + .env
 
 # 2. Copy and fill in secrets
 cp .env.example .env
-$EDITOR .env          # at minimum set PG_CON and GITHUB_CLIENT_SECRET
+$EDITOR .env          # at minimum set ANTHROPIC_API_KEY
 
-# 3. Start Postgres and run migrations
-make start-deps       # docker/podman compose up
-make setup-db         # runs sqlx migrations
-
-# 4. Run the server
-make run-server       # builds sandbox binary, then starts on :4200
+# 3. Start everything (Postgres, migrations, server with dev login)
+make start            # full reset + server on :4200
 ```
 
-The web UI is at `http://localhost:4200`. Login uses GitHub OAuth (configure an
-[OAuth App](https://github.com/settings/developers) with callback
-`http://localhost:4200/auth/github/callback`).
+The web UI is at `http://localhost:4200`. `make start` uses dev login mode
+(no GitHub OAuth required). For production GitHub OAuth, use `make run-server`
+with `GITHUB_CLIENT_SECRET` set and an
+[OAuth App](https://github.com/settings/developers) configured with callback
+`http://localhost:4200/auth/github/callback`.
 
 ## Environment Variables
 
@@ -37,7 +35,7 @@ A complete `.env.example` is provided at the repo root.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PG_CON` | **Yes** | — | PostgreSQL connection URL. |
-| `GITHUB_CLIENT_SECRET` | **Yes** | — | GitHub OAuth App client secret. |
+| `GITHUB_CLIENT_SECRET` | No | `dev-secret` | GitHub OAuth App client secret (only needed when `oauth.login: github`). |
 | `ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for the agent LLM runtime. Server starts without it but agent prompts will fail. |
 | `GALOY_AGENTS_CONFIG` | No | `galoy-agents.yml` | Path to the YAML config file. |
 | `GITHUB_ALLOWED_TEAMS` | No | `""` (all users) | Comma-separated GitHub teams allowed to log in (`org/team-slug`). |
@@ -111,4 +109,4 @@ charts/         Helm chart for Kubernetes deployment
 | `make nix-run-server` | Run server via `nix run .` |
 | `make build-sandbox` | Build only the sandbox tool server |
 | `make sqlx-prepare` | Regenerate SQLx offline query data |
-| `make start` | Full reset: `reset-deps` then `run-server` |
+| `make start` | Full reset: `reset-deps` then server with dev login |

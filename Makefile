@@ -1,5 +1,5 @@
 PG_CON ?= postgres://user:password@localhost:5432/galoy_agents
-GITHUB_CLIENT_SECRET ?= dev-secret
+GITHUB_CLIENT_SECRET ?= $(shell echo $$GITHUB_CLIENT_SECRET)
 ANTHROPIC_API_KEY ?= $(shell echo $$ANTHROPIC_API_KEY)
 
 # ── Container engine ─────────────────────────────────────────────────────────────
@@ -36,4 +36,5 @@ nix-run-server:
 sdl-rust:
 	SQLX_OFFLINE=true cargo run --bin write_sdl > web/src/graphql/schema.graphql
 
-start: reset-deps run-server
+start: reset-deps
+	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p galoy-agents-cli -- --set oauth.login=dev $(ARGS)
