@@ -10,5 +10,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  otel-agent:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.133.0
+    command: --config=/etc/otel-agent-config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./dev/otel-agent-config.yaml:/etc/otel-agent-config.yaml
+
 volumes:
   pgdata:
