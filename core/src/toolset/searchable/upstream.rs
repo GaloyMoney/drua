@@ -31,7 +31,15 @@ impl UpstreamToolSet {
         upstream: &McpUpstreamConfig,
     ) -> Result<UpstreamToolSet, ToolSetsError> {
         let mut headers = HashMap::new();
-        if !upstream.auth_header.is_empty() {
+        if upstream.auth_header.is_empty() {
+            if upstream.auth_required {
+                let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
+                return Err(ToolSetsError::MissingAuthHeader {
+                    name: upstream.name.clone(),
+                    env_key,
+                });
+            }
+        } else {
             headers.insert(
                 HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
                     .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,

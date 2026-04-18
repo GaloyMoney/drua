@@ -26,6 +26,10 @@ pub struct McpUpstreamConfig {
     pub auth_header: String,
     #[serde(default = "default_auth_header_name")]
     pub auth_header_name: String,
+    /// When true (default), the upstream requires authentication and init
+    /// will fail early if the auth header env var is missing.
+    #[serde(default = "default_auth_required")]
+    pub auth_required: bool,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
@@ -43,6 +47,10 @@ pub struct McpUpstreamConfig {
 
 fn default_auth_header_name() -> String {
     "authorization".to_string()
+}
+
+fn default_auth_required() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

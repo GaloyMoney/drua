@@ -6,6 +6,8 @@ pub enum ToolSetsError {
     ClientInit(#[from] Box<rmcp::service::ClientInitializeError>),
     #[error("ToolSetsError - Service: {0}")]
     Service(#[from] rmcp::service::ServiceError),
+    #[error("ToolSetsError - MissingAuthHeader: upstream '{name}' requires authentication — set {env_key}")]
+    MissingAuthHeader { name: String, env_key: String },
     #[error("ToolSetsError - InvalidHeader: {0}")]
     InvalidHeader(String),
     #[error("ToolSetsError - ToolNotFound: {0}")]
