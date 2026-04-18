@@ -6,16 +6,18 @@
 //! returning a single `PromptResponse`.
 
 mod convert;
-pub mod sse;
+mod sse;
 mod stream;
-pub mod types;
+mod types;
 
 use thiserror::Error;
 use tracing::instrument;
 
 use llm::{Prompt, PromptResponse};
 
-use crate::convert::{accumulated_to_response, prompt_to_request};
+use llm::stream::StreamDelta;
+
+use crate::convert::{accumulated_to_response, prompt_to_request, sse_data_to_delta};
 use crate::sse::{parse_sse_stream, SseError};
 use crate::stream::StreamAccumulator;
 
@@ -128,14 +130,15 @@ impl AnthropicClient {
         Ok(accumulated_to_response(accumulator.finish()))
     }
 
-    /// Issue a streaming Messages API request, yielding raw SSE events via
-    /// channel. Caller is responsible for parsing/accumulating. Ping events
-    /// are filtered out.
+    /// Issue a streaming Messages API request, yielding provider-agnostic
+    /// [`StreamDelta`]s via channel. Ping events and events that carry no
+    /// delta are filtered out. The Anthropic→`StreamDelta` conversion
+    /// happens inside this method so callers never see Anthropic wire types.
     #[instrument(name = "anthropic_client.send_prompt_streaming", skip_all)]
     pub async fn send_prompt_streaming(
         &self,
         prompt: &Prompt,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<sse::SseEvent, AnthropicError>>, AnthropicError>
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, AnthropicError>>, AnthropicError>
     {
         let request_body = prompt_to_request(prompt);
 
@@ -160,16 +163,23 @@ impl AnthropicClient {
         }
 
         let byte_stream = resp.bytes_stream();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<sse::SseEvent, AnthropicError>>(128);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamDelta, AnthropicError>>(128);
         tokio::spawn(async move {
             let tx_ref = &tx;
-            let _ = parse_sse_stream(byte_stream, |event: sse::SseEvent| {
+            let _ = parse_sse_stream(byte_stream, |event| {
                 if event.event == "ping" {
                     return Ok(());
                 }
-                tx_ref
-                    .try_send(Ok(event))
-                    .map_err(|e| SseError::Processing(e.to_string()))
+                match sse_data_to_delta(&event.data) {
+                    Ok(Some(delta)) => tx_ref
+                        .try_send(Ok(delta))
+                        .map_err(|e| SseError::Processing(e.to_string())),
+                    Ok(None) => Ok(()),
+                    Err(e) => {
+                        let _ = tx_ref.try_send(Err(AnthropicError::Stream(e.clone())));
+                        Err(SseError::Processing(e))
+                    }
+                }
             })
             .await;
         });
