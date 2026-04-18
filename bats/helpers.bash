@@ -51,19 +51,20 @@ stop_server() {
 # The server runs migrations on startup, so the schema is ready.
 # Sets AGENT_TOKEN for use in subsequent test calls.
 create_test_agent() {
-  local user_id agent_id raw_token token_hash
+  local user_id agent_id raw_token token_hash github_id
 
   user_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   agent_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  github_id="test-gh-user-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
   raw_token="test-token-$(uuidgen | tr '[:upper:]' '[:lower:]')"
   token_hash="$(echo -n "$raw_token" | sha256sum | awk '{print $1}')"
 
   psql "$PG_CON" -q <<SQL
-    INSERT INTO users (id, github_id, created_at) VALUES ('$user_id', 'test-gh-user', NOW());
+    INSERT INTO users (id, github_id, created_at) VALUES ('$user_id', '$github_id', NOW());
     INSERT INTO user_events (id, sequence, event_type, event, recorded_at)
     VALUES ('$user_id', 0, 'initialized',
-      '{"type":"initialized","id":"$user_id","github_id":"test-gh-user","email":null,"name":"Test User"}',
+      '{"type":"initialized","id":"$user_id","github_id":"$github_id","email":null,"name":"Test User"}',
       NOW());
 
     INSERT INTO mcp_creds (id, owner_id, token_hash, created_at) VALUES ('$agent_id', '$user_id', '$token_hash', NOW());
@@ -107,7 +108,11 @@ graphql_query() {
     headers+=(-H "Authorization: Bearer $token")
   fi
 
+  # Use jq to properly escape the query string inside the JSON payload.
+  local body
+  body="$(jq -n --arg q "$query" '{query: $q}')"
+
   curl -s -X POST http://localhost:4200/graphql \
     "${headers[@]}" \
-    -d "{\"query\":\"$query\"}"
+    -d "$body"
 }
