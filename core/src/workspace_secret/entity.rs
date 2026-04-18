@@ -131,3 +131,83 @@ impl IntoEvents<WorkspaceSecretEvent> for NewWorkspaceSecret {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+    use super::*;
+    use crate::encryption::EncryptionKey;
+
+    fn test_key() -> EncryptionKey {
+        EncryptionKey::new([42u8; 32])
+    }
+
+    fn new_secret(name: &str, secret_type: SecretType, value: &str) -> NewWorkspaceSecret {
+        let key = test_key();
+        NewWorkspaceSecret::builder()
+            .workspace_id(WorkspaceId::new())
+            .name(name)
+            .secret_type(secret_type)
+            .encrypted_value(key.encrypt_string(value))
+            .build()
+            .expect("build NewWorkspaceSecret")
+    }
+
+    fn hydrate(new: NewWorkspaceSecret) -> WorkspaceSecret {
+        WorkspaceSecret::try_from_events(new.into_events()).expect("hydrate")
+    }
+
+    #[test]
+    fn hydrate_from_initialized_event() {
+        let new = new_secret("API_KEY", SecretType::EnvVar, "sk-123");
+        let id = new.id;
+        let ws_id = new.workspace_id;
+        let secret = hydrate(new);
+
+        assert_eq!(secret.id, id);
+        assert_eq!(secret.workspace_id, ws_id);
+        assert_eq!(secret.name, "API_KEY");
+        assert_eq!(secret.secret_type, SecretType::EnvVar);
+    }
+
+    #[test]
+    fn update_value_replaces_encrypted_value() {
+        let key = test_key();
+        let mut secret = hydrate(new_secret("DB_PASS", SecretType::File, "old-password"));
+
+        let new_encrypted = key.encrypt_string("new-password");
+        let _ = secret.update_value(new_encrypted);
+
+        let decrypted = key.decrypt_string(secret.encrypted_value()).unwrap();
+        assert_eq!(decrypted, "new-password");
+    }
+
+    #[test]
+    fn hydrate_with_value_updated_event() {
+        let key = test_key();
+        let new = new_secret("TOKEN", SecretType::EnvVar, "v1");
+        let id = new.id;
+        let mut secret = hydrate(new);
+
+        let updated_encrypted = key.encrypt_string("v2");
+        let _ = secret.update_value(updated_encrypted);
+
+        // Re-hydrate from the full event stream
+        let rehydrated =
+            WorkspaceSecret::try_from_events(secret.events.clone()).expect("rehydrate");
+        assert_eq!(rehydrated.id, id);
+        assert_eq!(rehydrated.name, "TOKEN");
+        let decrypted = key.decrypt_string(rehydrated.encrypted_value()).unwrap();
+        assert_eq!(decrypted, "v2");
+    }
+
+    #[test]
+    fn display_format() {
+        let secret = hydrate(new_secret("MY_SECRET", SecretType::File, "hidden"));
+        let display = format!("{}", secret);
+        assert!(display.contains("MY_SECRET"));
+        assert!(display.contains("file"));
+        assert!(!display.contains("hidden"));
+    }
+}
