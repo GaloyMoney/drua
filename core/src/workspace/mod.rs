@@ -7,10 +7,10 @@ use std::sync::Arc;
 use es_entity::*;
 use tracing::instrument;
 
+pub use crate::workspace::workspace_cursor::WorkspaceByCreatedAtCursor;
 pub use entity::Workspace;
 use entity::*;
 pub use error::*;
-pub use crate::workspace::workspace_cursor::WorkspaceByCreatedAtCursor;
 use repo::*;
 
 use crate::agent::{AgentRole, Agents};
