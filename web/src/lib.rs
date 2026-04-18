@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod graphql;
 mod routes;
 pub mod server;
 mod templates;
@@ -53,9 +54,10 @@ impl AppState {
     }
 }
 
-/// Build the web router with page routes, auth routes, and API routes.
+/// Build the web router with page routes, auth routes, API routes, and GraphQL.
 pub fn router() -> Router<AppState> {
     routes::router()
         .merge(auth::auth_router())
         .merge(routes::api_router())
+        .merge(graphql::router())
 }

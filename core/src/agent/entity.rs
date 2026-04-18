@@ -278,9 +278,7 @@ pub struct NewAgent {
 
 impl NewAgent {
     pub fn builder() -> NewAgentBuilder {
-        let mut builder = NewAgentBuilder::default();
-        builder.id(AgentId::new());
-        builder
+        NewAgentBuilder::default()
     }
 }
 

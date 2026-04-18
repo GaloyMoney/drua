@@ -1,0 +1,144 @@
+type Agent {
+	id: AgentId!
+	name: String!
+	role: AgentRole!
+	workspaceId: WorkspaceId!
+}
+
+scalar AgentId
+
+enum AgentRole {
+	AGENT
+	WORKSPACE_LEAD
+}
+
+type Mutation {
+	"""
+	Placeholder — will be replaced with real mutations.
+	"""
+	ping: String!
+	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
+	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
+	workspaceUpdate(input: WorkspaceUpdateInput!): WorkspaceUpdatePayload!
+}
+
+"""
+Information about pagination in a connection
+"""
+type PageInfo {
+	"""
+	When paginating forwards, the cursor to continue.
+	"""
+	endCursor: String
+	"""
+	When paginating forwards, are there more items?
+	"""
+	hasNextPage: Boolean!
+	"""
+	When paginating backwards, are there more items?
+	"""
+	hasPreviousPage: Boolean!
+	"""
+	When paginating backwards, the cursor to continue.
+	"""
+	startCursor: String
+}
+
+type Query {
+	"""
+	The ID of the currently authenticated user, if any.
+	"""
+	me: UUID
+	ping: String!
+	workspace(id: WorkspaceId!): Workspace
+	workspaces(after: String, first: Int!): WorkspaceConnection!
+}
+
+"""
+An ISO 8601 UTC timestamp (e.g., 2024-01-15T09:30:00Z). Always in UTC.
+"""
+scalar Timestamp
+
+scalar UUID
+
+type Workspace {
+	createdAt: Timestamp!
+	description: String
+	id: WorkspaceId!
+	"""
+	The workspace lead agent.
+	"""
+	lead: Agent!
+	name: String!
+}
+
+type WorkspaceConnection {
+	"""
+	A list of edges.
+	"""
+	edges: [WorkspaceEdge!]!
+	"""
+	A list of nodes.
+	"""
+	nodes: [Workspace!]!
+	"""
+	Information to aid in pagination.
+	"""
+	pageInfo: PageInfo!
+}
+
+input WorkspaceCreateInput {
+	description: String
+	name: String!
+}
+
+type WorkspaceCreatePayload {
+	workspace: Workspace!
+}
+
+input WorkspaceDeleteInput {
+	id: WorkspaceId!
+}
+
+type WorkspaceDeletePayload {
+	workspace: Workspace!
+}
+
+"""
+An edge in a connection.
+"""
+type WorkspaceEdge {
+	"""
+	A cursor for use in pagination
+	"""
+	cursor: String!
+	"""
+	The item at the end of the edge
+	"""
+	node: Workspace!
+}
+
+scalar WorkspaceId
+
+input WorkspaceUpdateInput {
+	description: String
+	id: WorkspaceId!
+	name: String!
+}
+
+type WorkspaceUpdatePayload {
+	workspace: Workspace!
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+	mutation: Mutation
+}

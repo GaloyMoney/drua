@@ -5,8 +5,12 @@ edition.workspace = true
 
 [lib]
 
+[[bin]]
+name = "write_sdl"
+path = "src/bin/write_sdl.rs"
+
 [dependencies]
-galoy-agents-core = { path = "../core" }
+galoy-agents-core = { path = "../core", features = ["graphql"] }
 es-entity = { workspace = true }
 anyhow = "1"
 k8s-openapi = { version = "0.25", features = ["v1_33"] }
@@ -32,6 +36,8 @@ tokio-stream = "0.1"
 tower-sessions = "0.15"
 opentelemetry = "0.31"
 opentelemetry-http = "0.31"
+async-graphql = { version = "8.0.0-rc.4", default-features = false, features = ["tracing", "tempfile"] }
+async-graphql-axum = "8.0.0-rc.4"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
 url = { workspace = true }

@@ -592,11 +592,12 @@ async fn workspace_create(
         None => return Redirect::to("/").into_response(),
     };
 
+    let sub = domain::auth::AuthSubject::User(user_id);
     let description = form.description.filter(|d| !d.is_empty());
     match state
         .app
         .workspaces()
-        .create(user_id, &form.name, description)
+        .create(&sub, &form.name, description)
         .await
     {
         Ok(ws) => Redirect::to(&format!("/workspaces/{}/chat", ws.id)).into_response(),
@@ -640,16 +641,18 @@ async fn workspace_update(
     Path(id): Path<uuid::Uuid>,
     Form(form): Form<WorkspaceForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
 
+    let sub = domain::auth::AuthSubject::User(user_id);
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     let description = form.description.filter(|d| !d.is_empty());
     match state
         .app
         .workspaces()
-        .update(workspace_id, &form.name, description)
+        .update(&sub, workspace_id, &form.name, description)
         .await
     {
         Ok(_) => Redirect::to(&format!("/workspaces/{id}")).into_response(),
@@ -667,12 +670,14 @@ async fn workspace_delete(
     Path(id): Path<uuid::Uuid>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
 
+    let sub = domain::auth::AuthSubject::User(user_id);
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    match state.app.workspaces().delete(workspace_id).await {
+    match state.app.workspaces().delete(&sub, workspace_id).await {
         Ok(_) => {
             // If called via HTMX, redirect client-side using HX-Redirect
             if headers.contains_key("hx-request") {

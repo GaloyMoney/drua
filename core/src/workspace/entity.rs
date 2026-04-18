@@ -12,6 +12,7 @@ use crate::primitives::*;
 pub enum WorkspaceEvent {
     Initialized {
         id: WorkspaceId,
+        lead_agent_id: AgentId,
         name: String,
         description: Option<String>,
     },
@@ -28,6 +29,7 @@ pub enum WorkspaceEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Workspace {
     pub id: WorkspaceId,
+    pub lead_agent_id: AgentId,
     pub name: String,
     #[builder(setter(strip_option), default)]
     pub description: Option<String>,
@@ -79,10 +81,14 @@ impl TryFromEvents<WorkspaceEvent> for Workspace {
             match event {
                 WorkspaceEvent::Initialized {
                     id,
+                    lead_agent_id,
                     name,
                     description,
                 } => {
-                    builder = builder.id(*id).name(name.clone());
+                    builder = builder
+                        .id(*id)
+                        .lead_agent_id(*lead_agent_id)
+                        .name(name.clone());
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
                     }
@@ -108,6 +114,8 @@ pub struct NewWorkspace {
     #[builder(setter(into))]
     pub(super) id: WorkspaceId,
     #[builder(setter(into))]
+    pub(super) lead_agent_id: AgentId,
+    #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into, strip_option), default)]
     pub(super) description: Option<String>,
@@ -127,6 +135,7 @@ impl IntoEvents<WorkspaceEvent> for NewWorkspace {
             self.id,
             [WorkspaceEvent::Initialized {
                 id: self.id,
+                lead_agent_id: self.lead_agent_id,
                 name: self.name,
                 description: self.description,
             }],
@@ -138,13 +147,14 @@ impl IntoEvents<WorkspaceEvent> for NewWorkspace {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
-    use crate::primitives::WorkspaceId;
+    use crate::primitives::{AgentId, WorkspaceId};
 
     use super::{NewWorkspace, Workspace};
 
     fn new_workspace() -> Workspace {
         let new = NewWorkspace::builder()
             .id(WorkspaceId::new())
+            .lead_agent_id(AgentId::new())
             .name("test-workspace")
             .description("A test workspace".to_string())
             .build()
@@ -173,6 +183,7 @@ mod tests {
     fn workspace_hydration_without_description() {
         let new = NewWorkspace::builder()
             .id(WorkspaceId::new())
+            .lead_agent_id(AgentId::new())
             .name("minimal")
             .build()
             .unwrap();

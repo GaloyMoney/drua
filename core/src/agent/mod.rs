@@ -89,9 +89,10 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
+        let id = AgentId::new();
         let mut op = self.repo.begin_op().await?;
         let agent = self
-            .create_in_op(&mut op, workspace_id, agent_role, name, attach_sandbox)
+            .create_in_op(&mut op, id, workspace_id, agent_role, name, attach_sandbox)
             .await?;
         op.commit().await?;
         Ok(agent)
@@ -110,6 +111,7 @@ impl Agents {
     pub async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
+        id: AgentId,
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
@@ -125,6 +127,7 @@ impl Agents {
         let authz_scopes = default_authz_scopes(agent_role, workspace_id);
 
         let new_agent = NewAgent::builder()
+            .id(id)
             .workspace_id(workspace_id)
             .agent_role(agent_role)
             .name(name)

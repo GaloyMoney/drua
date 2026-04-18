@@ -4,8 +4,10 @@ pub(crate) mod repo;
 
 use std::sync::Arc;
 
+use es_entity::*;
 use tracing::instrument;
 
+pub use crate::workspace::workspace_cursor::WorkspaceByCreatedAtCursor;
 pub use entity::Workspace;
 use entity::*;
 pub use error::*;
@@ -29,12 +31,13 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.create", skip(self))]
     pub async fn create(
         &self,
-        _user_id: UserId,
+        sub: &AuthSubject,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
         let name = name.into();
-        let new_workspace = build_new_workspace(&name, description);
+        let lead_agent_id = AgentId::new();
+        let new_workspace = build_new_workspace(lead_agent_id, &name, description);
         let workspace_id = new_workspace.id;
 
         let mut op = self.repo.begin_op().await?;
@@ -43,6 +46,7 @@ impl Workspaces {
         self.agents
             .create_in_op(
                 &mut op,
+                lead_agent_id,
                 workspace_id,
                 AgentRole::WorkspaceLead,
                 "lead",
@@ -51,6 +55,13 @@ impl Workspaces {
             .await?;
 
         op.commit().await?;
+
+        tracing::info!(
+            workspace.id = %workspace.id,
+            sub = ?sub,
+            "workspace created"
+        );
+
         Ok(workspace)
     }
 
@@ -62,6 +73,16 @@ impl Workspaces {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
 
+    #[instrument(name = "domain.workspace.list", skip(self))]
+    pub async fn list(
+        &self,
+        _sub: &AuthSubject,
+        query: PaginatedQueryArgs<WorkspaceByCreatedAtCursor>,
+        direction: ListDirection,
+    ) -> Result<PaginatedQueryRet<Workspace, WorkspaceByCreatedAtCursor>, WorkspaceError> {
+        Ok(self.repo.list_by_created_at(query, direction).await?)
+    }
+
     #[instrument(name = "domain.workspace.list_all", skip(self))]
     pub async fn list_all(&self) -> Result<Vec<Workspace>, WorkspaceError> {
         Ok(self.repo.list_all().await?)
@@ -70,6 +91,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.update", skip(self))]
     pub async fn update(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
@@ -83,6 +105,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.delete", skip(self))]
     pub async fn delete(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         let mut op = self.repo.begin_op().await?;
@@ -124,8 +147,13 @@ impl Workspaces {
     }
 }
 
-fn build_new_workspace(name: impl Into<String>, description: Option<String>) -> NewWorkspace {
+fn build_new_workspace(
+    lead_agent_id: AgentId,
+    name: impl Into<String>,
+    description: Option<String>,
+) -> NewWorkspace {
     let mut builder = NewWorkspace::builder();
+    builder.lead_agent_id(lead_agent_id);
     builder.name(name);
     if let Some(desc) = description {
         builder.description(desc);

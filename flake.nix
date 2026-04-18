@@ -34,6 +34,7 @@
             (builtins.match ".*\.bats$" path != null) ||
             (builtins.match ".*\.toml$" path != null) ||
             (builtins.match ".*\.jsonl$" path != null) ||
+            (builtins.match ".*\.graphql$" path != null) ||
             craneLib.filterCargoSources path type;
         };
 
@@ -83,6 +84,12 @@
           inherit cargoArtifacts;
           pname = "code-assistant";
           cargoExtraArgs = "-p code-assistant";
+        });
+
+        write-sdl = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "write-sdl";
+          cargoExtraArgs = "-p galoy-agents-web --bin write_sdl";
         });
 
         pythonEnv = pkgs.python3.withPackages (ps:
@@ -145,6 +152,30 @@
             inherit cargoArtifacts;
             cargoNextestExtraArgs = "--no-tests=pass";
           });
+
+          graphql-schema = pkgs.stdenv.mkDerivation {
+            name = "graphql-schema-check";
+            src = src;
+            nativeBuildInputs = [ pkgs.diffutils ];
+            buildInputs = [ write-sdl ];
+            buildPhase = ''
+              echo "Generating GraphQL SDL..."
+              ${write-sdl}/bin/write_sdl > schema-generated.graphql
+
+              echo "Comparing with committed schema..."
+              if ! diff -u web/src/graphql/schema.graphql schema-generated.graphql; then
+                echo "ERROR: GraphQL schema is out of date!"
+                echo "Run 'make sdl-rust' to update the schema"
+                exit 1
+              fi
+
+              echo "GraphQL schema is up to date"
+            '';
+            installPhase = ''
+              mkdir -p $out
+              echo "GraphQL schema check passed" > $out/result.txt
+            '';
+          };
         };
 
         packages.galoy-agents-unwrapped = galoy-agents;
