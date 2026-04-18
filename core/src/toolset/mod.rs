@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
+use tracing::instrument;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -39,19 +40,8 @@ impl ToolSets {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            match UpstreamToolSet::init(upstream).await {
-                Ok(ts) => {
-                    tracing::info!(
-                        name = %upstream.name,
-                        prefix = ts.prefix(),
-                        tools = ts.tools().len(),
-                        "MCP upstream toolset initialized"
-                    );
-                    sets.push(Arc::new(ts));
-                }
-                Err(e) => {
-                    tracing::warn!(name = %upstream.name, error = %e, "Failed to initialize MCP upstream, skipping");
-                }
+            if let Ok(ts) = init_upstream(upstream).await {
+                sets.push(Arc::new(ts));
             }
         }
 
@@ -225,6 +215,27 @@ impl ToolSets {
         }
         .with_event_context(seed)
         .await
+    }
+}
+
+#[instrument(name = "domain.toolset.init_upstream", skip_all, fields(upstream.name, upstream.url))]
+async fn init_upstream(upstream: &McpUpstreamConfig) -> Result<UpstreamToolSet, ToolSetsError> {
+    tracing::Span::current()
+        .record("upstream.name", &upstream.name)
+        .record("upstream.url", &upstream.url);
+    match UpstreamToolSet::init(upstream).await {
+        Ok(ts) => {
+            tracing::info!(
+                prefix = ts.prefix(),
+                tools = ts.tools().len(),
+                "MCP upstream toolset initialized"
+            );
+            Ok(ts)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to initialize MCP upstream, skipping");
+            Err(e)
+        }
     }
 }
 
