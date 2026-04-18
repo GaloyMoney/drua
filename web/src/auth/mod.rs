@@ -7,10 +7,11 @@ pub mod session_store;
 use axum::{
     extract::{Request, State},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
+use serde::Serialize;
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -20,7 +21,7 @@ pub use error::AuthError;
 use galoy_agents_core as domain;
 
 use domain::auth::AuthSubject;
-use domain::mcp_creds::token::hash_token;
+use domain::mcp_creds::token::{generate_token, hash_token};
 use domain::primitives::UserId;
 
 use crate::AppState;
@@ -31,6 +32,7 @@ pub fn auth_router() -> Router<AppState> {
         .route("/auth/github", get(oauth::github_redirect))
         .route("/auth/github/callback", get(oauth::github_callback))
         .route("/auth/dev", post(dev_login))
+        .route("/auth/cli/token", post(cli_token_exchange))
         .route("/auth/logout", get(logout))
 }
 
@@ -164,6 +166,111 @@ async fn dev_login(
 
     session.insert("user_id", user.id).await?;
     Ok(axum::response::Redirect::to("/"))
+}
+
+#[derive(Serialize)]
+struct CliTokenResponse {
+    token: String,
+    user_id: String,
+}
+
+/// Exchange a GitHub access token for a CLI bearer token.
+///
+/// The CLI obtains a GitHub token via the OAuth Device Flow, then calls this
+/// endpoint to convert it into an MCP credential bearer token. The server
+/// validates the GitHub token, finds/creates the user, and returns a new
+/// bearer token for subsequent API calls.
+#[instrument(name = "web.auth.cli_token_exchange", skip_all)]
+async fn cli_token_exchange(State(state): State<AppState>, request: Request) -> Response {
+    let github_token = match extract_bearer_token(&request) {
+        Some(t) => t,
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "missing Authorization: Bearer header"})),
+            )
+                .into_response()
+        }
+    };
+
+    let github_user =
+        match oauth::fetch_github_user(&github_token).await {
+            Ok(u) => u,
+            Err(e) => return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": format!("GitHub token validation failed: {e}")})),
+            )
+                .into_response(),
+        };
+
+    if !state.github_allowed_teams.is_empty() {
+        let teams_ok = match oauth::fetch_github_teams(&github_token).await {
+            Ok(teams) => teams.iter().any(|team| {
+                let full_slug = format!("{}/{}", team.organization.login, team.slug);
+                state
+                    .github_allowed_teams
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&full_slug))
+            }),
+            Err(_) => false,
+        };
+        if !teams_ok {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "GitHub account is not in an authorized team"})),
+            )
+                .into_response();
+        }
+    }
+
+    let github_id_str = github_user.id.to_string();
+    let user = match state.app.users().find_by_github_id(&github_id_str).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            match state
+                .app
+                .users()
+                .create_from_github_login(github_id_str, github_user.email, github_user.name)
+                .await
+            {
+                Ok(user) => user,
+                Err(e) => {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("failed to create user: {e}")})),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("user lookup failed: {e}")})),
+            )
+                .into_response()
+        }
+    };
+
+    let (raw_token, token_hash) = generate_token();
+
+    match state
+        .app
+        .mcp_creds()
+        .create_for_user(user.id, "drua-cli", token_hash, vec![])
+        .await
+    {
+        Ok(_) => Json(CliTokenResponse {
+            token: raw_token,
+            user_id: user.id.to_string(),
+        })
+        .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to create credentials: {e}")})),
+        )
+            .into_response(),
+    }
 }
 
 #[instrument(name = "web.auth.logout", skip_all)]
