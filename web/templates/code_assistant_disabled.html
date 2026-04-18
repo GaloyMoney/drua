@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Code Assistant — Galoy Agents{% endblock %}
+
+{% block nav_code_assistant %}class="active"{% endblock %}
+
+{% block content %}
+<h2>Code Assistant</h2>
+
+<article>
+  <h3>Not configured</h3>
+  <p>The Code Assistant search index has not been built yet. To enable it, run:</p>
+  <pre><code>cd code-assistant && make bootstrap</code></pre>
+  <p>This will clone the configured repositories and build the vector search database.
+     Once the index exists, restart the server and this page will load automatically.</p>
+</article>
+{% endblock %}

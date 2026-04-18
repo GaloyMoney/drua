@@ -53,6 +53,10 @@ pub struct CodeAssistantTemplate {
 }
 
 #[derive(Template, WebTemplate)]
+#[template(path = "code_assistant_disabled.html")]
+pub struct CodeAssistantDisabledTemplate {}
+
+#[derive(Template, WebTemplate)]
 #[template(path = "code_assistant_recent.html")]
 pub struct CodeAssistantRecentTemplate {
     pub rows: Vec<CodeAssistantRequestRow>,

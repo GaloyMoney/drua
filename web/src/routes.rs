@@ -374,7 +374,7 @@ async fn code_assistant_dashboard(State(state): State<AppState>, session: Sessio
 
     let ca = match state.app.code_assistant() {
         Some(ca) => ca,
-        None => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        None => return CodeAssistantDisabledTemplate {}.into_response(),
     };
 
     let stats = match ca.logs().dashboard_stats().await {
