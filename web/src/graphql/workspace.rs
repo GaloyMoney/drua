@@ -5,7 +5,6 @@ use async_graphql::{ComplexObject, Context, InputObject, SimpleObject};
 use super::agent::Agent;
 use super::primitives::*;
 
-use galoy_agents_core::agent::AgentRole as DomainAgentRole;
 use galoy_agents_core::workspace::Workspace as DomainWorkspace;
 
 #[derive(SimpleObject, Clone)]
@@ -26,14 +25,10 @@ impl Workspace {
     }
 
     /// The workspace lead agent.
-    async fn lead(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Agent>> {
+    async fn lead(&self, ctx: &Context<'_>) -> async_graphql::Result<Agent> {
         let (app, _sub) = app_and_sub_from_ctx!(ctx);
-        let agents = app.agents().list_for_workspace(self.id).await?;
-        let lead = agents
-            .into_iter()
-            .find(|a| a.agent_role == DomainAgentRole::WorkspaceLead)
-            .map(Agent::from);
-        Ok(lead)
+        let agent = app.agents().find_by_id(self.entity.lead_agent_id).await?;
+        Ok(Agent::from(agent))
     }
 }
 

@@ -81,7 +81,7 @@ type Workspace {
 	"""
 	The workspace lead agent.
 	"""
-	lead: Agent
+	lead: Agent!
 	name: String!
 }
 

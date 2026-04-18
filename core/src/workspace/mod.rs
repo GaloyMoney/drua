@@ -36,7 +36,8 @@ impl Workspaces {
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
         let name = name.into();
-        let new_workspace = build_new_workspace(&name, description);
+        let lead_agent_id = AgentId::new();
+        let new_workspace = build_new_workspace(lead_agent_id, &name, description);
         let workspace_id = new_workspace.id;
 
         let mut op = self.repo.begin_op().await?;
@@ -45,6 +46,7 @@ impl Workspaces {
         self.agents
             .create_in_op(
                 &mut op,
+                lead_agent_id,
                 workspace_id,
                 AgentRole::WorkspaceLead,
                 "lead",
@@ -145,8 +147,13 @@ impl Workspaces {
     }
 }
 
-fn build_new_workspace(name: impl Into<String>, description: Option<String>) -> NewWorkspace {
+fn build_new_workspace(
+    lead_agent_id: AgentId,
+    name: impl Into<String>,
+    description: Option<String>,
+) -> NewWorkspace {
     let mut builder = NewWorkspace::builder();
+    builder.lead_agent_id(lead_agent_id);
     builder.name(name);
     if let Some(desc) = description {
         builder.description(desc);
