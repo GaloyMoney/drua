@@ -18,6 +18,14 @@ pub enum SandboxBackendConfig {
     K8s {
         namespace: String,
         template_name: String,
+        /// When present, sandboxes get a PVC mounted at `mount_path` using
+        /// `storage_class`. Without this, sandbox pods use ephemeral storage
+        /// and lose workspace state on restart. Per-sandbox disk size comes
+        /// from [`SandboxSpecs::disk_size`].
+        #[serde(default)]
+        storage_class: Option<String>,
+        #[serde(default)]
+        mount_path: Option<String>,
     },
 }
 

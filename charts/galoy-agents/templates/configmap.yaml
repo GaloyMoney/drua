@@ -120,4 +120,8 @@ data:
         provider: k8s
         namespace: {{ .Values.sandbox.namespace | quote }}
         template_name: {{ .Values.sandbox.templateName | quote }}
+        {{- with .Values.sandbox.persistence }}
+        storage_class: {{ .storageClassName | quote }}
+        mount_path: {{ .mountPath | quote }}
+        {{- end }}
     {{- end }}
