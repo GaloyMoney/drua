@@ -23,7 +23,7 @@ pub async fn run() -> Result<()> {
         }
         None => {
             return Err(anyhow!(
-                "token is no longer valid — run `caro login` to re-authenticate"
+                "token is no longer valid — run `drua login` to re-authenticate"
             ));
         }
     }

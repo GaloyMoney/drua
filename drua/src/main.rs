@@ -6,10 +6,10 @@ mod tui;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "caro", about = "Galoy Agents CLI")]
+#[command(name = "drua", about = "Galoy Agents CLI")]
 struct Cli {
     /// Server URL (can also be set during login)
-    #[arg(long, env = "CARO_SERVER_URL")]
+    #[arg(long, env = "DRUA_SERVER_URL")]
     server: Option<String>,
 
     #[command(subcommand)]

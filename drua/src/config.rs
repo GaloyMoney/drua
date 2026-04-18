@@ -12,7 +12,7 @@ pub struct Config {
 
 fn config_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".caro"))
+    Ok(home.join(".drua"))
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -23,7 +23,7 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path()?;
         let contents =
-            fs::read_to_string(&path).context("not logged in — run `caro login` first")?;
+            fs::read_to_string(&path).context("not logged in — run `drua login` first")?;
         let config: Config = serde_json::from_str(&contents).context("invalid config file")?;
         Ok(config)
     }

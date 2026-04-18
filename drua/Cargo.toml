@@ -1,10 +1,10 @@
 [package]
-name = "caro"
+name = "drua"
 version = "0.1.0"
 edition.workspace = true
 
 [[bin]]
-name = "caro"
+name = "drua"
 path = "src/main.rs"
 
 [dependencies]

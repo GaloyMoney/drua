@@ -74,7 +74,7 @@ pub async fn list() -> Result<()> {
     let resp: WorkspacesResponse = client.query(query, serde_json::json!({})).await?;
 
     if resp.workspaces.edges.is_empty() {
-        println!("No workspaces found. Create one with `caro workspace create <name>`.");
+        println!("No workspaces found. Create one with `drua workspace create <name>`.");
         return Ok(());
     }
 

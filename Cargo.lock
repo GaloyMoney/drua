@@ -617,21 +617,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "caro"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "dirs",
- "ratatui",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "cassowary"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1322,6 +1307,21 @@ checksum = "db96968fcf52fe063a98c75df1d1f2b1fba304e7ae29b72fdc81c1165b7e2fd0"
 dependencies = [
  "colored",
  "futures",
+]
+
+[[package]]
+name = "drua"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "dirs",
+ "ratatui",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
