@@ -97,3 +97,17 @@ mcp_call_no_auth() {
     -H "Accept: application/json, text/event-stream" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}"
 }
+
+graphql_query() {
+  local query="$1"
+  local token="${2:-}"
+
+  local -a headers=(-H "Content-Type: application/json")
+  if [ -n "$token" ]; then
+    headers+=(-H "Authorization: Bearer $token")
+  fi
+
+  curl -s -X POST http://localhost:4200/graphql \
+    "${headers[@]}" \
+    -d "{\"query\":\"$query\"}"
+}
