@@ -1,6 +1,5 @@
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 GALOY_AGENTS_BIN="${GALOY_AGENTS_BIN:-cargo run --bin galoy-agents --}"
-GALOY_AGENTS_RUN_CMD="$GALOY_AGENTS_BIN run"
 SERVER_PID_FILE="$BATS_FILE_TMPDIR/server.pid"
 PG_CON="${PG_CON:-postgres://user:password@localhost:5432/galoy_agents}"
 
@@ -28,7 +27,7 @@ start_server() {
   export GALOY_AGENTS_CONFIG="$REPO_ROOT/galoy-agents.yml"
   export CODE_ASSISTANT_DB_PATH=""  # disable code assistant in tests
 
-  $GALOY_AGENTS_RUN_CMD > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
+  $GALOY_AGENTS_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
 
   # Wait for server
