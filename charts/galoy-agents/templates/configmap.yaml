@@ -60,6 +60,9 @@ data:
           {{- if .authHeaderName }}
           auth_header_name: {{ .authHeaderName | quote }}
           {{- end }}
+          {{- if hasKey . "authRequired" }}
+          auth_required: {{ .authRequired }}
+          {{- end }}
           {{- if .category }}
           category: {{ .category | quote }}
           {{- end }}
@@ -85,6 +88,7 @@ data:
       {{- if and $k8sMcp $k8sMcp.enabled }}
         - name: "kubernetes"
           url: "http://{{ .Release.Name }}-kubernetes-mcp-server:{{ $k8sMcp.service.port }}/mcp"
+          auth_required: false
           tool_prefix: "k8s"
           category: "infrastructure"
           category_description: "Kubernetes cluster operations — pods, logs, events, deployments"

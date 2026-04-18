@@ -19,6 +19,7 @@ async fn init_toolsets() {
             url: "https://mcp.honeycomb.io/mcp".to_string(),
             auth_header,
             auth_header_name: "authorization".to_string(),
+            auth_required: true,
             category: Some("observability".to_string()),
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
             tool_prefix: None,
