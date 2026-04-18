@@ -6,6 +6,7 @@ use galoy_agents_core::primitives::{AuthSubject, ChatOutputEvent, UserId, Worksp
 use galoy_agents_core::sandbox::{SandboxConfig, Sandboxes};
 use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
+use llm::response::StopReason;
 use llm::{PromptRequest, PromptResponse, PromptResult, Usage};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use tokio::sync::mpsc;
@@ -245,7 +246,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 input_tokens: 7,
                 output_tokens: 4,
             },
-            stop_reason: None,
+            stop_reason: Some(StopReason::ToolUse),
         })))
         .expect("send first response");
 
