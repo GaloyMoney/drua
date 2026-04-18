@@ -3,7 +3,7 @@ fn main() {
 
     println!(
         "{}",
-        galoy_agents_web::graphql::schema()
+        galoy_agents_web::graphql::schema(None)
             .sdl_with_options(
                 SDLExportOptions::new()
                     .sorted_fields()

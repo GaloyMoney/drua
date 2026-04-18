@@ -6,8 +6,14 @@ type Mutation {
 }
 
 type Query {
+	"""
+	The ID of the currently authenticated user, if any.
+	"""
+	me: UUID
 	ping: String!
 }
+
+scalar UUID
 
 """
 Directs the executor to include this field or fragment only when the `if` argument is true.

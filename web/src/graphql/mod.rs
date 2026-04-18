@@ -1,54 +1,63 @@
+#[macro_use]
+pub(crate) mod macros;
 mod mutation;
+pub(crate) mod primitives;
 mod query;
 mod types;
 
 use async_graphql::{extensions, EmptySubscription, Schema};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::{
-    response::{Html, IntoResponse},
-    routing::{get, post},
-    Extension, Router,
-};
+use axum::{extract::State, routing::post, Extension, Router};
+
+use crate::AppState;
 
 pub use mutation::Mutation;
 pub use query::Query;
 
 pub type AgentsSchema = Schema<Query, Mutation, EmptySubscription>;
 
-/// Build the GraphQL schema with the tracing extension enabled.
+/// Build the GraphQL schema.
 ///
-/// Follows lana-bank's pattern: callers can later inject application
-/// data via `.data()` before calling `.finish()`, but this minimal
-/// version builds a self-contained schema suitable for the `ping`
-/// placeholder queries.
-pub fn schema() -> AgentsSchema {
-    Schema::build(Query, Mutation, EmptySubscription)
-        .extension(extensions::Tracing)
-        .finish()
+/// Follows lana-bank's pattern: `app` is optional so that the `write_sdl`
+/// binary can generate the SDL without a live database connection.
+pub fn schema(app: Option<domain::App>) -> AgentsSchema {
+    let mut builder =
+        Schema::build(Query, Mutation, EmptySubscription).extension(extensions::Tracing);
+
+    if let Some(app) = app {
+        builder = builder.data(app);
+    }
+
+    builder.finish()
 }
 
-/// Axum router for the GraphQL endpoint and playground.
-///
-/// **Not yet mounted** — call `.merge(graphql::router())` from the
-/// top-level router when ready to expose the API.
-pub fn router() -> Router {
-    let schema = schema();
+/// Axum router for the GraphQL endpoint.
+pub fn router() -> Router<AppState> {
+    let gql_schema = schema(None);
 
     Router::new()
         .route("/graphql", post(graphql_handler))
-        .route("/graphql/playground", get(graphql_playground))
-        .layer(Extension(schema))
+        .layer(Extension(gql_schema))
 }
 
 async fn graphql_handler(
+    State(state): State<AppState>,
     Extension(schema): Extension<AgentsSchema>,
+    auth: Option<Extension<domain::auth::AuthSubject>>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    schema.execute(req.into_inner()).await.into()
+    let mut request = req.into_inner();
+
+    // Inject App from shared state so resolvers can access domain services.
+    request = request.data(state.app.clone());
+
+    // Inject the per-request auth subject resolved by the auth middleware.
+    let auth_subject = auth
+        .map(|Extension(sub)| sub)
+        .unwrap_or(domain::auth::AuthSubject::Anonymous);
+    request = request.data(auth_subject);
+
+    schema.execute(request).await.into()
 }
 
-async fn graphql_playground() -> impl IntoResponse {
-    Html(async_graphql::http::playground_source(
-        async_graphql::http::GraphQLPlaygroundConfig::new("/graphql"),
-    ))
-}
+use galoy_agents_core as domain;

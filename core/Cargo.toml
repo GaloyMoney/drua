@@ -3,9 +3,13 @@ name = "galoy-agents-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+graphql = ["es-entity/graphql", "dep:async-graphql"]
+
 [lib]
 
 [dependencies]
+async-graphql = { version = "8.0.0-rc.4", optional = true, default-features = false }
 anthropic-client = { workspace = true }
 code-assistant-core = { workspace = true }
 anyhow = { workspace = true }
