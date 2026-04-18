@@ -229,6 +229,30 @@
               echo "GraphQL schema check passed" > $out/result.txt
             '';
           };
+
+          default-config = pkgs.stdenv.mkDerivation {
+            name = "default-config-check";
+            src = src;
+            nativeBuildInputs = [ pkgs.diffutils ];
+            buildInputs = [ galoy-agents ];
+            buildPhase = ''
+              echo "Generating default config..."
+              ${galoy-agents}/bin/galoy-agents dump-default-config > default-config-generated.yml
+
+              echo "Comparing with committed default config..."
+              if ! diff -u dev/galoy-agents.default.yml default-config-generated.yml; then
+                echo "ERROR: Default config is out of date!"
+                echo "Run 'make generate-default-config' to update the config"
+                exit 1
+              fi
+
+              echo "Default config is up to date"
+            '';
+            installPhase = ''
+              mkdir -p $out
+              echo "Default config check passed" > $out/result.txt
+            '';
+          };
         };
 
         packages.galoy-agents-unwrapped = galoy-agents;

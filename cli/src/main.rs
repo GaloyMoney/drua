@@ -1,13 +1,27 @@
 mod config;
 mod tracing_init;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use config::{Config, EnvSecrets};
 
 #[derive(Parser)]
 #[command(name = "galoy-agents", about = "Galoy Agents CLI")]
 struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate default configuration file (galoy-agents.yml) with all default values
+    DumpDefaultConfig,
+    /// Run the main server
+    Run(RunArgs),
+}
+
+#[derive(clap::Args)]
+struct RunArgs {
     /// Path to config file
     #[arg(long, env = "GALOY_AGENTS_CONFIG", default_value = "galoy-agents.yml")]
     config: String,
@@ -37,6 +51,18 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let args = match cli.command {
+        Commands::DumpDefaultConfig => {
+            let default_config = Config::default();
+            let yaml_output = serde_yaml::to_string(&default_config)?;
+            println!("{yaml_output}");
+            return Ok(());
+        }
+        Commands::Run(args) => args,
+    };
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install default CryptoProvider");
@@ -45,8 +71,7 @@ async fn main() -> anyhow::Result<()> {
         service_name: "galoy-agents".to_string(),
     })?;
 
-    let cli = Cli::parse();
-    let allowed_teams: Vec<String> = cli
+    let allowed_teams: Vec<String> = args
         .github_allowed_teams
         .split(',')
         .map(str::trim)
@@ -55,14 +80,14 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     let config = Config::try_new(
-        &cli.config,
+        &args.config,
         EnvSecrets {
-            pg_con: cli.pg_con,
-            github_client_secret: cli.github_client_secret,
+            pg_con: args.pg_con,
+            github_client_secret: args.github_client_secret,
             github_allowed_teams: allowed_teams,
-            anthropic_api_key: cli.anthropic_api_key,
+            anthropic_api_key: args.anthropic_api_key,
         },
-        &cli.config_overrides,
+        &args.config_overrides,
     )?;
 
     let pool = sqlx::PgPool::connect(&config.db.pg_con).await?;

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use galoy_agents_core::agent::AgentsConfig;
 use galoy_agents_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
@@ -9,7 +9,7 @@ use galoy_agents_core::sandbox::SandboxConfig;
 use galoy_agents_core::toolset::ToolSetsConfig;
 use galoy_agents_web::auth::config::{AuthConfig, LoginMethod};
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -61,7 +61,7 @@ impl Config {
 /// GitHub App config from the YAML config file.
 /// The `private_key_path` field is `#[serde(skip)]` because it's a secret
 /// loaded from an env var / K8s secret mount — never baked into the config file.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubAppCliConfig {
     #[serde(default)]
@@ -73,7 +73,7 @@ pub struct GitHubAppCliConfig {
     pub private_key_path: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
@@ -113,7 +113,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
     #[serde(default)]
@@ -128,7 +128,7 @@ pub struct OAuthConfig {
     pub github_allowed_teams: Vec<String>,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbConfig {
     #[serde(skip)]
