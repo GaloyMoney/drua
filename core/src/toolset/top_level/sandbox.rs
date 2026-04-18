@@ -46,6 +46,10 @@ static WS_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| 
                 "type": "string",
                 "description": "Repository URL to clone (required when mode is 'repo')."
             },
+            "branch": {
+                "type": "string",
+                "description": "Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'."
+            },
             "cpu": {
                 "type": "string",
                 "description": "CPU resource spec (e.g. '500m'). Defaults to '500m'."
@@ -142,6 +146,10 @@ static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(
             "repo_url": {
                 "type": "string",
                 "description": "Repository URL to clone (required when mode is 'repo')."
+            },
+            "branch": {
+                "type": "string",
+                "description": "Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'."
             },
             "cpu": {
                 "type": "string",
@@ -504,7 +512,11 @@ fn parse_sandbox_create_args(
                     ToolSetsError::MissingArgument("repo_url (required for mode=repo)".to_string())
                 })?
                 .to_string();
-            sandbox::SandboxMode::Repo { repo_url }
+            let branch = args
+                .and_then(|a| a.get("branch"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            sandbox::SandboxMode::Repo { repo_url, branch }
         }
         _ => sandbox::SandboxMode::Scratch,
     };

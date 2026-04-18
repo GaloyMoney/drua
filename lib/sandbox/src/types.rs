@@ -10,7 +10,13 @@ pub enum SandboxMode {
     Scratch,
     /// `/initialize` clones `repo_url` into `<workspace>/repos/<name>`
     /// and scans the result for CLAUDE.md / .claude/commands/*.md.
-    Repo { repo_url: String },
+    /// When `branch` is set, the clone checks out that branch instead
+    /// of the remote's default.
+    Repo {
+        repo_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
 }
 
 /// Per-sandbox resource specs supplied at create time.
