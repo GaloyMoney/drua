@@ -30,15 +30,21 @@ impl UpstreamToolSet {
     pub(in super::super) async fn init(
         upstream: &McpUpstreamConfig,
     ) -> Result<UpstreamToolSet, ToolSetsError> {
-        let mut headers = HashMap::new();
-        if !upstream.auth_header.is_empty() {
-            headers.insert(
-                HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
-                    .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
-                HeaderValue::from_str(&upstream.auth_header)
-                    .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
-            );
+        if upstream.auth_header.is_empty() {
+            let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
+            return Err(ToolSetsError::MissingAuthHeader {
+                name: upstream.name.clone(),
+                env_key,
+            });
         }
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
+                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
+            HeaderValue::from_str(&upstream.auth_header)
+                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
+        );
 
         let transport_config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str())
             .custom_headers(headers);
