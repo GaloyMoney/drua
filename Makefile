@@ -33,4 +33,7 @@ run-server: build-sandbox
 nix-run-server:
 	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) nix run .
 
+sdl-rust:
+	SQLX_OFFLINE=true cargo run --bin write_sdl > web/src/graphql/schema.graphql
+
 start: reset-deps run-server

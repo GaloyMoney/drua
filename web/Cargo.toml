@@ -5,6 +5,10 @@ edition.workspace = true
 
 [lib]
 
+[[bin]]
+name = "write_sdl"
+path = "src/bin/write_sdl.rs"
+
 [dependencies]
 galoy-agents-core = { path = "../core" }
 es-entity = { workspace = true }
@@ -32,6 +36,8 @@ tokio-stream = "0.1"
 tower-sessions = "0.15"
 opentelemetry = "0.31"
 opentelemetry-http = "0.31"
+async-graphql = { version = "7", features = ["tracing"] }
+async-graphql-axum = "7"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
 url = { workspace = true }
