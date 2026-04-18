@@ -1729,6 +1729,12 @@ async fn api_agent_message(
                 domain::primitives::ChatOutputEvent::AssistantText { .. } => "assistant_text",
                 domain::primitives::ChatOutputEvent::Thinking { .. } => "thinking",
                 domain::primitives::ChatOutputEvent::ToolCall { .. } => "tool_call",
+                domain::primitives::ChatOutputEvent::TextDelta { .. } => "text_delta",
+                domain::primitives::ChatOutputEvent::ThinkingDelta { .. } => "thinking_delta",
+                domain::primitives::ChatOutputEvent::ToolCallStart { .. } => "tool_call_start",
+                domain::primitives::ChatOutputEvent::ToolCallInputDelta { .. } => {
+                    "tool_call_input_delta"
+                }
                 domain::primitives::ChatOutputEvent::ToolResult { .. } => "tool_result",
                 domain::primitives::ChatOutputEvent::AssistantDone { .. } => "assistant_done",
                 domain::primitives::ChatOutputEvent::Error { .. } => "error",

@@ -399,7 +399,7 @@ impl Agents {
             let mut output_tokens: u32 = 0;
             loop {
                 turn += 1;
-                let response = match next {
+                let result = match next {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
                         let _ = tx
@@ -412,9 +412,20 @@ impl Agents {
                     Err(_) => return, // executor dropped the response channel
                 };
 
+                let (response, streamed) = match result {
+                    llm::PromptResult::Stream(handle) => {
+                        match consume_stream(handle, &tx).await {
+                            Some(resp) => (resp, true),
+                            None => return, // stream error — already sent to UI
+                        }
+                    }
+                    llm::PromptResult::Complete(response) => (response, false),
+                };
+
                 input_tokens += response.usage.input_tokens;
                 output_tokens += response.usage.output_tokens;
 
+                // Persist the complete response to the session.
                 let session_response = match sessions
                     .assistant_response_received(id, response.clone())
                     .await
@@ -429,7 +440,12 @@ impl Agents {
                         return;
                     }
                 };
-                forward_response(response, &tx).await;
+
+                // For the Complete path, forward full blocks to UI (streaming
+                // path already forwarded deltas during consumption).
+                if !streamed {
+                    forward_response(response, &tx).await;
+                }
 
                 let next_prompt = match session_response {
                     session::AgentSessionResponse::Done => break,
@@ -506,6 +522,58 @@ impl Agents {
         });
 
         Ok(rx)
+    }
+}
+
+/// Drain a streaming LLM response, forwarding deltas to the UI channel and
+/// accumulating the final [`llm::PromptResponse`]. Returns `None` if the
+/// stream errors — the error is already sent on `tx`.
+async fn consume_stream(
+    handle: llm::StreamHandle,
+    tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
+) -> Option<llm::PromptResponse> {
+    let mut acc = llm::stream::StreamAccumulator::new();
+    let mut rx = handle.rx;
+    while let Some(event) = rx.recv().await {
+        match event {
+            Ok(delta) => {
+                if let Some(chat_event) = delta_to_chat_event(&delta) {
+                    let _ = tx.send(chat_event).await;
+                }
+                acc.process(&delta);
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(ChatOutputEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
+                return None; // never persist partial
+            }
+        }
+    }
+    Some(acc.finish())
+}
+
+fn delta_to_chat_event(delta: &llm::stream::StreamDelta) -> Option<ChatOutputEvent> {
+    use llm::stream::{ContentBlockType, StreamDelta};
+    match delta {
+        StreamDelta::TextDelta { text, .. } => {
+            Some(ChatOutputEvent::TextDelta { text: text.clone() })
+        }
+        StreamDelta::ThinkingDelta { text, .. } => {
+            Some(ChatOutputEvent::ThinkingDelta { text: text.clone() })
+        }
+        StreamDelta::ContentBlockStart {
+            block_type: ContentBlockType::ToolUse { name, .. },
+            ..
+        } => Some(ChatOutputEvent::ToolCallStart { name: name.clone() }),
+        StreamDelta::InputJsonDelta { partial_json, .. } => {
+            Some(ChatOutputEvent::ToolCallInputDelta {
+                partial_json: partial_json.clone(),
+            })
+        }
+        _ => None,
     }
 }
 

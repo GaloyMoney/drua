@@ -93,6 +93,21 @@ function appendMsg(cls, text) {
   container.scrollTop = container.scrollHeight;
 }
 
+function appendOrStream(cls, text) {
+  const container = document.getElementById('messages');
+  const last = container.lastElementChild;
+  if (last && last.classList.contains(cls) && last.dataset.streaming === '1') {
+    last.textContent += text;
+  } else {
+    const el = document.createElement('div');
+    el.className = 'msg ' + cls;
+    el.dataset.streaming = '1';
+    el.textContent = text;
+    container.appendChild(el);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
 async function sendMessage() {
   const textarea = document.getElementById('prompt');
   const prompt = textarea.value.trim();
@@ -137,7 +152,15 @@ async function sendMessage() {
           if (!data) continue;
           try {
             const parsed = JSON.parse(data);
-            if (parsed.type === 'assistant_text') {
+            if (parsed.type === 'text_delta') {
+              appendOrStream('msg-assistant', parsed.text);
+            } else if (parsed.type === 'thinking_delta') {
+              appendOrStream('msg-system', parsed.text);
+            } else if (parsed.type === 'tool_call_start') {
+              appendMsg('msg-system', 'Calling tool: ' + parsed.name + '...');
+            } else if (parsed.type === 'tool_call_input_delta') {
+              // partial JSON — ignore in UI
+            } else if (parsed.type === 'assistant_text') {
               appendMsg('msg-assistant', parsed.text);
             } else if (parsed.type === 'thinking') {
               appendMsg('msg-system', '(thinking) ' + parsed.text);
@@ -148,7 +171,7 @@ async function sendMessage() {
               appendMsg('msg-system', 'tool: ' + parsed.name + args);
             } else if (parsed.type === 'tool_result') {
               appendMsg('msg-system', (parsed.is_error ? 'error: ' : 'ok: ') + parsed.name);
-            } else if (parsed.type === 'done') {
+            } else if (parsed.type === 'assistant_done' || parsed.type === 'done') {
               const tokens = (parsed.input_tokens || 0) + (parsed.output_tokens || 0);
               const parts = [(parsed.turns || 0) + ' turns', tokens + ' tokens'];
               if (parsed.duration_ms) parts.push((parsed.duration_ms / 1000).toFixed(1) + 's');

@@ -176,7 +176,7 @@ impl ExecutorState {
                 match model.client {
                     ProviderClient::Anthropic(client) => {
                         tokio::spawn(async move {
-                            evaluate_with_anthropic(
+                            evaluate_with_anthropic_streaming(
                                 client,
                                 request.prompt,
                                 request.response_channel,
@@ -190,16 +190,50 @@ impl ExecutorState {
     }
 }
 
-async fn evaluate_with_anthropic(
+#[instrument(name = "domain.prompt_executor.evaluate_streaming", skip_all)]
+async fn evaluate_with_anthropic_streaming(
     client: AnthropicClient,
     prompt: Prompt,
     response: PromptResponseChannel,
 ) {
-    let outcome = client
-        .send_prompt(&prompt)
-        .await
-        .map_err(|e| PromptError::Provider(e.to_string()));
-    let _ = response.send(outcome);
+    let (delta_tx, delta_rx) = mpsc::channel(128);
+
+    // Send StreamHandle immediately so agent loop can start consuming.
+    if response
+        .send(Ok(llm::PromptResult::Stream(llm::StreamHandle {
+            rx: delta_rx,
+        })))
+        .is_err()
+    {
+        return; // caller dropped
+    }
+
+    // The anthropic client already converts SSE → StreamDelta internally,
+    // so we just pipe deltas through to the agent loop.
+    match client.send_prompt_streaming(&prompt).await {
+        Ok(mut delta_rx) => {
+            while let Some(result) = delta_rx.recv().await {
+                match result {
+                    Ok(delta) => {
+                        if delta_tx.send(Ok(delta)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = delta_tx
+                            .send(Err(PromptError::Provider(e.to_string())))
+                            .await;
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let _ = delta_tx
+                .send(Err(PromptError::Provider(e.to_string())))
+                .await;
+        }
+    }
 }
 
 #[derive(Clone)]

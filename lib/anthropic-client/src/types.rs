@@ -133,7 +133,7 @@ pub(crate) struct AnthropicSystemBlock {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum AnthropicStreamEvent {
+pub enum AnthropicStreamEvent {
     MessageStart {
         message: AnthropicMessageStart,
     },
@@ -162,7 +162,7 @@ pub(crate) enum AnthropicStreamEvent {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicMessageStart {
+pub struct AnthropicMessageStart {
     #[serde(default)]
     pub usage: Option<AnthropicUsage>,
 }
@@ -171,7 +171,7 @@ pub(crate) struct AnthropicMessageStart {
 /// Field names match the API response format.
 #[derive(Debug, Deserialize)]
 #[allow(clippy::struct_field_names)]
-pub(crate) struct AnthropicUsage {
+pub struct AnthropicUsage {
     #[serde(rename = "input_tokens")]
     pub input: u64,
     #[serde(default, rename = "cache_read_input_tokens")]
@@ -181,7 +181,7 @@ pub(crate) struct AnthropicUsage {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicDeltaUsage {
+pub struct AnthropicDeltaUsage {
     pub output_tokens: u64,
 }
 
@@ -190,7 +190,7 @@ pub(crate) struct AnthropicDeltaUsage {
 /// Using a tagged enum avoids allocating a `String` for the type field.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum AnthropicContentBlock {
+pub enum AnthropicContentBlock {
     Text,
     Thinking,
     ToolUse {
@@ -209,7 +209,7 @@ pub(crate) enum AnthropicContentBlock {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::enum_variant_names)]
-pub(crate) enum AnthropicDelta {
+pub enum AnthropicDelta {
     TextDelta {
         #[serde(default)]
         text: Option<String>,
@@ -233,7 +233,7 @@ pub(crate) enum AnthropicDelta {
 /// Using an enum avoids allocating a `String` for the stop reason.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AnthropicStopReason {
+pub enum AnthropicStopReason {
     EndTurn,
     MaxTokens,
     ToolUse,
@@ -241,12 +241,12 @@ pub(crate) enum AnthropicStopReason {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicMessageDelta {
+pub struct AnthropicMessageDelta {
     #[serde(default)]
     pub stop_reason: Option<AnthropicStopReason>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicErrorBody {
+pub struct AnthropicErrorBody {
     pub message: String,
 }
