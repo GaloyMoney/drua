@@ -50,7 +50,7 @@ pkgs.dockerTools.buildLayeredImage {
     group
     pkgs.bashInteractive
     pkgs.coreutils
-    pkgs.git
+    pkgs.gitMinimal
     pkgs.curl
     pkgs.cacert
     pkgs.findutils
