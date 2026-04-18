@@ -4,6 +4,49 @@ use rmcp::model::JsonObject;
 
 use super::error::ToolSetsError;
 
+/// Serde helpers for liberal deserialization of MCP tool arguments.
+///
+/// Agents sometimes send values in unexpected representations — e.g.
+/// `"20"` instead of `20` for an integer field. These helpers accept
+/// both native JSON types and their stringified equivalents.
+mod liberal {
+    use serde::Deserialize;
+
+    /// Deserialize an `i64` from either a JSON number or a string like `"20"`.
+    pub(crate) fn deserialize_i64<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<i64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrInt {
+            Int(i64),
+            Str(String),
+        }
+        match StringOrInt::deserialize(deserializer)? {
+            StringOrInt::Int(v) => Ok(v),
+            StringOrInt::Str(s) => s.parse().map_err(serde::de::Error::custom),
+        }
+    }
+
+    /// Deserialize an `Option<i64>` from a JSON number, string, or null.
+    pub(crate) fn deserialize_option_i64<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<i64>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrInt {
+            Int(i64),
+            Str(String),
+        }
+        let opt: Option<StringOrInt> = Option::deserialize(deserializer)?;
+        match opt {
+            None => Ok(None),
+            Some(StringOrInt::Int(v)) => Ok(Some(v)),
+            Some(StringOrInt::Str(s)) => s.parse().map(Some).map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// Deserialize tool arguments into a typed params struct.
 ///
 /// Converts the raw `Option<JsonObject>` from [`TopLevelTool::call`] into `T`.

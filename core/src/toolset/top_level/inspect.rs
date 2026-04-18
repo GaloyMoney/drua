@@ -243,8 +243,12 @@ fn build_read_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError
         "path": path,
     });
 
-    let offset = args.get("offset").and_then(|v| v.as_i64());
-    let limit = args.get("limit").and_then(|v| v.as_i64());
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
 
     if offset.is_some() || limit.is_some() {
         let start = offset.unwrap_or(0) + 1; // 0-based → 1-based

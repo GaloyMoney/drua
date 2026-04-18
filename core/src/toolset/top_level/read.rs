@@ -27,8 +27,10 @@ struct ReadParams {
     /// Absolute path to the file inside the sandbox workspace.
     path: String,
     /// Line offset to start reading from (0-based). Optional.
+    #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
     offset: Option<i64>,
     /// Maximum number of lines to read. Optional.
+    #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
     limit: Option<i64>,
 }
 

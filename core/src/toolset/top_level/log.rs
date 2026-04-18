@@ -40,7 +40,10 @@ struct AuditLogParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
     /// Max entries to return (1-100, default 20).
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "super::liberal::deserialize_i64"
+    )]
     limit: i64,
 }
 
