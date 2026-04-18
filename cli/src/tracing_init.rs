@@ -130,6 +130,18 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn flush_tracer() {
+    let handle = {
+        let guard = TRACER_HANDLE.lock().expect("Failed to lock tracer handle");
+        guard.clone()
+    };
+    if let Some(handle) = handle {
+        if let Err(e) = handle.provider.force_flush() {
+            eprintln!("Failed to flush tracer: {e}");
+        }
+    }
+}
+
 pub fn shutdown_tracer() -> Result<(), TracingError> {
     let handle = {
         let guard = TRACER_HANDLE.lock().expect("Failed to lock tracer handle");
