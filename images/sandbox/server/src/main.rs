@@ -157,9 +157,10 @@ async fn execute_bash_bwrap(
             .args(["--dev", "/dev"])
             // Isolation flags
             .args(["--unshare-pid", "--die-with-parent", "--new-session"])
-            // UID drop
-            .uid(1000)
-            .gid(1000)
+            // UID drop — use bwrap flags (not process-level .uid()/.gid())
+            // so that a missing bwrap binary gives "No such file" rather
+            // than a pre-exec setuid failure masking the real issue.
+            .args(["--uid", "1000", "--gid", "1000"])
             // Environment
             .env("HOME", workspace)
             .env("USER", "agent")
@@ -194,8 +195,9 @@ async fn execute_bash_bwrap(
 ///
 /// In fake-root environments (e.g. Nix build sandbox user namespaces), the
 /// process appears as UID 0 but cannot actually setuid. When that happens
-/// the spawn fails with "Operation not permitted" — we catch this and retry
-/// without the UID drop.
+/// the spawn fails with EPERM ("Operation not permitted") or EINVAL
+/// ("Invalid argument" — UID not mapped). We catch both and retry without
+/// the UID drop.
 #[cfg(unix)]
 async fn execute_bash_uid_only(
     command: &str,
@@ -205,7 +207,7 @@ async fn execute_bash_uid_only(
     if is_root() {
         match execute_bash_as_uid(command, workspace, workspace_tmp, Some((1000, 1000))).await {
             Ok(result) => return Ok(result),
-            Err(e) if e.contains("Operation not permitted") => {
+            Err(e) if is_uid_drop_error(&e) => {
                 tracing::warn!("UID drop failed (fake-root?), falling back to plain bash: {e}");
             }
             Err(e) => return Err(e),
@@ -213,6 +215,14 @@ async fn execute_bash_uid_only(
     }
 
     execute_bash_as_uid(command, workspace, workspace_tmp, None).await
+}
+
+/// Detect errors from a failed setuid/setgid in a restricted namespace.
+///
+/// EPERM  → "Operation not permitted" (no CAP_SETUID)
+/// EINVAL → "Invalid argument" (UID not mapped in user namespace)
+fn is_uid_drop_error(err: &str) -> bool {
+    err.contains("Operation not permitted") || err.contains("Invalid argument")
 }
 
 /// Inner helper: run bash with optional UID/GID override.
