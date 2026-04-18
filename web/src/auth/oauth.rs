@@ -20,21 +20,21 @@ pub struct CallbackParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct GitHubUser {
-    pub(crate) id: u64,
-    pub(crate) email: Option<String>,
-    pub(crate) name: Option<String>,
+struct GitHubUser {
+    id: u64,
+    email: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct GitHubTeam {
-    pub(crate) slug: String,
-    pub(crate) organization: GitHubOrganization,
+struct GitHubTeam {
+    slug: String,
+    organization: GitHubOrganization,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct GitHubOrganization {
-    pub(crate) login: String,
+struct GitHubOrganization {
+    login: String,
 }
 
 #[instrument(name = "web.auth.github_redirect", skip_all)]
@@ -124,7 +124,7 @@ pub async fn github_callback(
     Ok((jar.add(remove_cookie), Redirect::temporary("/")))
 }
 
-pub(crate) async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Error> {
+async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Error> {
     reqwest::Client::new()
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -137,9 +137,7 @@ pub(crate) async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, 
         .await
 }
 
-pub(crate) async fn fetch_github_teams(
-    access_token: &str,
-) -> Result<Vec<GitHubTeam>, reqwest::Error> {
+async fn fetch_github_teams(access_token: &str) -> Result<Vec<GitHubTeam>, reqwest::Error> {
     reqwest::Client::new()
         .get("https://api.github.com/user/teams")
         .header("Authorization", format!("Bearer {access_token}"))

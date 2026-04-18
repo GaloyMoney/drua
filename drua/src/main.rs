@@ -8,13 +8,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "drua", about = "Galoy Agents CLI")]
 struct Cli {
-    /// Server URL (can also be set during login)
+    /// Server URL (default: http://localhost:4200)
     #[arg(long, env = "DRUA_SERVER_URL")]
     server: Option<String>,
-
-    /// GitHub OAuth App client ID (public, not a secret)
-    #[arg(long, env = "DRUA_GITHUB_CLIENT_ID")]
-    github_client_id: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -61,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Login => commands::login::run(cli.server, cli.github_client_id).await,
+        Command::Login => commands::login::run(cli.server).await,
         Command::Status => commands::status::run().await,
         Command::Logout => commands::logout::run(),
         Command::Dashboard => commands::dashboard::run().await,
