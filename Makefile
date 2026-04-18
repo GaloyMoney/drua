@@ -36,6 +36,9 @@ nix-run-server:
 sdl-rust:
 	SQLX_OFFLINE=true cargo run --bin write_sdl > web/src/graphql/schema.graphql
 
+generate-default-config:
+	SQLX_OFFLINE=true cargo run -q -p galoy-agents-cli -- dump-default-config > dev/galoy-agents.default.yml
+
 integration-tests: reset-deps
 	DATABASE_URL=$(PG_CON) cargo nextest run
 

@@ -1,8 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::primitives::AuthScope;
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ToolSetsConfig {
     #[serde(default)]
     pub mcp_upstreams: Vec<McpUpstreamConfig>,
@@ -12,13 +12,13 @@ pub struct ToolSetsConfig {
     pub code_assistant: CodeAssistantToolSetConfig,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CodeAssistantToolSetConfig {
     #[serde(default)]
     pub db_path: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpUpstreamConfig {
     pub name: String,
     pub url: String,
@@ -45,7 +45,7 @@ fn default_auth_header_name() -> String {
     "authorization".to_string()
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConcourseToolSetConfig {
     #[serde(default)]
     pub enabled: bool,

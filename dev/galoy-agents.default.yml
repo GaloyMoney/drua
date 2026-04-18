@@ -1,0 +1,28 @@
+server:
+  port: 4200
+  host: 0.0.0.0
+  secure_cookies: true
+  mcp_endpoint: http://localhost:4200/mcp
+oauth:
+  login: github
+  github_redirect_uri: ''
+  github_client_id: ''
+  github_allowed_teams: []
+db: {}
+agents:
+  builtin_roles: {}
+toolsets:
+  mcp_upstreams: []
+  concourse:
+    enabled: false
+    url: ''
+    team: ''
+  code_assistant:
+    db_path: ''
+sandbox:
+  backend:
+    provider: local
+    sandbox_spawn_cmd: cargo run -q -p sandbox-tool-server --
+  local_repo_root: ''
+github_app: null
+

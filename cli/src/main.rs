@@ -1,7 +1,7 @@
 mod config;
 mod tracing_init;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use config::{Config, EnvSecrets};
 
@@ -13,7 +13,7 @@ struct Cli {
     config: String,
 
     /// PostgreSQL connection URL
-    #[arg(long, env = "PG_CON")]
+    #[arg(long, env = "PG_CON", default_value = "")]
     pg_con: String,
 
     /// GitHub OAuth client secret
@@ -33,10 +33,33 @@ struct Cli {
     /// Example: --set oauth.login=dev
     #[clap(long = "set", value_name = "KEY=VALUE")]
     config_overrides: Vec<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate default configuration file (galoy-agents.yml) with all default values
+    DumpDefaultConfig,
+    /// Run the main server (default when no subcommand is specified)
+    Run,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command.unwrap_or(Commands::Run) {
+        Commands::DumpDefaultConfig => {
+            let default_config = Config::default();
+            let yaml_output = serde_yaml::to_string(&default_config)?;
+            println!("{yaml_output}");
+            return Ok(());
+        }
+        Commands::Run => {}
+    }
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install default CryptoProvider");
@@ -45,7 +68,6 @@ async fn main() -> anyhow::Result<()> {
         service_name: "galoy-agents".to_string(),
     })?;
 
-    let cli = Cli::parse();
     let allowed_teams: Vec<String> = cli
         .github_allowed_teams
         .split(',')
