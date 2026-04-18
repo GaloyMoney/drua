@@ -191,6 +191,7 @@ pub struct SandboxView {
     pub last_error: Option<String>,
     pub mode_label: String,
     pub repo_url: Option<String>,
+    pub branch: Option<String>,
     pub cpu: String,
     pub memory: String,
     pub disk_size: String,
