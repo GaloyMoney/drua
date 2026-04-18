@@ -200,7 +200,7 @@
 
           nextest = craneLib.cargoNextest (commonArgs // {
             inherit cargoArtifacts;
-            cargoNextestExtraArgs = "--lib --no-tests=pass";
+            cargoNextestExtraArgs = "--lib";
           });
 
           graphql-schema = pkgs.stdenv.mkDerivation {
