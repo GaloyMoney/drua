@@ -147,7 +147,11 @@ async fn execute_bash_bwrap(
             ])
             .args(["--ro-bind", "/nix/var/nix/db", "/nix/var/nix/db"])
             .args(["--ro-bind", "/nix/var/nix/gcroots", "/nix/var/nix/gcroots"])
-            .args(["--ro-bind", "/nix/var/nix/profiles", "/nix/var/nix/profiles"])
+            .args([
+                "--ro-bind",
+                "/nix/var/nix/profiles",
+                "/nix/var/nix/profiles",
+            ])
             // Special filesystems
             .args(["--proc", "/proc"])
             .args(["--dev", "/dev"])
@@ -264,8 +268,8 @@ fn format_bash_output(output: &std::process::Output) -> Result<String, String> {
 
 fn validate_path(path: &str) -> Result<PathBuf, String> {
     let workspace = PathBuf::from(workspace_root());
-    let workspace_canonical = std::fs::canonicalize(&workspace)
-        .map_err(|e| format!("Cannot resolve workspace: {e}"))?;
+    let workspace_canonical =
+        std::fs::canonicalize(&workspace).map_err(|e| format!("Cannot resolve workspace: {e}"))?;
 
     let canonical = match std::fs::canonicalize(path) {
         Ok(p) => p,
