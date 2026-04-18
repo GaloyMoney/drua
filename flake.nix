@@ -168,7 +168,7 @@
           cargo-nextest nextest run \
             --archive-file ${integration-test-archive}/test-archive.tar.zst \
             --workspace-remap "$REPO_ROOT" \
-            --test-threads 1 --leak-timeout 5s
+            --test-threads 1
         '';
 
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
