@@ -2,14 +2,14 @@
 /// [`Context`].
 ///
 /// Instead of:
-/// ```rust
+/// ```ignore
 /// async fn workspaces(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Workspace>> {
 ///     let app = ctx.data_unchecked::<App>();
 ///     let sub: &AuthSubject = ctx.data()?;
 /// ```
 ///
 /// Use:
-/// ```rust
+/// ```ignore
 /// async fn workspaces(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Workspace>> {
 ///     let (app, sub) = app_and_sub_from_ctx!(ctx);
 /// ```
@@ -25,12 +25,12 @@ macro_rules! app_and_sub_from_ctx {
 /// Standard mutation payload: a single-field struct wrapping the returned
 /// GraphQL entity plus a `From` impl for ergonomic conversion.
 ///
-/// ```rust
+/// ```ignore
 /// mutation_payload! { WorkspaceCreatePayload, workspace: Workspace }
 /// ```
 ///
 /// Expands to:
-/// ```rust
+/// ```ignore
 /// #[derive(SimpleObject)]
 /// pub struct WorkspaceCreatePayload {
 ///     workspace: Workspace,
