@@ -1,11 +1,14 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -30,6 +33,25 @@ struct InitializeRequest {
     repo_url: Option<String>,
     #[serde(default)]
     github_token: Option<String>,
+    /// Shell command to start long-running background services after
+    /// initialization (e.g. `nix run .#nix-deps -- up -D -n default`).
+    /// Runs outside bwrap so child processes survive across `/execute` calls.
+    #[serde(default)]
+    nix_deps_cmd: Option<String>,
+}
+
+/// A background service process and the info needed to shut it down.
+struct BgProcess {
+    child: tokio::process::Child,
+    /// Working directory where the process was spawned (for running `down`).
+    cwd: PathBuf,
+}
+
+/// Shared server state — tracks background service processes spawned by
+/// `/initialize` so they can be cleaned up on shutdown.
+#[derive(Clone, Default)]
+struct AppState {
+    bg_processes: Arc<Mutex<Vec<BgProcess>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -667,7 +689,10 @@ fn github_token_path() -> String {
     std::env::var("GITHUB_TOKEN_PATH").unwrap_or_else(|_| DEFAULT_GITHUB_TOKEN_PATH.to_string())
 }
 
-async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeResponse> {
+async fn initialize(
+    State(state): State<AppState>,
+    Json(req): Json<InitializeRequest>,
+) -> Json<InitializeResponse> {
     if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
         if let Err(e) = write_github_token(&github_token_path(), token).await {
             return Json(InitializeResponse {
@@ -679,7 +704,21 @@ async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeRespon
         }
     }
 
-    initialize_inner(&workspace_root(), &req.mode, req.repo_url.as_deref()).await
+    let resp = initialize_inner(&workspace_root(), &req.mode, req.repo_url.as_deref()).await;
+
+    // Start background services if nix_deps_cmd is set and init succeeded.
+    if resp.error.is_none() {
+        if let Some(cmd) = req.nix_deps_cmd.as_deref().filter(|c| !c.is_empty()) {
+            if let Err(e) = start_nix_deps(cmd, &resp.cwd, &state).await {
+                return Json(InitializeResponse {
+                    error: Some(format!("nix_deps_cmd failed: {e}")),
+                    ..resp.0
+                });
+            }
+        }
+    }
+
+    resp
 }
 
 async fn initialize_inner(
@@ -704,6 +743,36 @@ async fn initialize_inner(
             error: Some(msg),
         }),
     }
+}
+
+/// Spawn a background service manager (e.g. process-compose) outside bwrap.
+///
+/// The process runs as a direct child of sandbox-tool-server. It is NOT
+/// wrapped in bwrap, so child daemons (postgres, etc.) persist across
+/// `/execute` calls. Since bwrap doesn't isolate the network, those services
+/// are reachable at localhost from inside bwrap.
+async fn start_nix_deps(cmd: &str, cwd: &str, state: &AppState) -> Result<(), String> {
+    tracing::info!(cmd, cwd, "Starting background services via nix_deps_cmd");
+
+    let child = Command::new("bash")
+        .args(["-c", cmd])
+        .current_dir(cwd)
+        .env("HOME", cwd)
+        .env("NIX_REMOTE", "daemon")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn nix_deps_cmd: {e}"))?;
+
+    let mut procs = state.bg_processes.lock().await;
+    procs.push(BgProcess {
+        child,
+        cwd: PathBuf::from(cwd),
+    });
+
+    tracing::info!("nix_deps_cmd spawned");
+    Ok(())
 }
 
 /// Write the GitHub token to `path` with mode 0600. Creates parent dirs as needed.
@@ -946,10 +1015,13 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let state = AppState::default();
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/execute", post(execute))
-        .route("/initialize", post(initialize));
+        .route("/initialize", post(initialize))
+        .with_state(state.clone());
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -962,7 +1034,40 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state))
+        .await
+        .expect("server error");
+}
+
+/// Wait for SIGTERM/SIGINT then shut down all background processes.
+///
+/// For process-compose style daemons (started with `-D`), killing the
+/// spawning shell doesn't stop the daemonized children. We run
+/// `process-compose down` in the workspace to cleanly stop them, then
+/// kill the original child as a fallback.
+async fn shutdown_signal(state: AppState) {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("Shutting down — stopping background processes");
+    let mut procs = state.bg_processes.lock().await;
+    for bg in procs.iter_mut() {
+        // Try process-compose down first (works for detached mode).
+        let down_result = Command::new("process-compose")
+            .arg("down")
+            .current_dir(&bg.cwd)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await;
+        match down_result {
+            Ok(out) if out.status.success() => {
+                tracing::info!(cwd = %bg.cwd.display(), "process-compose down succeeded");
+            }
+            _ => {
+                tracing::warn!(cwd = %bg.cwd.display(), "process-compose down failed, killing child");
+                let _ = bg.child.kill().await;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
