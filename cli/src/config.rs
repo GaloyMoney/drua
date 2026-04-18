@@ -216,11 +216,7 @@ impl Config {
     }
 }
 
-fn apply_yaml_override(
-    root: &mut serde_yaml::Value,
-    key: &str,
-    value: &str,
-) -> anyhow::Result<()> {
+fn apply_yaml_override(root: &mut serde_yaml::Value, key: &str, value: &str) -> anyhow::Result<()> {
     let parts: Vec<&str> = key.split('.').collect();
     let mut current = root;
 
