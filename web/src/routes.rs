@@ -1028,9 +1028,11 @@ async fn workspace_skill_delete(
 // ---------------------------------------------------------------------------
 
 fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
-    let (mode_label, repo_url) = match &s.mode {
-        SandboxMode::Scratch => ("Scratch".to_string(), None),
-        SandboxMode::Repo { repo_url, .. } => ("Repo".to_string(), Some(repo_url.clone())),
+    let (mode_label, repo_url, branch) = match &s.mode {
+        SandboxMode::Scratch => ("Scratch".to_string(), None, None),
+        SandboxMode::Repo { repo_url, branch } => {
+            ("Repo".to_string(), Some(repo_url.clone()), branch.clone())
+        }
     };
 
     let exported_system_prompt = s.exported_system_prompt.as_ref().map(|f| ExportedFileView {
@@ -1063,6 +1065,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         last_error: s.last_error.clone(),
         mode_label,
         repo_url,
+        branch,
         cpu: s.specs.cpu.clone(),
         memory: s.specs.memory.clone(),
         disk_size: s.specs.disk_size.clone(),

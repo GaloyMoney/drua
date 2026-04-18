@@ -170,6 +170,11 @@
       {% match sandbox.repo_url %}
         {% when Some with (url) %}
           <br><small><code>{{ url }}</code></small>
+          {% match sandbox.branch %}
+            {% when Some with (b) %}
+              <br><small>branch: <code>{{ b }}</code></small>
+            {% when None %}
+          {% endmatch %}
         {% when None %}
       {% endmatch %}
     </dd>
