@@ -7,6 +7,7 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 use crate::primitives::{SandboxId, WorkspaceId};
@@ -14,6 +15,81 @@ use crate::sandbox::{Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::parse_params;
+
+// ---------------------------------------------------------------------------
+// Params structs
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreateSandboxParams {
+    name: String,
+    mode: String,
+    repo_url: Option<String>,
+    branch: Option<String>,
+    #[serde(default = "default_cpu")]
+    cpu: String,
+    #[serde(default = "default_memory")]
+    memory: String,
+    #[serde(default = "default_disk_size")]
+    disk_size: String,
+}
+
+impl CreateSandboxParams {
+    fn into_sandbox_args(
+        self,
+    ) -> Result<(String, sandbox::SandboxSpecs, sandbox::SandboxMode), ToolSetsError> {
+        let mode = match self.mode.as_str() {
+            "repo" => {
+                let repo_url = self.repo_url.ok_or_else(|| {
+                    ToolSetsError::InvalidArgument(
+                        "repo_url is required when mode is 'repo'".to_string(),
+                    )
+                })?;
+                sandbox::SandboxMode::Repo {
+                    repo_url,
+                    branch: self.branch,
+                }
+            }
+            _ => sandbox::SandboxMode::Scratch,
+        };
+
+        let specs = sandbox::SandboxSpecs {
+            cpu: self.cpu,
+            memory: self.memory,
+            disk_size: self.disk_size,
+        };
+
+        Ok((self.name, specs, mode))
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminCreateSandboxParams {
+    workspace_id: WorkspaceId,
+    #[serde(flatten)]
+    inner: CreateSandboxParams,
+}
+
+#[derive(Deserialize)]
+struct AdminListSandboxesParams {
+    workspace_id: WorkspaceId,
+}
+
+#[derive(Deserialize)]
+struct GetSandboxParams {
+    sandbox_id: SandboxId,
+}
+
+fn default_cpu() -> String {
+    "500m".to_string()
+}
+fn default_memory() -> String {
+    "512Mi".to_string()
+}
+fn default_disk_size() -> String {
+    "10Gi".to_string()
+}
 
 // ---------------------------------------------------------------------------
 // workspace_create_sandbox
@@ -96,8 +172,8 @@ impl TopLevelTool for WorkspaceCreateSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let (name, specs, mode) = parse_sandbox_create_args(args)?;
+        let params: CreateSandboxParams = parse_params(arguments)?;
+        let (name, specs, mode) = params.into_sandbox_args()?;
 
         let sandbox = self
             .sandboxes
@@ -196,13 +272,12 @@ impl TopLevelTool for AdminCreateSandbox {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let workspace_id: WorkspaceId = require_uuid_field(args, "workspace_id")?.into();
-        let (name, specs, mode) = parse_sandbox_create_args(args)?;
+        let params: AdminCreateSandboxParams = parse_params(arguments)?;
+        let (name, specs, mode) = params.inner.into_sandbox_args()?;
 
         let sandbox = self
             .sandboxes
-            .create(workspace_id, name, specs, mode)
+            .create(params.workspace_id, name, specs, mode)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -331,12 +406,11 @@ impl TopLevelTool for AdminListSandboxes {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let workspace_id: WorkspaceId = require_uuid_field(args, "workspace_id")?.into();
+        let params: AdminListSandboxesParams = parse_params(arguments)?;
 
         let sandboxes = self
             .sandboxes
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -403,12 +477,11 @@ impl TopLevelTool for WorkspaceGetSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: GetSandboxParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -463,12 +536,11 @@ impl TopLevelTool for AdminGetSandbox {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: GetSandboxParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -481,70 +553,6 @@ impl TopLevelTool for AdminGetSandbox {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-fn parse_sandbox_create_args(
-    args: Option<&JsonObject>,
-) -> Result<(String, sandbox::SandboxSpecs, sandbox::SandboxMode), ToolSetsError> {
-    let name = args
-        .and_then(|a| a.get("name"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?
-        .to_string();
-
-    let mode_str = args
-        .and_then(|a| a.get("mode"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolSetsError::MissingArgument("mode".to_string()))?;
-
-    let mode = match mode_str {
-        "repo" => {
-            let repo_url = args
-                .and_then(|a| a.get("repo_url"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ToolSetsError::MissingArgument("repo_url (required for mode=repo)".to_string())
-                })?
-                .to_string();
-            let branch = args
-                .and_then(|a| a.get("branch"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            sandbox::SandboxMode::Repo { repo_url, branch }
-        }
-        _ => sandbox::SandboxMode::Scratch,
-    };
-
-    let cpu = args
-        .and_then(|a| a.get("cpu"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("500m")
-        .to_string();
-    let memory = args
-        .and_then(|a| a.get("memory"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("512Mi")
-        .to_string();
-    let disk_size = args
-        .and_then(|a| a.get("disk_size"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("10Gi")
-        .to_string();
-
-    let specs = sandbox::SandboxSpecs {
-        cpu,
-        memory,
-        disk_size,
-    };
-
-    Ok((name, specs, mode))
-}
 
 fn format_sandbox(s: &Sandbox) -> String {
     let agents: Vec<String> = s

@@ -7,6 +7,7 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::auth::AuthSubject;
@@ -15,6 +16,45 @@ use crate::sandbox::{SandboxAgentMode, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::parse_params;
+
+// ---------------------------------------------------------------------------
+// Params structs
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AgentCreateParams {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct AdminAgentCreateParams {
+    workspace_id: WorkspaceId,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct AttachSandboxParams {
+    agent_id: AgentId,
+    sandbox_id: SandboxId,
+    #[serde(default = "default_mode")]
+    mode: SandboxAgentMode,
+}
+
+#[derive(Deserialize)]
+struct DetachSandboxParams {
+    agent_id: AgentId,
+    sandbox_id: SandboxId,
+}
+
+#[derive(Deserialize)]
+struct AdminListAgentsParams {
+    workspace_id: WorkspaceId,
+}
+
+fn default_mode() -> SandboxAgentMode {
+    SandboxAgentMode::Read
+}
 
 // ---------------------------------------------------------------------------
 // workspace_create_agent
@@ -72,16 +112,11 @@ impl TopLevelTool for WorkspaceAgentCreate {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-
-        let name = args
-            .and_then(|a| a.get("name"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?;
+        let params: AgentCreateParams = parse_params(arguments)?;
 
         let agent = self
             .agents
-            .create(workspace_id, AgentRole::Agent, name, None)
+            .create(workspace_id, AgentRole::Agent, &params.name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -151,16 +186,11 @@ impl TopLevelTool for AdminAgentCreate {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let workspace_id: WorkspaceId = require_uuid_field(args, "workspace_id")?.into();
-        let name = args
-            .and_then(|a| a.get("name"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?;
+        let params: AdminAgentCreateParams = parse_params(arguments)?;
 
         let agent = self
             .agents
-            .create(workspace_id, AgentRole::Agent, name, None)
+            .create(params.workspace_id, AgentRole::Agent, &params.name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -238,14 +268,11 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
-        let mode = parse_sandbox_mode(args);
+        let params: AttachSandboxParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
         if sandbox.workspace_id != workspace_id {
@@ -254,7 +281,7 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
 
         let agent = self
             .agents
-            .attach_sandbox(subject, agent_id, sandbox_id, mode)
+            .attach_sandbox(subject, params.agent_id, params.sandbox_id, params.mode)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -330,21 +357,11 @@ impl TopLevelTool for AdminAgentAttachSandbox {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
-        let mode = args
-            .and_then(|a| a.get("mode"))
-            .and_then(|v| v.as_str())
-            .map(|s| match s {
-                "write" => SandboxAgentMode::Write,
-                _ => SandboxAgentMode::Read,
-            })
-            .unwrap_or(SandboxAgentMode::Read);
+        let params: AttachSandboxParams = parse_params(arguments)?;
 
         let agent = self
             .agents
-            .attach_sandbox(subject, agent_id, sandbox_id, mode)
+            .attach_sandbox(subject, params.agent_id, params.sandbox_id, params.mode)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -417,13 +434,11 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: DetachSandboxParams = parse_params(arguments)?;
 
         let existing = self
             .agents
-            .find_by_id(agent_id)
+            .find_by_id(params.agent_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
         if existing.workspace_id != workspace_id {
@@ -432,7 +447,7 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
         if sandbox.workspace_id != workspace_id {
@@ -441,7 +456,7 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
 
         let agent = self
             .agents
-            .detach_sandbox(subject, agent_id, sandbox_id)
+            .detach_sandbox(subject, params.agent_id, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -492,13 +507,11 @@ impl TopLevelTool for AdminAgentDetachSandbox {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let agent_id: AgentId = require_uuid_field(args, "agent_id")?.into();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: DetachSandboxParams = parse_params(arguments)?;
 
         let agent = self
             .agents
-            .detach_sandbox(subject, agent_id, sandbox_id)
+            .detach_sandbox(subject, params.agent_id, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -627,12 +640,11 @@ impl TopLevelTool for AdminListAgents {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let workspace_id: WorkspaceId = require_uuid_field(args, "workspace_id")?.into();
+        let params: AdminListAgentsParams = parse_params(arguments)?;
 
         let agents = self
             .agents
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -645,23 +657,6 @@ impl TopLevelTool for AdminListAgents {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
-
-fn parse_sandbox_mode(args: Option<&JsonObject>) -> SandboxAgentMode {
-    args.and_then(|a| a.get("mode"))
-        .and_then(|v| v.as_str())
-        .map(|s| match s {
-            "write" => SandboxAgentMode::Write,
-            _ => SandboxAgentMode::Read,
-        })
-        .unwrap_or(SandboxAgentMode::Read)
-}
 
 fn format_agent(a: &Agent) -> String {
     let role = match a.agent_role {

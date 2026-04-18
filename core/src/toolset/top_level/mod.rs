@@ -1,5 +1,21 @@
 //! Built-in [`TopLevelTool`](super::traits::TopLevelTool) implementations.
 
+use rmcp::model::JsonObject;
+
+use super::error::ToolSetsError;
+
+/// Deserialize tool arguments into a typed params struct.
+///
+/// Converts the raw `Option<JsonObject>` from [`TopLevelTool::call`] into `T`.
+/// Missing arguments are treated as an empty object (suitable for tools with
+/// all-optional fields).
+pub(super) fn parse_params<T: serde::de::DeserializeOwned>(
+    arguments: Option<JsonObject>,
+) -> Result<T, ToolSetsError> {
+    let value = serde_json::Value::Object(arguments.unwrap_or_default());
+    serde_json::from_value(value).map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))
+}
+
 mod agent;
 mod bash;
 mod catalog;

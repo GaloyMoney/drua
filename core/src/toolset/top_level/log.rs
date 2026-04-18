@@ -9,11 +9,59 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::parse_params;
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
+use crate::primitives::{AgentId, SandboxId, UserId};
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AuditLogParams {
+    action: Option<String>,
+    outcome: Option<String>,
+    errors_only: Option<bool>,
+    user_id: Option<UserId>,
+    agent_id: Option<AgentId>,
+    sandbox_id: Option<SandboxId>,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+fn default_limit() -> i64 {
+    20
+}
+
+impl AuditLogParams {
+    fn into_query(self) -> AuditLogQuery {
+        let action = self
+            .action
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
+        let outcome = self
+            .outcome
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
+        let error = self.errors_only.and_then(|b| b.then_some(true));
+
+        AuditLogQuery {
+            limit: self.limit.clamp(1, 100),
+            action,
+            outcome,
+            acting_user_id: self.user_id,
+            acting_agent_id: self.agent_id,
+            sandbox_id: self.sandbox_id,
+            error,
+            ..Default::default()
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // workspace_log
@@ -66,8 +114,9 @@ impl TopLevelTool for WorkspaceLog {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let params: AuditLogParams = parse_params(arguments)?;
 
-        let mut query = parse_query(&arguments);
+        let mut query = params.into_query();
         query.workspace_id = Some(workspace_id);
         query.exclude_agent_id = subject.acting_agent_id();
 
@@ -128,7 +177,8 @@ impl TopLevelTool for AdminAllLogs {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let query = parse_query(&arguments);
+        let params: AuditLogParams = parse_params(arguments)?;
+        let query = params.into_query();
         let entries = self.audit.find(&query).await?;
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -177,55 +227,6 @@ fn truncate(s: &str, max: usize) -> &str {
     } else {
         &s[..max]
     }
-}
-
-/// Parse common filter fields from tool arguments into an [`AuditLogQuery`].
-fn parse_query(arguments: &Option<JsonObject>) -> AuditLogQuery {
-    let args = arguments.as_ref();
-
-    let limit = args
-        .and_then(|a| a.get("limit"))
-        .and_then(|v| v.as_i64())
-        .map(|n| n.clamp(1, 100))
-        .unwrap_or(20);
-
-    let action = parse_ilike_field(args, "action");
-    let outcome = parse_ilike_field(args, "outcome");
-
-    let acting_user_id = parse_uuid_field(args, "user_id");
-    let acting_agent_id = parse_uuid_field(args, "agent_id");
-    let sandbox_id = parse_uuid_field(args, "sandbox_id");
-
-    let error = args
-        .and_then(|a| a.get("errors_only"))
-        .and_then(|v| v.as_bool())
-        .and_then(|b| b.then_some(true));
-
-    AuditLogQuery {
-        limit,
-        action,
-        outcome,
-        acting_user_id: acting_user_id.map(crate::primitives::UserId::from),
-        acting_agent_id: acting_agent_id.map(crate::primitives::AgentId::from),
-        sandbox_id: sandbox_id.map(crate::primitives::SandboxId::from),
-        error,
-        ..Default::default()
-    }
-}
-
-/// Read a string field and wrap it in `%…%` for ILIKE matching.
-fn parse_ilike_field(args: Option<&JsonObject>, key: &str) -> Option<String> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("%{s}%"))
-}
-
-/// Read a UUID string field.
-fn parse_uuid_field(args: Option<&JsonObject>, key: &str) -> Option<uuid::Uuid> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
 }
 
 /// Shared input properties exposed by both tools.

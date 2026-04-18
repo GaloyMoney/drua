@@ -9,12 +9,34 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 use crate::workspace::{Workspace, Workspaces};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::parse_params;
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct WorkspaceCreateParams {
+    name: String,
+    description: Option<String>,
+}
+
+impl WorkspaceCreateParams {
+    /// Filter out empty descriptions so callers sending `""` get `None`.
+    fn description(&self) -> Option<String> {
+        self.description
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // admin_create_workspace
@@ -76,20 +98,11 @@ impl TopLevelTool for AdminWorkspaceCreate {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let name = args
-            .and_then(|a| a.get("name"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("name".to_string()))?;
-        let description = args
-            .and_then(|a| a.get("description"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from);
+        let params: WorkspaceCreateParams = parse_params(arguments)?;
 
         let workspace = self
             .workspaces
-            .create(subject, name, description)
+            .create(subject, &params.name, params.description())
             .await
             .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
 

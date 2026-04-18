@@ -9,12 +9,29 @@ use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
+use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::parse_params;
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LsParams {
+    path: String,
+    #[serde(default)]
+    ignore: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Tool
+// ---------------------------------------------------------------------------
 
 pub struct Ls {
     sandboxes: Arc<Sandboxes>,
@@ -77,12 +94,7 @@ impl TopLevelTool for Ls {
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.unwrap_or_default();
-
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("path".to_string()))?;
+        let params: LsParams = parse_params(arguments)?;
 
         let client = self
             .sandboxes
@@ -94,27 +106,24 @@ impl TopLevelTool for Ls {
             tool: "str_replace_based_edit_tool".to_string(),
             input: serde_json::json!({
                 "command": "view",
-                "path": path,
+                "path": params.path,
             }),
         };
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let output = if let Some(ignore_list) =
-                    args.get("ignore").and_then(|v| v.as_array())
-                {
+                let output = if params.ignore.is_empty() {
+                    resp.output
+                } else {
                     // Filter out entries matching the ignore list
-                    let ignore: Vec<&str> = ignore_list.iter().filter_map(|v| v.as_str()).collect();
                     resp.output
                         .lines()
                         .filter(|line| {
                             let name = line.trim_end_matches('/');
-                            !ignore.contains(&name)
+                            !params.ignore.iter().any(|ig| ig == name)
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
-                } else {
-                    resp.output
                 };
 
                 let content = vec![Content::text(output)];

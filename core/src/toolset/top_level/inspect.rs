@@ -8,6 +8,7 @@ use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
+use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 use crate::primitives::SandboxId;
@@ -15,6 +16,19 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::parse_params;
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct InspectParams {
+    sandbox_id: SandboxId,
+    tool: String,
+    #[serde(default)]
+    arguments: JsonObject,
+}
 
 // ---------------------------------------------------------------------------
 // workspace_inspect_sandbox
@@ -61,19 +75,18 @@ impl TopLevelTool for WorkspaceInspectSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let args = arguments.as_ref();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: InspectParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(sandbox_id)
+            .find_by_id(params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
         if sandbox.workspace_id != workspace_id {
             return Err(ToolSetsError::Unauthorized);
         }
 
-        execute_inspect(&self.sandboxes, sandbox_id, args).await
+        execute_inspect(&self.sandboxes, params).await
     }
 }
 
@@ -120,23 +133,15 @@ impl TopLevelTool for AdminInspectSandbox {
         _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.as_ref();
-        let sandbox_id: SandboxId = require_uuid_field(args, "sandbox_id")?.into();
+        let params: InspectParams = parse_params(arguments)?;
 
-        execute_inspect(&self.sandboxes, sandbox_id, args).await
+        execute_inspect(&self.sandboxes, params).await
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn require_uuid_field(args: Option<&JsonObject>, key: &str) -> Result<uuid::Uuid, ToolSetsError> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
-}
 
 fn inspect_schema() -> serde_json::Value {
     serde_json::json!({
@@ -169,19 +174,10 @@ fn inspect_schema() -> serde_json::Value {
 /// Shared execution logic for both workspace and admin inspect tools.
 async fn execute_inspect(
     sandboxes: &Sandboxes,
-    sandbox_id: SandboxId,
-    args: Option<&JsonObject>,
+    params: InspectParams,
 ) -> Result<CallToolResult, ToolSetsError> {
-    let tool_name = args
-        .and_then(|a| a.get("tool"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolSetsError::MissingArgument("tool".to_string()))?;
-
-    let tool_args = args
-        .and_then(|a| a.get("arguments"))
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    let tool_name = params.tool.as_str();
+    let tool_args = params.arguments;
 
     // Extract LS ignore list before the match moves tool_args.
     let ls_ignore: Vec<String> = if tool_name == "ls" {
@@ -217,7 +213,7 @@ async fn execute_inspect(
     };
 
     let client = sandboxes
-        .instance_client_for(sandbox_id)
+        .instance_client_for(params.sandbox_id)
         .await
         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
