@@ -34,7 +34,7 @@ A complete `.env.example` is provided at the repo root.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PG_CON` | **Yes** | — | PostgreSQL connection URL. |
+| `PG_CON` | No | `postgres://user:password@localhost:5432/galoy_agents` | PostgreSQL connection URL. The Makefile provides this default, which matches the bundled compose stack. |
 | `GITHUB_CLIENT_SECRET` | No | `dev-secret` | GitHub OAuth App client secret (only needed when `oauth.login: github`). |
 | `ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for the agent LLM runtime. Server starts without it but agent prompts will fail. |
 | `GALOY_AGENTS_CONFIG` | No | `galoy-agents.yml` | Path to the YAML config file. |
