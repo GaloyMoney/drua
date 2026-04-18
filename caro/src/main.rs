@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod graphql;
+mod tui;
 
 use clap::{Parser, Subcommand};
 
@@ -23,6 +24,8 @@ enum Command {
     Status,
     /// Remove stored credentials
     Logout,
+    /// Interactive TUI dashboard
+    Dashboard,
     /// Workspace management
     Workspace {
         #[command(subcommand)]
@@ -57,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Login => commands::login::run(cli.server).await,
         Command::Status => commands::status::run().await,
         Command::Logout => commands::logout::run(),
+        Command::Dashboard => commands::dashboard::run().await,
         Command::Workspace { action } => match action {
             WorkspaceAction::List => commands::workspace::list().await,
             WorkspaceAction::Create { name, description } => {
