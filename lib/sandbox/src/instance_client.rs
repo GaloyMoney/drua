@@ -100,6 +100,10 @@ pub struct InitializeRequest {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github_token: Option<String>,
+    /// Shell command to start long-running background services after init
+    /// (e.g. `nix run .#nix-deps -- up -D -n default`). Runs outside bwrap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nix_deps_cmd: Option<String>,
 }
 
 impl InitializeRequest {
@@ -112,12 +116,14 @@ impl InitializeRequest {
                 repo_url: None,
                 branch: None,
                 github_token,
+                nix_deps_cmd: None,
             },
             SandboxMode::Repo { repo_url, branch } => Self {
                 mode: "repo".to_string(),
                 repo_url: Some(repo_url.clone()),
                 branch: branch.clone(),
                 github_token,
+                nix_deps_cmd: None,
             },
         }
     }
