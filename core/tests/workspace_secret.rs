@@ -17,12 +17,23 @@ fn workspace_secrets(pool: &sqlx::PgPool) -> WorkspaceSecrets {
     WorkspaceSecrets::new(pool, test_key())
 }
 
+async fn create_workspace(pool: &sqlx::PgPool) -> WorkspaceId {
+    let id = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES ($1, $2, NOW())")
+        .bind(&id)
+        .bind("test-workspace")
+        .execute(pool)
+        .await
+        .expect("insert workspace");
+    id
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn create_and_find_by_id() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_id = WorkspaceId::new();
+    let ws_id = create_workspace(&pool).await;
 
     let created = svc
         .create(ws_id, "API_KEY", SecretType::EnvVar, "sk-test-123")
@@ -43,7 +54,7 @@ async fn create_and_find_by_id() {
 async fn create_and_decrypt_round_trip() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_id = WorkspaceId::new();
+    let ws_id = create_workspace(&pool).await;
 
     svc.create(ws_id, "DB_PASSWORD", SecretType::File, "super-secret")
         .await
@@ -64,7 +75,7 @@ async fn create_and_decrypt_round_trip() {
 async fn update_value_changes_decrypted_output() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_id = WorkspaceId::new();
+    let ws_id = create_workspace(&pool).await;
 
     let created = svc
         .create(ws_id, "TOKEN", SecretType::EnvVar, "old-value")
@@ -88,7 +99,7 @@ async fn update_value_changes_decrypted_output() {
 async fn delete_removes_from_listing() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_id = WorkspaceId::new();
+    let ws_id = create_workspace(&pool).await;
 
     let secret = svc
         .create(ws_id, "TEMP_KEY", SecretType::EnvVar, "will-be-deleted")
@@ -109,8 +120,8 @@ async fn delete_removes_from_listing() {
 async fn list_by_workspace_returns_only_own_secrets() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_a = WorkspaceId::new();
-    let ws_b = WorkspaceId::new();
+    let ws_a = create_workspace(&pool).await;
+    let ws_b = create_workspace(&pool).await;
 
     svc.create(ws_a, "SECRET_A", SecretType::EnvVar, "a-val")
         .await
@@ -133,7 +144,7 @@ async fn list_by_workspace_returns_only_own_secrets() {
 async fn duplicate_name_in_same_workspace_fails() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_id = WorkspaceId::new();
+    let ws_id = create_workspace(&pool).await;
 
     svc.create(ws_id, "UNIQUE_KEY", SecretType::EnvVar, "first")
         .await
@@ -154,8 +165,8 @@ async fn duplicate_name_in_same_workspace_fails() {
 async fn same_name_in_different_workspaces_ok() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
-    let ws_a = WorkspaceId::new();
-    let ws_b = WorkspaceId::new();
+    let ws_a = create_workspace(&pool).await;
+    let ws_b = create_workspace(&pool).await;
 
     svc.create(ws_a, "SHARED_NAME", SecretType::EnvVar, "val-a")
         .await
@@ -170,7 +181,7 @@ async fn same_name_in_different_workspaces_ok() {
 #[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn wrong_key_fails_decryption() {
     let pool = pool().await;
-    let ws_id = WorkspaceId::new();
+    let ws_id = create_workspace(&pool).await;
 
     // Create with one key
     let svc = WorkspaceSecrets::new(&pool, EncryptionKey::new([1u8; 32]));
