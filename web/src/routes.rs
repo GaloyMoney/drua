@@ -1030,7 +1030,7 @@ async fn workspace_skill_delete(
 fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
     let (mode_label, repo_url) = match &s.mode {
         SandboxMode::Scratch => ("Scratch".to_string(), None),
-        SandboxMode::Repo { repo_url } => ("Repo".to_string(), Some(repo_url.clone())),
+        SandboxMode::Repo { repo_url, .. } => ("Repo".to_string(), Some(repo_url.clone())),
     };
 
     let exported_system_prompt = s.exported_system_prompt.as_ref().map(|f| ExportedFileView {
@@ -1170,6 +1170,8 @@ struct CreateSandboxForm {
     mode: String,
     #[serde(default)]
     repo_url: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
     cpu: String,
     memory: String,
     disk_size: String,
@@ -1198,7 +1200,15 @@ async fn workspace_sandbox_create(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
             match repo_url {
-                Some(repo_url) => SandboxMode::Repo { repo_url },
+                Some(repo_url) => {
+                    let branch = form
+                        .branch
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    SandboxMode::Repo { repo_url, branch }
+                }
                 None => {
                     tracing::warn!("repo mode requires a non-empty repo_url");
                     return Redirect::to(&format!("/workspaces/{id}/sandboxes/new"))

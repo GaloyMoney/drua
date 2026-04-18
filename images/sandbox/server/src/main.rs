@@ -29,6 +29,8 @@ struct InitializeRequest {
     #[serde(default)]
     repo_url: Option<String>,
     #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
     github_token: Option<String>,
 }
 
@@ -500,17 +502,24 @@ async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeRespon
         }
     }
 
-    initialize_inner(&workspace_root(), &req.mode, req.repo_url.as_deref()).await
+    initialize_inner(
+        &workspace_root(),
+        &req.mode,
+        req.repo_url.as_deref(),
+        req.branch.as_deref(),
+    )
+    .await
 }
 
 async fn initialize_inner(
     workspace: &str,
     mode: &str,
     repo_url: Option<&str>,
+    branch: Option<&str>,
 ) -> Json<InitializeResponse> {
     let result = match mode {
         "scratch" => initialize_scratch(workspace).await,
-        "repo" => initialize_repo(workspace, repo_url).await,
+        "repo" => initialize_repo(workspace, repo_url, branch).await,
         other => Err(format!(
             "Unknown mode: {other}. Expected 'scratch' or 'repo'."
         )),
@@ -568,6 +577,7 @@ async fn initialize_scratch(workspace: &str) -> Result<InitializeResponse, Strin
 async fn initialize_repo(
     workspace: &str,
     repo_url: Option<&str>,
+    branch: Option<&str>,
 ) -> Result<InitializeResponse, String> {
     let repo_url = repo_url
         .filter(|u| !u.is_empty())
@@ -587,8 +597,14 @@ async fn initialize_repo(
     // dir still triggers a fresh clone.
     let already_cloned = clone_dir.join(".git").is_dir();
     if !already_cloned {
+        let mut args = vec!["clone"];
+        if let Some(b) = branch.filter(|b| !b.is_empty()) {
+            args.extend(["--branch", b]);
+        }
+        args.extend([repo_url, clone_dir.to_str().unwrap()]);
+
         let output = Command::new("git")
-            .args(["clone", repo_url, clone_dir.to_str().unwrap()])
+            .args(&args)
             .output()
             .await
             .map_err(|e| format!("Failed to run git clone: {e}"))?;
@@ -1330,6 +1346,7 @@ mod tests {
         let result = initialize_repo(
             workspace.to_str().unwrap(),
             Some(bare_dir.to_str().unwrap()),
+            None,
         )
         .await;
         assert!(result.is_ok(), "initialize_repo failed: {:?}", result);
@@ -1354,7 +1371,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_repo_missing_url_fails() {
-        let result = initialize_repo("/tmp/sandbox-test-missing", None).await;
+        let result = initialize_repo("/tmp/sandbox-test-missing", None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("repo_url"));
     }
@@ -1371,6 +1388,7 @@ mod tests {
         let result = initialize_repo(
             dir.to_str().unwrap(),
             Some("https://invalid.example.com/nonexistent/repo.git"),
+            None,
         )
         .await;
         assert!(result.is_err());
