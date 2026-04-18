@@ -40,9 +40,8 @@ impl ToolSets {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            match init_upstream(upstream).await {
-                Ok(ts) => sets.push(Arc::new(ts)),
-                Err(_) => {}
+            if let Ok(ts) = init_upstream(upstream).await {
+                sets.push(Arc::new(ts));
             }
         }
 
