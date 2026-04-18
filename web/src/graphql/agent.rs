@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_graphql::{Enum, InputObject, SimpleObject};
+use async_graphql::{Enum, SimpleObject};
 
 use super::primitives::*;
 
@@ -44,15 +44,4 @@ impl From<DomainAgentRole> for AgentRole {
             DomainAgentRole::Agent => Self::Agent,
         }
     }
-}
-
-#[derive(InputObject)]
-pub struct AgentSendMessageInput {
-    pub agent_id: AgentId,
-    pub message: String,
-}
-
-#[derive(SimpleObject)]
-pub struct AgentSendMessagePayload {
-    pub response_text: String,
 }

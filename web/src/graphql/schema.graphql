@@ -12,20 +12,7 @@ enum AgentRole {
 	WORKSPACE_LEAD
 }
 
-input AgentSendMessageInput {
-	agentId: AgentId!
-	message: String!
-}
-
-type AgentSendMessagePayload {
-	responseText: String!
-}
-
 type Mutation {
-	"""
-	Send a message to an agent and collect the full response.
-	"""
-	agentSendMessage(input: AgentSendMessageInput!): AgentSendMessagePayload!
 	"""
 	Placeholder — will be replaced with real mutations.
 	"""
