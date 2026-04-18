@@ -1,0 +1,114 @@
+# Galoy Agents
+
+An MCP-gateway platform that orchestrates AI agents with tool access across
+Concourse CI, Honeycomb observability, GitHub source control, Kubernetes, and
+code-search — all behind a unified progressive-disclosure interface.
+
+## Quick Start
+
+```bash
+# 1. Install Nix (https://nixos.org) and direnv, then:
+direnv allow          # loads the nix devShell + .env
+
+# 2. Copy and fill in secrets
+cp .env.example .env
+$EDITOR .env          # at minimum set PG_CON and GITHUB_CLIENT_SECRET
+
+# 3. Start Postgres and run migrations
+make start-deps       # docker/podman compose up
+make setup-db         # runs sqlx migrations
+
+# 4. Run the server
+make run-server       # builds sandbox binary, then starts on :4200
+```
+
+The web UI is at `http://localhost:4200`. Login uses GitHub OAuth (configure an
+[OAuth App](https://github.com/settings/developers) with callback
+`http://localhost:4200/auth/github/callback`).
+
+## Environment Variables
+
+All secrets are loaded from environment variables (or CLI flags). Non-secret
+configuration lives in a YAML config file (`galoy-agents.yml` by default).
+A complete `.env.example` is provided at the repo root.
+
+### Main Server (`galoy-agents-cli`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PG_CON` | **Yes** | — | PostgreSQL connection URL. |
+| `GITHUB_CLIENT_SECRET` | **Yes** | — | GitHub OAuth App client secret. |
+| `ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for the agent LLM runtime. Server starts without it but agent prompts will fail. |
+| `GALOY_AGENTS_CONFIG` | No | `galoy-agents.yml` | Path to the YAML config file. |
+| `GITHUB_ALLOWED_TEAMS` | No | `""` (all users) | Comma-separated GitHub teams allowed to log in (`org/team-slug`). |
+| `CONCOURSE_USERNAME` | No | — | Concourse CI basic-auth username (when concourse toolset is enabled). |
+| `CONCOURSE_PASSWORD` | No | — | Concourse CI basic-auth password. |
+| `{UPSTREAM}_AUTH_HEADER` | No | — | Auth header for each MCP upstream. Name is uppercased from the config, e.g. `HONEYCOMB_AUTH_HEADER`, `GITHUB_AUTH_HEADER`, `LINGO_AUTH_HEADER`. |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | No | — | Filesystem path to the GitHub App PEM private key (for sandbox token auto-provisioning). Requires `github_app` section in config. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `http://localhost:4317` | OpenTelemetry OTLP gRPC endpoint. |
+| `OTEL_SDK_DISABLED` | No | `false` | Set to `true` to disable OpenTelemetry tracing entirely. |
+| `RUST_LOG` | No | `info` | Standard `tracing` / `EnvFilter` log level directive. |
+
+### Sandbox Tool Server (`sandbox-tool-server`)
+
+These variables are set **automatically** by the local sandbox spawner (or by
+the K8s pod spec). You only need them when running the sandbox server directly.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PORT` | No | `3000` | HTTP listen port. |
+| `WORKSPACE_ROOT` | No | `/workspace` | Root directory for sandbox file operations. |
+| `GITHUB_TOKEN_PATH` | No | `/run/secrets/github-token` | Path to the GitHub token file (injected by the platform). |
+
+### Test-Only Variables
+
+These are only needed when running specific integration tests:
+
+| Variable | Test File | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | `core/tests/prompt_executor.rs` | Anthropic round-trip test. |
+| `DATABASE_URL` | `core/tests/agent.rs` | Postgres URL for agent integration tests. |
+| `HONEYCOMB_AUTH_HEADER` | `core/tests/toolset.rs` | Auth header for MCP upstream toolset test. |
+
+## Config File Reference
+
+The YAML config file (`galoy-agents.yml`) holds non-secret configuration. See
+the included `galoy-agents.yml` for a complete local-dev example. Key sections:
+
+| Section | Purpose |
+|---|---|
+| `server` | Host, port, secure cookies, MCP endpoint URL |
+| `oauth` | GitHub OAuth client ID, redirect URI, allowed teams |
+| `agents.builtin_roles` | Per-role LLM model, system prompt, max tokens, auto-reset timer |
+| `toolsets.concourse` | Concourse CI URL, team, enabled flag |
+| `toolsets.mcp_upstreams[]` | MCP upstream services (name, URL, category, allowed tools, auth header name) |
+| `toolsets.code_assistant` | Path to the code-assistant SQLite DB |
+| `sandbox.backend` | `local` (child process) or `k8s` (namespace + template) |
+| `github_app` | GitHub App client ID and installation ID (private key via env) |
+
+## Project Layout
+
+```
+cli/            CLI entrypoint (config loading, main server binary)
+core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
+web/            Axum web server (routes, OAuth, templates)
+mcp-gateway/    MCP protocol gateway (rmcp-based)
+lib/            Shared libraries (anthropic-client, sandbox admin client, LLM)
+images/sandbox/ Sandbox tool server (runs inside sandbox pods)
+code-assistant/ Semantic code search toolset
+charts/         Helm chart for Kubernetes deployment
+```
+
+## Make Targets
+
+| Target | Description |
+|---|---|
+| `make start-deps` | Start Postgres via docker/podman compose |
+| `make clean-deps` | Tear down Postgres and volumes |
+| `make setup-db` | Wait for Postgres and run SQLx migrations |
+| `make reset-deps` | `clean-deps` + `start-deps` + `setup-db` |
+| `make run-server` | Build sandbox binary and start the server |
+| `make nix-run-server` | Run server via `nix run .` |
+| `make build-sandbox` | Build only the sandbox tool server |
+| `make sqlx-prepare` | Regenerate SQLx offline query data |
+| `make start` | Full reset: `reset-deps` then `run-server` |
