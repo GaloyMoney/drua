@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                id AS \"id: AuditEntryId\",\n                acting_user_id AS \"acting_user_id: UserId\",\n                workspace_id AS \"workspace_id: WorkspaceId\",\n                acting_agent_id AS \"acting_agent_id: AgentId\",\n                on_behalf_of_user_id AS \"on_behalf_of_user_id: UserId\",\n                sandbox_id AS \"sandbox_id: SandboxId\",\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                error,\n                duration_ms,\n                tokens_returned,\n                recorded_at\n            FROM audit_entries\n            ORDER BY id DESC\n            LIMIT $1",
+  "query": "SELECT\n                id AS \"id: AuditEntryId\",\n                acting_user_id AS \"acting_user_id: UserId\",\n                acting_agent_id AS \"acting_agent_id: AgentId\",\n                on_behalf_of_user_id AS \"on_behalf_of_user_id: UserId\",\n                resource_ids AS \"resource_ids: serde_json::Value\",\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                error,\n                duration_ms,\n                tokens_returned,\n                recorded_at\n            FROM audit_entries\n            ORDER BY id DESC\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -15,61 +15,56 @@
       },
       {
         "ordinal": 2,
-        "name": "workspace_id: WorkspaceId",
-        "type_info": "Uuid"
-      },
-      {
-        "ordinal": 3,
         "name": "acting_agent_id: AgentId",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "on_behalf_of_user_id: UserId",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 5,
-        "name": "sandbox_id: SandboxId",
-        "type_info": "Uuid"
+        "ordinal": 4,
+        "name": "resource_ids: serde_json::Value",
+        "type_info": "Jsonb"
       },
       {
-        "ordinal": 6,
+        "ordinal": 5,
         "name": "interaction_type",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 7,
+        "ordinal": 6,
         "name": "action",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "metadata: serde_json::Value",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 9,
+        "ordinal": 8,
         "name": "outcome",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "error",
         "type_info": "Bool"
       },
       {
-        "ordinal": 11,
+        "ordinal": 10,
         "name": "duration_ms",
         "type_info": "Int8"
       },
       {
-        "ordinal": 12,
+        "ordinal": 11,
         "name": "tokens_returned",
         "type_info": "Int8"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "recorded_at",
         "type_info": "Timestamptz"
       }
@@ -84,8 +79,7 @@
       true,
       true,
       true,
-      true,
-      true,
+      false,
       false,
       false,
       false,
@@ -96,5 +90,5 @@
       false
     ]
   },
-  "hash": "10320dfefa193135772b80a418c95ad3292601ba85c3ead24b522fc905afcc5c"
+  "hash": "b094e7309e143300e8cda6586772dd8416e2a0cdfc35e16b3002b0c773565485"
 }

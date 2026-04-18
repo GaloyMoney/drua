@@ -52,17 +52,22 @@ impl std::fmt::Display for InteractionOutcome {
 /// Each field is optional — callers record fields progressively via the
 /// type-safe `Audit::record_*` helpers and a final `Audit::collect_context`
 /// reads the snapshot before persistence.
+///
+/// Actor columns (`acting_user_id`, `acting_agent_id`, `on_behalf_of_user_id`)
+/// remain top-level for fast filtering. Resource IDs (workspace, sandbox, …)
+/// are accumulated in [`resource_ids`](Self::resource_ids) as a flat JSON
+/// object, mapping directly to the `resource_ids JSONB` column in Postgres so
+/// new resource types can be added without schema migrations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuditContextData {
     pub acting_user_id: Option<UserId>,
-    pub workspace_id: Option<WorkspaceId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
+    /// Resource IDs involved in this interaction, keyed by role
+    /// (e.g. `"workspace_id"`, `"sandbox_id"`).
+    #[serde(default)]
+    pub resource_ids: serde_json::Map<String, serde_json::Value>,
     pub interaction_type: Option<InteractionType>,
-    /// Sandbox targeted by this interaction. Set by sandbox-service
-    /// methods via [`crate::audit::Audit::record_sandbox_id`] so audit
-    /// log queries can filter by sandbox.
-    pub sandbox_id: Option<SandboxId>,
     pub action: Option<String>,
     pub outcome: Option<InteractionOutcome>,
     pub duration_ms: Option<u64>,
@@ -101,10 +106,11 @@ pub struct AuditLogQuery {
 pub struct AuditEntry {
     pub id: AuditEntryId,
     pub acting_user_id: Option<UserId>,
-    pub workspace_id: Option<WorkspaceId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
-    pub sandbox_id: Option<SandboxId>,
+    /// All resource IDs involved in this interaction as a flat JSON object
+    /// (e.g. `{"workspace_id": "…", "sandbox_id": "…"}`).
+    pub resource_ids: serde_json::Value,
     pub interaction_type: String,
     pub action: String,
     pub metadata: serde_json::Value,
@@ -113,4 +119,25 @@ pub struct AuditEntry {
     pub duration_ms: Option<i64>,
     pub tokens_returned: Option<i64>,
     pub recorded_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl AuditEntry {
+    /// Extract a resource ID string by key.
+    pub fn resource_id(&self, key: &str) -> Option<&str> {
+        self.resource_ids.get(key).and_then(|v| v.as_str())
+    }
+
+    /// Workspace involved in this interaction, if any.
+    pub fn workspace_id(&self) -> Option<WorkspaceId> {
+        self.resource_id("workspace_id")
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+            .map(WorkspaceId::from)
+    }
+
+    /// Sandbox involved in this interaction, if any.
+    pub fn sandbox_id(&self) -> Option<SandboxId> {
+        self.resource_id("sandbox_id")
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+            .map(SandboxId::from)
+    }
 }
