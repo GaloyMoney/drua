@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
-use crate::tui::app::{AgentItem, App, WorkspaceItem};
+use crate::tui::app::{AgentItem, App, Mode, WorkspaceItem};
 use crate::tui::ui;
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +78,47 @@ const WORKSPACES_QUERY: &str = r#"
         }
     }
 "#;
+
+const WORKSPACE_CREATE_MUTATION: &str = r#"
+    mutation WorkspaceCreate($input: WorkspaceCreateInput!) {
+        workspaceCreate(input: $input) {
+            workspace {
+                id
+                name
+            }
+        }
+    }
+"#;
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceCreateResponse {
+    #[serde(rename = "workspaceCreate")]
+    workspace_create: WorkspaceCreatePayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceCreatePayload {
+    workspace: CreatedWorkspace,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatedWorkspace {
+    name: String,
+}
+
+async fn create_workspace(client: &GraphqlClient, name: &str, description: &str) -> Result<String> {
+    let mut input = serde_json::json!({ "name": name });
+    if !description.is_empty() {
+        input["description"] = serde_json::json!(description);
+    }
+    let resp: WorkspaceCreateResponse = client
+        .query(
+            WORKSPACE_CREATE_MUTATION,
+            serde_json::json!({ "input": input }),
+        )
+        .await?;
+    Ok(resp.workspace_create.workspace.name)
+}
 
 async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> {
     let resp: WorkspacesResponse = client
@@ -167,16 +208,56 @@ async fn run_event_loop(
                     continue;
                 }
 
-                match key.code {
-                    KeyCode::Char('q') => app.should_quit = true,
-                    KeyCode::Char('j') | KeyCode::Down => app.cursor_down(),
-                    KeyCode::Char('k') | KeyCode::Up => app.cursor_up(),
-                    KeyCode::Char('r') => {
-                        if let Ok(workspaces) = fetch_workspaces(client).await {
-                            app.replace_workspaces(workspaces);
+                match app.mode {
+                    Mode::Browse => {
+                        app.status_message = None;
+                        match key.code {
+                            KeyCode::Char('q') => app.should_quit = true,
+                            KeyCode::Char('j') | KeyCode::Down => app.cursor_down(),
+                            KeyCode::Char('k') | KeyCode::Up => app.cursor_up(),
+                            KeyCode::Char('n') => app.enter_create_mode(),
+                            KeyCode::Char('r') => {
+                                if let Ok(workspaces) = fetch_workspaces(client).await {
+                                    app.replace_workspaces(workspaces);
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
+                    Mode::CreateWorkspace => match key.code {
+                        KeyCode::Esc => app.exit_create_mode(),
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            app.input_field = (app.input_field + 1) % 2;
+                        }
+                        KeyCode::Backspace => {
+                            app.active_input_mut().pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.active_input_mut().push(c);
+                        }
+                        KeyCode::Enter => {
+                            if app.input_name.trim().is_empty() {
+                                app.status_message = Some("Name is required".to_string());
+                                continue;
+                            }
+                            let name = app.input_name.trim().to_string();
+                            let desc = app.input_description.trim().to_string();
+                            match create_workspace(client, &name, &desc).await {
+                                Ok(ws_name) => {
+                                    app.exit_create_mode();
+                                    if let Ok(workspaces) = fetch_workspaces(client).await {
+                                        app.replace_workspaces(workspaces);
+                                    }
+                                    app.status_message =
+                                        Some(format!("Created workspace: {ws_name}"));
+                                }
+                                Err(e) => {
+                                    app.status_message = Some(format!("Error: {e}"));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                 }
             }
         }

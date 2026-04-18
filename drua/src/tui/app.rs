@@ -12,12 +12,25 @@ pub struct AgentItem {
     pub role: String,
 }
 
+#[derive(Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Browse,
+    CreateWorkspace,
+}
+
 pub struct App {
     pub workspaces: Vec<WorkspaceItem>,
     pub cursor: usize,
     pub server_url: String,
     pub user_name: String,
     pub should_quit: bool,
+
+    pub mode: Mode,
+    pub input_name: String,
+    pub input_description: String,
+    pub input_field: u8,
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -28,6 +41,11 @@ impl App {
             server_url,
             user_name,
             should_quit: false,
+            mode: Mode::default(),
+            input_name: String::new(),
+            input_description: String::new(),
+            input_field: 0,
+            status_message: None,
         }
     }
 
@@ -51,6 +69,28 @@ impl App {
         self.workspaces = workspaces;
         if self.cursor >= self.workspaces.len() {
             self.cursor = self.workspaces.len().saturating_sub(1);
+        }
+    }
+
+    pub fn enter_create_mode(&mut self) {
+        self.input_name.clear();
+        self.input_description.clear();
+        self.input_field = 0;
+        self.mode = Mode::CreateWorkspace;
+    }
+
+    pub fn exit_create_mode(&mut self) {
+        self.mode = Mode::Browse;
+        self.input_name.clear();
+        self.input_description.clear();
+        self.input_field = 0;
+    }
+
+    pub fn active_input_mut(&mut self) -> &mut String {
+        if self.input_field == 0 {
+            &mut self.input_name
+        } else {
+            &mut self.input_description
         }
     }
 }

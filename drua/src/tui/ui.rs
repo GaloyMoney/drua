@@ -1,12 +1,12 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
 
-use super::app::App;
+use super::app::{App, Mode};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -25,6 +25,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_workspace_list(frame, app, panels[0]);
     draw_detail_panel(frame, app, panels[1]);
     draw_status_bar(frame, app, status_area);
+
+    if app.mode == Mode::CreateWorkspace {
+        draw_create_modal(frame, app);
+    }
 }
 
 fn draw_workspace_list(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -142,17 +146,80 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         app.user_name.clone()
     };
 
-    let bar = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" Server: ", Style::default().fg(Color::DarkGray)),
         Span::styled(&app.server_url, Style::default().fg(Color::White)),
         Span::styled(" │ User: ", Style::default().fg(Color::DarkGray)),
         Span::styled(user_short, Style::default().fg(Color::White)),
-        Span::styled(
-            " │ j/k:nav  r:refresh  q:quit ",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    ];
+
+    if let Some(msg) = &app.status_message {
+        spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(msg, Style::default().fg(Color::Green)));
+    }
+
+    spans.push(Span::styled(
+        " │ j/k:nav  n:new  r:refresh  q:quit ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let bar = Line::from(spans);
 
     let paragraph = Paragraph::new(bar);
     frame.render_widget(paragraph, area);
+}
+
+fn draw_create_modal(frame: &mut Frame, app: &App) {
+    let area = centered_rect(52, 10, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Create Workspace ")
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let name_style = if app.input_field == 0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let desc_style = if app.input_field == 1 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let cursor_name = if app.input_field == 0 { "▎" } else { "" };
+    let cursor_desc = if app.input_field == 1 { "▎" } else { "" };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Name:        ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}{cursor_name}", app.input_name), name_style),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Description: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}{cursor_desc}", app.input_description),
+                desc_style,
+            ),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Tab:switch  Enter:create  Esc:cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
 }
