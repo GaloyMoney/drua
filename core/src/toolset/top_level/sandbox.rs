@@ -15,22 +15,38 @@ use crate::sandbox::{Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params structs
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SandboxCreateMode {
+    /// Empty workspace.
+    Scratch,
+    /// Clone a repository.
+    Repo,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct CreateSandboxParams {
+    /// Display name for the new sandbox.
     name: String,
-    mode: String,
+    /// Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository.
+    mode: SandboxCreateMode,
+    /// Repository URL to clone (required when mode is 'repo').
     repo_url: Option<String>,
+    /// Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'.
     branch: Option<String>,
+    /// CPU resource spec (e.g. '500m'). Defaults to '500m'.
     #[serde(default = "default_cpu")]
     cpu: String,
+    /// Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'.
     #[serde(default = "default_memory")]
     memory: String,
+    /// Disk size spec (e.g. '10Gi'). Defaults to '10Gi'.
     #[serde(default = "default_disk_size")]
     disk_size: String,
 }
@@ -39,8 +55,8 @@ impl CreateSandboxParams {
     fn into_sandbox_args(
         self,
     ) -> Result<(String, sandbox::SandboxSpecs, sandbox::SandboxMode), ToolSetsError> {
-        let mode = match self.mode.as_str() {
-            "repo" => {
+        let mode = match self.mode {
+            SandboxCreateMode::Repo => {
                 let repo_url = self.repo_url.ok_or_else(|| {
                     ToolSetsError::InvalidArgument(
                         "repo_url is required when mode is 'repo'".to_string(),
@@ -51,7 +67,7 @@ impl CreateSandboxParams {
                     branch: self.branch,
                 }
             }
-            _ => sandbox::SandboxMode::Scratch,
+            SandboxCreateMode::Scratch => sandbox::SandboxMode::Scratch,
         };
 
         let specs = sandbox::SandboxSpecs {
@@ -64,20 +80,26 @@ impl CreateSandboxParams {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AdminCreateSandboxParams {
+    /// Workspace to create the sandbox in.
+    #[schemars(with = "uuid::Uuid")]
     workspace_id: WorkspaceId,
     #[serde(flatten)]
     inner: CreateSandboxParams,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AdminListSandboxesParams {
+    /// Workspace to list sandboxes for.
+    #[schemars(with = "uuid::Uuid")]
     workspace_id: WorkspaceId,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct GetSandboxParams {
+    /// ID of the sandbox to retrieve.
+    #[schemars(with = "uuid::Uuid")]
     sandbox_id: SandboxId,
 }
 
@@ -105,44 +127,8 @@ impl WorkspaceCreateSandbox {
     }
 }
 
-static WS_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Display name for the new sandbox."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["scratch", "repo"],
-                "description": "Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository."
-            },
-            "repo_url": {
-                "type": "string",
-                "description": "Repository URL to clone (required when mode is 'repo')."
-            },
-            "branch": {
-                "type": "string",
-                "description": "Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'."
-            },
-            "cpu": {
-                "type": "string",
-                "description": "CPU resource spec (e.g. '500m'). Defaults to '500m'."
-            },
-            "memory": {
-                "type": "string",
-                "description": "Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'."
-            },
-            "disk_size": {
-                "type": "string",
-                "description": "Disk size spec (e.g. '10Gi'). Defaults to '10Gi'."
-            }
-        },
-        "required": ["name", "mode"],
-        "additionalProperties": false,
-    })
-});
+static WS_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<CreateSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceCreateSandbox {
@@ -201,49 +187,8 @@ impl AdminCreateSandbox {
     }
 }
 
-static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Workspace to create the sandbox in."
-            },
-            "name": {
-                "type": "string",
-                "description": "Display name for the new sandbox."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["scratch", "repo"],
-                "description": "Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository."
-            },
-            "repo_url": {
-                "type": "string",
-                "description": "Repository URL to clone (required when mode is 'repo')."
-            },
-            "branch": {
-                "type": "string",
-                "description": "Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'."
-            },
-            "cpu": {
-                "type": "string",
-                "description": "CPU resource spec (e.g. '500m'). Defaults to '500m'."
-            },
-            "memory": {
-                "type": "string",
-                "description": "Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'."
-            },
-            "disk_size": {
-                "type": "string",
-                "description": "Disk size spec (e.g. '10Gi'). Defaults to '10Gi'."
-            }
-        },
-        "required": ["workspace_id", "name", "mode"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AdminCreateSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminCreateSandbox {
@@ -364,20 +309,8 @@ impl AdminListSandboxes {
     }
 }
 
-static ADMIN_LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Workspace to list sandboxes for."
-            }
-        },
-        "required": ["workspace_id"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AdminListSandboxesParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminListSandboxes {
@@ -434,20 +367,8 @@ impl WorkspaceGetSandbox {
     }
 }
 
-static WS_GET_SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "sandbox_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the sandbox to retrieve."
-            }
-        },
-        "required": ["sandbox_id"],
-        "additionalProperties": false,
-    })
-});
+static WS_GET_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<GetSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceGetSandbox {

@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
 use crate::primitives::{AgentId, SandboxId, UserId};
@@ -22,14 +22,24 @@ use crate::primitives::{AgentId, SandboxId, UserId};
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AuditLogParams {
+    /// Substring filter on action (e.g. 'mcp', 'POST /workspaces').
     action: Option<String>,
+    /// Substring filter on outcome (e.g. 'success', 'error').
     outcome: Option<String>,
+    /// When true, return only entries that resulted in an error.
     errors_only: Option<bool>,
+    /// Filter by acting user ID.
+    #[schemars(with = "Option<uuid::Uuid>")]
     user_id: Option<UserId>,
+    /// Filter by acting agent ID.
+    #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
+    /// Filter by sandbox ID.
+    #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
+    /// Max entries to return (1-100, default 20).
     #[serde(default = "default_limit")]
     limit: i64,
 }
@@ -77,13 +87,8 @@ impl WorkspaceLog {
     }
 }
 
-static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": common_schema_properties(),
-        "additionalProperties": false,
-    })
-});
+static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AuditLogParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceLog {
@@ -142,13 +147,7 @@ impl AdminAllLogs {
     }
 }
 
-static ALL_LOGS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": common_schema_properties(),
-        "additionalProperties": false,
-    })
-});
+static ALL_LOGS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AuditLogParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminAllLogs {
@@ -227,41 +226,4 @@ fn truncate(s: &str, max: usize) -> &str {
     } else {
         &s[..max]
     }
-}
-
-/// Shared input properties exposed by both tools.
-fn common_schema_properties() -> serde_json::Value {
-    serde_json::json!({
-        "action": {
-            "type": "string",
-            "description": "Substring filter on action (e.g. 'mcp', 'POST /workspaces')."
-        },
-        "outcome": {
-            "type": "string",
-            "description": "Substring filter on outcome (e.g. 'success', 'error')."
-        },
-        "errors_only": {
-            "type": "boolean",
-            "description": "When true, return only entries that resulted in an error."
-        },
-        "user_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Filter by acting user ID."
-        },
-        "agent_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Filter by acting agent ID."
-        },
-        "sandbox_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Filter by sandbox ID."
-        },
-        "limit": {
-            "type": "integer",
-            "description": "Max entries to return (1-100, default 20)."
-        }
-    })
 }

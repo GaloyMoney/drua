@@ -16,16 +16,33 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum InspectTool {
+    /// Search file contents.
+    Grep,
+    /// Find files by pattern.
+    Glob,
+    /// Read file contents.
+    Read,
+    /// List directory entries.
+    Ls,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct InspectParams {
+    /// ID of the sandbox to inspect.
+    #[schemars(with = "uuid::Uuid")]
     sandbox_id: SandboxId,
-    tool: String,
+    /// Read-only tool to run against the sandbox.
+    tool: InspectTool,
+    /// Tool-specific arguments passed through to the sandbox. grep: {pattern, path?, glob?, output_mode?, ...}. glob: {pattern, path?}. read: {path, offset?, limit?}. ls: {path, ignore?}.
     #[serde(default)]
     arguments: JsonObject,
 }
@@ -44,7 +61,7 @@ impl WorkspaceInspectSandbox {
     }
 }
 
-static WS_INSPECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(inspect_schema);
+static WS_INSPECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<InspectParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceInspectSandbox {
@@ -104,7 +121,8 @@ impl AdminInspectSandbox {
     }
 }
 
-static ADMIN_INSPECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(inspect_schema);
+static ADMIN_INSPECT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<InspectParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminInspectSandbox {
@@ -143,44 +161,16 @@ impl TopLevelTool for AdminInspectSandbox {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn inspect_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "sandbox_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the sandbox to inspect."
-            },
-            "tool": {
-                "type": "string",
-                "enum": ["grep", "glob", "read", "ls"],
-                "description": "Read-only tool to run against the sandbox."
-            },
-            "arguments": {
-                "type": "object",
-                "description": "Tool-specific arguments passed through to the sandbox. \
-                    grep: {pattern, path?, glob?, output_mode?, ...}. \
-                    glob: {pattern, path?}. \
-                    read: {path, offset?, limit?}. \
-                    ls: {path, ignore?}."
-            }
-        },
-        "required": ["sandbox_id", "tool", "arguments"],
-        "additionalProperties": false,
-    })
-}
-
 /// Shared execution logic for both workspace and admin inspect tools.
 async fn execute_inspect(
     sandboxes: &Sandboxes,
     params: InspectParams,
 ) -> Result<CallToolResult, ToolSetsError> {
-    let tool_name = params.tool.as_str();
+    let is_ls = matches!(params.tool, InspectTool::Ls);
     let tool_args = params.arguments;
 
     // Extract LS ignore list before the match moves tool_args.
-    let ls_ignore: Vec<String> = if tool_name == "ls" {
+    let ls_ignore: Vec<String> = if is_ls {
         tool_args
             .get("ignore")
             .and_then(|v| v.as_array())
@@ -194,22 +184,17 @@ async fn execute_inspect(
         Vec::new()
     };
 
-    let req = match tool_name {
-        "grep" => ExecuteRequest {
+    let req = match params.tool {
+        InspectTool::Grep => ExecuteRequest {
             tool: "Grep".to_string(),
             input: serde_json::Value::Object(tool_args),
         },
-        "glob" => ExecuteRequest {
+        InspectTool::Glob => ExecuteRequest {
             tool: "Glob".to_string(),
             input: serde_json::Value::Object(tool_args),
         },
-        "read" => build_read_request(&tool_args)?,
-        "ls" => build_ls_request(&tool_args)?,
-        _ => {
-            return Err(ToolSetsError::InvalidArgument(format!(
-                "unknown inspect tool: {tool_name} (expected grep, glob, read, or ls)"
-            )))
-        }
+        InspectTool::Read => build_read_request(&tool_args)?,
+        InspectTool::Ls => build_ls_request(&tool_args)?,
     };
 
     let client = sandboxes
@@ -222,7 +207,7 @@ async fn execute_inspect(
             let mut output = resp.output;
 
             // LS: apply client-side ignore filter
-            if tool_name == "ls" && !ls_ignore.is_empty() {
+            if is_ls && !ls_ignore.is_empty() {
                 output = output
                     .lines()
                     .filter(|line| {

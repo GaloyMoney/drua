@@ -16,16 +16,19 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct ReadParams {
+    /// Absolute path to the file inside the sandbox workspace.
     path: String,
+    /// Line offset to start reading from (0-based). Optional.
     offset: Option<i64>,
+    /// Maximum number of lines to read. Optional.
     limit: Option<i64>,
 }
 
@@ -43,27 +46,7 @@ impl Read {
     }
 }
 
-static READ_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "Absolute path to the file inside the sandbox workspace."
-            },
-            "offset": {
-                "type": "integer",
-                "description": "Line offset to start reading from (0-based). Optional."
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of lines to read. Optional."
-            }
-        },
-        "required": ["path"],
-        "additionalProperties": false,
-    })
-});
+static READ_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ReadParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for Read {

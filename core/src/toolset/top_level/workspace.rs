@@ -16,15 +16,17 @@ use crate::workspace::{Workspace, Workspaces};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct WorkspaceCreateParams {
+    /// Display name for the new workspace.
     name: String,
+    /// Optional freeform description.
     description: Option<String>,
 }
 
@@ -52,23 +54,8 @@ impl AdminWorkspaceCreate {
     }
 }
 
-static ADMIN_WORKSPACE_CREATE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Display name for the new workspace."
-            },
-            "description": {
-                "type": "string",
-                "description": "Optional freeform description."
-            }
-        },
-        "required": ["name"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_WORKSPACE_CREATE_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<WorkspaceCreateParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminWorkspaceCreate {

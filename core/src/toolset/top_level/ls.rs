@@ -16,15 +16,17 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct LsParams {
+    /// Absolute path to the directory inside the sandbox workspace.
     path: String,
+    /// List of file/directory names to exclude from the listing.
     #[serde(default)]
     ignore: Vec<String>,
 }
@@ -43,24 +45,7 @@ impl Ls {
     }
 }
 
-static LS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "Absolute path to the directory inside the sandbox workspace."
-            },
-            "ignore": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "List of file/directory names to exclude from the listing."
-            }
-        },
-        "required": ["path"],
-        "additionalProperties": false,
-    })
-});
+static LS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LsParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for Ls {

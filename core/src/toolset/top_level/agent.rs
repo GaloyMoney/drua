@@ -16,39 +16,54 @@ use crate::sandbox::{SandboxAgentMode, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params structs
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AgentCreateParams {
+    /// Display name for the new agent.
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AdminAgentCreateParams {
+    /// Workspace to create the agent in.
+    #[schemars(with = "uuid::Uuid")]
     workspace_id: WorkspaceId,
+    /// Display name for the new agent.
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AttachSandboxParams {
+    /// ID of the agent to attach the sandbox to.
+    #[schemars(with = "uuid::Uuid")]
     agent_id: AgentId,
+    /// ID of the sandbox to attach.
+    #[schemars(with = "uuid::Uuid")]
     sandbox_id: SandboxId,
+    /// Attach mode. Defaults to 'read'.
     #[serde(default = "default_mode")]
     mode: SandboxAgentMode,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct DetachSandboxParams {
+    /// ID of the agent to detach the sandbox from.
+    #[schemars(with = "uuid::Uuid")]
     agent_id: AgentId,
+    /// ID of the sandbox to detach.
+    #[schemars(with = "uuid::Uuid")]
     sandbox_id: SandboxId,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct AdminListAgentsParams {
+    /// Workspace to list agents for.
+    #[schemars(with = "uuid::Uuid")]
     workspace_id: WorkspaceId,
 }
 
@@ -70,19 +85,8 @@ impl WorkspaceAgentCreate {
     }
 }
 
-static WS_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Display name for the new agent."
-            }
-        },
-        "required": ["name"],
-        "additionalProperties": false,
-    })
-});
+static WS_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AgentCreateParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceAgentCreate {
@@ -140,24 +144,8 @@ impl AdminAgentCreate {
     }
 }
 
-static ADMIN_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Workspace to create the agent in."
-            },
-            "name": {
-                "type": "string",
-                "description": "Display name for the new agent."
-            }
-        },
-        "required": ["workspace_id", "name"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AdminAgentCreateParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminAgentCreate {
@@ -215,30 +203,8 @@ impl WorkspaceAgentAttachSandbox {
     }
 }
 
-static WS_ATTACH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "agent_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the agent to attach the sandbox to."
-            },
-            "sandbox_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the sandbox to attach."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["read", "write"],
-                "description": "Attach mode. Defaults to 'read'."
-            }
-        },
-        "required": ["agent_id", "sandbox_id"],
-        "additionalProperties": false,
-    })
-});
+static WS_ATTACH_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AttachSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceAgentAttachSandbox {
@@ -305,30 +271,8 @@ impl AdminAgentAttachSandbox {
     }
 }
 
-static ADMIN_ATTACH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "agent_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the agent to attach the sandbox to."
-            },
-            "sandbox_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the sandbox to attach."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["read", "write"],
-                "description": "Attach mode. Defaults to 'read'."
-            }
-        },
-        "required": ["agent_id", "sandbox_id"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_ATTACH_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AttachSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminAgentAttachSandbox {
@@ -386,25 +330,8 @@ impl WorkspaceAgentDetachSandbox {
     }
 }
 
-static WS_DETACH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "agent_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the agent to detach the sandbox from."
-            },
-            "sandbox_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "ID of the sandbox to detach."
-            }
-        },
-        "required": ["agent_id", "sandbox_id"],
-        "additionalProperties": false,
-    })
-});
+static WS_DETACH_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<DetachSandboxParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceAgentDetachSandbox {
@@ -598,20 +525,8 @@ impl AdminListAgents {
     }
 }
 
-static ADMIN_LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Workspace to list agents for."
-            }
-        },
-        "required": ["workspace_id"],
-        "additionalProperties": false,
-    })
-});
+static ADMIN_LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AdminListAgentsParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for AdminListAgents {
