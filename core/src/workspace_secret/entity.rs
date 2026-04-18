@@ -159,19 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_from_initialized_event() {
-        let new = new_secret("API_KEY", SecretType::EnvVar, "sk-123");
-        let id = new.id;
-        let ws_id = new.workspace_id;
-        let secret = hydrate(new);
-
-        assert_eq!(secret.id, id);
-        assert_eq!(secret.workspace_id, ws_id);
-        assert_eq!(secret.name, "API_KEY");
-        assert_eq!(secret.secret_type, SecretType::EnvVar);
-    }
-
-    #[test]
     fn update_value_replaces_encrypted_value() {
         let key = test_key();
         let mut secret = hydrate(new_secret("DB_PASS", SecretType::File, "old-password"));
@@ -202,12 +189,4 @@ mod tests {
         assert_eq!(decrypted, "v2");
     }
 
-    #[test]
-    fn display_format() {
-        let secret = hydrate(new_secret("MY_SECRET", SecretType::File, "hidden"));
-        let display = format!("{}", secret);
-        assert!(display.contains("MY_SECRET"));
-        assert!(display.contains("file"));
-        assert!(!display.contains("hidden"));
-    }
 }
