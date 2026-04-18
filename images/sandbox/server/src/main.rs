@@ -969,8 +969,41 @@ async fn main() {
 mod tests {
     use super::*;
 
+    /// Set WORKSPACE_ROOT to the system temp dir so that `validate_path` and
+    /// `write_workspace_git_credentials` work inside the Nix build sandbox
+    /// (where `/workspace` does not exist).
+    fn ensure_workspace_root() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let tmp = std::env::temp_dir();
+            std::env::set_var("WORKSPACE_ROOT", tmp.to_str().unwrap());
+        });
+    }
+
+    /// Returns true when the process can drop to UID 1000 (requires root).
+    #[cfg(unix)]
+    async fn uid_drop_available() -> bool {
+        Command::new("true")
+            .uid(1000)
+            .gid(1000)
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[cfg(not(unix))]
+    async fn uid_drop_available() -> bool {
+        true
+    }
+
     #[tokio::test]
     async fn bash_executes_echo() {
+        ensure_workspace_root();
+        if !uid_drop_available().await {
+            eprintln!("uid drop not available, skipping");
+            return;
+        }
         let input = serde_json::json!({"command": "echo hello"});
         let result = execute_bash(&input).await;
         assert!(result.is_ok());
@@ -979,6 +1012,11 @@ mod tests {
 
     #[tokio::test]
     async fn bash_returns_error_on_nonzero_exit() {
+        ensure_workspace_root();
+        if !uid_drop_available().await {
+            eprintln!("uid drop not available, skipping");
+            return;
+        }
         let input = serde_json::json!({"command": "exit 42"});
         let result = execute_bash(&input).await;
         assert!(result.is_err());
@@ -1003,6 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_create_and_view() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-create-view");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("test.txt");
@@ -1029,6 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_view_with_range() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-view-range");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("range.txt");
@@ -1057,6 +1097,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_view_directory() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-view-dir");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -1076,6 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_str_replace_single_match() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-replace");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("replace.txt");
@@ -1106,6 +1148,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_str_replace_no_match() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-replace-no-match");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("no_match.txt");
@@ -1132,6 +1175,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_str_replace_multiple_matches() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-replace-multi");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("multi.txt");
@@ -1158,6 +1202,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_insert_at_beginning() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-insert");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("insert.txt");
@@ -1188,6 +1233,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_view_nonexistent_file_returns_error() {
+        ensure_workspace_root();
         let input = serde_json::json!({
             "command": "view",
             "path": "/nonexistent/path/file.txt"
@@ -1198,6 +1244,7 @@ mod tests {
 
     #[tokio::test]
     async fn text_editor_dispatch_routes_commands() {
+        ensure_workspace_root();
         let dir = std::env::temp_dir().join("sandbox-test-dispatch");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("dispatch.txt");
@@ -1405,6 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_github_token_creates_file_and_parent_dir() {
+        ensure_workspace_root();
         let base = std::env::temp_dir().join("sandbox-test-token");
         let _ = tokio::fs::remove_dir_all(&base).await;
         let path = base.join("nested").join("github-token");
