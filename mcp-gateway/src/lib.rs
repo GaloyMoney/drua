@@ -34,10 +34,22 @@ impl McpGateway {
     }
 
     /// Build the MCP service.
-    pub fn service(app: App) -> StreamableHttpService<Self, LocalSessionManager> {
+    ///
+    /// `mcp_endpoint` is the public URL at which this server is reachable
+    /// (e.g. `https://dashboard.agents.galoy.io/mcp`). Its hostname is
+    /// added to the `allowed_hosts` list so that rmcp's DNS-rebinding
+    /// protection accepts incoming requests.
+    pub fn service(app: App, mcp_endpoint: &str) -> StreamableHttpService<Self, LocalSessionManager> {
         let mut config = StreamableHttpServerConfig::default();
         config.stateful_mode = false;
         config.json_response = true;
+
+        if let Ok(url) = url::Url::parse(mcp_endpoint) {
+            if let Some(host) = url.host_str() {
+                config.allowed_hosts.push(host.to_string());
+            }
+        }
+
         StreamableHttpService::new(
             move || Ok(McpGateway::new(app.clone())),
             LocalSessionManager::default().into(),

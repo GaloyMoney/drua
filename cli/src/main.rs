@@ -101,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
         secure_cookies: config.server.secure_cookies,
     };
 
-    let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(app.clone());
+    let mcp_service =
+        galoy_agents_mcp_gateway::McpGateway::service(app.clone(), &config.server.mcp_endpoint);
 
     let mut app_state = galoy_agents_web::AppState::new(
         app,
