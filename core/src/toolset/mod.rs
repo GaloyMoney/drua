@@ -122,6 +122,17 @@ impl ToolSets {
         sets.push(toolset);
     }
 
+    /// Remove a searchable toolset by name. Used when a tunnel disconnects
+    /// so its tools are no longer advertised.
+    pub fn unregister_searchable(&self, name: &str) {
+        let mut sets = self.sets.write().expect("toolset lock poisoned");
+        let before = sets.len();
+        sets.retain(|s| s.name() != name);
+        if sets.len() < before {
+            tracing::info!(name = %name, "Unregistered toolset");
+        }
+    }
+
     /// Human-readable summary of available toolsets — used as the MCP
     /// server's `instructions` payload so clients know how to discover and
     /// call upstream tools.

@@ -3,6 +3,7 @@ pub mod graphql;
 mod routes;
 pub mod server;
 mod templates;
+pub mod tunnel;
 
 use axum::Router;
 
@@ -54,10 +55,14 @@ impl AppState {
     }
 }
 
-/// Build the web router with page routes, auth routes, API routes, and GraphQL.
+/// Build the web router with page routes, auth routes, API routes, GraphQL,
+/// and the tunnel WebSocket endpoint.
 pub fn router() -> Router<AppState> {
+    use axum::routing::get;
+
     routes::router()
         .merge(auth::auth_router())
         .merge(routes::api_router())
         .merge(graphql::router())
+        .route("/tunnel/ws", get(tunnel::tunnel_ws_handler))
 }
