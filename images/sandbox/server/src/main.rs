@@ -197,9 +197,10 @@ async fn execute_bash_bwrap(
 ///
 /// In fake-root environments (e.g. Nix build sandbox user namespaces), the
 /// process appears as UID 0 but cannot actually setuid. When that happens
-/// the spawn fails with EPERM ("Operation not permitted") or EINVAL
-/// ("Invalid argument" — UID not mapped). We catch both and retry without
-/// the UID drop.
+/// the spawn fails with a pre-exec error (EPERM, EINVAL, EACCES depending
+/// on the namespace config). We detect ALL spawn failures via the "Failed
+/// to execute command:" prefix and retry without uid drop. Real command
+/// failures inside bash produce "Exit code ..." errors and are never retried.
 #[cfg(unix)]
 async fn execute_bash_uid_only(
     command: &str,
@@ -209,7 +210,7 @@ async fn execute_bash_uid_only(
     if is_root() {
         match execute_bash_as_uid(command, workspace, workspace_tmp, Some((1000, 1000))).await {
             Ok(result) => return Ok(result),
-            Err(e) if is_uid_drop_error(&e) => {
+            Err(e) if is_spawn_failure(&e) => {
                 tracing::warn!("UID drop failed (fake-root?), falling back to plain bash: {e}");
             }
             Err(e) => return Err(e),
@@ -219,12 +220,12 @@ async fn execute_bash_uid_only(
     execute_bash_as_uid(command, workspace, workspace_tmp, None).await
 }
 
-/// Detect errors from a failed setuid/setgid in a restricted namespace.
-///
-/// EPERM  → "Operation not permitted" (no CAP_SETUID)
-/// EINVAL → "Invalid argument" (UID not mapped in user namespace)
-fn is_uid_drop_error(err: &str) -> bool {
-    err.contains("Operation not permitted") || err.contains("Invalid argument")
+/// Detect pre-exec spawn failures (setuid, chdir, exec) vs. bash command
+/// failures. Spawn failures always carry the "Failed to execute command:"
+/// prefix from the map_err in execute_bash_as_uid, while command-level
+/// errors start with "Exit code".
+fn is_spawn_failure(err: &str) -> bool {
+    err.starts_with("Failed to execute command:")
 }
 
 /// Inner helper: run bash with optional UID/GID override.
