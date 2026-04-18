@@ -33,9 +33,11 @@ pub enum SandboxState {
     /// `/execute` calls.
     Ready,
     /// The sandbox has been suspended via the admin client — the underlying
-    /// pod/process has been deleted, but workspace state survives (k8s: the
-    /// PVC is retained; local: the `.sandboxes/<name>/` directory is left
-    /// in place). Recreating with the same name resumes from that state.
+    /// pod/process has been deleted. On the local backend the
+    /// `.sandboxes/<name>/` directory is left in place so workspace state
+    /// survives a restart. On k8s, workspace state is ephemeral unless
+    /// persistence is configured via `K8sAdminClient::with_persistence`;
+    /// without it, a restart re-clones from scratch.
     Suspended,
     /// A step in the provisioning / restart lifecycle failed. The failure
     /// reason is recorded on the entity as `last_error` and emitted as a
