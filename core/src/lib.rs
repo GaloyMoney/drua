@@ -11,6 +11,7 @@ pub mod prompt_executor;
 pub mod sandbox;
 pub mod skill;
 pub mod toolset;
+pub mod tunnel;
 pub mod user;
 pub mod workspace;
 pub mod workspace_secret;

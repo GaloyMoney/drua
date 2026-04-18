@@ -1743,7 +1743,9 @@ async fn workspace_chat(
 // ---------------------------------------------------------------------------
 
 pub fn api_router() -> Router<AppState> {
-    Router::new().route("/api/v1/agents/{id}/secrets", get(api_agent_secrets))
+    Router::new()
+        .route("/api/v1/agents/{id}/secrets", get(api_agent_secrets))
+        .route("/tunnel/ws", get(crate::tunnel::tunnel_ws_handler))
 }
 
 // ---------------------------------------------------------------------------
