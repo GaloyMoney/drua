@@ -11,7 +11,6 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use crate::auth::AuthSubject;
-use crate::primitives::UserId;
 use crate::workspace::{Workspace, Workspaces};
 
 use super::super::error::ToolSetsError;
@@ -88,16 +87,9 @@ impl TopLevelTool for AdminWorkspaceCreate {
             .filter(|s| !s.is_empty())
             .map(String::from);
 
-        // `Workspaces::create` takes a `_user_id` that's currently unused —
-        // fall back to the nil UUID for agent-driven calls that don't
-        // carry an originating user (admin ExportedAgent tokens do).
-        let user_id = subject
-            .originating_user_id()
-            .unwrap_or_else(|| UserId::from(uuid::Uuid::nil()));
-
         let workspace = self
             .workspaces
-            .create(user_id, name, description)
+            .create(subject, name, description)
             .await
             .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
 

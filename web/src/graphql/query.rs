@@ -1,7 +1,12 @@
-use async_graphql::{Context, Object};
+use async_graphql::{
+    types::connection::{Connection, EmptyFields},
+    Context, Object,
+};
 
 use super::primitives::*;
 use super::workspace::Workspace;
+
+use galoy_agents_core::workspace::WorkspaceByCreatedAtCursor;
 
 pub struct Query;
 
@@ -33,9 +38,23 @@ impl Query {
         }
     }
 
-    async fn workspaces(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Workspace>> {
-        let (app, _sub) = app_and_sub_from_ctx!(ctx);
-        let list = app.workspaces().list_all().await?;
-        Ok(list.into_iter().map(Workspace::from).collect())
+    async fn workspaces(
+        &self,
+        ctx: &Context<'_>,
+        first: i32,
+        after: Option<String>,
+    ) -> async_graphql::Result<
+        Connection<WorkspaceByCreatedAtCursor, Workspace, EmptyFields, EmptyFields>,
+    > {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        list_with_cursor!(
+            WorkspaceByCreatedAtCursor,
+            Workspace,
+            after,
+            first,
+            |query| app
+                .workspaces()
+                .list(sub, query, es_entity::ListDirection::Descending)
+        )
     }
 }

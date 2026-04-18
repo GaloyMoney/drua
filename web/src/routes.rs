@@ -587,11 +587,12 @@ async fn workspace_create(
         None => return Redirect::to("/").into_response(),
     };
 
+    let sub = domain::auth::AuthSubject::User(user_id);
     let description = form.description.filter(|d| !d.is_empty());
     match state
         .app
         .workspaces()
-        .create(user_id, &form.name, description)
+        .create(&sub, &form.name, description)
         .await
     {
         Ok(ws) => Redirect::to(&format!("/workspaces/{}/chat", ws.id)).into_response(),

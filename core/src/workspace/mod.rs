@@ -4,11 +4,13 @@ pub(crate) mod repo;
 
 use std::sync::Arc;
 
+use es_entity::*;
 use tracing::instrument;
 
 pub use entity::Workspace;
 use entity::*;
 pub use error::*;
+pub use crate::workspace::workspace_cursor::WorkspaceByCreatedAtCursor;
 use repo::*;
 
 use crate::agent::{AgentRole, Agents};
@@ -29,7 +31,7 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.create", skip(self))]
     pub async fn create(
         &self,
-        _user_id: UserId,
+        sub: &AuthSubject,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
@@ -51,6 +53,13 @@ impl Workspaces {
             .await?;
 
         op.commit().await?;
+
+        tracing::info!(
+            workspace.id = %workspace.id,
+            sub = ?sub,
+            "workspace created"
+        );
+
         Ok(workspace)
     }
 
@@ -60,6 +69,16 @@ impl Workspaces {
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         Ok(self.repo.find_by_id(id.into()).await?)
+    }
+
+    #[instrument(name = "domain.workspace.list", skip(self))]
+    pub async fn list(
+        &self,
+        _sub: &AuthSubject,
+        query: PaginatedQueryArgs<WorkspaceByCreatedAtCursor>,
+        direction: ListDirection,
+    ) -> Result<PaginatedQueryRet<Workspace, WorkspaceByCreatedAtCursor>, WorkspaceError> {
+        Ok(self.repo.list_by_created_at(query, direction).await?)
     }
 
     #[instrument(name = "domain.workspace.list_all", skip(self))]

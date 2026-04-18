@@ -37,6 +37,47 @@ macro_rules! app_and_sub_from_ctx {
 /// }
 /// impl From<Workspace> for WorkspaceCreatePayload { .. }
 /// ```
+/// Cursor-based list query following the Relay connection spec.
+///
+/// ```ignore
+/// list_with_cursor!(
+///     WorkspaceByCreatedAtCursor,
+///     Workspace,
+///     after,
+///     first,
+///     |query| app.workspaces().list(sub, query, direction)
+/// )
+/// ```
+#[macro_export]
+macro_rules! list_with_cursor {
+    ($cursor:ty, $entity:ty, $after:expr, $first:expr, $load:expr) => {{
+        async_graphql::types::connection::query(
+            $after,
+            None,
+            Some($first),
+            None,
+            |after, _, first, _| async move {
+                let first = first.expect("First always exists") as usize;
+                let args = es_entity::PaginatedQueryArgs { first, after };
+                let res = $load(args).await?;
+                let mut connection =
+                    async_graphql::types::connection::Connection::new(false, res.has_next_page);
+                connection
+                    .edges
+                    .extend(res.entities.into_iter().map(|entity| {
+                        let cursor = <$cursor>::from(&entity);
+                        async_graphql::types::connection::Edge::new(
+                            cursor,
+                            <$entity>::from(entity),
+                        )
+                    }));
+                Ok::<_, async_graphql::Error>(connection)
+            },
+        )
+        .await
+    }};
+}
+
 #[macro_export]
 macro_rules! mutation_payload {
     ($payload:ident, $name:ident: $gql_type:ty) => {

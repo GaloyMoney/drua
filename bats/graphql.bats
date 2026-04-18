@@ -58,10 +58,11 @@ teardown_file() {
   echo "$output"
   [[ "$output" == *'"name":"test-ws"'* ]]
 
-  # List workspaces
-  run graphql_query "{ workspaces { id name } }"
+  # List workspaces (cursor-based)
+  run graphql_query "{ workspaces(first: 10) { edges { node { id name } } pageInfo { hasNextPage } } }"
   echo "$output"
   [[ "$output" == *'"name":"test-ws"'* ]]
+  [[ "$output" == *'"hasNextPage"'* ]]
 
   # Update workspace
   run graphql_query "mutation { workspaceUpdate(input: { id: \"$ws_id\", name: \"renamed-ws\", description: \"updated\" }) { workspace { name description } } }" "$AGENT_TOKEN"
@@ -75,7 +76,7 @@ teardown_file() {
   [[ "$output" == *'"id"'* ]]
 
   # After deletion, workspace should not appear in list
-  run graphql_query "{ workspaces { id } }"
+  run graphql_query "{ workspaces(first: 100) { edges { node { id } } } }"
   echo "$output"
   [[ "$output" != *"$ws_id"* ]]
 }

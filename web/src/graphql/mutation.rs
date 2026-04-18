@@ -17,12 +17,9 @@ impl Mutation {
         input: WorkspaceCreateInput,
     ) -> async_graphql::Result<WorkspaceCreatePayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let user_id = sub
-            .originating_user_id()
-            .ok_or_else(|| async_graphql::Error::new("Authentication required"))?;
         let ws = app
             .workspaces()
-            .create(user_id, input.name, input.description)
+            .create(sub, input.name, input.description)
             .await?;
         Ok(WorkspaceCreatePayload::from(Workspace::from(ws)))
     }
