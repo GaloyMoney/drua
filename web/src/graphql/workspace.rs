@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use async_graphql::{ComplexObject, InputObject, SimpleObject};
+use async_graphql::{ComplexObject, Context, InputObject, SimpleObject};
 
+use super::agent::Agent;
 use super::primitives::*;
 
+use galoy_agents_core::agent::AgentRole as DomainAgentRole;
 use galoy_agents_core::workspace::Workspace as DomainWorkspace;
 
 #[derive(SimpleObject, Clone)]
@@ -23,6 +25,16 @@ impl Workspace {
         self.entity.created_at().into()
     }
 
+    /// The workspace lead agent.
+    async fn lead(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Agent>> {
+        let (app, _sub) = app_and_sub_from_ctx!(ctx);
+        let agents = app.agents().list_for_workspace(self.id).await?;
+        let lead = agents
+            .into_iter()
+            .find(|a| a.agent_role == DomainAgentRole::WorkspaceLead)
+            .map(Agent::from);
+        Ok(lead)
+    }
 }
 
 impl From<DomainWorkspace> for Workspace {

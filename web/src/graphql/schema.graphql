@@ -1,4 +1,31 @@
+type Agent {
+	id: AgentId!
+	name: String!
+	role: AgentRole!
+	workspaceId: WorkspaceId!
+}
+
+scalar AgentId
+
+enum AgentRole {
+	AGENT
+	WORKSPACE_LEAD
+}
+
+input AgentSendMessageInput {
+	agentId: AgentId!
+	message: String!
+}
+
+type AgentSendMessagePayload {
+	responseText: String!
+}
+
 type Mutation {
+	"""
+	Send a message to an agent and collect the full response.
+	"""
+	agentSendMessage(input: AgentSendMessageInput!): AgentSendMessagePayload!
 	"""
 	Placeholder — will be replaced with real mutations.
 	"""
@@ -51,6 +78,10 @@ type Workspace {
 	createdAt: Timestamp!
 	description: String
 	id: WorkspaceId!
+	"""
+	The workspace lead agent.
+	"""
+	lead: Agent
 	name: String!
 }
 

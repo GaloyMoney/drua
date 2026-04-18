@@ -1,5 +1,6 @@
 #[macro_use]
 pub(crate) mod macros;
+mod agent;
 mod mutation;
 pub(crate) mod primitives;
 mod query;

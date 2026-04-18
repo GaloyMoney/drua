@@ -53,10 +53,11 @@ teardown_file() {
   ws_id="$(echo "$output" | sed 's/.*"id":"\([^"]*\)".*/\1/')"
   echo "workspace id: $ws_id"
 
-  # Query single workspace
-  run graphql_query "{ workspace(id: \"$ws_id\") { id name description } }"
+  # Query single workspace with lead agent
+  run graphql_query "{ workspace(id: \"$ws_id\") { id name description lead { id name role } } }"
   echo "$output"
   [[ "$output" == *'"name":"test-ws"'* ]]
+  [[ "$output" == *'"role":"WORKSPACE_LEAD"'* ]]
 
   # List workspaces (cursor-based)
   run graphql_query "{ workspaces(first: 10) { edges { node { id name } } pageInfo { hasNextPage } } }"
