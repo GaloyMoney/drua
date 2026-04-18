@@ -29,7 +29,6 @@ async fn create_workspace(pool: &sqlx::PgPool) -> WorkspaceId {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn create_and_find_by_id() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -50,7 +49,6 @@ async fn create_and_find_by_id() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn create_and_decrypt_round_trip() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -71,7 +69,6 @@ async fn create_and_decrypt_round_trip() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn update_value_changes_decrypted_output() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -95,7 +92,6 @@ async fn update_value_changes_decrypted_output() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn delete_removes_from_listing() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -116,7 +112,6 @@ async fn delete_removes_from_listing() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn list_by_workspace_returns_only_own_secrets() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -140,7 +135,6 @@ async fn list_by_workspace_returns_only_own_secrets() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn duplicate_name_in_same_workspace_fails() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -161,7 +155,6 @@ async fn duplicate_name_in_same_workspace_fails() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn same_name_in_different_workspaces_ok() {
     let pool = pool().await;
     let svc = workspace_secrets(&pool);
@@ -178,7 +171,6 @@ async fn same_name_in_different_workspaces_ok() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL — run via integration-tests"]
 async fn wrong_key_fails_decryption() {
     let pool = pool().await;
     let ws_id = create_workspace(&pool).await;
