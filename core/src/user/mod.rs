@@ -33,8 +33,9 @@ impl Users {
         github_id: impl Into<String> + std::fmt::Debug,
         email: Option<String>,
         name: Option<String>,
+        github_username: Option<String>,
     ) -> Result<User, UserError> {
-        let new_user = build_new_user(github_id, email, name);
+        let new_user = build_new_user(github_id, email, name, github_username);
         let user = self.repo.create(new_user).await?;
         Ok(user)
     }
@@ -46,8 +47,9 @@ impl Users {
         github_id: impl Into<String> + std::fmt::Debug,
         email: Option<String>,
         name: Option<String>,
+        github_username: Option<String>,
     ) -> Result<User, UserError> {
-        let new_user = build_new_user(github_id, email, name);
+        let new_user = build_new_user(github_id, email, name, github_username);
         let user = self.repo.create_in_op(op, new_user).await?;
         Ok(user)
     }
@@ -65,6 +67,7 @@ fn build_new_user(
     github_id: impl Into<String>,
     email: Option<String>,
     name: Option<String>,
+    github_username: Option<String>,
 ) -> NewUser {
     let mut builder = NewUser::builder();
     builder.github_id(github_id);
@@ -73,6 +76,9 @@ fn build_new_user(
     }
     if let Some(name) = name {
         builder.name(name);
+    }
+    if let Some(github_username) = github_username {
+        builder.github_username(github_username);
     }
     builder.build().expect("Could not build new user")
 }

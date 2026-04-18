@@ -136,10 +136,10 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let user_short = if app.user_id.len() > 12 {
-        format!("{}…", &app.user_id[..12])
+    let user_short = if app.user_name.len() > 12 {
+        format!("{}…", &app.user_name[..12])
     } else {
-        app.user_id.clone()
+        app.user_name.clone()
     };
 
     let bar = Line::from(vec![

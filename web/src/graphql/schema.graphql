@@ -12,6 +12,13 @@ enum AgentRole {
 	WORKSPACE_LEAD
 }
 
+type Me {
+	email: String
+	githubUsername: String
+	id: UUID!
+	name: String
+}
+
 type Mutation {
 	"""
 	Placeholder — will be replaced with real mutations.
@@ -46,9 +53,9 @@ type PageInfo {
 
 type Query {
 	"""
-	The ID of the currently authenticated user, if any.
+	The currently authenticated user, if any.
 	"""
-	me: UUID
+	me: Me
 	ping: String!
 	workspace(id: WorkspaceId!): Workspace
 	workspaces(after: String, first: Int!): WorkspaceConnection!

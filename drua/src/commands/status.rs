@@ -6,19 +6,37 @@ use crate::graphql::GraphqlClient;
 
 #[derive(Debug, Deserialize)]
 struct MeResponse {
-    me: Option<String>,
+    me: Option<MeUser>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeUser {
+    github_username: Option<String>,
+    name: Option<String>,
+    email: Option<String>,
 }
 
 pub async fn run() -> Result<()> {
     let config = Config::load()?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
-    let resp: MeResponse = client.query("{ me }", serde_json::json!({})).await?;
+    let resp: MeResponse = client
+        .query(
+            "{ me { githubUsername name email } }",
+            serde_json::json!({}),
+        )
+        .await?;
 
     match resp.me {
-        Some(user_id) => {
+        Some(user) => {
+            let display = user
+                .github_username
+                .or(user.name)
+                .or(user.email)
+                .unwrap_or_else(|| "unknown".to_string());
             println!("Server:  {}", config.server_url);
-            println!("User:    {user_id}");
+            println!("User:    {display}");
             println!("Status:  connected");
         }
         None => {

@@ -10,7 +10,15 @@ const DEFAULT_SERVER_URL: &str = "http://localhost:4200";
 
 #[derive(Debug, Deserialize)]
 struct MeResponse {
-    me: Option<String>,
+    me: Option<MeUser>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeUser {
+    github_username: Option<String>,
+    name: Option<String>,
+    email: Option<String>,
 }
 
 pub async fn run(server: Option<String>) -> Result<()> {
@@ -41,11 +49,19 @@ pub async fn run(server: Option<String>) -> Result<()> {
     println!("Validating token...");
     let client = GraphqlClient::new(&server_url, &token);
     let resp: MeResponse = client
-        .query("{ me }", serde_json::json!({}))
+        .query(
+            "{ me { githubUsername name email } }",
+            serde_json::json!({}),
+        )
         .await
         .map_err(|e| anyhow!("authentication failed: {e}"))?;
 
-    let user_id = resp.me.ok_or_else(|| anyhow!("token is not valid"))?;
+    let user = resp.me.ok_or_else(|| anyhow!("token is not valid"))?;
+    let display = user
+        .github_username
+        .or(user.name)
+        .or(user.email)
+        .unwrap_or_else(|| "unknown".to_string());
 
     let config = Config {
         server_url,
@@ -53,7 +69,7 @@ pub async fn run(server: Option<String>) -> Result<()> {
     };
     config.save()?;
 
-    println!("Authenticated as {user_id}");
+    println!("Authenticated as {display}");
     Ok(())
 }
 

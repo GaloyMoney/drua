@@ -159,6 +159,7 @@ async fn dev_login(
                     dev_github_id.to_string(),
                     Some("dev@localhost".to_string()),
                     Some("Dev User".to_string()),
+                    Some("dev-user".to_string()),
                 )
                 .await?
         }

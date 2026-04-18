@@ -16,17 +16,17 @@ pub struct App {
     pub workspaces: Vec<WorkspaceItem>,
     pub cursor: usize,
     pub server_url: String,
-    pub user_id: String,
+    pub user_name: String,
     pub should_quit: bool,
 }
 
 impl App {
-    pub fn new(workspaces: Vec<WorkspaceItem>, server_url: String, user_id: String) -> Self {
+    pub fn new(workspaces: Vec<WorkspaceItem>, server_url: String, user_name: String) -> Self {
         Self {
             workspaces,
             cursor: 0,
             server_url,
-            user_id,
+            user_name,
             should_quit: false,
         }
     }
