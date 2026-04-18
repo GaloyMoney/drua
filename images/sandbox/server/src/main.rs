@@ -107,6 +107,160 @@ async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing 'command' field")?;
 
+    let workspace = workspace_root();
+    let workspace_tmp = format!("{workspace}/tmp");
+    let _ = tokio::fs::create_dir_all(&workspace_tmp).await;
+
+    // Try bubblewrap first (Layer 3), fall back to uid-only (Layer 2)
+    match execute_bash_bwrap(command, &workspace, &workspace_tmp).await {
+        Ok(result) => Ok(result),
+        Err(bwrap_err) if is_bwrap_unavailable(&bwrap_err) => {
+            tracing::warn!("bwrap unavailable, falling back to uid isolation: {bwrap_err}");
+            execute_bash_uid_only(command, &workspace, &workspace_tmp).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Layer 3: Execute bash inside a bubblewrap mount namespace.
+///
+/// Mounts the workspace read-write, Nix store read-only, hides `/run/secrets`
+/// behind a tmpfs, and connects to the nix-daemon socket for `nix build` etc.
+#[cfg(unix)]
+async fn execute_bash_bwrap(
+    command: &str,
+    workspace: &str,
+    workspace_tmp: &str,
+) -> Result<String, String> {
+    let output = tokio::time::timeout(
+        Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        Command::new("bwrap")
+            // Filesystem mounts
+            .args(["--ro-bind", "/nix/store", "/nix/store"])
+            .args(["--ro-bind", "/etc", "/etc"])
+            .args(["--bind", workspace, workspace])
+            .args(["--bind", workspace_tmp, "/tmp"])
+            .args(["--tmpfs", "/run"])
+            // Nix daemon access
+            .args([
+                "--bind",
+                "/nix/var/nix/daemon-socket",
+                "/nix/var/nix/daemon-socket",
+            ])
+            .args(["--ro-bind", "/nix/var/nix/db", "/nix/var/nix/db"])
+            .args(["--ro-bind", "/nix/var/nix/gcroots", "/nix/var/nix/gcroots"])
+            .args([
+                "--ro-bind",
+                "/nix/var/nix/profiles",
+                "/nix/var/nix/profiles",
+            ])
+            // Special filesystems
+            .args(["--proc", "/proc"])
+            .args(["--dev", "/dev"])
+            // Isolation flags
+            .args(["--unshare-pid", "--die-with-parent", "--new-session"])
+            // UID drop — use bwrap flags (not process-level .uid()/.gid())
+            // so that a missing bwrap binary gives "No such file" rather
+            // than a pre-exec setuid failure masking the real issue.
+            .args(["--uid", "1000", "--gid", "1000"])
+            // Environment
+            .env("HOME", workspace)
+            .env("USER", "agent")
+            .env("TMPDIR", "/tmp")
+            .env("NIX_REMOTE", "daemon")
+            .current_dir(workspace)
+            // Execute
+            .args(["--", "bash", "-c", command])
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
+    .map_err(|e| format!("Failed to execute command: {e}"))?;
+
+    format_bash_output(&output)
+}
+
+#[cfg(not(unix))]
+async fn execute_bash_bwrap(
+    _command: &str,
+    _workspace: &str,
+    _workspace_tmp: &str,
+) -> Result<String, String> {
+    Err("bwrap not available on this platform".to_string())
+}
+
+/// Layer 2: Execute bash with UID/GID drop only (no mount namespace).
+///
+/// Used as fallback when bwrap is unavailable (e.g. nested containers without
+/// user namespace support). UID drop requires the parent to be root (UID 0);
+/// when not root (e.g. in dev/test), runs without privilege drop.
+///
+/// In fake-root environments (e.g. Nix build sandbox user namespaces), the
+/// process appears as UID 0 but cannot actually setuid. When that happens
+/// the spawn fails with EPERM ("Operation not permitted") or EINVAL
+/// ("Invalid argument" — UID not mapped). We catch both and retry without
+/// the UID drop.
+#[cfg(unix)]
+async fn execute_bash_uid_only(
+    command: &str,
+    workspace: &str,
+    workspace_tmp: &str,
+) -> Result<String, String> {
+    if is_root() {
+        match execute_bash_as_uid(command, workspace, workspace_tmp, Some((1000, 1000))).await {
+            Ok(result) => return Ok(result),
+            Err(e) if is_uid_drop_error(&e) => {
+                tracing::warn!("UID drop failed (fake-root?), falling back to plain bash: {e}");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    execute_bash_as_uid(command, workspace, workspace_tmp, None).await
+}
+
+/// Detect errors from a failed setuid/setgid in a restricted namespace.
+///
+/// EPERM  → "Operation not permitted" (no CAP_SETUID)
+/// EINVAL → "Invalid argument" (UID not mapped in user namespace)
+fn is_uid_drop_error(err: &str) -> bool {
+    err.contains("Operation not permitted") || err.contains("Invalid argument")
+}
+
+/// Inner helper: run bash with optional UID/GID override.
+#[cfg(unix)]
+async fn execute_bash_as_uid(
+    command: &str,
+    workspace: &str,
+    workspace_tmp: &str,
+    uid_gid: Option<(u32, u32)>,
+) -> Result<String, String> {
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(workspace)
+        .env("HOME", workspace)
+        .env("USER", "agent")
+        .env("TMPDIR", workspace_tmp);
+
+    if let Some((uid, gid)) = uid_gid {
+        cmd.uid(uid).gid(gid);
+    }
+
+    let output = tokio::time::timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS), cmd.output())
+        .await
+        .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
+        .map_err(|e| format!("Failed to execute command: {e}"))?;
+
+    format_bash_output(&output)
+}
+
+#[cfg(not(unix))]
+async fn execute_bash_uid_only(
+    command: &str,
+    _workspace: &str,
+    _workspace_tmp: &str,
+) -> Result<String, String> {
     let output = tokio::time::timeout(
         Duration::from_millis(DEFAULT_TIMEOUT_MS),
         Command::new("bash").arg("-c").arg(command).output(),
@@ -115,6 +269,29 @@ async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
     .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
     .map_err(|e| format!("Failed to execute command: {e}"))?;
 
+    format_bash_output(&output)
+}
+
+/// Returns true if the current process is running as root (UID 0).
+#[cfg(unix)]
+fn is_root() -> bool {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid() is a POSIX function, always safe to call
+    unsafe { geteuid() == 0 }
+}
+
+/// Detect whether a bwrap error indicates the tool is unavailable vs. a real
+/// command failure. Returns `true` for platform/permission issues that warrant
+/// a fallback to uid-only isolation.
+fn is_bwrap_unavailable(err: &str) -> bool {
+    err.contains("No permissions to create new namespace")
+        || err.contains("No such file or directory")
+        || err.contains("Operation not permitted")
+}
+
+fn format_bash_output(output: &std::process::Output) -> Result<String, String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -128,6 +305,46 @@ async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
         let code = output.status.code().unwrap_or(-1);
         Err(format!("Exit code {code}\n{stdout}{stderr}"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path validation — Layer 1 isolation for text_editor
+//
+// Rejects any path that resolves outside the workspace root after symlink
+// resolution. For new files that don't exist yet, the parent directory is
+// resolved instead.
+// ---------------------------------------------------------------------------
+
+fn validate_path(path: &str) -> Result<PathBuf, String> {
+    let workspace = PathBuf::from(workspace_root());
+    let workspace_canonical =
+        std::fs::canonicalize(&workspace).map_err(|e| format!("Cannot resolve workspace: {e}"))?;
+
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => {
+            // File doesn't exist yet — resolve the parent and append filename
+            let p = PathBuf::from(path);
+            let parent = p
+                .parent()
+                .ok_or_else(|| format!("Invalid path: no parent directory for '{path}'"))?;
+            let parent_canonical = std::fs::canonicalize(parent)
+                .map_err(|e| format!("Cannot resolve parent directory: {e}"))?;
+            parent_canonical.join(
+                p.file_name()
+                    .ok_or_else(|| format!("Invalid path: no filename in '{path}'"))?,
+            )
+        }
+    };
+
+    if !canonical.starts_with(&workspace_canonical) {
+        return Err(format!(
+            "Access denied: path '{}' is outside workspace '{}'",
+            path,
+            workspace_root()
+        ));
+    }
+    Ok(canonical)
 }
 
 // ---------------------------------------------------------------------------
@@ -153,10 +370,12 @@ async fn execute_text_editor(input: &serde_json::Value) -> Result<String, String
 
 /// View a file (with optional line range) or list a directory.
 async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
-    let path = input
+    let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
+    let validated = validate_path(raw_path)?;
+    let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
 
     let meta = tokio::fs::metadata(path)
         .await
@@ -216,7 +435,7 @@ async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
 
 /// Create a new file with the given content.
 async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
-    let path = input
+    let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
@@ -225,11 +444,14 @@ async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing 'file_text' field")?;
 
-    if let Some(parent) = std::path::Path::new(path).parent() {
+    // Create parent dirs first so validate_path can canonicalize the parent
+    if let Some(parent) = std::path::Path::new(raw_path).parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("Error creating directories: {e}"))?;
     }
+    let validated = validate_path(raw_path)?;
+    let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
 
     tokio::fs::write(path, file_text)
         .await
@@ -240,10 +462,12 @@ async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
 
 /// Replace exactly one occurrence of `old_str` with `new_str` in a file.
 async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String> {
-    let path = input
+    let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
+    let validated = validate_path(raw_path)?;
+    let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
     let old_str = input
         .get("old_str")
         .and_then(|v| v.as_str())
@@ -279,10 +503,12 @@ async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String>
 
 /// Insert text after a given line number (0 = beginning of file).
 async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
-    let path = input
+    let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
+    let validated = validate_path(raw_path)?;
+    let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
     let insert_line = input
         .get("insert_line")
         .and_then(|v| v.as_u64())
@@ -538,6 +764,9 @@ async fn initialize_inner(
 
 /// Write the GitHub token to `path` with mode 0600. Creates parent dirs as needed.
 /// The git credential helper baked into the sandbox image reads from this path.
+///
+/// Also writes workspace-level `.git-credentials` so the UID-dropped agent user
+/// can authenticate git operations without access to `/run/secrets/`.
 async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
     let path_buf = PathBuf::from(path);
     if let Some(parent) = path_buf.parent() {
@@ -556,6 +785,53 @@ async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
         tokio::fs::set_permissions(&path_buf, perms)
             .await
             .map_err(|e| format!("Failed to chmod github token: {e}"))?;
+    }
+
+    // Write workspace-level git credentials for the agent user (UID 1000)
+    write_workspace_git_credentials(token).await?;
+
+    Ok(())
+}
+
+/// Write `.git-credentials` into the workspace so the agent user (after UID
+/// drop) can push/pull without access to `/run/secrets/`. Also configures git
+/// to use the credential store.
+async fn write_workspace_git_credentials(token: &str) -> Result<(), String> {
+    let workspace = workspace_root();
+    let cred_path = format!("{workspace}/.git-credentials");
+    let content = format!("https://x-access-token:{token}@github.com\n");
+
+    tokio::fs::write(&cred_path, &content)
+        .await
+        .map_err(|e| format!("Failed to write git credentials: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&cred_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| format!("Failed to chmod git credentials: {e}"))?;
+
+        // chown to agent:agent (1000:1000) so the UID-dropped process can read it
+        let output = std::process::Command::new("chown")
+            .args(["1000:1000", &cred_path])
+            .output();
+        if let Err(e) = output {
+            tracing::warn!("Failed to chown git credentials (non-fatal): {e}");
+        }
+    }
+
+    // Configure git to use the credential store
+    let output = std::process::Command::new("git")
+        .args([
+            "config",
+            "--global",
+            "credential.helper",
+            &format!("store --file={cred_path}"),
+        ])
+        .output();
+    if let Err(e) = output {
+        tracing::warn!("Failed to configure git credential store (non-fatal): {e}");
     }
 
     Ok(())
@@ -760,8 +1036,21 @@ async fn main() {
 mod tests {
     use super::*;
 
+    /// Set WORKSPACE_ROOT to the system temp dir so that tests using
+    /// `std::env::temp_dir()` pass path validation. Called once per process.
+    fn init_test_workspace() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let tmp = std::env::temp_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::env::set_var("WORKSPACE_ROOT", tmp.to_str().unwrap());
+        });
+    }
+
     #[tokio::test]
     async fn bash_executes_echo() {
+        init_test_workspace();
         let input = serde_json::json!({"command": "echo hello"});
         let result = execute_bash(&input).await;
         assert!(result.is_ok());
@@ -770,6 +1059,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_returns_error_on_nonzero_exit() {
+        init_test_workspace();
         let input = serde_json::json!({"command": "exit 42"});
         let result = execute_bash(&input).await;
         assert!(result.is_err());
@@ -778,6 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_restart_returns_ok() {
+        init_test_workspace();
         let input = serde_json::json!({"restart": true});
         let result = execute_bash(&input).await;
         assert!(result.is_ok());
@@ -786,6 +1077,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_missing_command_returns_error() {
+        init_test_workspace();
         let input = serde_json::json!({});
         let result = execute_bash(&input).await;
         assert!(result.is_err());
@@ -794,6 +1086,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_create_and_view() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-create-view");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("test.txt");
@@ -820,6 +1113,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_view_with_range() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-view-range");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("range.txt");
@@ -848,6 +1142,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_view_directory() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-view-dir");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -867,6 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_str_replace_single_match() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-replace");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("replace.txt");
@@ -897,6 +1193,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_str_replace_no_match() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-replace-no-match");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("no_match.txt");
@@ -923,6 +1220,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_str_replace_multiple_matches() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-replace-multi");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("multi.txt");
@@ -949,6 +1247,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_insert_at_beginning() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-insert");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("insert.txt");
@@ -979,6 +1278,7 @@ mod tests {
 
     #[tokio::test]
     async fn editor_view_nonexistent_file_returns_error() {
+        init_test_workspace();
         let input = serde_json::json!({
             "command": "view",
             "path": "/nonexistent/path/file.txt"
@@ -989,6 +1289,7 @@ mod tests {
 
     #[tokio::test]
     async fn text_editor_dispatch_routes_commands() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-dispatch");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let file = dir.join("dispatch.txt");
@@ -1196,6 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_github_token_creates_file_and_parent_dir() {
+        init_test_workspace();
         let base = std::env::temp_dir().join("sandbox-test-token");
         let _ = tokio::fs::remove_dir_all(&base).await;
         let path = base.join("nested").join("github-token");
@@ -1226,6 +1528,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_scratch_returns_workspace() {
+        init_test_workspace();
         let dir = std::env::temp_dir().join("sandbox-test-init-scratch");
         let _ = tokio::fs::remove_dir_all(&dir).await;
 
@@ -1578,5 +1881,107 @@ mod tests {
         let result = execute_glob(&input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("pattern"));
+    }
+
+    // ── validate_path (Layer 1 isolation) ─────────────────────────
+
+    #[test]
+    fn validate_path_allows_workspace_paths() {
+        init_test_workspace();
+        let workspace = workspace_root();
+        let dir = PathBuf::from(&workspace);
+
+        // Ensure workspace dir exists for canonicalization
+        std::fs::create_dir_all(&dir).unwrap();
+        let test_file = dir.join("test-validate.txt");
+        std::fs::write(&test_file, "ok").unwrap();
+
+        let result = validate_path(test_file.to_str().unwrap());
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+
+        std::fs::remove_file(&test_file).unwrap();
+    }
+
+    #[test]
+    fn validate_path_rejects_outside_paths() {
+        init_test_workspace();
+        let result = validate_path("/etc/passwd");
+        assert!(result.is_err());
+        assert!(
+            result.as_ref().unwrap_err().contains("Access denied"),
+            "expected 'Access denied', got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validate_path_rejects_secrets() {
+        init_test_workspace();
+        let result = validate_path("/run/secrets/github-token");
+        assert!(result.is_err());
+        // Either "Access denied" (if the path exists) or "Cannot resolve"
+        // (if parent doesn't exist). Both are acceptable rejections.
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Access denied") || err.contains("Cannot resolve"),
+            "expected rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_path_rejects_traversal() {
+        init_test_workspace();
+        let workspace = workspace_root();
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Try to escape workspace via ../
+        let traversal = format!("{workspace}/../etc/passwd");
+        let result = validate_path(&traversal);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Access denied") || err.contains("Cannot resolve"),
+            "expected rejection for traversal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_path_handles_new_files() {
+        init_test_workspace();
+        let workspace = workspace_root();
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Non-existent file in a valid directory should pass
+        let new_file = format!("{workspace}/does-not-exist-yet.txt");
+        let result = validate_path(&new_file);
+        assert!(
+            result.is_ok(),
+            "expected ok for new file, got: {:?}",
+            result
+        );
+    }
+
+    // ── is_bwrap_unavailable ──────────────────────────────────────
+
+    #[test]
+    fn bwrap_unavailable_detects_namespace_error() {
+        assert!(is_bwrap_unavailable(
+            "No permissions to create new namespace"
+        ));
+    }
+
+    #[test]
+    fn bwrap_unavailable_detects_missing_binary() {
+        assert!(is_bwrap_unavailable("No such file or directory"));
+    }
+
+    #[test]
+    fn bwrap_unavailable_detects_operation_not_permitted() {
+        assert!(is_bwrap_unavailable("Operation not permitted"));
+    }
+
+    #[test]
+    fn bwrap_unavailable_returns_false_for_real_errors() {
+        assert!(!is_bwrap_unavailable("Exit code 1\ncommand not found: foo"));
     }
 }
