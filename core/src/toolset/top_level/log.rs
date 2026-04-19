@@ -112,10 +112,6 @@ impl TopLevelTool for WorkspaceLog {
         subject.can_read_workspace()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -167,10 +163,6 @@ impl TopLevelTool for AdminAllLogs {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
     }
 

@@ -30,9 +30,9 @@ use skill::Skills;
 use toolset::{
     AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminAllLogs,
     AdminCreateSandbox, AdminGetSandbox, AdminInspectSandbox, AdminListAgents, AdminListSandboxes,
-    AdminWorkspaceCreate, AdminWorkspaceList, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read,
-    TextEditor, ToolSets, ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
-    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
+    AdminToolSet, AdminWorkspaceCreate, AdminWorkspaceList, Bash, CodeAssistantToolSet, GlobTool,
+    Grep, Ls, Read, TextEditor, ToolSets, ToolSetsError, TopLevelTool, WorkspaceAgentAttachSandbox,
+    WorkspaceAgentCreate, WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
     WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
 };
 use user::Users;
@@ -105,7 +105,6 @@ impl App {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }
         toolsets.register_top_level(WorkspaceLog::new(Arc::clone(&audit)));
-        toolsets.register_top_level(AdminAllLogs::new(Arc::clone(&audit)));
         toolsets.set_audit(Arc::clone(&audit));
 
         // Spawn the prompt executor and hand its request channel to the
@@ -166,35 +165,43 @@ impl App {
             Arc::clone(&skills),
         ));
 
-        // Register agent & sandbox management tools now that both services
+        // Register workspace-scoped management tools now that both services
         // are available. Uses interior-mutable `register_top_level` so the
         // already-Arc'd toolsets can be extended.
         toolsets.register_top_level(WorkspaceAgentCreate::new(Arc::clone(&agents)));
-        toolsets.register_top_level(AdminAgentCreate::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceAgentAttachSandbox::new(
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
         ));
-        toolsets.register_top_level(AdminAgentAttachSandbox::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceAgentDetachSandbox::new(
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
         ));
-        toolsets.register_top_level(AdminAgentDetachSandbox::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceListAgents::new(Arc::clone(&agents)));
-        toolsets.register_top_level(AdminListAgents::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceCreateSandbox::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(AdminCreateSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(WorkspaceListSandboxes::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(AdminListSandboxes::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(WorkspaceGetSandbox::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(AdminGetSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(WorkspaceInspectSandbox::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(AdminInspectSandbox::new(Arc::clone(&sandboxes)));
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
-        toolsets.register_top_level(AdminWorkspaceCreate::new(Arc::clone(&workspaces)));
-        toolsets.register_top_level(AdminWorkspaceList::new(Arc::clone(&workspaces)));
+
+        // Admin tools move behind progressive disclosure (search_tools →
+        // describe_tool → call_tool) to declutter the top-level list_tools
+        // response.
+        let admin_tools: Vec<Arc<dyn TopLevelTool>> = vec![
+            Arc::new(AdminAgentCreate::new(Arc::clone(&agents))),
+            Arc::new(AdminAgentAttachSandbox::new(Arc::clone(&agents))),
+            Arc::new(AdminAgentDetachSandbox::new(Arc::clone(&agents))),
+            Arc::new(AdminListAgents::new(Arc::clone(&agents))),
+            Arc::new(AdminCreateSandbox::new(Arc::clone(&sandboxes))),
+            Arc::new(AdminListSandboxes::new(Arc::clone(&sandboxes))),
+            Arc::new(AdminGetSandbox::new(Arc::clone(&sandboxes))),
+            Arc::new(AdminInspectSandbox::new(Arc::clone(&sandboxes))),
+            Arc::new(AdminAllLogs::new(Arc::clone(&audit))),
+            Arc::new(AdminWorkspaceCreate::new(Arc::clone(&workspaces))),
+            Arc::new(AdminWorkspaceList::new(Arc::clone(&workspaces))),
+        ];
+        toolsets.register_searchable(AdminToolSet::new(admin_tools));
 
         Ok(Self {
             users: Arc::new(Users::new(pool)),

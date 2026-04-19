@@ -76,10 +76,6 @@ impl TopLevelTool for AdminWorkspaceCreate {
         subject.is_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -136,10 +132,6 @@ impl TopLevelTool for AdminWorkspaceList {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
     }
 

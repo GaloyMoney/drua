@@ -70,10 +70,6 @@ impl TopLevelTool for Read {
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.is_agent() && subject.readable_sandbox_id().is_some()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,

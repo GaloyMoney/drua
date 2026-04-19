@@ -94,21 +94,11 @@ impl TopLevelTool for Bash {
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        // Visible-but-unauthorized when an agent has no attachment yet —
-        // the model gets a clear `Unauthorized` error from dispatch
-        // instead of the tool silently disappearing.
-        subject.is_agent() && sandbox_use_id(subject).is_some()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        // Defense in depth — dispatch already checked `can_execute`, but
-        // surfacing the same error here keeps the tool callable in
-        // contexts that bypass the dispatcher (tests, internal calls).
         let sandbox_id = sandbox_use_id(subject).ok_or(ToolSetsError::Unauthorized)?;
 
         let client = self
