@@ -118,11 +118,15 @@ impl Sandboxes {
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
+        let id = SandboxId::new();
+        let workspace_path = self.admin.workspace_path(&format!("sb-{id}"));
         let new_sandbox = NewSandbox::builder()
+            .id(id)
             .workspace_id(workspace_id.into())
             .name(name.into())
             .specs(specs)
             .mode(mode)
+            .workspace_path(workspace_path)
             .build()
             .expect("could not build new sandbox");
 
@@ -311,12 +315,6 @@ impl Sandboxes {
         }
         op.commit().await?;
         Ok(())
-    }
-
-    /// Return the absolute path to the workspace directory for `sandbox`.
-    /// Delegates to the admin client, which knows the mount layout.
-    pub fn workspace_path(&self, sandbox: &Sandbox) -> String {
-        self.admin.workspace_path(&sandbox.resource_name())
     }
 
     #[instrument(name = "domain.sandbox.find_by_id", skip(self, _sub))]

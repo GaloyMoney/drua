@@ -343,26 +343,26 @@ impl Agents {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
 
-        // Then sandbox side (enforces workspace match and single-writer).
-        self.sandboxes
+        // Sandbox side (enforces workspace match and single-writer).
+        let sandbox = self
+            .sandboxes
             .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
             .await?;
 
-        op.commit().await?;
-
         // Notify the agent's session so the LLM knows a sandbox was attached.
-        let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
-        let workspace_path = self.sandboxes.workspace_path(&sandbox);
         self.sessions
-            .sandbox_notification(
+            .sandbox_notification_in_op(
+                &mut op,
                 agent_id,
                 sandbox.name,
                 session::message::SandboxOperation::Attach {
                     mode: format!("{mode:?}").to_lowercase(),
-                    workspace_path,
+                    workspace_path: sandbox.workspace_path,
                 },
             )
             .await?;
+
+        op.commit().await?;
 
         Ok(agent)
     }
@@ -392,21 +392,22 @@ impl Agents {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
 
-        self.sandboxes
+        let sandbox = self
+            .sandboxes
             .detach_from_agent_in_op(&mut op, sandbox_id, agent_id)
             .await?;
 
-        op.commit().await?;
-
         // Notify the agent's session so the LLM knows a sandbox was detached.
-        let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
         self.sessions
-            .sandbox_notification(
+            .sandbox_notification_in_op(
+                &mut op,
                 agent_id,
                 sandbox.name,
                 session::message::SandboxOperation::Detach,
             )
             .await?;
+
+        op.commit().await?;
 
         Ok(agent)
     }

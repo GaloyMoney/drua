@@ -67,6 +67,8 @@ pub enum SandboxEvent {
         name: String,
         specs: SandboxSpecs,
         mode: SandboxMode,
+        #[serde(default)]
+        workspace_path: String,
     },
     StateChanged {
         state: SandboxState,
@@ -106,6 +108,11 @@ pub struct Sandbox {
     pub name: String,
     pub specs: SandboxSpecs,
     pub mode: SandboxMode,
+    /// Absolute path to the workspace directory inside the sandbox,
+    /// cached at creation time from the admin client. Empty for
+    /// sandboxes created before this field was added.
+    #[builder(default)]
+    pub workspace_path: String,
     #[builder(default = "SandboxState::Provisioning")]
     pub state: SandboxState,
     /// Reason for the most recent failed provisioning step, set by
@@ -345,6 +352,7 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                     name,
                     specs,
                     mode,
+                    workspace_path,
                 } => {
                     builder = builder
                         .id(*id)
@@ -352,6 +360,7 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                         .name(name.clone())
                         .specs(specs.clone())
                         .mode(mode.clone())
+                        .workspace_path(workspace_path.clone())
                         .state(SandboxState::Provisioning);
                 }
                 SandboxEvent::StateChanged { state } => {
@@ -402,6 +411,8 @@ pub struct NewSandbox {
     pub(super) name: String,
     pub(super) specs: SandboxSpecs,
     pub(super) mode: SandboxMode,
+    #[builder(default, setter(into))]
+    pub(super) workspace_path: String,
 }
 
 impl NewSandbox {
@@ -422,6 +433,7 @@ impl IntoEvents<SandboxEvent> for NewSandbox {
                 name: self.name,
                 specs: self.specs,
                 mode: self.mode,
+                workspace_path: self.workspace_path,
             }],
         )
     }
@@ -694,6 +706,7 @@ mod tests {
                     name: "test-sandbox".into(),
                     specs: test_specs(),
                     mode: SandboxMode::Scratch,
+                    workspace_path: "/workspace".into(),
                 },
                 SandboxEvent::AgentAttached {
                     agent_id: a,
