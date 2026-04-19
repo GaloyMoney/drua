@@ -1,17 +1,17 @@
-variable "galoy_agents_namespace" {
-  description = "Namespace for the galoy-agents deployment"
+variable "drua_namespace" {
+  description = "Namespace for the drua deployment"
   type        = string
-  default     = "galoy-agents"
+  default     = "drua"
 }
 
-variable "galoy_agents_image_tag" {
-  description = "Image tag for galoy-agents"
+variable "drua_image_tag" {
+  description = "Image tag for drua"
   type        = string
   default     = "edge"
 }
 
-variable "galoy_agents_secrets" {
-  description = "JSON-encoded secrets for galoy-agents"
+variable "drua_secrets" {
+  description = "JSON-encoded secrets for drua"
   sensitive   = true
   type        = string
   default     = "{}"
@@ -47,26 +47,26 @@ provider "helm" {
 }
 
 locals {
-  secrets = length(var.galoy_agents_secrets) > 2 ? jsondecode(var.galoy_agents_secrets) : {}
+  secrets = length(var.drua_secrets) > 2 ? jsondecode(var.drua_secrets) : {}
 
-  pg_password = try(local.secrets.pg_password, "galoy-agents")
-  pg_con      = try(local.secrets.pg_con, "postgresql://galoy-agents:${local.pg_password}@galoy-agents-postgresql:5432/galoy-agents")
+  pg_password = try(local.secrets.pg_password, "drua")
+  pg_con      = try(local.secrets.pg_con, "postgresql://drua:${local.pg_password}@drua-postgresql:5432/drua")
 
   github_client_id     = try(local.secrets.github_client_id, "dummy-client-id")
   github_client_secret = try(local.secrets.github_client_secret, "dummy-client-secret")
   github_redirect_uri  = try(local.secrets.github_redirect_uri, "http://localhost:5254/auth/callback")
 }
 
-resource "kubernetes_namespace" "galoy_agents" {
+resource "kubernetes_namespace" "drua" {
   metadata {
-    name = var.galoy_agents_namespace
+    name = var.drua_namespace
   }
 }
 
-resource "kubernetes_secret" "galoy_agents" {
+resource "kubernetes_secret" "drua" {
   metadata {
-    name      = "galoy-agents"
-    namespace = kubernetes_namespace.galoy_agents.metadata[0].name
+    name      = "drua"
+    namespace = kubernetes_namespace.drua.metadata[0].name
   }
 
   data = {
@@ -78,18 +78,18 @@ resource "kubernetes_secret" "galoy_agents" {
   }
 }
 
-resource "helm_release" "galoy_agents" {
-  name      = "galoy-agents"
+resource "helm_release" "drua" {
+  name      = "drua"
   chart     = "${path.module}/../../charts/drua"
-  namespace = kubernetes_namespace.galoy_agents.metadata[0].name
+  namespace = kubernetes_namespace.drua.metadata[0].name
 
   values = [
     templatefile("${path.module}/drua-values.yml.tmpl", {
-      image_tag = var.galoy_agents_image_tag
+      image_tag = var.drua_image_tag
     })
   ]
 
-  depends_on = [kubernetes_secret.galoy_agents]
+  depends_on = [kubernetes_secret.drua]
 
   dependency_update = true
   timeout           = 900 # 15 minutes
