@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
+use crate::auth::AuthSubject;
 use crate::code_assistant::{CodeAssistant, SearchCodeParams};
 
 use super::super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
@@ -89,6 +90,7 @@ impl SearchableToolSet for CodeAssistantToolSet {
 
     async fn call(
         &self,
+        _subject: &AuthSubject,
         tool_name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {

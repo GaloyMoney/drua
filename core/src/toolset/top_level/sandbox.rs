@@ -148,10 +148,6 @@ impl TopLevelTool for WorkspaceCreateSandbox {
         subject.can_write_workspace()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.can_write_workspace()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -205,10 +201,6 @@ impl TopLevelTool for AdminCreateSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
     }
 
@@ -272,10 +264,6 @@ impl TopLevelTool for WorkspaceListSandboxes {
         subject.can_read_workspace()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -327,10 +315,6 @@ impl TopLevelTool for AdminListSandboxes {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
     }
 
@@ -388,10 +372,6 @@ impl TopLevelTool for WorkspaceGetSandbox {
         subject.can_read_workspace()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -445,10 +425,6 @@ impl TopLevelTool for AdminGetSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
     }
 

@@ -31,13 +31,6 @@ pub trait TopLevelTool: Send + Sync {
         true
     }
 
-    /// Whether the subject may actually invoke this tool. Default: yes.
-    /// `ToolSets::call_top_level_tool` enforces this before dispatch and
-    /// surfaces `ToolSetsError::Unauthorized` on `false`.
-    fn can_execute(&self, _subject: &AuthSubject) -> bool {
-        true
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -74,15 +67,9 @@ pub trait SearchableToolSet: Send + Sync {
         true
     }
 
-    /// Whether the subject may invoke any tool in this set. Default: yes.
-    /// `CallCatalogTool` enforces this before dispatching and surfaces
-    /// `ToolSetsError::Unauthorized` on `false`.
-    fn can_execute(&self, _subject: &AuthSubject) -> bool {
-        true
-    }
-
     async fn call(
         &self,
+        subject: &AuthSubject,
         tool_name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError>;

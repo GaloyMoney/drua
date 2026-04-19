@@ -381,11 +381,7 @@ impl TopLevelTool for CallCatalogTool {
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
-        if !set.can_execute(subject) {
-            return Err(ToolSetsError::Unauthorized);
-        }
-
-        let result = set.call(&name, inner_args).await;
+        let result = set.call(subject, &name, inner_args).await;
         let filter = output_filter
             .or(tool_default_filter)
             .unwrap_or_else(OutputFilter::global_default);
@@ -492,6 +488,7 @@ mod tests {
         }
         async fn call(
             &self,
+            _subject: &AuthSubject,
             _tool_name: &str,
             _arguments: Option<JsonObject>,
         ) -> Result<CallToolResult, ToolSetsError> {

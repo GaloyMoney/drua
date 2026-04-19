@@ -162,9 +162,8 @@ impl ToolSets {
             .into_iter()
     }
 
-    /// Look up and execute a top-level tool by name. Runs
-    /// [`TopLevelTool::can_execute`] + dispatch, and records an audit entry
-    /// when an [`Audit`] instance has been wired via [`set_audit`].
+    /// Look up and execute a top-level tool by name. Records an audit
+    /// entry when an [`Audit`] instance has been wired via [`set_audit`].
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -180,10 +179,6 @@ impl ToolSets {
                     .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?,
             )
         };
-
-        if !tool.can_execute(subject) {
-            return Err(ToolSetsError::Unauthorized);
-        }
 
         let seed = {
             let ctx = EventContext::current();

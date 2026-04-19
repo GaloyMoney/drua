@@ -94,13 +94,6 @@ impl TopLevelTool for Bash {
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        // Visible-but-unauthorized when an agent has no attachment yet —
-        // the model gets a clear `Unauthorized` error from dispatch
-        // instead of the tool silently disappearing.
-        subject.is_agent() && sandbox_use_id(subject).is_some()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,

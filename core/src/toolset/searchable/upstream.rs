@@ -117,12 +117,9 @@ impl SearchableToolSet for UpstreamToolSet {
         has_required_scopes(&self.required_scopes, subject)
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        has_required_scopes(&self.required_scopes, subject)
-    }
-
     async fn call(
         &self,
+        _subject: &AuthSubject,
         tool_name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
