@@ -1,3 +1,5 @@
+use super::chat::AssistantChat;
+
 #[allow(dead_code)]
 pub struct WorkspaceItem {
     pub id: String,
@@ -28,33 +30,61 @@ pub enum Focus {
     Chat,
 }
 
-pub struct ChatMessage {
-    pub role: String,
-    pub text: String,
+/// Scroll and viewport state for the chat message area.
+#[derive(Default)]
+pub struct ChatViewState {
+    pub assistant: AssistantChat,
+    pub chat_scroll: u16,
+    chat_viewport_height: u16,
 }
 
-pub struct App {
+impl ChatViewState {
+    pub fn scroll_up(&mut self) {
+        let jump = (self.chat_viewport_height / 2).max(1);
+        self.chat_scroll = self.chat_scroll.saturating_add(jump);
+    }
+
+    pub fn scroll_down(&mut self) {
+        let jump = (self.chat_viewport_height / 2).max(1);
+        self.chat_scroll = self.chat_scroll.saturating_sub(jump);
+    }
+
+    pub fn reset_scroll(&mut self) {
+        self.chat_scroll = 0;
+    }
+
+    /// Called from the render path to record the available height.
+    pub fn update_viewport_height(&mut self, h: u16) {
+        self.chat_viewport_height = h;
+    }
+}
+
+/// Top-level TUI state — replaces the old flat `App` struct.
+pub struct ScreenState {
+    // Workspace browsing
     pub workspaces: Vec<WorkspaceItem>,
     pub cursor: usize,
+    pub selected_lead_id: Option<String>,
+
+    // Global
     pub server_url: String,
     pub user_name: String,
     pub should_quit: bool,
-
-    pub mode: Mode,
     pub focus: Focus,
+    pub status_message: Option<String>,
+
+    // Chat
+    pub chat_view: ChatViewState,
+    pub chat_input: String,
+
+    // Create workspace modal
+    pub mode: Mode,
     pub input_name: String,
     pub input_description: String,
     pub input_field: u8,
-    pub status_message: Option<String>,
-
-    pub chat_messages: Vec<ChatMessage>,
-    pub chat_input: String,
-    pub chat_scroll: u16,
-    pub chat_streaming: bool,
-    pub selected_lead_id: Option<String>,
 }
 
-impl App {
+impl ScreenState {
     pub fn new(workspaces: Vec<WorkspaceItem>, server_url: String, user_name: String) -> Self {
         let selected_lead_id = workspaces
             .first()
@@ -67,16 +97,16 @@ impl App {
             server_url,
             user_name,
             should_quit: false,
-            mode: Mode::default(),
             focus: Focus::default(),
+            status_message: None,
+
+            chat_view: ChatViewState::default(),
+            chat_input: String::new(),
+
+            mode: Mode::default(),
             input_name: String::new(),
             input_description: String::new(),
             input_field: 0,
-            status_message: None,
-            chat_messages: Vec::new(),
-            chat_input: String::new(),
-            chat_scroll: 0,
-            chat_streaming: false,
             selected_lead_id,
         }
     }
@@ -136,36 +166,13 @@ impl App {
         };
     }
 
-    pub fn push_chat_message(&mut self, role: impl Into<String>, text: impl Into<String>) {
-        self.chat_messages.push(ChatMessage {
-            role: role.into(),
-            text: text.into(),
-        });
-        self.chat_scroll = 0;
-    }
-
-    pub fn append_to_last_assistant(&mut self, text: &str) {
-        if let Some(last) = self.chat_messages.last_mut() {
-            if last.role == "assistant" {
-                last.text.push_str(text);
-                return;
-            }
-        }
-        self.push_chat_message("assistant", text);
-    }
-
-    pub fn clear_chat(&mut self) {
-        self.chat_messages.clear();
-        self.chat_input.clear();
-        self.chat_scroll = 0;
-        self.chat_streaming = false;
-    }
-
     fn sync_lead_and_clear_chat(&mut self) {
         self.selected_lead_id = self
             .selected_workspace()
             .and_then(|ws| ws.lead.as_ref())
             .map(|l| l.id.clone());
-        self.clear_chat();
+        self.chat_view.assistant.clear();
+        self.chat_input.clear();
+        self.chat_view.reset_scroll();
     }
 }
