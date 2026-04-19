@@ -62,6 +62,38 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -q "err"
 }
 
+@test "sandbox: bash background process survives between calls" {
+  # Start a background process that writes a marker file after a delay
+  MARKER="$SANDBOX_WORK/bg-alive-marker"
+  RESP=$(sandbox_execute "{\"tool\":\"bash\",\"input\":{\"command\":\"(sleep 1 && echo bg-alive > $MARKER) &\"}}")
+  echo "$RESP"
+  echo "$RESP" | jq -e '.is_error == false'
+
+  # Run another command — the background process should still be running
+  RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"echo foreground-ok"}}')
+  echo "$RESP"
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | grep -q "foreground-ok"
+
+  # Wait for background process to complete and verify marker file
+  sleep 2
+  [ -f "$MARKER" ]
+  grep -q "bg-alive" "$MARKER"
+}
+
+@test "sandbox: bash session preserves state between calls" {
+  # Set a variable in one call
+  RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"export PERSIST_VAR=hello_session"}}')
+  echo "$RESP"
+  echo "$RESP" | jq -e '.is_error == false'
+
+  # Read it back in a separate call — only works with persistent session
+  RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"echo $PERSIST_VAR"}}')
+  echo "$RESP"
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | grep -q "hello_session"
+}
+
 # ── Text editor: create ──────────────────────────────────────────────
 
 @test "sandbox: text editor creates a file" {
