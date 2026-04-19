@@ -88,10 +88,12 @@ impl ToolSets {
         })
     }
 
-    /// Log upstream init results. Must be called from OUTSIDE the
-    /// ToolSets::init context — rmcp's RunningService consumes the
-    /// tracing span, making events emitted during init invisible to
-    /// OTel exporters.
+    /// Log upstream init results. Must be called from OUTSIDE
+    /// `ToolSets::init` — rmcp's `serve_inner` captures
+    /// `tracing::Span::current()` and instruments a long-lived background
+    /// task with it. That task holds the span open for the MCP
+    /// connection's lifetime, so `tracing-opentelemetry` never exports it
+    /// (spans export only on close, i.e. when all handles are dropped).
     #[tracing::instrument(name = "domain.toolset.init_summary", skip_all)]
     pub fn log_init_summary(&self) {
         let sets = self.sets.read().expect("toolset lock poisoned");
