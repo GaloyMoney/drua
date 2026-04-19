@@ -254,7 +254,7 @@ impl BashSession {
             .await
         {
             Ok(Ok(result)) => {
-                let output = self.collect_output(session, result);
+                let output = self.collect_output(session, result).await;
                 Ok(output)
             }
             Ok(Err(_)) => {
@@ -290,11 +290,15 @@ impl BashSession {
     }
 
     /// Collect stdout output and any buffered stderr into a single [`CommandResult`].
-    fn collect_output(
+    async fn collect_output(
         &self,
         session: &mut BashSessionInner,
         result: MarkerResult,
     ) -> CommandResult {
+        // Give the stderr background reader a moment to forward any remaining
+        // chunks that arrived around the same time as the stdout marker.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
         let mut stderr_buf = String::new();
         while let Ok(chunk) = session.stderr_rx.try_recv() {
             stderr_buf.push_str(&chunk);
