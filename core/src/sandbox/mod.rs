@@ -46,9 +46,12 @@ impl Sandboxes {
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
-            SandboxBackendConfig::Local { sandbox_spawn_cmd } => Arc::new(LocalAdminClient::new(
+            SandboxBackendConfig::Local {
+                sandbox_spawn_cmd,
+                local_repo_root,
+            } => Arc::new(LocalAdminClient::new(
                 LocalSandboxConfig { sandbox_spawn_cmd },
-                &config.local_repo_root,
+                &local_repo_root,
             )),
             SandboxBackendConfig::K8s {
                 namespace,
