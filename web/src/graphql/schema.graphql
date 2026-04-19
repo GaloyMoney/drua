@@ -69,6 +69,10 @@ scalar Timestamp
 scalar UUID
 
 type Workspace {
+	"""
+	All agents in this workspace.
+	"""
+	agents: [Agent!]!
 	createdAt: Timestamp!
 	description: String
 	id: WorkspaceId!

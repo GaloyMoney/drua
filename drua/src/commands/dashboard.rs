@@ -57,6 +57,8 @@ struct WorkspaceNode {
     description: Option<String>,
     created_at: Option<String>,
     lead: Option<AgentNode>,
+    #[serde(default)]
+    agents: Vec<AgentNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +78,11 @@ const WORKSPACES_QUERY: &str = r#"
                     description
                     createdAt
                     lead {
+                        id
+                        name
+                        role
+                    }
+                    agents {
                         id
                         name
                         role
@@ -291,6 +298,15 @@ async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> 
                     name: a.name,
                     role: a.role,
                 }),
+                agents: node
+                    .agents
+                    .into_iter()
+                    .map(|a| AgentItem {
+                        id: a.id,
+                        name: a.name,
+                        role: a.role,
+                    })
+                    .collect(),
             }
         })
         .collect();

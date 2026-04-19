@@ -20,6 +20,7 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     match state.mode {
         Mode::Browse => match state.focus {
             Focus::Sidebar => handle_sidebar_key(state, key),
+            Focus::Agents => handle_agents_key(state, key),
             Focus::Chat => handle_chat_key(state, key),
         },
         Mode::CreateWorkspace => handle_create_key(state, key),
@@ -51,6 +52,38 @@ fn handle_sidebar_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     }
 }
 
+fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    state.status_message = None;
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.agent_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.agent_cursor_up();
+            Action::None
+        }
+        KeyCode::Tab => {
+            state.toggle_focus();
+            Action::None
+        }
+        KeyCode::Esc => {
+            state.focus = Focus::Sidebar;
+            Action::None
+        }
+        KeyCode::Enter => {
+            let input = state.chat_input.trim().to_string();
+            if input.is_empty() {
+                // Switch to chat pane for typing
+                state.focus = Focus::Chat;
+                return Action::None;
+            }
+            send_chat_to_selected_agent(state, input)
+        }
+        _ => Action::None,
+    }
+}
+
 fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc => {
@@ -66,21 +99,7 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             if input.is_empty() {
                 return Action::None;
             }
-            match state.selected_lead_id.clone() {
-                Some(agent_id) => {
-                    state.chat_view.assistant.add_user_message(&input);
-                    state.chat_input.clear();
-                    state.chat_view.reset_scroll();
-                    Action::SendChat {
-                        agent_id,
-                        prompt: input,
-                    }
-                }
-                None => {
-                    state.status_message = Some("No lead agent selected".to_string());
-                    Action::None
-                }
-            }
+            send_chat_to_selected_agent(state, input)
         }
         KeyCode::Backspace => {
             state.chat_input.pop();
@@ -130,5 +149,24 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Action::CreateWorkspace { name, description }
         }
         _ => Action::None,
+    }
+}
+
+/// Send chat to whichever agent is currently selected in the agents panel.
+fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action {
+    match state.selected_agent_id() {
+        Some(agent_id) => {
+            state.chat_view.assistant.add_user_message(&input);
+            state.chat_input.clear();
+            state.chat_view.reset_scroll();
+            Action::SendChat {
+                agent_id,
+                prompt: input,
+            }
+        }
+        None => {
+            state.status_message = Some("No agent selected".to_string());
+            Action::None
+        }
     }
 }

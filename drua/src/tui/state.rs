@@ -7,6 +7,7 @@ pub struct WorkspaceItem {
     pub description: Option<String>,
     pub created_at: Option<String>,
     pub lead: Option<AgentItem>,
+    pub agents: Vec<AgentItem>,
 }
 
 #[allow(dead_code)]
@@ -27,6 +28,7 @@ pub enum Mode {
 pub enum Focus {
     #[default]
     Sidebar,
+    Agents,
     Chat,
 }
 
@@ -66,6 +68,9 @@ pub struct ScreenState {
     pub cursor: usize,
     pub selected_lead_id: Option<String>,
 
+    // Agent browsing
+    pub agent_cursor: usize,
+
     // Global
     pub server_url: String,
     pub user_name: String,
@@ -100,6 +105,8 @@ impl ScreenState {
             focus: Focus::default(),
             status_message: None,
 
+            agent_cursor: 0,
+
             chat_view: ChatViewState::default(),
             chat_input: String::new(),
 
@@ -127,6 +134,31 @@ impl ScreenState {
 
     pub fn selected_workspace(&self) -> Option<&WorkspaceItem> {
         self.workspaces.get(self.cursor)
+    }
+
+    /// Returns the agent at the current agent cursor position.
+    pub fn selected_agent(&self) -> Option<&AgentItem> {
+        self.selected_workspace()
+            .and_then(|ws| ws.agents.get(self.agent_cursor))
+    }
+
+    /// Returns the id of the currently selected agent (for chat targeting).
+    pub fn selected_agent_id(&self) -> Option<String> {
+        self.selected_agent().map(|a| a.id.clone())
+    }
+
+    pub fn agent_cursor_down(&mut self) {
+        if let Some(ws) = self.selected_workspace() {
+            if !ws.agents.is_empty() && self.agent_cursor < ws.agents.len() - 1 {
+                self.agent_cursor += 1;
+            }
+        }
+    }
+
+    pub fn agent_cursor_up(&mut self) {
+        if self.agent_cursor > 0 {
+            self.agent_cursor -= 1;
+        }
     }
 
     pub fn replace_workspaces(&mut self, workspaces: Vec<WorkspaceItem>) {
@@ -161,7 +193,8 @@ impl ScreenState {
 
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
-            Focus::Sidebar => Focus::Chat,
+            Focus::Sidebar => Focus::Agents,
+            Focus::Agents => Focus::Chat,
             Focus::Chat => Focus::Sidebar,
         };
     }
@@ -171,6 +204,7 @@ impl ScreenState {
             .selected_workspace()
             .and_then(|ws| ws.lead.as_ref())
             .map(|l| l.id.clone());
+        self.agent_cursor = 0;
         self.chat_view.assistant.clear();
         self.chat_input.clear();
         self.chat_view.reset_scroll();

@@ -33,6 +33,13 @@ impl Workspace {
             .await?;
         Ok(Agent::from(agent))
     }
+
+    /// All agents in this workspace.
+    async fn agents(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Agent>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let agents = app.agents().list_for_workspace(sub, self.entity.id).await?;
+        Ok(agents.into_iter().map(Agent::from).collect())
+    }
 }
 
 impl From<DomainWorkspace> for Workspace {
