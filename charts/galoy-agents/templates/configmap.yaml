@@ -4,7 +4,7 @@ metadata:
   name: {{ template "galoyAgents.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
 data:
-  galoy-agents.yml: |-
+  drua.yml: |-
     server:
       port: {{ .Values.galoyAgents.server.service.port }}
       host: {{ .Values.galoyAgents.config.server.host | quote }}

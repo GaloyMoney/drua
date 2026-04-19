@@ -109,8 +109,8 @@ spec:
           protocol: TCP
         volumeMounts:
         - name: config
-          mountPath: "/config/galoy-agents.yml"
-          subPath: "galoy-agents.yml"
+          mountPath: "/config/drua.yml"
+          subPath: "drua.yml"
           readOnly: true
         {{- if .Values.galoyAgents.codeAssistant.indexHash }}
         - name: code-assistant-data
@@ -122,8 +122,8 @@ spec:
           readOnly: true
         {{- end }}
         env:
-        - name: GALOY_AGENTS_CONFIG
-          value: "/config/galoy-agents.yml"
+        - name: DRUA_CONFIG
+          value: "/config/drua.yml"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
         - name: PG_CON
