@@ -8,7 +8,11 @@ receivers:
 
 exporters:
   debug:
-    verbosity: basic
+    verbosity: detailed
+  otlp/honeycomb:
+    endpoint: "api.honeycomb.io:443"
+    headers:
+      "x-honeycomb-team": ${HONEYCOMB_API_KEY}
 
 extensions:
   health_check:
@@ -19,4 +23,4 @@ service:
     traces:
       receivers: [otlp]
       processors: []
-      exporters: [debug]
+      exporters: [otlp/honeycomb, debug]
