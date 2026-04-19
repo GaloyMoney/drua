@@ -40,6 +40,7 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.create", skip_all)]
     pub async fn create(
         &self,
+        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
         name: &str,
         secret_type: SecretType,
@@ -63,6 +64,7 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.list_by_workspace", skip_all)]
     pub async fn list_by_workspace(
         &self,
+        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<WorkspaceSecret>, WorkspaceSecretError> {
         self.list_all_for_workspace(workspace_id).await
@@ -91,6 +93,7 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
+        _sub: &AuthSubject,
         id: WorkspaceSecretId,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
         Ok(self.repo.find_by_id(id).await?)
@@ -100,6 +103,7 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.update_value", skip_all)]
     pub async fn update_value(
         &self,
+        _sub: &AuthSubject,
         id: WorkspaceSecretId,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
@@ -113,7 +117,11 @@ impl WorkspaceSecrets {
 
     /// Delete a secret (soft delete via archive).
     #[instrument(name = "workspace_secret.delete", skip_all)]
-    pub async fn delete(&self, id: WorkspaceSecretId) -> Result<(), WorkspaceSecretError> {
+    pub async fn delete(
+        &self,
+        _sub: &AuthSubject,
+        id: WorkspaceSecretId,
+    ) -> Result<(), WorkspaceSecretError> {
         let secret = self.repo.find_by_id(id).await?;
         self.repo.delete(secret).await?;
         Ok(())
@@ -123,6 +131,7 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.list_decrypted", skip_all)]
     pub async fn list_decrypted(
         &self,
+        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<DecryptedSecret>, WorkspaceSecretError> {
         let secrets = self.list_all_for_workspace(workspace_id).await?;

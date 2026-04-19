@@ -27,6 +27,8 @@ use repo::*;
 
 use crate::primitives::*;
 
+use crate::auth::AuthSubject;
+
 /// Service for managing sandbox lifecycle. Wraps a backend-agnostic
 /// [`AdminClient`] (k8s or local) and persists per-sandbox lifecycle state
 /// in the `sandboxes` table. Optionally holds a [`GitHubAppTokenProvider`]
@@ -81,9 +83,10 @@ impl Sandboxes {
         })
     }
 
-    #[instrument(name = "domain.sandbox.create", skip(self))]
+    #[instrument(name = "domain.sandbox.create", skip(self, _sub))]
     pub async fn create(
         &self,
+        _sub: &AuthSubject,
         workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         specs: SandboxSpecs,
@@ -310,9 +313,10 @@ impl Sandboxes {
         Ok(())
     }
 
-    #[instrument(name = "domain.sandbox.find_by_id", skip(self))]
+    #[instrument(name = "domain.sandbox.find_by_id", skip(self, _sub))]
     pub async fn find_by_id(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         Ok(self.repo.find_by_id(id.into()).await?)
@@ -337,9 +341,10 @@ impl Sandboxes {
     /// the entity isn't in [`SandboxState::Ready`] (the only state where
     /// a `base_url` is guaranteed). Used by tools that act inside the
     /// sandbox (e.g. the `bash` top-level tool).
-    #[instrument(name = "domain.sandbox.instance_client_for", skip(self))]
+    #[instrument(name = "domain.sandbox.instance_client_for", skip(self, _sub))]
     pub async fn instance_client_for(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<InstanceClient, SandboxError> {
         let id = id.into();
@@ -355,9 +360,10 @@ impl Sandboxes {
         })
     }
 
-    #[instrument(name = "domain.sandbox.list_for_workspace", skip(self))]
+    #[instrument(name = "domain.sandbox.list_for_workspace", skip(self, _sub))]
     pub async fn list_for_workspace(
         &self,
+        _sub: &AuthSubject,
         workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Vec<Sandbox>, SandboxError> {
         const PAGE_SIZE: usize = 100;
@@ -388,9 +394,10 @@ impl Sandboxes {
     /// workspace dir), then `/initialize` is called again. The server's
     /// `/initialize` is idempotent — it overwrites the GitHub token and
     /// skips re-cloning when the repo is already on disk.
-    #[instrument(name = "domain.sandbox.restart", skip(self))]
+    #[instrument(name = "domain.sandbox.restart", skip(self, _sub))]
     pub async fn restart(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
@@ -456,9 +463,10 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    #[instrument(name = "domain.sandbox.suspend", skip(self))]
+    #[instrument(name = "domain.sandbox.suspend", skip(self, _sub))]
     pub async fn suspend(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let mut op = self.repo.begin_op().await?;

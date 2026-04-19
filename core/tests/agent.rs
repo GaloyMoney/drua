@@ -60,17 +60,20 @@ async fn send_message_round_trip_via_prompt_channel() {
         Arc::clone(&skills),
     );
 
+    let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead", None)
+        .create(
+            &sub,
+            WorkspaceId::new(),
+            AgentRole::WorkspaceLead,
+            "lead",
+            None,
+        )
         .await
         .expect("create agent");
 
     let mut events_rx = agents
-        .send_message(
-            AuthSubject::User(UserId::new()),
-            agent.id,
-            "Hello agent".to_string(),
-        )
+        .send_message(sub, agent.id, "Hello agent".to_string())
         .await
         .expect("send_message");
 
@@ -207,17 +210,20 @@ async fn send_message_dispatches_registered_tool_call() {
         Arc::clone(&skills),
     );
 
+    let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create(WorkspaceId::new(), AgentRole::WorkspaceLead, "lead", None)
+        .create(
+            &sub,
+            WorkspaceId::new(),
+            AgentRole::WorkspaceLead,
+            "lead",
+            None,
+        )
         .await
         .expect("create agent");
 
     let mut events_rx = agents
-        .send_message(
-            AuthSubject::User(UserId::new()),
-            agent.id,
-            "Call ping".to_string(),
-        )
+        .send_message(sub, agent.id, "Call ping".to_string())
         .await
         .expect("send_message");
 

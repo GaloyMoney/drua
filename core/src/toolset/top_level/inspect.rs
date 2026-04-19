@@ -92,14 +92,14 @@ impl TopLevelTool for WorkspaceInspectSandbox {
 
         let sandbox = self
             .sandboxes
-            .find_by_id(params.sandbox_id)
+            .find_by_id(subject, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
         if sandbox.workspace_id != workspace_id {
             return Err(ToolSetsError::Unauthorized);
         }
 
-        execute_inspect(&self.sandboxes, params).await
+        execute_inspect(subject, &self.sandboxes, params).await
     }
 }
 
@@ -140,12 +140,12 @@ impl TopLevelTool for AdminInspectSandbox {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: InspectParams = parse_params(arguments)?;
 
-        execute_inspect(&self.sandboxes, params).await
+        execute_inspect(subject, &self.sandboxes, params).await
     }
 }
 
@@ -155,6 +155,7 @@ impl TopLevelTool for AdminInspectSandbox {
 
 /// Shared execution logic for both workspace and admin inspect tools.
 async fn execute_inspect(
+    sub: &AuthSubject,
     sandboxes: &Sandboxes,
     params: InspectParams,
 ) -> Result<CallToolResult, ToolSetsError> {
@@ -190,7 +191,7 @@ async fn execute_inspect(
     };
 
     let client = sandboxes
-        .instance_client_for(params.sandbox_id)
+        .instance_client_for(sub, params.sandbox_id)
         .await
         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 

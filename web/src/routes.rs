@@ -147,10 +147,11 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
         Err(_) => return Redirect::to("/").into_response(),
     };
 
+    let sub = AuthSubject::User(user_id);
     let mcp_creds = state
         .app
         .mcp_creds()
-        .list_all_for_user(user.id)
+        .list_all_for_user(&sub, user.id)
         .await
         .unwrap_or_default();
 
@@ -202,6 +203,7 @@ async fn create_mcp_creds(
 
     let (raw_token, token_hash) = generate_token();
 
+    let sub = AuthSubject::User(user_id);
     let scopes = if form.admin.as_deref() == Some("true") {
         vec![domain::primitives::AuthScope::Admin]
     } else {
@@ -211,7 +213,7 @@ async fn create_mcp_creds(
     match state
         .app
         .mcp_creds()
-        .create_for_user(user_id, &form.name, token_hash, scopes)
+        .create_for_user(&sub, user_id, &form.name, token_hash, scopes)
         .await
     {
         Ok(_) => {
@@ -238,8 +240,9 @@ async fn revoke_mcp_creds(
         None => return Redirect::to("/").into_response(),
     };
 
+    let sub = AuthSubject::User(user_id);
     let creds_id = McpCredsId::from(id);
-    match state.app.mcp_creds().revoke(user_id, creds_id).await {
+    match state.app.mcp_creds().revoke(&sub, user_id, creds_id).await {
         Ok(creds) => McpCredsRowTemplate {
             creds: mcp_creds_to_view(&creds),
         }
@@ -254,11 +257,12 @@ async fn mcp_creds_list(State(state): State<AppState>, session: Session) -> Resp
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };
+    let sub = AuthSubject::User(user_id);
 
     let mcp_creds = state
         .app
         .mcp_creds()
-        .list_all_for_user(user_id)
+        .list_all_for_user(&sub, user_id)
         .await
         .unwrap_or_default();
 
@@ -278,9 +282,11 @@ async fn audit_page(session: Session) -> Response {
 
 #[instrument(name = "web.audit_entries", skip_all)]
 async fn audit_entries(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let entries = state.app.audit().list_recent(50).await;
 
@@ -293,11 +299,11 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
                     None => None,
                 };
                 let workspace = match entry.workspace_id() {
-                    Some(id) => Some(lookup_workspace_label(&state.app, id).await),
+                    Some(id) => Some(lookup_workspace_label(&sub, &state.app, id).await),
                     None => None,
                 };
                 let acting_agent = match entry.acting_agent_id {
-                    Some(id) => Some(lookup_agent_label(&state.app, id).await),
+                    Some(id) => Some(lookup_agent_label(&sub, &state.app, id).await),
                     None => None,
                 };
                 let on_behalf_of = match entry.on_behalf_of_user_id {
@@ -345,22 +351,24 @@ async fn lookup_user_label(
 }
 
 async fn lookup_agent_label(
+    sub: &AuthSubject,
     app: &galoy_agents_core::App,
     agent_id: galoy_agents_core::primitives::AgentId,
 ) -> String {
     app.agents()
-        .find_by_id(agent_id)
+        .find_by_id(sub, agent_id)
         .await
         .map(|a| a.name.clone())
         .unwrap_or_else(|_| agent_id.to_string())
 }
 
 async fn lookup_workspace_label(
+    sub: &AuthSubject,
     app: &galoy_agents_core::App,
     workspace_id: galoy_agents_core::primitives::WorkspaceId,
 ) -> String {
     app.workspaces()
-        .find_by_id(workspace_id)
+        .find_by_id(sub, workspace_id)
         .await
         .map(|ws| ws.name.clone())
         .unwrap_or_else(|_| workspace_id.to_string())
@@ -531,11 +539,18 @@ fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
 
 #[instrument(name = "web.workspaces_page", skip_all)]
 async fn workspaces_page(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
-    let workspaces = state.app.workspaces().list_all().await.unwrap_or_default();
+    let workspaces = state
+        .app
+        .workspaces()
+        .list_all(&sub)
+        .await
+        .unwrap_or_default();
 
     WorkspaceHubTemplate {
         workspaces: workspaces.iter().map(workspace_to_view).collect(),
@@ -551,11 +566,13 @@ async fn workspaces_page(State(state): State<AppState>, session: Session) -> Res
 
 #[instrument(name = "web.workspace_sidebar_list", skip_all)]
 async fn workspace_sidebar_list(State(state): State<AppState>, session: Session) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
-    match state.app.workspaces().list_all().await {
+    match state.app.workspaces().list_all(&sub).await {
         Ok(workspaces) => WorkspaceSidebarListTemplate {
             workspaces: workspaces.iter().map(workspace_to_view).collect(),
         }
@@ -592,7 +609,7 @@ async fn workspace_create(
         None => return Redirect::to("/").into_response(),
     };
 
-    let sub = domain::auth::AuthSubject::User(user_id);
+    let sub = AuthSubject::User(user_id);
     let description = form.description.filter(|d| !d.is_empty());
     match state
         .app
@@ -614,17 +631,19 @@ async fn workspace_detail(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     WorkspaceDetailTemplate {
         workspace: workspace_to_view(&ws),
@@ -646,7 +665,7 @@ async fn workspace_update(
         None => return Redirect::to("/").into_response(),
     };
 
-    let sub = domain::auth::AuthSubject::User(user_id);
+    let sub = AuthSubject::User(user_id);
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     let description = form.description.filter(|d| !d.is_empty());
     match state
@@ -675,7 +694,7 @@ async fn workspace_delete(
         None => return Redirect::to("/").into_response(),
     };
 
-    let sub = domain::auth::AuthSubject::User(user_id);
+    let sub = AuthSubject::User(user_id);
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     match state.app.workspaces().delete(&sub, workspace_id).await {
         Ok(_) => {
@@ -719,15 +738,17 @@ async fn workspace_secrets_list(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     match state
         .app
         .workspace_secrets()
-        .list_by_workspace(workspace_id)
+        .list_by_workspace(&sub, workspace_id)
         .await
     {
         Ok(secrets) => WorkspaceSecretsListTemplate {
@@ -755,9 +776,11 @@ async fn workspace_secret_create(
     Path(id): Path<uuid::Uuid>,
     Form(form): Form<CreateSecretForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     let secret_type: domain::workspace_secret::SecretType = match form.secret_type.parse() {
@@ -768,7 +791,7 @@ async fn workspace_secret_create(
     if let Err(e) = state
         .app
         .workspace_secrets()
-        .create(workspace_id, &form.name, secret_type, &form.value)
+        .create(&sub, workspace_id, &form.name, secret_type, &form.value)
         .await
     {
         tracing::error!(error = %e, "Failed to create workspace secret");
@@ -779,7 +802,7 @@ async fn workspace_secret_create(
     match state
         .app
         .workspace_secrets()
-        .list_by_workspace(workspace_id)
+        .list_by_workspace(&sub, workspace_id)
         .await
     {
         Ok(secrets) => WorkspaceSecretsListTemplate {
@@ -796,14 +819,16 @@ async fn workspace_secret_delete(
     session: Session,
     Path((id, secret_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     let secret_id = WorkspaceSecretId::from(secret_id);
 
-    if let Err(e) = state.app.workspace_secrets().delete(secret_id).await {
+    if let Err(e) = state.app.workspace_secrets().delete(&sub, secret_id).await {
         tracing::error!(error = %e, "Failed to delete workspace secret");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -812,7 +837,7 @@ async fn workspace_secret_delete(
     match state
         .app
         .workspace_secrets()
-        .list_by_workspace(workspace_id)
+        .list_by_workspace(&sub, workspace_id)
         .await
     {
         Ok(secrets) => WorkspaceSecretsListTemplate {
@@ -844,22 +869,24 @@ async fn workspace_skills_page(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     let skills = state
         .app
         .skills()
-        .list_by_workspace_id(workspace_id)
+        .list_by_workspace_id(&sub, workspace_id)
         .await
         .unwrap_or_default();
 
@@ -878,17 +905,19 @@ async fn workspace_skill_new(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     WorkspaceSkillNewTemplate {
         workspace: workspace_to_view(&ws),
@@ -912,9 +941,11 @@ async fn workspace_skill_create(
     Path(id): Path<uuid::Uuid>,
     Form(form): Form<CreateSkillForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     let new_skill = domain::skill::NewSkill::builder()
@@ -925,7 +956,7 @@ async fn workspace_skill_create(
         .build()
         .expect("Could not build new skill");
 
-    if let Err(e) = state.app.skills().create(new_skill).await {
+    if let Err(e) = state.app.skills().create(&sub, new_skill).await {
         tracing::error!(error = %e, "Failed to create skill");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -939,23 +970,25 @@ async fn workspace_skill_edit(
     session: Session,
     Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
     let skill_id = SkillId::from(skill_id);
-    let skill = match state.app.skills().find_by_id(skill_id).await {
+    let skill = match state.app.skills().find_by_id(&sub, skill_id).await {
         Ok(s) => s,
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     WorkspaceSkillEditTemplate {
         workspace: workspace_to_view(&ws),
@@ -980,12 +1013,14 @@ async fn workspace_skill_update(
     Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
     Form(form): Form<UpdateSkillForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let skill_id = SkillId::from(skill_id);
-    let mut skill = match state.app.skills().find_by_id(skill_id).await {
+    let mut skill = match state.app.skills().find_by_id(&sub, skill_id).await {
         Ok(s) => s,
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
     };
@@ -994,7 +1029,7 @@ async fn workspace_skill_update(
         .update(Some(form.name), Some(form.description), Some(form.body))
         .did_execute()
     {
-        if let Err(e) = state.app.skills().update(&mut skill).await {
+        if let Err(e) = state.app.skills().update(&sub, &mut skill).await {
             tracing::error!(error = %e, "Failed to update skill");
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -1009,13 +1044,15 @@ async fn workspace_skill_delete(
     session: Session,
     Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let skill_id = SkillId::from(skill_id);
 
-    if let Err(e) = state.app.skills().delete(skill_id).await {
+    if let Err(e) = state.app.skills().delete(&sub, skill_id).await {
         tracing::error!(error = %e, "Failed to delete skill");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1081,13 +1118,14 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
 /// list underneath. If there's no WorkspaceLead (shouldn't happen after
 /// workspace create, but handle gracefully), `lead_agent` is `None`.
 async fn workspace_sidebar_context(
+    sub: &AuthSubject,
     state: &AppState,
     workspace_id: domain::primitives::WorkspaceId,
 ) -> (Option<AgentView>, Vec<AgentView>) {
     let agents = state
         .app
         .agents()
-        .list_for_workspace(workspace_id)
+        .list_for_workspace(sub, workspace_id)
         .await
         .unwrap_or_default();
 
@@ -1113,22 +1151,24 @@ async fn workspace_sandboxes_page(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     let sandboxes = state
         .app
         .sandboxes()
-        .list_for_workspace(workspace_id)
+        .list_for_workspace(&sub, workspace_id)
         .await
         .unwrap_or_default();
 
@@ -1147,17 +1187,19 @@ async fn workspace_sandbox_new(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     WorkspaceSandboxNewTemplate {
         workspace: workspace_to_view(&ws),
@@ -1187,9 +1229,11 @@ async fn workspace_sandbox_create(
     Path(id): Path<uuid::Uuid>,
     Form(form): Form<CreateSandboxForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
 
@@ -1234,7 +1278,7 @@ async fn workspace_sandbox_create(
     if let Err(e) = state
         .app
         .sandboxes()
-        .create(workspace_id, form.name, specs, mode)
+        .create(&sub, workspace_id, form.name, specs, mode)
         .await
     {
         tracing::error!(error = %e, "Failed to create sandbox");
@@ -1250,23 +1294,25 @@ async fn workspace_sandbox_detail(
     session: Session,
     Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
     let sandbox_id = SandboxId::from(sandbox_id);
-    let sandbox = match state.app.sandboxes().find_by_id(sandbox_id).await {
+    let sandbox = match state.app.sandboxes().find_by_id(&sub, sandbox_id).await {
         Ok(s) => s,
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/sandboxes")).into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     WorkspaceSandboxDetailTemplate {
         workspace: workspace_to_view(&ws),
@@ -1283,12 +1329,14 @@ async fn workspace_sandbox_suspend(
     session: Session,
     Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let sandbox_id = SandboxId::from(sandbox_id);
-    if let Err(e) = state.app.sandboxes().suspend(sandbox_id).await {
+    if let Err(e) = state.app.sandboxes().suspend(&sub, sandbox_id).await {
         tracing::error!(error = %e, "Failed to suspend sandbox");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1302,12 +1350,14 @@ async fn workspace_sandbox_restart(
     session: Session,
     Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let sandbox_id = SandboxId::from(sandbox_id);
-    if let Err(e) = state.app.sandboxes().restart(sandbox_id).await {
+    if let Err(e) = state.app.sandboxes().restart(&sub, sandbox_id).await {
         tracing::error!(error = %e, "Failed to restart sandbox");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1325,22 +1375,24 @@ async fn workspace_agent_new(
     session: Session,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
     let sandbox_options: Vec<SandboxOptionView> = state
         .app
         .sandboxes()
-        .list_for_workspace(workspace_id)
+        .list_for_workspace(&sub, workspace_id)
         .await
         .unwrap_or_default()
         .iter()
@@ -1377,9 +1429,11 @@ async fn workspace_agent_create(
     Path(id): Path<uuid::Uuid>,
     Form(form): Form<CreateAgentForm>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
 
@@ -1404,6 +1458,7 @@ async fn workspace_agent_create(
         .app
         .agents()
         .create(
+            &sub,
             workspace_id,
             domain::agent::AgentRole::Agent,
             form.name,
@@ -1429,11 +1484,12 @@ fn role_label(role: domain::agent::AgentRole) -> &'static str {
 }
 
 async fn attached_sandbox_view(
+    sub: &AuthSubject,
     state: &AppState,
     attached: Option<(SandboxId, SandboxAgentMode)>,
 ) -> Option<AttachedSandboxView> {
     let (sbx_id, mode) = attached?;
-    let sandbox = state.app.sandboxes().find_by_id(sbx_id).await.ok()?;
+    let sandbox = state.app.sandboxes().find_by_id(sub, sbx_id).await.ok()?;
     Some(AttachedSandboxView {
         id: sandbox.id.to_string(),
         name: sandbox.name.clone(),
@@ -1458,25 +1514,27 @@ async fn workspace_agent_detail(
     Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
     Query(query): Query<AgentDetailQuery>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
     let agent_id = AgentId::from(agent_id);
-    let agent = match state.app.agents().find_by_id(agent_id).await {
+    let agent = match state.app.agents().find_by_id(&sub, agent_id).await {
         Ok(a) => a,
         Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
     };
 
-    let (lead_agent, agents) = workspace_sidebar_context(&state, workspace_id).await;
+    let (lead_agent, agents) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
-    let attached_view = attached_sandbox_view(&state, agent.attached_sandbox).await;
+    let attached_view = attached_sandbox_view(&sub, &state, agent.attached_sandbox).await;
 
     // Dropdown options are only needed when no sandbox is currently attached.
     let sandbox_options: Vec<SandboxOptionView> = if attached_view.is_some() {
@@ -1485,7 +1543,7 @@ async fn workspace_agent_detail(
         state
             .app
             .sandboxes()
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(&sub, workspace_id)
             .await
             .unwrap_or_default()
             .iter()
@@ -1548,7 +1606,7 @@ async fn workspace_agent_attach_sandbox(
     let Some(user_id) = extract_user_id(&session).await else {
         return Redirect::to("/").into_response();
     };
-    let subject = domain::primitives::AuthSubject::User(user_id);
+    let subject = AuthSubject::User(user_id);
 
     let agent_id = AgentId::from(agent_id);
     let Ok(sandbox_uuid) = form.sandbox_id.parse::<uuid::Uuid>() else {
@@ -1583,11 +1641,11 @@ async fn workspace_agent_detach_sandbox(
     let Some(user_id) = extract_user_id(&session).await else {
         return Redirect::to("/").into_response();
     };
-    let subject = domain::primitives::AuthSubject::User(user_id);
+    let subject = AuthSubject::User(user_id);
 
     let agent_id = AgentId::from(agent_id);
     // The handler needs the sandbox_id; fetch the agent to look it up.
-    let sandbox_id = match state.app.agents().find_by_id(agent_id).await {
+    let sandbox_id = match state.app.agents().find_by_id(&subject, agent_id).await {
         Ok(a) => a.attached_sandbox.map(|(sbx, _)| sbx),
         Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
     };
@@ -1625,22 +1683,29 @@ async fn workspace_chat(
     Path(id): Path<uuid::Uuid>,
     Query(query): Query<ChatQuery>,
 ) -> Response {
-    if extract_user_id(&session).await.is_none() {
-        return Redirect::to("/").into_response();
-    }
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(workspace_id).await {
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
         Ok(ws) => ws,
         Err(_) => return Redirect::to("/workspaces").into_response(),
     };
 
-    let all_workspaces = state.app.workspaces().list_all().await.unwrap_or_default();
+    let all_workspaces = state
+        .app
+        .workspaces()
+        .list_all(&sub)
+        .await
+        .unwrap_or_default();
 
     let agents = state
         .app
         .agents()
-        .list_for_workspace(workspace_id)
+        .list_for_workspace(&sub, workspace_id)
         .await
         .unwrap_or_default();
 
@@ -1803,7 +1868,7 @@ async fn api_agent_secrets(
     let secrets = match state
         .app
         .workspace_secrets()
-        .list_decrypted(workspace_id)
+        .list_decrypted(&auth, workspace_id)
         .await
     {
         Ok(s) => s,

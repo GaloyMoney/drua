@@ -81,9 +81,10 @@ impl Agents {
         &self.skills
     }
 
-    #[instrument(name = "domain.agent.create", skip(self))]
+    #[instrument(name = "domain.agent.create", skip(self, _sub))]
     pub async fn create(
         &self,
+        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
@@ -182,17 +183,19 @@ impl Agents {
         Ok(agent)
     }
 
-    #[instrument(name = "domain.agent.find_by_id", skip(self))]
+    #[instrument(name = "domain.agent.find_by_id", skip(self, _sub))]
     pub async fn find_by_id(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<AgentId> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
         Ok(self.repo.find_by_id(id.into()).await?)
     }
 
-    #[instrument(name = "domain.agent.list_for_workspace", skip(self))]
+    #[instrument(name = "domain.agent.list_for_workspace", skip(self, _sub))]
     pub async fn list_for_workspace(
         &self,
+        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Agent>, AgentError> {
         let query = es_entity::PaginatedQueryArgs {

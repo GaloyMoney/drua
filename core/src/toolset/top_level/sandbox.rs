@@ -159,7 +159,7 @@ impl TopLevelTool for WorkspaceCreateSandbox {
 
         let sandbox = self
             .sandboxes
-            .create(workspace_id, name, specs, mode)
+            .create(subject, workspace_id, name, specs, mode)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -206,7 +206,7 @@ impl TopLevelTool for AdminCreateSandbox {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: AdminCreateSandboxParams = parse_params(arguments)?;
@@ -214,7 +214,7 @@ impl TopLevelTool for AdminCreateSandbox {
 
         let sandbox = self
             .sandboxes
-            .create(params.workspace_id, name, specs, mode)
+            .create(subject, params.workspace_id, name, specs, mode)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -273,7 +273,7 @@ impl TopLevelTool for WorkspaceListSandboxes {
 
         let sandboxes = self
             .sandboxes
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(subject, workspace_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -320,14 +320,14 @@ impl TopLevelTool for AdminListSandboxes {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: AdminListSandboxesParams = parse_params(arguments)?;
 
         let sandboxes = self
             .sandboxes
-            .list_for_workspace(params.workspace_id)
+            .list_for_workspace(subject, params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -382,7 +382,7 @@ impl TopLevelTool for WorkspaceGetSandbox {
 
         let sandbox = self
             .sandboxes
-            .find_by_id(params.sandbox_id)
+            .find_by_id(subject, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -430,14 +430,14 @@ impl TopLevelTool for AdminGetSandbox {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: GetSandboxParams = parse_params(arguments)?;
 
         let sandbox = self
             .sandboxes
-            .find_by_id(params.sandbox_id)
+            .find_by_id(subject, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 

@@ -65,9 +65,10 @@ impl Workspaces {
         Ok(workspace)
     }
 
-    #[instrument(name = "domain.workspace.find_by_id", skip(self))]
+    #[instrument(name = "domain.workspace.find_by_id", skip(self, _sub))]
     pub async fn find_by_id(
         &self,
+        _sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         Ok(self.repo.find_by_id(id.into()).await?)
@@ -83,8 +84,8 @@ impl Workspaces {
         Ok(self.repo.list_by_created_at(query, direction).await?)
     }
 
-    #[instrument(name = "domain.workspace.list_all", skip(self))]
-    pub async fn list_all(&self) -> Result<Vec<Workspace>, WorkspaceError> {
+    #[instrument(name = "domain.workspace.list_all", skip(self, _sub))]
+    pub async fn list_all(&self, _sub: &AuthSubject) -> Result<Vec<Workspace>, WorkspaceError> {
         Ok(self.repo.list_all().await?)
     }
 
@@ -105,19 +106,20 @@ impl Workspaces {
     #[instrument(name = "domain.workspace.delete", skip(self))]
     pub async fn delete(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         let mut op = self.repo.begin_op().await?;
-        let workspace = self.delete_in_op(&mut op, id).await?;
+        let workspace = self.delete_in_op(&mut op, sub, id).await?;
         op.commit().await?;
         Ok(workspace)
     }
 
-    #[instrument(name = "domain.workspace.delete_in_op", skip(self, op))]
+    #[instrument(name = "domain.workspace.delete_in_op", skip(self, op, _sub))]
     pub async fn delete_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
+        _sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         let id = id.into();
@@ -128,7 +130,7 @@ impl Workspaces {
         }
 
         // Cascade: soft-delete agents (which also destroys their sandboxes)
-        let agent_list = self.agents.list_for_workspace(id).await?;
+        let agent_list = self.agents.list_for_workspace(_sub, id).await?;
         for agent in &agent_list {
             if let Err(e) = self.agents.delete_in_op(op, agent.id).await {
                 tracing::warn!(
