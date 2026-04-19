@@ -257,10 +257,18 @@ impl BashSession {
                 let output = self.collect_output(session, result);
                 Ok(output)
             }
-            Ok(Err(e)) => {
-                // stdout EOF — shell died
-                let _ = guard.take();
-                Err(format!("Session shell exited unexpectedly: {e}"))
+            Ok(Err(_)) => {
+                // stdout EOF — shell died. Retrieve exit code from the child
+                // process so `exit N` still reports the correct code.
+                let mut session = guard.take().expect("session exists");
+                let exit_code = match session.child.wait().await {
+                    Ok(status) => status.code().unwrap_or(1),
+                    Err(_) => 1,
+                };
+                Ok(CommandResult {
+                    output: String::new(),
+                    exit_code,
+                })
             }
             Err(_) => {
                 // Timeout — try SIGINT first to interrupt the foreground command
@@ -623,10 +631,15 @@ mod tests {
         init_test_workspace();
         let session = BashSession::new();
 
-        // Kill the shell
+        // Kill the shell — `exit 0` causes EOF on stdout.
+        // The session detects this and returns the child's exit code.
         let result = session.execute("exit 0", DEFAULT_TIMEOUT_MS).await;
-        // This should fail because the shell exited
-        assert!(result.is_err(), "expected error when shell exits");
+        assert!(
+            result.is_ok(),
+            "exit should return Ok with code: {:?}",
+            result
+        );
+        assert_eq!(result.unwrap().exit_code, 0);
 
         // Next call should auto-create a new session
         let r = session.execute("echo recovered", DEFAULT_TIMEOUT_MS).await;
