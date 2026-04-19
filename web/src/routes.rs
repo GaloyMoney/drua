@@ -292,7 +292,7 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
                     Some(id) => Some(lookup_user_label(&state.app, id).await),
                     None => None,
                 };
-                let workspace = match entry.workspace_id {
+                let workspace = match entry.workspace_id() {
                     Some(id) => Some(lookup_workspace_label(&state.app, id).await),
                     None => None,
                 };

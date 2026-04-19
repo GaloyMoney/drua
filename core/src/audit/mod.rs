@@ -41,12 +41,12 @@ impl Audit {
                 ctx.acting_user_id = Some(*user_id);
             }
             AuthSubject::Agent(workspace_id, agent_id, _) => {
-                ctx.workspace_id = Some(*workspace_id);
+                Self::set_resource_id(ctx, "workspace_id", *workspace_id);
                 ctx.acting_agent_id = Some(*agent_id);
             }
             AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, _) => {
                 ctx.acting_agent_id = Some(*agent_id);
-                ctx.workspace_id = Some(*workspace_id);
+                Self::set_resource_id(ctx, "workspace_id", *workspace_id);
                 ctx.on_behalf_of_user_id = Some(*user_id);
             }
             AuthSubject::Anonymous => {}
@@ -55,12 +55,20 @@ impl Audit {
 
     /// Record the workspace that scopes this interaction.
     pub fn record_workspace_id(workspace_id: WorkspaceId) {
-        Self::update_context(|ctx| ctx.workspace_id = Some(workspace_id));
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "workspace_id", workspace_id));
     }
 
     /// Record the sandbox targeted by this interaction.
     pub fn record_sandbox_id(sandbox_id: SandboxId) {
-        Self::update_context(|ctx| ctx.sandbox_id = Some(sandbox_id));
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "sandbox_id", sandbox_id));
+    }
+
+    /// Insert a typed ID into the context's `resource_ids` map.
+    fn set_resource_id(ctx: &mut AuditContextData, key: &str, id: impl Into<uuid::Uuid>) {
+        ctx.resource_ids.insert(
+            key.to_owned(),
+            serde_json::Value::String(id.into().to_string()),
+        );
     }
 
     /// Record the interaction type (API call, MCP call, …).
@@ -166,10 +174,9 @@ impl Audit {
             r#"SELECT
                 id AS "id: AuditEntryId",
                 acting_user_id AS "acting_user_id: UserId",
-                workspace_id AS "workspace_id: WorkspaceId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
-                sandbox_id AS "sandbox_id: SandboxId",
+                resource_ids AS "resource_ids: serde_json::Value",
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
@@ -192,13 +199,17 @@ impl Audit {
     ///
     /// All filter fields are optional — unset fields are excluded from the
     /// WHERE clause. String fields use `ILIKE` for fuzzy matching.
+    /// Resource IDs (workspace, sandbox) are filtered via the `resource_ids`
+    /// JSONB column using `->>` extraction.
     #[instrument(name = "audit.find", skip_all)]
     pub async fn find(&self, query: &AuditLogQuery) -> Result<Vec<AuditEntry>, AuditError> {
-        let workspace_id = query.workspace_id.map(uuid::Uuid::from);
+        let workspace_id = query
+            .workspace_id
+            .map(|id| uuid::Uuid::from(id).to_string());
         let acting_user_id = query.acting_user_id.map(uuid::Uuid::from);
         let acting_agent_id = query.acting_agent_id.map(uuid::Uuid::from);
         let exclude_agent_id = query.exclude_agent_id.map(uuid::Uuid::from);
-        let sandbox_id = query.sandbox_id.map(uuid::Uuid::from);
+        let sandbox_id = query.sandbox_id.map(|id| uuid::Uuid::from(id).to_string());
         let action = query.action.as_deref();
         let outcome = query.outcome.as_deref();
         let error = query.error;
@@ -209,10 +220,9 @@ impl Audit {
             r#"SELECT
                 id AS "id: AuditEntryId",
                 acting_user_id AS "acting_user_id: UserId",
-                workspace_id AS "workspace_id: WorkspaceId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
-                sandbox_id AS "sandbox_id: SandboxId",
+                resource_ids AS "resource_ids: serde_json::Value",
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
@@ -222,21 +232,21 @@ impl Audit {
                 tokens_returned,
                 recorded_at
             FROM audit_entries
-            WHERE ($1::uuid IS NULL OR workspace_id = $1)
+            WHERE ($1::text IS NULL OR resource_ids->>'workspace_id' = $1)
               AND ($2::uuid IS NULL OR acting_user_id = $2)
               AND ($3::uuid IS NULL OR acting_agent_id = $3)
               AND ($4::uuid IS NULL OR acting_agent_id IS NULL OR acting_agent_id != $4)
-              AND ($5::uuid IS NULL OR sandbox_id = $5)
+              AND ($5::text IS NULL OR resource_ids->>'sandbox_id' = $5)
               AND ($6::text IS NULL OR action ILIKE $6)
               AND ($7::text IS NULL OR outcome ILIKE $7)
               AND ($8::bool IS NULL OR error = $8)
             ORDER BY id DESC
             LIMIT $9"#,
-            workspace_id,
+            workspace_id.as_deref(),
             acting_user_id,
             acting_agent_id,
             exclude_agent_id,
-            sandbox_id,
+            sandbox_id.as_deref(),
             action,
             outcome,
             error,
@@ -249,10 +259,9 @@ impl Audit {
 
     async fn insert(&self, ctx: &AuditContextData) -> Result<AuditEntry, AuditError> {
         let acting_user_id = ctx.acting_user_id.map(uuid::Uuid::from);
-        let workspace_id = ctx.workspace_id.map(uuid::Uuid::from);
         let acting_agent_id = ctx.acting_agent_id.map(uuid::Uuid::from);
         let on_behalf_of = ctx.on_behalf_of_user_id.map(uuid::Uuid::from);
-        let sandbox_id = ctx.sandbox_id.map(uuid::Uuid::from);
+        let resource_ids = serde_json::Value::Object(ctx.resource_ids.clone());
         let itype = ctx
             .interaction_type
             .as_ref()
@@ -269,17 +278,16 @@ impl Audit {
         let row = sqlx::query_as!(
             AuditEntry,
             r#"INSERT INTO audit_entries
-                (acting_user_id, workspace_id, acting_agent_id, on_behalf_of_user_id,
-                 sandbox_id, interaction_type, action, metadata, outcome, error,
+                (acting_user_id, acting_agent_id, on_behalf_of_user_id,
+                 resource_ids, interaction_type, action, metadata, outcome, error,
                  duration_ms, tokens_returned)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING
                 id AS "id: AuditEntryId",
                 acting_user_id AS "acting_user_id: UserId",
-                workspace_id AS "workspace_id: WorkspaceId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
-                sandbox_id AS "sandbox_id: SandboxId",
+                resource_ids AS "resource_ids: serde_json::Value",
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
@@ -289,10 +297,9 @@ impl Audit {
                 tokens_returned,
                 recorded_at"#,
             acting_user_id,
-            workspace_id,
             acting_agent_id,
             on_behalf_of,
-            sandbox_id,
+            resource_ids,
             itype,
             action,
             metadata,
