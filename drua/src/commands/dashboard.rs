@@ -1,19 +1,25 @@
 use std::io;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{Event, EventStream, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
-use crate::tui::app::{AgentItem, App, Focus, Mode, WorkspaceItem};
-use crate::tui::ui;
+use crate::tui::state::{AgentItem, ScreenState, WorkspaceItem};
+use crate::tui::{handlers, ui};
+
+// ---------------------------------------------------------------------------
+// GraphQL response types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct MeResponse {
@@ -107,71 +113,16 @@ struct CreatedWorkspace {
     name: String,
 }
 
+// ---------------------------------------------------------------------------
+// Chat streaming
+// ---------------------------------------------------------------------------
+
 enum ChatStreamEvent {
     Delta(String),
     ToolUse(String),
     ToolResult(String),
     Error(String),
     Done,
-}
-
-async fn create_workspace(client: &GraphqlClient, name: &str, description: &str) -> Result<String> {
-    let mut input = serde_json::json!({ "name": name });
-    if !description.is_empty() {
-        input["description"] = serde_json::json!(description);
-    }
-    let resp: WorkspaceCreateResponse = client
-        .query(
-            WORKSPACE_CREATE_MUTATION,
-            serde_json::json!({ "input": input }),
-        )
-        .await?;
-    Ok(resp.workspace_create.workspace.name)
-}
-
-async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> {
-    let resp: WorkspacesResponse = client
-        .query(WORKSPACES_QUERY, serde_json::json!({}))
-        .await?;
-
-    let items = resp
-        .workspaces
-        .edges
-        .into_iter()
-        .map(|edge| {
-            let node = edge.node;
-            WorkspaceItem {
-                id: node.id,
-                name: node.name,
-                description: node.description,
-                created_at: node.created_at,
-                lead: node.lead.map(|a| AgentItem {
-                    id: a.id,
-                    name: a.name,
-                    role: a.role,
-                }),
-            }
-        })
-        .collect();
-
-    Ok(items)
-}
-
-async fn fetch_user_name(client: &GraphqlClient) -> Result<String> {
-    let resp: MeResponse = client
-        .query(
-            "{ me { githubUsername name email } }",
-            serde_json::json!({}),
-        )
-        .await?;
-    let user = resp
-        .me
-        .ok_or_else(|| anyhow::anyhow!("not authenticated"))?;
-    Ok(user
-        .github_username
-        .or(user.name)
-        .or(user.email)
-        .unwrap_or_else(|| "unknown".to_string()))
 }
 
 fn spawn_chat_stream(
@@ -301,6 +252,100 @@ fn parse_sse_block(block: &str) -> Option<ChatStreamEvent> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Data fetching
+// ---------------------------------------------------------------------------
+
+async fn create_workspace(client: &GraphqlClient, name: &str, description: &str) -> Result<String> {
+    let mut input = serde_json::json!({ "name": name });
+    if !description.is_empty() {
+        input["description"] = serde_json::json!(description);
+    }
+    let resp: WorkspaceCreateResponse = client
+        .query(
+            WORKSPACE_CREATE_MUTATION,
+            serde_json::json!({ "input": input }),
+        )
+        .await?;
+    Ok(resp.workspace_create.workspace.name)
+}
+
+async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> {
+    let resp: WorkspacesResponse = client
+        .query(WORKSPACES_QUERY, serde_json::json!({}))
+        .await?;
+
+    let items = resp
+        .workspaces
+        .edges
+        .into_iter()
+        .map(|edge| {
+            let node = edge.node;
+            WorkspaceItem {
+                id: node.id,
+                name: node.name,
+                description: node.description,
+                created_at: node.created_at,
+                lead: node.lead.map(|a| AgentItem {
+                    id: a.id,
+                    name: a.name,
+                    role: a.role,
+                }),
+            }
+        })
+        .collect();
+
+    Ok(items)
+}
+
+async fn fetch_user_name(client: &GraphqlClient) -> Result<String> {
+    let resp: MeResponse = client
+        .query(
+            "{ me { githubUsername name email } }",
+            serde_json::json!({}),
+        )
+        .await?;
+    let user = resp
+        .me
+        .ok_or_else(|| anyhow::anyhow!("not authenticated"))?;
+    Ok(user
+        .github_username
+        .or(user.name)
+        .or(user.email)
+        .unwrap_or_else(|| "unknown".to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch stream events → AssistantChat
+// ---------------------------------------------------------------------------
+
+fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
+    match evt {
+        ChatStreamEvent::Delta(text) => {
+            state.chat_view.assistant.append_text(&text);
+        }
+        ChatStreamEvent::ToolUse(name) => {
+            state
+                .chat_view
+                .assistant
+                .add_tool_activity(format!("calling {name}…"));
+        }
+        ChatStreamEvent::ToolResult(summary) => {
+            state.chat_view.assistant.add_tool_activity(summary);
+        }
+        ChatStreamEvent::Error(msg) => {
+            state.chat_view.assistant.add_error(msg);
+        }
+        ChatStreamEvent::Done => {
+            state.chat_view.assistant.finish_streaming();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth bootstrap — delegate to login flow when credentials are missing/stale
+// ---------------------------------------------------------------------------
+
 async fn ensure_authenticated(server: Option<String>) -> Result<(Config, GraphqlClient, String)> {
     // Try existing config first
     if let Ok(config) = Config::load() {
@@ -322,11 +367,15 @@ async fn ensure_authenticated(server: Option<String>) -> Result<(Config, Graphql
     Ok((config, client, user_name))
 }
 
+// ---------------------------------------------------------------------------
+// Entry point & event loop
+// ---------------------------------------------------------------------------
+
 pub async fn run(server: Option<String>) -> Result<()> {
     let (config, client, user_name) = ensure_authenticated(server).await?;
     let workspaces = fetch_workspaces(&client).await?;
 
-    let mut app = App::new(workspaces, config.server_url.clone(), user_name);
+    let mut state = ScreenState::new(workspaces, config.server_url.clone(), user_name);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -334,7 +383,7 @@ pub async fn run(server: Option<String>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_event_loop(&mut terminal, &mut app, &client, &config).await;
+    let result = run_event_loop(&mut terminal, &mut state, &client, &config).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -345,142 +394,72 @@ pub async fn run(server: Option<String>) -> Result<()> {
 
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
+    state: &mut ScreenState,
     client: &GraphqlClient,
     config: &Config,
 ) -> Result<()> {
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+    let mut event_stream = EventStream::new();
 
     loop {
-        // Drain pending stream events
-        while let Ok(evt) = stream_rx.try_recv() {
-            match evt {
-                ChatStreamEvent::Delta(text) => {
-                    app.append_to_last_assistant(&text);
-                }
-                ChatStreamEvent::ToolUse(name) => {
-                    app.push_chat_message("tool", format!("calling {name}…"));
-                }
-                ChatStreamEvent::ToolResult(summary) => {
-                    app.push_chat_message("tool", summary);
-                }
-                ChatStreamEvent::Error(msg) => {
-                    app.push_chat_message("system", format!("Error: {msg}"));
-                    app.chat_streaming = false;
-                }
-                ChatStreamEvent::Done => {
-                    app.chat_streaming = false;
-                }
-            }
-        }
+        terminal.draw(|frame| ui::draw(frame, state))?;
 
-        terminal.draw(|frame| ui::draw(frame, app))?;
-
-        if app.should_quit {
+        if state.should_quit {
             break;
         }
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    app.should_quit = true;
-                    continue;
-                }
+        let timeout = if state.chat_view.assistant.streaming {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(500)
+        };
 
-                match app.mode {
-                    Mode::Browse => match app.focus {
-                        Focus::Sidebar => {
-                            app.status_message = None;
-                            match key.code {
-                                KeyCode::Char('q') => app.should_quit = true,
-                                KeyCode::Char('j') | KeyCode::Down => app.cursor_down(),
-                                KeyCode::Char('k') | KeyCode::Up => app.cursor_up(),
-                                KeyCode::Char('n') => app.enter_create_mode(),
-                                KeyCode::Char('r') => {
-                                    if let Ok(workspaces) = fetch_workspaces(client).await {
-                                        app.replace_workspaces(workspaces);
-                                    }
+        tokio::select! {
+            event = event_stream.next() => {
+                if let Some(Ok(Event::Key(key))) = event {
+                    if key.kind == KeyEventKind::Press {
+                        match handlers::handle_key(state, key) {
+                            handlers::Action::Quit => state.should_quit = true,
+                            handlers::Action::Refresh => {
+                                if let Ok(workspaces) = fetch_workspaces(client).await {
+                                    state.replace_workspaces(workspaces);
                                 }
-                                KeyCode::Tab => app.toggle_focus(),
-                                _ => {}
                             }
-                        }
-                        Focus::Chat => match key.code {
-                            KeyCode::Esc => {
-                                app.focus = Focus::Sidebar;
-                            }
-                            KeyCode::Tab => app.toggle_focus(),
-                            KeyCode::Enter => {
-                                let input = app.chat_input.trim().to_string();
-                                if !input.is_empty() {
-                                    if let Some(agent_id) = app.selected_lead_id.clone() {
-                                        app.push_chat_message("user", &input);
-                                        app.chat_input.clear();
-                                        app.chat_streaming = true;
-                                        spawn_chat_stream(
-                                            config.server_url.clone(),
-                                            config.auth_token.clone(),
-                                            agent_id,
-                                            input,
-                                            stream_tx.clone(),
-                                        );
-                                    } else {
-                                        app.status_message =
-                                            Some("No lead agent selected".to_string());
+                            handlers::Action::CreateWorkspace { name, description } => {
+                                match create_workspace(client, &name, &description).await {
+                                    Ok(ws_name) => {
+                                        state.exit_create_mode();
+                                        if let Ok(workspaces) = fetch_workspaces(client).await {
+                                            state.replace_workspaces(workspaces);
+                                        }
+                                        state.status_message =
+                                            Some(format!("Created workspace: {ws_name}"));
+                                    }
+                                    Err(e) => {
+                                        state.status_message = Some(format!("Error: {e}"));
                                     }
                                 }
                             }
-                            KeyCode::Backspace => {
-                                app.chat_input.pop();
+                            handlers::Action::SendChat { agent_id, prompt } => {
+                                spawn_chat_stream(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    agent_id,
+                                    prompt,
+                                    stream_tx.clone(),
+                                );
                             }
-                            KeyCode::Up => {
-                                app.chat_scroll = app.chat_scroll.saturating_add(1);
-                            }
-                            KeyCode::Down => {
-                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
-                            }
-                            KeyCode::Char(c) => {
-                                app.chat_input.push(c);
-                            }
-                            _ => {}
-                        },
-                    },
-                    Mode::CreateWorkspace => match key.code {
-                        KeyCode::Esc => app.exit_create_mode(),
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            app.input_field = (app.input_field + 1) % 2;
+                            handlers::Action::None => {}
                         }
-                        KeyCode::Backspace => {
-                            app.active_input_mut().pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.active_input_mut().push(c);
-                        }
-                        KeyCode::Enter => {
-                            if app.input_name.trim().is_empty() {
-                                app.status_message = Some("Name is required".to_string());
-                                continue;
-                            }
-                            let name = app.input_name.trim().to_string();
-                            let desc = app.input_description.trim().to_string();
-                            match create_workspace(client, &name, &desc).await {
-                                Ok(ws_name) => {
-                                    app.exit_create_mode();
-                                    if let Ok(workspaces) = fetch_workspaces(client).await {
-                                        app.replace_workspaces(workspaces);
-                                    }
-                                    app.status_message =
-                                        Some(format!("Created workspace: {ws_name}"));
-                                }
-                                Err(e) => {
-                                    app.status_message = Some(format!("Error: {e}"));
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
+                    }
                 }
             }
+            event = stream_rx.recv() => {
+                if let Some(evt) = event {
+                    dispatch_stream_event(state, evt);
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {}
         }
     }
     Ok(())

@@ -16,4 +16,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = { workspace = true }
