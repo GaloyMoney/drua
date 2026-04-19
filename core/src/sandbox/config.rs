@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 pub enum SandboxBackendConfig {
     Local {
         sandbox_spawn_cmd: String,
+        #[serde(default = "default_local_repo_root")]
+        local_repo_root: PathBuf,
     },
     K8s {
         namespace: String,
@@ -33,6 +35,7 @@ impl Default for SandboxBackendConfig {
     fn default() -> Self {
         Self::Local {
             sandbox_spawn_cmd: "cargo run -q -p sandbox-tool-server --".into(),
+            local_repo_root: default_local_repo_root(),
         }
     }
 }
@@ -41,9 +44,6 @@ impl Default for SandboxBackendConfig {
 pub struct SandboxConfig {
     #[serde(default)]
     pub backend: SandboxBackendConfig,
-    /// For local mode: parent of the `.sandboxes/` directory. Defaults to `.`.
-    #[serde(default = "default_local_repo_root")]
-    pub local_repo_root: PathBuf,
 }
 
 fn default_local_repo_root() -> PathBuf {

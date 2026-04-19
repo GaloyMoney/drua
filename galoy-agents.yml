@@ -43,7 +43,7 @@ sandbox:
   backend:
     provider: local
     sandbox_spawn_cmd: "cargo run -q -p sandbox-tool-server --"
-  local_repo_root: "."
+    local_repo_root: "."
 
 toolsets:
   code_assistant:
