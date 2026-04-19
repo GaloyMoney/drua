@@ -5,7 +5,7 @@
 //! Each tool keeps its existing `TopLevelTool` implementation unchanged.
 //! The adapter strips the `admin_` prefix from each tool's name to produce
 //! the short catalog name, then the `SearchableToolSet` prefix
-//! (`galoy_agents_`) is added at query time.
+//! (`drua_`) is added at query time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ impl AdminToolSet {
 #[async_trait::async_trait]
 impl SearchableToolSet for AdminToolSet {
     fn name(&self) -> &str {
-        "galoy_agents"
+        "drua"
     }
 
     fn category(&self) -> &str {

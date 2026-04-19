@@ -93,7 +93,7 @@ galoyAgents:
     #   categoryDescription: "AI-powered localization engine management and translation"
     ## GitHub App configuration for token auto-provisioning.
     ## When enabled, sandbox agents receive a `github-token` file secret.
-    ## The PEM private key is read from the main galoy-agents secret (key: github-app-private-key).
+    ## The PEM private key is read from the main drua secret (key: github-app-private-key).
     githubApp:
       enabled: false
       clientId: ""
@@ -196,7 +196,7 @@ sandbox:
   templateName: agent-sandbox
   runtimeClassName: gvisor
   networkPolicyManagement: Managed
-  ## MCP gateway URL for sandbox pods (e.g. "http://galoy-agents.galoy-agents.svc.cluster.local:5254/mcp")
+  ## MCP gateway URL for sandbox pods (e.g. "http://drua.drua.svc.cluster.local:5254/mcp")
   mcpGatewayUrl: ""
   ## Audience claim for the projected SA token (must match gateway validation)
   saTokenAudience: "galoy-agents-mcp"

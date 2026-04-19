@@ -30,6 +30,6 @@ name = "obix"
 url = "unused"
 
 [[repos]]
-name = "galoy-agents"
+name = "drua"
 url = "unused"
 exclude_dirs = ["code-assistant"]
