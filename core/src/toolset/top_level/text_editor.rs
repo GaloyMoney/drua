@@ -121,13 +121,6 @@ impl TopLevelTool for TextEditor {
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        // Permissive at dispatch — allow if the subject can read *or*
-        // write any sandbox. Per-command authz happens inside `call()`
-        // once we know whether the request is mutating.
-        subject.is_agent() && subject.readable_sandbox_id().is_some()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,

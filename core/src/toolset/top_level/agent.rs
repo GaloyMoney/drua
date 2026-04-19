@@ -106,10 +106,6 @@ impl TopLevelTool for WorkspaceAgentCreate {
         subject.can_write_workspace()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.can_write_workspace()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -165,10 +161,6 @@ impl TopLevelTool for AdminAgentCreate {
         subject.is_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
     async fn call(
         &self,
         _subject: &AuthSubject,
@@ -221,10 +213,6 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_write_workspace()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.can_write_workspace()
     }
 
@@ -292,10 +280,6 @@ impl TopLevelTool for AdminAgentAttachSandbox {
         subject.is_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -348,10 +332,6 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_write_workspace()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.can_write_workspace()
     }
 
@@ -425,10 +405,6 @@ impl TopLevelTool for AdminAgentDetachSandbox {
         subject.is_admin()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -488,10 +464,6 @@ impl TopLevelTool for WorkspaceListAgents {
         subject.can_read_workspace()
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -543,10 +515,6 @@ impl TopLevelTool for AdminListAgents {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
     }
 

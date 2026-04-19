@@ -50,10 +50,6 @@ impl TopLevelTool for WhoAmI {
         matches!(subject, AuthSubject::ExportedAgent(_, _, _))
     }
 
-    fn can_execute(&self, subject: &AuthSubject) -> bool {
-        matches!(subject, AuthSubject::ExportedAgent(_, _, _))
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
