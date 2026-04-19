@@ -26,8 +26,11 @@ impl Workspace {
 
     /// The workspace lead agent.
     async fn lead(&self, ctx: &Context<'_>) -> async_graphql::Result<Agent> {
-        let (app, _sub) = app_and_sub_from_ctx!(ctx);
-        let agent = app.agents().find_by_id(self.entity.lead_agent_id).await?;
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let agent = app
+            .agents()
+            .find_by_id(sub, self.entity.lead_agent_id)
+            .await?;
         Ok(Agent::from(agent))
     }
 }

@@ -10,6 +10,7 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
+use crate::auth::AuthSubject;
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -23,9 +24,10 @@ impl McpCredentials {
         Self { repo }
     }
 
-    #[instrument(name = "domain.mcp_creds.create_for_user", skip(self))]
+    #[instrument(name = "domain.mcp_creds.create_for_user", skip(self, _sub))]
     pub async fn create_for_user(
         &self,
+        _sub: &AuthSubject,
         user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
         token_hash: impl Into<String> + std::fmt::Debug,
@@ -66,9 +68,10 @@ impl McpCredentials {
         Ok(creds)
     }
 
-    #[instrument(name = "domain.mcp_creds.revoke", skip(self))]
+    #[instrument(name = "domain.mcp_creds.revoke", skip(self, _sub))]
     pub async fn revoke(
         &self,
+        _sub: &AuthSubject,
         user_id: UserId,
         id: impl Into<McpCredsId> + std::fmt::Debug,
     ) -> Result<McpCreds, McpCredsError> {
@@ -104,9 +107,10 @@ impl McpCredentials {
         Ok(creds)
     }
 
-    #[instrument(name = "domain.mcp_creds.list_for_user", skip(self))]
+    #[instrument(name = "domain.mcp_creds.list_for_user", skip(self, _sub))]
     pub async fn list_for_user(
         &self,
+        _sub: &AuthSubject,
         user_id: UserId,
         query: es_entity::PaginatedQueryArgs<repo::mcp_creds_cursor::McpCredsByCreatedAtCursor>,
         direction: es_entity::ListDirection,
@@ -121,8 +125,12 @@ impl McpCredentials {
             .await?)
     }
 
-    #[instrument(name = "domain.mcp_creds.list_all_for_user", skip(self))]
-    pub async fn list_all_for_user(&self, user_id: UserId) -> Result<Vec<McpCreds>, McpCredsError> {
+    #[instrument(name = "domain.mcp_creds.list_all_for_user", skip(self, _sub))]
+    pub async fn list_all_for_user(
+        &self,
+        _sub: &AuthSubject,
+        user_id: UserId,
+    ) -> Result<Vec<McpCreds>, McpCredsError> {
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,

@@ -103,7 +103,7 @@ impl TopLevelTool for Bash {
 
         let client = self
             .sandboxes
-            .instance_client_for(sandbox_id)
+            .instance_client_for(subject, sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 

@@ -121,7 +121,12 @@ async fn resolve_auth_context(
                     let agent_id = domain::primitives::AgentId::from(
                         id_str.parse::<uuid::Uuid>().expect("validated as UUID"),
                     );
-                    if let Ok(agent) = state.app.agents().find_by_id(agent_id).await {
+                    if let Ok(agent) = state
+                        .app
+                        .agents()
+                        .find_by_id(&AuthSubject::Anonymous, agent_id)
+                        .await
+                    {
                         return agent.auth_subject();
                     }
                 }
@@ -185,11 +190,12 @@ async fn logout(session: Session) -> axum::response::Redirect {
 async fn cli_login(State(state): State<AppState>, session: Session) -> Result<Response, AuthError> {
     // If user is already logged in, auto-create a token and display it
     if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
+        let sub = AuthSubject::User(user_id);
         let (raw_token, token_hash) = generate_token();
         state
             .app
             .mcp_creds()
-            .create_for_user(user_id, "cli", token_hash, vec![])
+            .create_for_user(&sub, user_id, "cli", token_hash, vec![])
             .await?;
         return Ok(CliTokenTemplate { token: raw_token }.into_response());
     }

@@ -29,7 +29,7 @@ impl Skills {
     }
 
     #[instrument(name = "skill.create", skip_all)]
-    pub async fn create(&self, new: NewSkill) -> Result<Skill, SkillError> {
+    pub async fn create(&self, _sub: &AuthSubject, new: NewSkill) -> Result<Skill, SkillError> {
         let skill = self.repo.create(new).await?;
         Ok(skill)
     }
@@ -45,7 +45,7 @@ impl Skills {
     }
 
     #[instrument(name = "skill.find_by_id", skip_all)]
-    pub async fn find_by_id(&self, id: SkillId) -> Result<Skill, SkillError> {
+    pub async fn find_by_id(&self, _sub: &AuthSubject, id: SkillId) -> Result<Skill, SkillError> {
         Ok(self.repo.find_by_id(id).await?)
     }
 
@@ -93,6 +93,7 @@ impl Skills {
     #[instrument(name = "skill.list_by_workspace_id", skip_all)]
     pub async fn list_by_workspace_id(
         &self,
+        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Skill>, SkillError> {
         let query = es_entity::PaginatedQueryArgs {
@@ -111,13 +112,13 @@ impl Skills {
     }
 
     #[instrument(name = "skill.update", skip_all)]
-    pub async fn update(&self, skill: &mut Skill) -> Result<(), SkillError> {
+    pub async fn update(&self, _sub: &AuthSubject, skill: &mut Skill) -> Result<(), SkillError> {
         self.repo.update(skill).await?;
         Ok(())
     }
 
     #[instrument(name = "skill.delete", skip_all)]
-    pub async fn delete(&self, id: SkillId) -> Result<(), SkillError> {
+    pub async fn delete(&self, _sub: &AuthSubject, id: SkillId) -> Result<(), SkillError> {
         let skill = self.repo.find_by_id(id).await?;
         self.repo.delete(skill).await?;
         Ok(())

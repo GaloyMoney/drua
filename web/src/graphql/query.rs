@@ -46,8 +46,8 @@ impl Query {
         ctx: &Context<'_>,
         id: WorkspaceId,
     ) -> async_graphql::Result<Option<Workspace>> {
-        let (app, _sub) = app_and_sub_from_ctx!(ctx);
-        match app.workspaces().find_by_id(id).await {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        match app.workspaces().find_by_id(sub, id).await {
             Ok(ws) => Ok(Some(Workspace::from(ws))),
             Err(galoy_agents_core::workspace::WorkspaceError::Find(_)) => Ok(None),
             Err(e) => Err(e.into()),

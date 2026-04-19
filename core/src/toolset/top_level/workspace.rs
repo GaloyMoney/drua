@@ -137,12 +137,12 @@ impl TopLevelTool for AdminWorkspaceList {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         _arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let all = self
             .workspaces
-            .list_all()
+            .list_all(subject)
             .await
             .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
 

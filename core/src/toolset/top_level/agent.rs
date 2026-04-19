@@ -116,7 +116,7 @@ impl TopLevelTool for WorkspaceAgentCreate {
 
         let agent = self
             .agents
-            .create(workspace_id, AgentRole::Agent, &params.name, None)
+            .create(subject, workspace_id, AgentRole::Agent, &params.name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -163,14 +163,20 @@ impl TopLevelTool for AdminAgentCreate {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: AdminAgentCreateParams = parse_params(arguments)?;
 
         let agent = self
             .agents
-            .create(params.workspace_id, AgentRole::Agent, &params.name, None)
+            .create(
+                subject,
+                params.workspace_id,
+                AgentRole::Agent,
+                &params.name,
+                None,
+            )
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -226,7 +232,7 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
 
         let sandbox = self
             .sandboxes
-            .find_by_id(params.sandbox_id)
+            .find_by_id(subject, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
         if sandbox.workspace_id != workspace_id {
@@ -345,7 +351,7 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
 
         let existing = self
             .agents
-            .find_by_id(params.agent_id)
+            .find_by_id(subject, params.agent_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
         if existing.workspace_id != workspace_id {
@@ -354,7 +360,7 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
 
         let sandbox = self
             .sandboxes
-            .find_by_id(params.sandbox_id)
+            .find_by_id(subject, params.sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
         if sandbox.workspace_id != workspace_id {
@@ -473,7 +479,7 @@ impl TopLevelTool for WorkspaceListAgents {
 
         let agents = self
             .agents
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(subject, workspace_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -520,14 +526,14 @@ impl TopLevelTool for AdminListAgents {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: AdminListAgentsParams = parse_params(arguments)?;
 
         let agents = self
             .agents
-            .list_for_workspace(params.workspace_id)
+            .list_for_workspace(subject, params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
