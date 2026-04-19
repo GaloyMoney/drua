@@ -140,7 +140,7 @@ async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Er
     reqwest::Client::new()
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {access_token}"))
-        .header("User-Agent", "galoy-agents")
+        .header("User-Agent", "drua")
         .header("Accept", "application/vnd.github+json")
         .send()
         .await?
@@ -153,7 +153,7 @@ async fn fetch_github_teams(access_token: &str) -> Result<Vec<GitHubTeam>, reqwe
     reqwest::Client::new()
         .get("https://api.github.com/user/teams")
         .header("Authorization", format!("Bearer {access_token}"))
-        .header("User-Agent", "galoy-agents")
+        .header("User-Agent", "drua")
         .header("Accept", "application/vnd.github+json")
         .query(&[("per_page", "100")])
         .send()

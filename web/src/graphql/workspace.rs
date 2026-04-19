@@ -5,7 +5,7 @@ use async_graphql::{ComplexObject, Context, InputObject, SimpleObject};
 use super::agent::Agent;
 use super::primitives::*;
 
-use galoy_agents_core::workspace::Workspace as DomainWorkspace;
+use drua_core::workspace::Workspace as DomainWorkspace;
 
 #[derive(SimpleObject, Clone)]
 #[graphql(complex)]

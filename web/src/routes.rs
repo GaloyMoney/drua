@@ -14,7 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_sessions::Session;
 use tracing::instrument;
 
-use galoy_agents_core as domain;
+use drua_core as domain;
 
 use domain::auth::AuthSubject;
 use domain::mcp_creds::token::generate_token;
@@ -180,11 +180,11 @@ fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
         }
     });
     let mcp_json = serde_json::json!({
-        "galoy-agents": &server_config
+        "drua": &server_config
     })
     .to_string();
     let cli_command = format!(
-        "claude mcp add-json --scope user galoy-agents '{}'",
+        "claude mcp add-json --scope user drua '{}'",
         server_config
     );
     (mcp_json, cli_command)
@@ -334,8 +334,8 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
 }
 
 async fn lookup_user_label(
-    app: &galoy_agents_core::App,
-    user_id: galoy_agents_core::primitives::UserId,
+    app: &drua_core::App,
+    user_id: drua_core::primitives::UserId,
 ) -> String {
     app.users()
         .find_by_id(user_id)
@@ -352,8 +352,8 @@ async fn lookup_user_label(
 
 async fn lookup_agent_label(
     sub: &AuthSubject,
-    app: &galoy_agents_core::App,
-    agent_id: galoy_agents_core::primitives::AgentId,
+    app: &drua_core::App,
+    agent_id: drua_core::primitives::AgentId,
 ) -> String {
     app.agents()
         .find_by_id(sub, agent_id)
@@ -364,8 +364,8 @@ async fn lookup_agent_label(
 
 async fn lookup_workspace_label(
     sub: &AuthSubject,
-    app: &galoy_agents_core::App,
-    workspace_id: galoy_agents_core::primitives::WorkspaceId,
+    app: &drua_core::App,
+    workspace_id: drua_core::primitives::WorkspaceId,
 ) -> String {
     app.workspaces()
         .find_by_id(sub, workspace_id)

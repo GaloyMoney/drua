@@ -80,7 +80,7 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
         }
 
         global::set_tracer_provider((*provider_arc).clone());
-        let tracer = provider_arc.tracer("galoy-agents-tracer");
+        let tracer = provider_arc.tracer("drua-tracer");
 
         // Build separate filter for OTel that excludes tokio/runtime
         let otel_filter = EnvFilter::try_from_default_env()
@@ -160,7 +160,7 @@ fn perform_shutdown(handle: TracerHandle) -> Result<(), TracingError> {
 fn telemetry_resource(config: &TracingConfig) -> Resource {
     Resource::builder()
         .with_service_name(config.service_name.clone())
-        .with_attributes([KeyValue::new(SERVICE_NAMESPACE, "galoy-agents")])
+        .with_attributes([KeyValue::new(SERVICE_NAMESPACE, "drua")])
         .build()
 }
 

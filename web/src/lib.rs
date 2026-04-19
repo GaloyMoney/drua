@@ -6,7 +6,7 @@ mod templates;
 
 use axum::Router;
 
-use galoy_agents_core as domain;
+use drua_core as domain;
 
 use domain::App;
 

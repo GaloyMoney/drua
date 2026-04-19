@@ -1,8 +1,8 @@
 //! Dynamic MCP server.
 //!
 //! Tools are sourced live from the core `ToolSets` registry via
-//! [`top_level_tools`](galoy_agents_core::toolset::ToolSets::top_level_tools)
-//! / [`call_top_level_tool`](galoy_agents_core::toolset::ToolSets::call_top_level_tool).
+//! [`top_level_tools`](drua_core::toolset::ToolSets::top_level_tools)
+//! / [`call_top_level_tool`](drua_core::toolset::ToolSets::call_top_level_tool).
 //! There is no static `#[tool]`-annotated table — `list_tools` reflects
 //! whatever the registry currently exposes for the calling subject's scopes,
 //! and `call_tool` dispatches by name straight into the registry.
@@ -19,9 +19,9 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{RoleServer, ServerHandler};
 
-use galoy_agents_core::auth::AuthSubject;
-use galoy_agents_core::toolset::TopLevelTool;
-use galoy_agents_core::App;
+use drua_core::auth::AuthSubject;
+use drua_core::toolset::TopLevelTool;
+use drua_core::App;
 
 #[derive(Clone)]
 pub struct McpGateway {
@@ -90,7 +90,7 @@ fn to_mcp_tool(tool: &(dyn TopLevelTool + '_)) -> Tool {
 impl ServerHandler for McpGateway {
     fn get_info(&self) -> ServerInfo {
         let instructions = format!(
-            "Galoy Agents MCP Gateway\n\n{}",
+            "Drua MCP Gateway\n\n{}",
             self.app.toolsets().mcp_gateway_info()
         );
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())

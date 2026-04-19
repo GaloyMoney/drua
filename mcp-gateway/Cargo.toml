@@ -1,12 +1,12 @@
 [package]
-name = "galoy-agents-mcp-gateway"
+name = "drua-mcp-gateway"
 version.workspace = true
 edition.workspace = true
 
 [lib]
 
 [dependencies]
-galoy-agents-core = { path = "../core" }
+drua-core = { path = "../core" }
 es-entity = { workspace = true }
 axum = { workspace = true }
 http = "1"

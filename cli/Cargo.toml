@@ -1,16 +1,16 @@
 [package]
-name = "galoy-agents-cli"
+name = "drua-cli"
 version = "0.1.0"
 edition.workspace = true
 
 [[bin]]
-name = "galoy-agents"
+name = "drua"
 path = "src/main.rs"
 
 [dependencies]
-galoy-agents-core = { path = "../core" }
-galoy-agents-mcp-gateway = { path = "../mcp-gateway" }
-galoy-agents-web = { path = "../web" }
+drua-core = { path = "../core" }
+drua-mcp-gateway = { path = "../mcp-gateway" }
+drua-web = { path = "../web" }
 sandbox = { workspace = true }
 anyhow = "1"
 axum = { workspace = true }

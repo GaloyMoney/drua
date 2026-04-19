@@ -1327,6 +1327,125 @@ dependencies = [
 ]
 
 [[package]]
+name = "drua-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "drua-core",
+ "drua-mcp-gateway",
+ "drua-web",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
+ "rustls",
+ "sandbox",
+ "serde",
+ "serde_yaml",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "drua-core"
+version = "0.1.0"
+dependencies = [
+ "anthropic-client",
+ "anyhow",
+ "async-graphql",
+ "async-trait",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "chrono",
+ "code-assistant-core",
+ "concourse-client",
+ "derive_builder",
+ "es-entity",
+ "futures",
+ "hex",
+ "http",
+ "jsonwebtoken",
+ "llm",
+ "opentelemetry",
+ "opentelemetry-http",
+ "pgvector",
+ "rand 0.9.4",
+ "regex",
+ "reqwest 0.13.2",
+ "rmcp",
+ "sandbox",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+]
+
+[[package]]
+name = "drua-mcp-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "drua-core",
+ "es-entity",
+ "http",
+ "rmcp",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "drua-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askama",
+ "askama_web",
+ "async-graphql",
+ "async-graphql-axum",
+ "async-trait",
+ "axum",
+ "axum-extra",
+ "chrono",
+ "drua-core",
+ "es-entity",
+ "k8s-openapi",
+ "kube",
+ "oauth2",
+ "opentelemetry",
+ "opentelemetry-http",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tower-http",
+ "tower-service",
+ "tower-sessions",
+ "tracing",
+ "tracing-opentelemetry",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1696,125 +1815,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "galoy-agents-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "galoy-agents-core",
- "galoy-agents-mcp-gateway",
- "galoy-agents-web",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk",
- "rustls",
- "sandbox",
- "serde",
- "serde_yaml",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "galoy-agents-core"
-version = "0.1.0"
-dependencies = [
- "anthropic-client",
- "anyhow",
- "async-graphql",
- "async-trait",
- "base64 0.22.1",
- "chacha20poly1305",
- "chrono",
- "code-assistant-core",
- "concourse-client",
- "derive_builder",
- "es-entity",
- "futures",
- "hex",
- "http",
- "jsonwebtoken",
- "llm",
- "opentelemetry",
- "opentelemetry-http",
- "pgvector",
- "rand 0.9.4",
- "regex",
- "reqwest 0.13.2",
- "rmcp",
- "sandbox",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "uuid",
-]
-
-[[package]]
-name = "galoy-agents-mcp-gateway"
-version = "0.1.0"
-dependencies = [
- "axum",
- "es-entity",
- "galoy-agents-core",
- "http",
- "rmcp",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "galoy-agents-web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "askama",
- "askama_web",
- "async-graphql",
- "async-graphql-axum",
- "async-trait",
- "axum",
- "axum-extra",
- "chrono",
- "es-entity",
- "galoy-agents-core",
- "k8s-openapi",
- "kube",
- "oauth2",
- "opentelemetry",
- "opentelemetry-http",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tokio-stream",
- "tower-http",
- "tower-service",
- "tower-sessions",
- "tracing",
- "tracing-opentelemetry",
- "url",
- "uuid",
 ]
 
 [[package]]
@@ -5892,9 +5892,9 @@ checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typenum"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "ucd-trie"

@@ -1,5 +1,5 @@
 [package]
-name = "galoy-agents-core"
+name = "drua-core"
 version.workspace = true
 edition.workspace = true
 

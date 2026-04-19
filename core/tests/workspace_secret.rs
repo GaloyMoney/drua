@@ -1,12 +1,12 @@
-use galoy_agents_core::encryption::EncryptionKey;
-use galoy_agents_core::primitives::{AuthSubject, UserId, WorkspaceId};
-use galoy_agents_core::workspace_secret::{SecretType, WorkspaceSecrets};
+use drua_core::encryption::EncryptionKey;
+use drua_core::primitives::{AuthSubject, UserId, WorkspaceId};
+use drua_core::workspace_secret::{SecretType, WorkspaceSecrets};
 
 fn test_sub() -> AuthSubject {
     AuthSubject::User(UserId::new())
 }
 
-const PG_CON: &str = "postgres://user:password@localhost:5432/galoy_agents";
+const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
 async fn pool() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| PG_CON.to_string());

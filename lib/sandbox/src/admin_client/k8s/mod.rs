@@ -19,7 +19,7 @@ use crate::error::AdminError;
 use crate::types::{Sandbox as SandboxView, SandboxSpecs};
 
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
-const MANAGED_BY_VALUE: &str = "galoy-agents";
+const MANAGED_BY_VALUE: &str = "drua";
 
 /// Cluster-level storage class config for the workspace PVC. Per-sandbox
 /// disk size comes from [`SandboxSpecs::disk_size`].
@@ -435,7 +435,7 @@ impl K8sAdminClient {
     ///
     /// The sandbox controller creates a headless Service for every Sandbox
     /// and records its DNS name in `status.serviceFQDN`.  This is how the
-    /// galoy-agents server reaches the harness HTTP server inside the pod.
+    /// drua server reaches the harness HTTP server inside the pod.
     #[instrument(name = "sandbox.admin.k8s.get_service_fqdn", skip_all, fields(%sandbox_name))]
     pub async fn get_service_fqdn(&self, sandbox_name: &str) -> Result<String, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);

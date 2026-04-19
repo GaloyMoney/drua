@@ -4,8 +4,8 @@ use async_graphql::{Enum, SimpleObject};
 
 use super::primitives::*;
 
-use galoy_agents_core::agent::Agent as DomainAgent;
-use galoy_agents_core::agent::AgentRole as DomainAgentRole;
+use drua_core::agent::Agent as DomainAgent;
+use drua_core::agent::AgentRole as DomainAgentRole;
 
 #[derive(SimpleObject, Clone)]
 pub struct Agent {

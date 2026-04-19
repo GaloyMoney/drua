@@ -1,6 +1,6 @@
 # drua
 
-CLI for Galoy Agents.
+CLI for Drua.
 
 ## Quick start
 
@@ -20,7 +20,7 @@ If you're already logged in, it skips straight to the dashboard.
 | Command | Description |
 |---------|-------------|
 | `drua dashboard` | Interactive TUI (auto-triggers login if needed) |
-| `drua login` | Authenticate with a galoy-agents server |
+| `drua login` | Authenticate with a drua server |
 | `drua logout` | Remove stored credentials |
 | `drua status` | Show current connection status |
 | `drua workspace list` | List all workspaces |

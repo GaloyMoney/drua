@@ -100,7 +100,7 @@ impl LocalAdminClient {
 
         // Intentionally don't override `current_dir`: inheriting the
         // parent's cwd lets the default `cargo run -q -p sandbox-tool-server`
-        // spawn command find the Cargo workspace when galoy-agents is run
+        // spawn command find the Cargo workspace when drua is run
         // from the repo root. The server locates its workspace via the
         // `WORKSPACE_ROOT` env var rather than cwd.
         let mut cmd = Command::new("sh");

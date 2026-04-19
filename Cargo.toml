@@ -36,7 +36,7 @@ opt-level = 0
 strip = true
 
 [workspace.metadata.crane]
-name = "galoy-agents"
+name = "drua"
 
 [workspace.dependencies]
 # Internal crates

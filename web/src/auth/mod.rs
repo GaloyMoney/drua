@@ -17,7 +17,7 @@ use tracing::instrument;
 pub use config::AuthConfig;
 pub use error::AuthError;
 
-use galoy_agents_core as domain;
+use drua_core as domain;
 
 use domain::auth::AuthSubject;
 use domain::mcp_creds::token::{generate_token, hash_token};
@@ -93,15 +93,15 @@ async fn resolve_auth_context(
         if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
             if !creds.is_revoked() {
                 match &creds.owner {
-                    galoy_agents_core::primitives::McpCredsOwner::User { user_id } => {
+                    drua_core::primitives::McpCredsOwner::User { user_id } => {
                         return AuthSubject::ExportedAgent(
                             *user_id,
                             creds.id,
                             creds.scopes.clone(),
                         );
                     }
-                    galoy_agents_core::primitives::McpCredsOwner::Agent { agent_id } => {
-                        let synthetic_user_id = galoy_agents_core::primitives::UserId::from(
+                    drua_core::primitives::McpCredsOwner::Agent { agent_id } => {
+                        let synthetic_user_id = drua_core::primitives::UserId::from(
                             uuid::Uuid::from(*agent_id),
                         );
                         return AuthSubject::ExportedAgent(

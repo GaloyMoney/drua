@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use galoy_agents_core::agent::{AgentRole, Agents, AgentsConfig, RoleConfig};
-use galoy_agents_core::primitives::{AuthSubject, ChatOutputEvent, UserId, WorkspaceId};
-use galoy_agents_core::sandbox::{SandboxConfig, Sandboxes};
-use galoy_agents_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
+use drua_core::agent::{AgentRole, Agents, AgentsConfig, RoleConfig};
+use drua_core::primitives::{AuthSubject, ChatOutputEvent, UserId, WorkspaceId};
+use drua_core::sandbox::{SandboxConfig, Sandboxes};
+use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
 use llm::response::StopReason;
 use llm::{PromptRequest, PromptResponse, PromptResult, Usage};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use tokio::sync::mpsc;
 
-const PG_CON: &str = "postgres://user:password@localhost:5432/galoy_agents";
+const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
 async fn pool() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| PG_CON.to_string());
@@ -47,7 +47,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             .await
             .expect("init sandboxes"),
     );
-    let skills = Arc::new(galoy_agents_core::skill::Skills::new(
+    let skills = Arc::new(drua_core::skill::Skills::new(
         &pool,
         Arc::clone(&sandboxes),
     ));
@@ -197,7 +197,7 @@ async fn send_message_dispatches_registered_tool_call() {
             .await
             .expect("init sandboxes"),
     );
-    let skills = Arc::new(galoy_agents_core::skill::Skills::new(
+    let skills = Arc::new(drua_core::skill::Skills::new(
         &pool,
         Arc::clone(&sandboxes),
     ));

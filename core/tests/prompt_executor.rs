@@ -1,4 +1,4 @@
-use galoy_agents_core::prompt_executor::{
+use drua_core::prompt_executor::{
     ModelConfig, PromptExecutor, PromptExecutorConfig, Provider,
 };
 use llm::prompt::{Message, UserBlock};

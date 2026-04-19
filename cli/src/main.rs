@@ -6,10 +6,10 @@ use clap::{Parser, Subcommand};
 use config::{Config, EnvSecrets};
 
 #[derive(Parser)]
-#[command(name = "galoy-agents", about = "Galoy Agents CLI")]
+#[command(name = "drua", about = "Drua CLI")]
 struct Cli {
     /// Path to config file
-    #[arg(long, env = "GALOY_AGENTS_CONFIG", default_value = "galoy-agents.yml")]
+    #[arg(long, env = "DRUA_CONFIG", default_value = "drua.yml")]
     config: String,
 
     /// PostgreSQL connection URL
@@ -40,7 +40,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate default configuration file (galoy-agents.yml) with all default values
+    /// Generate default configuration file (drua.yml) with all default values
     DumpDefaultConfig,
     /// Run the main server (default when no subcommand is specified)
     Run,
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to install default CryptoProvider");
 
     tracing_init::init_tracer(tracing_init::TracingConfig {
-        service_name: "galoy-agents".to_string(),
+        service_name: "drua".to_string(),
     })?;
 
     let allowed_teams: Vec<String> = cli
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         {
             None
         } else {
-            Some(galoy_agents_core::github_app::GitHubAppConfig {
+            Some(drua_core::github_app::GitHubAppConfig {
                 client_id: gh.client_id.clone(),
                 installation_id: gh.installation_id.clone(),
                 private_key_path: gh.private_key_path.clone(),
@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let app_config = galoy_agents_core::AppConfig {
+    let app_config = drua_core::AppConfig {
         agents: config.agents.clone(),
         prompt_executor: config.prompt_executor_config(),
         toolsets: config.toolsets.clone(),
@@ -114,18 +114,18 @@ async fn main() -> anyhow::Result<()> {
         github_app: github_app_config,
     };
 
-    let app = galoy_agents_core::App::init(&pool, app_config).await?;
+    let app = drua_core::App::init(&pool, app_config).await?;
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
-    let server_config = galoy_agents_web::server::ServerConfig {
+    let server_config = drua_web::server::ServerConfig {
         host: config.server.host.clone(),
         port: config.server.port,
         secure_cookies: config.server.secure_cookies,
     };
 
-    let mcp_service = galoy_agents_mcp_gateway::McpGateway::service(app.clone());
+    let mcp_service = drua_mcp_gateway::McpGateway::service(app.clone());
 
-    let mut app_state = galoy_agents_web::AppState::new(
+    let mut app_state = drua_web::AppState::new(
         app,
         oauth_client,
         auth_config.login,
@@ -135,13 +135,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize SA token validator for sandbox pod authentication (in-cluster only)
     if let Some(validator) =
-        galoy_agents_web::auth::sa_token::SaTokenValidator::try_from_env("galoy-agents-mcp").await
+        drua_web::auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await
     {
         tracing::info!("SA token validator initialized (in-cluster)");
         app_state = app_state.with_sa_token_validator(validator);
     }
 
-    let router = galoy_agents_web::server::build_app(&server_config, &pool, app_state, mcp_service);
+    let router = drua_web::server::build_app(&server_config, &pool, app_state, mcp_service);
 
     let addr: std::net::SocketAddr =
         format!("{}:{}", config.server.host, config.server.port).parse()?;
