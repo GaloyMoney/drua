@@ -17,7 +17,7 @@ teardown_file() {
 }
 
 @test "graphql: me query returns null when unauthenticated" {
-  run graphql_query "{ me }"
+  run graphql_query "{ me { id } }"
   echo "$output"
   [[ "$output" == *'"me":null'* ]]
 }
@@ -25,10 +25,10 @@ teardown_file() {
 @test "graphql: me query returns user id when authenticated" {
   create_test_agent
 
-  run graphql_query "{ me }" "$AGENT_TOKEN"
+  run graphql_query "{ me { id githubUsername } }" "$AGENT_TOKEN"
   echo "$output"
-  # Authenticated via MCP creds — me should return a UUID
-  [[ "$output" == *'"me":"'* ]]
+  # Authenticated via MCP creds — me should return an object with id
+  [[ "$output" == *'"id"'* ]]
   # Should not be null
   [[ "$output" != *'"me":null'* ]]
 }
