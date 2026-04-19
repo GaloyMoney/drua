@@ -357,7 +357,7 @@ impl Agents {
                 sandbox.name,
                 session::message::SandboxOperation::Attach {
                     mode: format!("{mode:?}").to_lowercase(),
-                    workspace_path: sandbox.workspace_path,
+                    mount_path: sandbox.mount_path,
                 },
             )
             .await?;

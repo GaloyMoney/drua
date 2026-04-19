@@ -196,7 +196,7 @@ impl AdminClient for LocalAdminClient {
         self.get_sandbox(name).await
     }
 
-    fn workspace_path(&self, name: &str) -> String {
+    fn mount_path(&self, name: &str) -> String {
         self.sandboxes_root
             .join(name)
             .join("workspace")

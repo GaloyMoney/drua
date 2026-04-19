@@ -287,10 +287,7 @@ impl From<llm::prompt::SystemBlock> for SystemBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxOperation {
-    Attach {
-        mode: String,
-        workspace_path: String,
-    },
+    Attach { mode: String, mount_path: String },
     Detach,
 }
 
@@ -299,14 +296,11 @@ pub enum SandboxOperation {
 /// agent system prompt.
 pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> String {
     match op {
-        SandboxOperation::Attach {
-            mode,
-            workspace_path,
-        } => {
+        SandboxOperation::Attach { mode, mount_path } => {
             format!(
                 "<sandbox>\n\
                  Attached sandbox \"{sandbox_name}\" in {mode} mode.\n\
-                 The workspace is mounted at {workspace_path}. \
+                 The workspace is mounted at {mount_path}. \
                  All file operations and command execution are confined to this path — \
                  do not attempt to read, write, or execute anything outside it.\n\
                  </sandbox>"

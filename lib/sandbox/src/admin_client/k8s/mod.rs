@@ -606,7 +606,7 @@ impl AdminClient for K8sAdminClient {
         K8sAdminClient::wait_sandbox_ready(self, name, timeout).await
     }
 
-    fn workspace_path(&self, _name: &str) -> String {
+    fn mount_path(&self, _name: &str) -> String {
         self.persistence
             .as_ref()
             .map(|p| p.mount_path.clone())
