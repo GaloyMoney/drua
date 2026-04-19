@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "drua",
   "cli",
   "lib/concourse-client",
   "core",

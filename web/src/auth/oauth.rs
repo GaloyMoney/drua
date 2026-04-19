@@ -22,6 +22,7 @@ pub struct CallbackParams {
 #[derive(Debug, Deserialize)]
 struct GitHubUser {
     id: u64,
+    login: String,
     email: Option<String>,
     name: Option<String>,
 }
@@ -109,7 +110,12 @@ pub async fn github_callback(
             state
                 .app
                 .users()
-                .create_from_github_login(github_id_str, github_user.email, github_user.name)
+                .create_from_github_login(
+                    github_id_str,
+                    github_user.email,
+                    github_user.name,
+                    Some(github_user.login),
+                )
                 .await?
         }
     };
@@ -121,7 +127,13 @@ pub async fn github_callback(
         .removal()
         .build();
 
-    Ok((jar.add(remove_cookie), Redirect::temporary("/")))
+    let redirect_to = session
+        .remove::<String>("cli_return_to")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "/".to_string());
+    Ok((jar.add(remove_cookie), Redirect::temporary(&redirect_to)))
 }
 
 async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Error> {

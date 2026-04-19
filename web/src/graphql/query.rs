@@ -1,12 +1,20 @@
 use async_graphql::{
     types::connection::{Connection, EmptyFields},
-    Context, Object,
+    Context, Object, SimpleObject,
 };
 
 use super::primitives::*;
 use super::workspace::Workspace;
 
 use galoy_agents_core::workspace::WorkspaceByCreatedAtCursor;
+
+#[derive(SimpleObject)]
+pub struct Me {
+    id: UUID,
+    name: Option<String>,
+    email: Option<String>,
+    github_username: Option<String>,
+}
 
 pub struct Query;
 
@@ -16,11 +24,19 @@ impl Query {
         "pong"
     }
 
-    /// The ID of the currently authenticated user, if any.
-    async fn me(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<UUID>> {
-        let (_app, sub) = app_and_sub_from_ctx!(ctx);
+    /// The currently authenticated user, if any.
+    async fn me(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Me>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
         match sub.originating_user_id() {
-            Some(id) => Ok(Some(UUID::from(uuid::Uuid::from(id)))),
+            Some(id) => {
+                let user = app.users().find_by_id(id).await?;
+                Ok(Some(Me {
+                    id: UUID::from(uuid::Uuid::from(id)),
+                    name: user.name,
+                    email: user.email,
+                    github_username: user.github_username,
+                }))
+            }
             None => Ok(None),
         }
     }

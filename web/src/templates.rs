@@ -333,3 +333,17 @@ pub struct WorkspaceChatTemplate {
     pub workspace: WorkspaceView,
     pub agent_id: String,
 }
+
+// ── CLI Login ─────────────────────────────────────────────────────────
+
+#[derive(Template, WebTemplate)]
+#[template(path = "cli_login.html")]
+pub struct CliLoginTemplate {
+    pub dev_auth: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "cli_token.html")]
+pub struct CliTokenTemplate {
+    pub token: String,
+}

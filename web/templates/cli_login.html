@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CLI Login — Galoy Agents</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+</head>
+<body>
+  <main class="container">
+    <article style="margin-top: 4rem; max-width: 480px; margin-left: auto; margin-right: auto;">
+      <header>
+        <h1>Galoy Agents CLI</h1>
+        <p>Sign in to generate a CLI token</p>
+      </header>
+      {% if dev_auth %}
+      <form method="post" action="/auth/dev">
+        <button type="submit" style="display: block; width: 100%; text-align: center;">
+          Login as Dev User
+        </button>
+      </form>
+      {% else %}
+      <a href="/auth/github" role="button" style="display: block; text-align: center;">
+        Sign in with GitHub
+      </a>
+      {% endif %}
+    </article>
+  </main>
+</body>
+</html>

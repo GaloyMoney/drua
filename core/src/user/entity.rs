@@ -14,6 +14,8 @@ pub enum UserEvent {
         github_id: String,
         email: Option<String>,
         name: Option<String>,
+        #[serde(default)]
+        github_username: Option<String>,
     },
 }
 
@@ -26,6 +28,8 @@ pub struct User {
     pub email: Option<String>,
     #[builder(setter(strip_option), default)]
     pub name: Option<String>,
+    #[builder(setter(strip_option), default)]
+    pub github_username: Option<String>,
     events: EntityEvents<UserEvent>,
 }
 
@@ -54,6 +58,7 @@ impl TryFromEvents<UserEvent> for User {
                     github_id,
                     email,
                     name,
+                    github_username,
                 } => {
                     builder = builder.id(*id).github_id(github_id.clone());
                     if let Some(email) = email {
@@ -61,6 +66,9 @@ impl TryFromEvents<UserEvent> for User {
                     }
                     if let Some(name) = name {
                         builder = builder.name(name.clone());
+                    }
+                    if let Some(github_username) = github_username {
+                        builder = builder.github_username(github_username.clone());
                     }
                 }
             }
@@ -80,6 +88,8 @@ pub struct NewUser {
     pub(super) email: Option<String>,
     #[builder(setter(into, strip_option), default)]
     pub(super) name: Option<String>,
+    #[builder(setter(into, strip_option), default)]
+    pub(super) github_username: Option<String>,
 }
 
 impl NewUser {
@@ -99,6 +109,7 @@ impl IntoEvents<UserEvent> for NewUser {
                 github_id: self.github_id,
                 email: self.email,
                 name: self.name,
+                github_username: self.github_username,
             }],
         )
     }
@@ -118,6 +129,7 @@ mod tests {
             .github_id("gh-123")
             .email("test@example.com".to_string())
             .name("Test User".to_string())
+            .github_username("testuser".to_string())
             .build()
             .unwrap();
 
@@ -130,6 +142,7 @@ mod tests {
         assert_eq!(user.github_id, "gh-123");
         assert_eq!(user.email, Some("test@example.com".to_string()));
         assert_eq!(user.name, Some("Test User".to_string()));
+        assert_eq!(user.github_username, Some("testuser".to_string()));
     }
 
     #[test]

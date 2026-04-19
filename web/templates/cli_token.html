@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CLI Token — Galoy Agents</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    .token-box {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--pico-card-background-color);
+      border: 1px solid var(--pico-muted-border-color);
+      border-radius: 4px;
+      padding: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .token-box pre {
+      flex: 1;
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <article style="margin-top: 4rem; max-width: 480px; margin-left: auto; margin-right: auto;">
+      <header>
+        <h1>CLI Token</h1>
+        <p>Your API token has been created.</p>
+      </header>
+      <div class="token-box">
+        <pre id="cli-token"><code>{{ token }}</code></pre>
+        <button
+          onclick="navigator.clipboard.writeText(document.getElementById('cli-token').textContent).then(function(){this.textContent='Copied!'}.bind(this))"
+          class="outline"
+        >
+          Copy
+        </button>
+      </div>
+      <p><small>Copy the token above and paste it into your terminal. You can close this tab.</small></p>
+    </article>
+  </main>
+</body>
+</html>
