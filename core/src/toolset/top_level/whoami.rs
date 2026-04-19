@@ -57,10 +57,7 @@ impl TopLevelTool for WhoAmI {
             AuthSubject::User(user_id) => {
                 info.insert("type".into(), "user".into());
                 info.insert("user_id".into(), user_id.to_string().into());
-                info.insert(
-                    "note".into(),
-                    "Users implicitly have all scopes".into(),
-                );
+                info.insert("note".into(), "Users implicitly have all scopes".into());
             }
             AuthSubject::ExportedAgent(user_id, creds_id, scopes) => {
                 info.insert("type".into(), "exported_agent".into());
@@ -68,7 +65,11 @@ impl TopLevelTool for WhoAmI {
                 info.insert("creds_id".into(), creds_id.to_string().into());
                 info.insert(
                     "scopes".into(),
-                    scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),
+                    scopes
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .into(),
                 );
             }
             AuthSubject::Agent(workspace_id, agent_id, scopes) => {
@@ -77,7 +78,11 @@ impl TopLevelTool for WhoAmI {
                 info.insert("agent_id".into(), agent_id.to_string().into());
                 info.insert(
                     "scopes".into(),
-                    scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),
+                    scopes
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .into(),
                 );
             }
             AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, scopes) => {
@@ -87,7 +92,11 @@ impl TopLevelTool for WhoAmI {
                 info.insert("agent_id".into(), agent_id.to_string().into());
                 info.insert(
                     "scopes".into(),
-                    scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),
+                    scopes
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .into(),
                 );
             }
             AuthSubject::Anonymous => {
@@ -95,8 +104,7 @@ impl TopLevelTool for WhoAmI {
             }
         }
 
-        let text = serde_json::to_string_pretty(&info)
-            .unwrap_or_else(|_| format!("{info:?}"));
+        let text = serde_json::to_string_pretty(&info).unwrap_or_else(|_| format!("{info:?}"));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
