@@ -144,7 +144,7 @@ impl Sessions {
         sandbox_name: String,
         operation: message::SandboxOperation,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let mut session = self.repo.find_by_agent_id_in_op(op, agent_id).await?;
         let response = session.add_sandbox_notification(sandbox_name, operation)?;
         self.repo.update_in_op(op, &mut session).await?;
         Ok(response)
