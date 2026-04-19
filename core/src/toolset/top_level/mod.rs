@@ -92,7 +92,6 @@ mod grep;
 mod inspect;
 mod log;
 mod ls;
-mod ping;
 mod read;
 mod sandbox;
 mod text_editor;
@@ -111,7 +110,6 @@ pub use grep::Grep;
 pub use inspect::{AdminInspectSandbox, WorkspaceInspectSandbox};
 pub use log::{AdminAllLogs, WorkspaceLog};
 pub use ls::Ls;
-pub use ping::Ping;
 pub use read::Read;
 pub use sandbox::{
     AdminCreateSandbox, AdminGetSandbox, AdminListSandboxes, WorkspaceCreateSandbox,

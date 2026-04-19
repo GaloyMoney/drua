@@ -46,6 +46,14 @@ impl TopLevelTool for WhoAmI {
         &WHOAMI_SCHEMA
     }
 
+    fn is_visible(&self, subject: &AuthSubject) -> bool {
+        matches!(subject, AuthSubject::ExportedAgent(_, _, _))
+    }
+
+    fn can_execute(&self, subject: &AuthSubject) -> bool {
+        matches!(subject, AuthSubject::ExportedAgent(_, _, _))
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
