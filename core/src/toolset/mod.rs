@@ -31,36 +31,21 @@ pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: RwLock<HashMap<String, Arc<dyn TopLevelTool>>>,
     audit: Option<Arc<Audit>>,
+    init_errors: Vec<(String, String)>,
 }
 
 impl ToolSets {
-    #[tracing::instrument(name = "toolset.init", skip_all)]
     pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
+        let mut init_errors: Vec<(String, String)> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            tracing::info!(
-                upstream.name = %upstream.name,
-                upstream.url = %upstream.url,
-                "Connecting to MCP upstream"
-            );
             match UpstreamToolSet::init(upstream).await {
                 Ok(ts) => {
-                    tracing::info!(
-                        upstream.name = %upstream.name,
-                        prefix = ts.prefix(),
-                        tools = ts.tools().len(),
-                        "MCP upstream toolset initialized"
-                    );
                     sets.push(Arc::new(ts));
                 }
                 Err(e) => {
-                    tracing::error!(
-                        upstream.name = %upstream.name,
-                        upstream.url = %upstream.url,
-                        error = %e,
-                        "Failed to initialize MCP upstream, skipping"
-                    );
+                    init_errors.push((upstream.name.clone(), e.to_string()));
                 }
             }
         }
@@ -99,7 +84,35 @@ impl ToolSets {
             sets,
             top_level: RwLock::new(top_level),
             audit: None,
+            init_errors,
         })
+    }
+
+    /// Log upstream init results. Must be called from OUTSIDE
+    /// `ToolSets::init` — rmcp's `serve_inner` captures
+    /// `tracing::Span::current()` and instruments a long-lived background
+    /// task with it. That task holds the span open for the MCP
+    /// connection's lifetime, so `tracing-opentelemetry` never exports it
+    /// (spans export only on close, i.e. when all handles are dropped).
+    #[tracing::instrument(name = "domain.toolset.init_summary", skip_all)]
+    pub fn log_init_summary(&self) {
+        let sets = self.sets.read().expect("toolset lock poisoned");
+        for set in sets.iter() {
+            tracing::info!(
+                upstream.name = set.name(),
+                upstream.prefix = set.prefix(),
+                upstream.tools = set.tools().len(),
+                upstream.category = set.category(),
+                "MCP upstream initialized"
+            );
+        }
+        for (name, error) in &self.init_errors {
+            tracing::error!(
+                upstream.name = %name,
+                error = %error,
+                "Failed to initialize MCP upstream"
+            );
+        }
     }
 
     /// Wire the audit service so tool calls are automatically recorded.
