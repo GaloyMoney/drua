@@ -116,7 +116,7 @@ impl TopLevelTool for WorkspaceAgentCreate {
 
         let agent = self
             .agents
-            .create(subject, workspace_id, AgentRole::Agent, &params.name, None)
+            .create_agent(workspace_id, &params.name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 
@@ -163,20 +163,14 @@ impl TopLevelTool for AdminAgentCreate {
 
     async fn call(
         &self,
-        subject: &AuthSubject,
+        _subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: AdminAgentCreateParams = parse_params(arguments)?;
 
         let agent = self
             .agents
-            .create(
-                subject,
-                params.workspace_id,
-                AgentRole::Agent,
-                &params.name,
-                None,
-            )
+            .create_agent(params.workspace_id, &params.name, None)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 

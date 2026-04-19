@@ -36,4 +36,11 @@ pub trait AdminClient: Send + Sync {
         name: &str,
         timeout: Duration,
     ) -> Result<Sandbox, AdminError>;
+
+    /// Return the absolute mount path for the sandbox workspace directory.
+    ///
+    /// For the local backend this is
+    /// `<repo_root>/.sandboxes/<name>/workspace`; for k8s it's the
+    /// persistence mount path (typically `/workspace`).
+    fn mount_path(&self, name: &str) -> String;
 }

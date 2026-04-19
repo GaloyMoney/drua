@@ -44,9 +44,12 @@ impl LocalAdminClient {
     /// Create a new client. Sandboxes will be placed under
     /// `<repo_root>/.sandboxes/`.
     pub fn new(config: LocalSandboxConfig, repo_root: impl AsRef<Path>) -> Self {
+        let sandboxes_root = std::fs::canonicalize(repo_root.as_ref())
+            .unwrap_or_else(|_| repo_root.as_ref().to_path_buf())
+            .join(SANDBOXES_DIR_NAME);
         Self {
             config,
-            sandboxes_root: repo_root.as_ref().join(SANDBOXES_DIR_NAME),
+            sandboxes_root,
             ready_timeout: READY_TIMEOUT,
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -194,6 +197,14 @@ impl AdminClient for LocalAdminClient {
         _timeout: Duration,
     ) -> Result<SandboxView, AdminError> {
         self.get_sandbox(name).await
+    }
+
+    fn mount_path(&self, name: &str) -> String {
+        self.sandboxes_root
+            .join(name)
+            .join("workspace")
+            .to_string_lossy()
+            .into_owned()
     }
 }
 

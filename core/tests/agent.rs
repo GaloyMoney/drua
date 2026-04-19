@@ -29,7 +29,6 @@ async fn send_message_round_trip_via_prompt_channel() {
         AgentRole::WorkspaceLead,
         RoleConfig {
             model: "claude-haiku-4-5-20251001".to_string(),
-            system: Vec::new(),
             max_tokens: 1024,
             reset_time_delta_seconds: None,
         },
@@ -59,13 +58,7 @@ async fn send_message_round_trip_via_prompt_channel() {
 
     let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create(
-            &sub,
-            WorkspaceId::new(),
-            AgentRole::WorkspaceLead,
-            "lead",
-            None,
-        )
+        .create_workspace_lead(WorkspaceId::new(), "lead", "test-workspace")
         .await
         .expect("create agent");
 
@@ -175,7 +168,6 @@ async fn send_message_dispatches_registered_tool_call() {
         AgentRole::WorkspaceLead,
         RoleConfig {
             model: "claude-haiku-4-5-20251001".to_string(),
-            system: Vec::new(),
             max_tokens: 1024,
             reset_time_delta_seconds: None,
         },
@@ -206,13 +198,7 @@ async fn send_message_dispatches_registered_tool_call() {
 
     let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create(
-            &sub,
-            WorkspaceId::new(),
-            AgentRole::WorkspaceLead,
-            "lead",
-            None,
-        )
+        .create_workspace_lead(WorkspaceId::new(), "lead", "test-workspace")
         .await
         .expect("create agent");
 

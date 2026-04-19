@@ -51,7 +51,6 @@ impl From<u32> for ResetTimeDeltaSeconds {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleConfig {
     pub model: String,
-    pub system: Vec<llm::prompt::SystemBlock>,
     pub max_tokens: u32,
     /// If set, a new thread is started when a user message arrives more
     /// than this many seconds after the previous user message in the

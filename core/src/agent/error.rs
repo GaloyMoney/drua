@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::primitives::SandboxId;
+use crate::primitives::{SandboxId, WorkspaceId};
 use crate::sandbox::error::SandboxError;
 use crate::skill::SkillError;
 
@@ -37,4 +37,6 @@ pub enum AgentError {
     AlreadyAttachedToSandbox { current: SandboxId },
     #[error("AgentError - workspace lead cannot attach a sandbox")]
     LeadCannotAttachSandbox,
+    #[error("AgentError - no lead agent found in workspace {0}")]
+    NoLeadAgent(WorkspaceId),
 }

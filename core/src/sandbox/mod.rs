@@ -118,11 +118,15 @@ impl Sandboxes {
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
+        let id = SandboxId::new();
+        let mount_path = self.admin.mount_path(&format!("sb-{id}"));
         let new_sandbox = NewSandbox::builder()
+            .id(id)
             .workspace_id(workspace_id.into())
             .name(name.into())
             .specs(specs)
             .mode(mode)
+            .mount_path(mount_path)
             .build()
             .expect("could not build new sandbox");
 

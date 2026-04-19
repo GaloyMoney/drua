@@ -28,6 +28,7 @@ pub enum AgentEvent {
         agent_role: AgentRole,
         name: String,
         authz_scopes: Vec<AuthScope>,
+        workspace_name: String,
     },
     /// Single delta event for adds and removes — bundles both sides of an
     /// attach/detach into one record. `added` and `removed` carry only the
@@ -53,6 +54,10 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_role: AgentRole,
     pub name: String,
+    /// Cached workspace display name — set at creation time and never
+    /// updated (if the workspace is renamed, existing agents keep the old
+    /// name until they are recreated).
+    pub workspace_name: String,
     /// Backed by a `HashSet` to enforce no-duplicates at the entity level.
     /// Wire format (`Initialized.authz_scopes`, `AuthScopesUpdated.added/removed`)
     /// stays as `Vec<AuthScope>` for backward-compatible JSON serialization.
@@ -230,12 +235,14 @@ impl TryFromEvents<AgentEvent> for Agent {
                     agent_role,
                     name,
                     authz_scopes,
+                    workspace_name,
                 } => {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
                         .agent_role(*agent_role)
-                        .name(name.clone());
+                        .name(name.clone())
+                        .workspace_name(workspace_name.clone());
                     scopes = authz_scopes.iter().cloned().collect();
                 }
                 AgentEvent::AuthScopesUpdated { added, removed } => {
@@ -274,6 +281,8 @@ pub struct NewAgent {
     #[builder(setter(into))]
     pub(super) name: String,
     pub(super) authz_scopes: Vec<AuthScope>,
+    #[builder(setter(into))]
+    pub(super) workspace_name: String,
 }
 
 impl NewAgent {
@@ -292,6 +301,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 agent_role: self.agent_role,
                 name: self.name,
                 authz_scopes: self.authz_scopes,
+                workspace_name: self.workspace_name,
             }],
         )
     }

@@ -43,6 +43,11 @@ pub enum AgentSessionEvent {
         source: UserMessageSource,
         text: String,
     },
+    SandboxNotificationAdded {
+        target: TargetThread,
+        sandbox_name: String,
+        operation: SandboxOperation,
+    },
     ThreadStarted {
         thread_id: SessionThreadId,
         start_reason: ThreadStartReason,
@@ -113,6 +118,30 @@ impl AgentSession {
             source,
             text: prompt,
         });
+        self.user_message_response(target)
+    }
+
+    pub fn add_sandbox_notification(
+        &mut self,
+        sandbox_name: String,
+        operation: SandboxOperation,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let target = TargetThread::Main;
+        self.events
+            .push(AgentSessionEvent::SandboxNotificationAdded {
+                target,
+                sandbox_name,
+                operation,
+            });
+        self.user_message_response(target)
+    }
+
+    /// Common post-push response logic shared by [`Self::add_user_input`]
+    /// and [`Self::add_sandbox_notification`].
+    fn user_message_response(
+        &self,
+        target: TargetThread,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
         let thread_id = match target {
             TargetThread::Main => match self.current_main_thread {
                 Some(id) => id,
@@ -155,7 +184,13 @@ impl AgentSession {
         let total_user_msgs = self
             .events
             .iter_all()
-            .filter(|e| matches!(e, AgentSessionEvent::UserInputAdded { .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentSessionEvent::UserInputAdded { .. }
+                        | AgentSessionEvent::SandboxNotificationAdded { .. }
+                )
+            })
             .count();
         let mut user_msg_counter = total_user_msgs;
         let mut pending_indexes = Vec::new();
@@ -165,6 +200,9 @@ impl AgentSession {
                     break;
                 }
                 AgentSessionEvent::UserInputAdded {
+                    target: msg_target, ..
+                }
+                | AgentSessionEvent::SandboxNotificationAdded {
                     target: msg_target, ..
                 } => {
                     user_msg_counter -= 1;
@@ -311,7 +349,8 @@ impl AgentSession {
                 !matches!(e, AgentSessionEvent::PromptSent { thread_id: tid, .. } if *tid == thread_id)
             })
             .any(|e| match e {
-                AgentSessionEvent::UserInputAdded { target, .. } => match target {
+                AgentSessionEvent::UserInputAdded { target, .. }
+                | AgentSessionEvent::SandboxNotificationAdded { target, .. } => match target {
                     TargetThread::Main => self.current_main_thread == Some(thread_id),
                     TargetThread::Id(id) => *id == thread_id,
                 },
@@ -373,7 +412,8 @@ impl AgentSession {
                 AgentSessionEvent::SystemBlocksUpdated { system_blocks } => {
                     materialized.push_system_blocks(system_blocks.iter());
                 }
-                AgentSessionEvent::UserInputAdded { .. } => {
+                AgentSessionEvent::UserInputAdded { .. }
+                | AgentSessionEvent::SandboxNotificationAdded { .. } => {
                     materialized.push_user_message();
                 }
                 AgentSessionEvent::AssistantResponseReceived { content, .. } => {
@@ -404,6 +444,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     builder = builder.current_main_thread(Some(*thread_id));
                 }
                 AgentSessionEvent::UserInputAdded { .. } => {}
+                AgentSessionEvent::SandboxNotificationAdded { .. } => {}
                 AgentSessionEvent::AssistantResponseReceived { .. } => {}
                 AgentSessionEvent::ToolDefsUpdated { .. } => {}
                 AgentSessionEvent::SystemBlocksUpdated { .. } => {}

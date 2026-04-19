@@ -572,6 +572,10 @@ impl K8sAdminClient {
     }
 }
 
+/// Default workspace root inside the sandbox container, matching the
+/// `WORKSPACE_ROOT` default in `images/sandbox/server/src/main.rs`.
+const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
+
 #[async_trait]
 impl AdminClient for K8sAdminClient {
     async fn create_sandbox(
@@ -600,5 +604,12 @@ impl AdminClient for K8sAdminClient {
         timeout: Duration,
     ) -> Result<SandboxView, AdminError> {
         K8sAdminClient::wait_sandbox_ready(self, name, timeout).await
+    }
+
+    fn mount_path(&self, _name: &str) -> String {
+        self.persistence
+            .as_ref()
+            .map(|p| p.mount_path.clone())
+            .unwrap_or_else(|| DEFAULT_WORKSPACE_ROOT.to_string())
     }
 }
