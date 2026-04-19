@@ -1,7 +1,7 @@
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-GALOY_AGENTS_BIN="${GALOY_AGENTS_BIN:-cargo run --bin galoy-agents --}"
+DRUA_BIN="${DRUA_BIN:-cargo run --bin drua --}"
 SERVER_PID_FILE="$BATS_FILE_TMPDIR/server.pid"
-PG_CON="${PG_CON:-postgres://user:password@localhost:5432/galoy_agents}"
+PG_CON="${PG_CON:-postgres://user:password@localhost:5432/drua}"
 
 COMPOSE_CMD="${COMPOSE_CMD:-docker compose}"
 
@@ -24,10 +24,10 @@ start_server() {
   export PG_CON
   export GITHUB_CLIENT_ID="test-client-id"
   export GITHUB_CLIENT_SECRET="test-client-secret"
-  export GALOY_AGENTS_CONFIG="$REPO_ROOT/galoy-agents.yml"
+  export DRUA_CONFIG="$REPO_ROOT/drua.yml"
   export CODE_ASSISTANT_DB_PATH=""  # disable code assistant in tests
 
-  $GALOY_AGENTS_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
+  $DRUA_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
 
   # Wait for server

@@ -3,11 +3,11 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use galoy_agents_core::agent::AgentsConfig;
-use galoy_agents_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
-use galoy_agents_core::sandbox::SandboxConfig;
-use galoy_agents_core::toolset::ToolSetsConfig;
-use galoy_agents_web::auth::config::{AuthConfig, LoginMethod};
+use drua_core::agent::AgentsConfig;
+use drua_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
+use drua_core::sandbox::SandboxConfig;
+use drua_core::toolset::ToolSetsConfig;
+use drua_web::auth::config::{AuthConfig, LoginMethod};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

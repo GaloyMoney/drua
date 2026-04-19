@@ -1,5 +1,5 @@
 [package]
-name = "galoy-agents-web"
+name = "drua-web"
 version.workspace = true
 edition.workspace = true
 
@@ -10,7 +10,7 @@ name = "write_sdl"
 path = "src/bin/write_sdl.rs"
 
 [dependencies]
-galoy-agents-core = { path = "../core", features = ["graphql"] }
+drua-core = { path = "../core", features = ["graphql"] }
 es-entity = { workspace = true }
 anyhow = "1"
 k8s-openapi = { version = "0.25", features = ["v1_33"] }

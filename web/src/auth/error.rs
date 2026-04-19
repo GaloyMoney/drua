@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use galoy_agents_core as domain;
+use drua_core as domain;
 
 use domain::mcp_creds::error::McpCredsError;
 use domain::user::error::UserError;

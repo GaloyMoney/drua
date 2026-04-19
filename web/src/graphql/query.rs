@@ -6,7 +6,7 @@ use async_graphql::{
 use super::primitives::*;
 use super::workspace::Workspace;
 
-use galoy_agents_core::workspace::WorkspaceByCreatedAtCursor;
+use drua_core::workspace::WorkspaceByCreatedAtCursor;
 
 #[derive(SimpleObject)]
 pub struct Me {
@@ -49,7 +49,7 @@ impl Query {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         match app.workspaces().find_by_id(sub, id).await {
             Ok(ws) => Ok(Some(Workspace::from(ws))),
-            Err(galoy_agents_core::workspace::WorkspaceError::Find(_)) => Ok(None),
+            Err(drua_core::workspace::WorkspaceError::Find(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }

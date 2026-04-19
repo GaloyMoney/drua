@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: galoy_agents
+      POSTGRES_DB: drua
     ports:
       - "5432:5432"
     volumes:

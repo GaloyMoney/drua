@@ -1,4 +1,4 @@
-# Galoy Agents
+# Drua
 
 An MCP-gateway platform that orchestrates AI agents with tool access across
 Concourse CI, Honeycomb observability, GitHub source control, Kubernetes, and
@@ -43,17 +43,17 @@ for all commands and key bindings.
 ## Environment Variables
 
 All secrets are loaded from environment variables (or CLI flags). Non-secret
-configuration lives in a YAML config file (`galoy-agents.yml` by default).
+configuration lives in a YAML config file (`drua.yml` by default).
 A complete `.env.example` is provided at the repo root.
 
-### Main Server (`galoy-agents-cli`)
+### Main Server (`drua-cli`)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PG_CON` | No | `postgres://user:password@localhost:5432/galoy_agents` | PostgreSQL connection URL. The Makefile provides this default, which matches the bundled compose stack. |
+| `PG_CON` | No | `postgres://user:password@localhost:5432/drua` | PostgreSQL connection URL. The Makefile provides this default, which matches the bundled compose stack. |
 | `GITHUB_CLIENT_SECRET` | No | `dev-secret` | GitHub OAuth App client secret (only needed when `oauth.login: github`). |
 | `ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for the agent LLM runtime. Server starts without it but agent prompts will fail. |
-| `GALOY_AGENTS_CONFIG` | No | `galoy-agents.yml` | Path to the YAML config file. |
+| `DRUA_CONFIG` | No | `drua.yml` | Path to the YAML config file. |
 | `GITHUB_ALLOWED_TEAMS` | No | `""` (all users) | Comma-separated GitHub teams allowed to log in (`org/team-slug`). |
 | `CONCOURSE_USERNAME` | No | — | Concourse CI basic-auth username (when concourse toolset is enabled). |
 | `CONCOURSE_PASSWORD` | No | — | Concourse CI basic-auth password. |
@@ -86,8 +86,8 @@ These are only needed when running specific integration tests:
 
 ## Config File Reference
 
-The YAML config file (`galoy-agents.yml`) holds non-secret configuration. See
-the included `galoy-agents.yml` for a complete local-dev example. Key sections:
+The YAML config file (`drua.yml`) holds non-secret configuration. See
+the included `drua.yml` for a complete local-dev example. Key sections:
 
 | Section | Purpose |
 |---|---|

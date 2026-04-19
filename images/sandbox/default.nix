@@ -55,8 +55,8 @@ let
     [credential "https://github.com"]
       helper = ${gitCredentialHelper}/bin/git-credential-github-token
     [user]
-      name = galoy-agents[bot]
-      email = galoy-agents[bot]@users.noreply.github.com
+      name = drua[bot]
+      email = drua[bot]@users.noreply.github.com
   '';
 
   # Entrypoint: starts nix-daemon, waits for socket, then execs tool server.

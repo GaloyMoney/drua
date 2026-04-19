@@ -27,7 +27,7 @@ agents:
       system:
         - type: text
           text: |
-            You are an agent operating inside a Galoy Agents workspace.
+            You are an agent operating inside a Drua workspace.
             You work on the tasks assigned to you and, when attached to
             a sandbox, you run commands and edit files inside it. Be
             concise and action-oriented.
@@ -38,7 +38,7 @@ sandbox:
   # Swap to k8s with:
   #   backend:
   #     provider: k8s
-  #     namespace: galoy-agents-sandboxes
+  #     namespace: drua-sandboxes
   #     template_name: agent-sandbox
   backend:
     provider: local

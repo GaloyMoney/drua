@@ -1,8 +1,8 @@
 use askama::Template;
 use askama_web::WebTemplate;
 
-use galoy_agents_core::code_assistant::logs::{CodeAssistantRequestRow, DashboardStats};
-use galoy_agents_core::code_assistant::LabelOriginCounts;
+use drua_core::code_assistant::logs::{CodeAssistantRequestRow, DashboardStats};
+use drua_core::code_assistant::LabelOriginCounts;
 
 pub struct McpCredsView {
     pub id: String,

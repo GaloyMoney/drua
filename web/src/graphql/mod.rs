@@ -62,4 +62,4 @@ async fn graphql_handler(
     schema.execute(request).await.into()
 }
 
-use galoy_agents_core as domain;
+use drua_core as domain;

@@ -18,7 +18,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Authenticate with a galoy-agents server
+    /// Authenticate with a drua server
     Login,
     /// Show current connection status
     Status,

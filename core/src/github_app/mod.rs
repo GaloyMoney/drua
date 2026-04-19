@@ -95,7 +95,7 @@ impl GitHubAppTokenProvider {
             .post(&url)
             .header("Authorization", format!("Bearer {jwt}"))
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "galoy-agents")
+            .header("User-Agent", "drua")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .json(&body)
             .send()

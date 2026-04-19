@@ -1,5 +1,5 @@
 {
-  description = "galoy-agents";
+  description = "drua";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -76,7 +76,7 @@
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        galoy-agents = craneLib.buildPackage (commonArgs // {
+        drua = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           doCheck = false;
         });
@@ -90,7 +90,7 @@
         write-sdl = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "write-sdl";
-          cargoExtraArgs = "-p galoy-agents-web --bin write_sdl";
+          cargoExtraArgs = "-p drua-web --bin write_sdl";
         });
 
         pythonEnv = pkgs.python3.withPackages (ps:
@@ -139,7 +139,7 @@
 
           export TERM="''${TERM:-dumb}"
           export REPO_ROOT="$(pwd)"
-          export PG_CON="postgres://user:password@localhost:5432/galoy_agents"
+          export PG_CON="postgres://user:password@localhost:5432/drua"
           export DATABASE_URL="$PG_CON"
           export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
 
@@ -152,7 +152,7 @@
 
           echo "Waiting for PostgreSQL..."
           for i in $(seq 1 30); do
-            if pg_isready -h localhost -p 5432 -U user -d galoy_agents >/dev/null 2>&1; then
+            if pg_isready -h localhost -p 5432 -U user -d drua >/dev/null 2>&1; then
               echo "PostgreSQL ready"
               break
             fi
@@ -176,12 +176,12 @@
 
           export TERM="''${TERM:-dumb}"
           export REPO_ROOT="$(pwd)"
-          export GALOY_AGENTS_BIN="${galoy-agents}/bin/galoy-agents"
+          export DRUA_BIN="${drua}/bin/drua"
           # Point bats/sandbox-helpers.bash at the nix-built binary so
           # setup_file doesn't fall back to `cargo run` (which fetches
           # + compiles the crate in CI and blows past the bats timeout).
           export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerBin}/bin/sandbox-tool-server"
-          export PG_CON="postgres://user:password@localhost:5432/galoy_agents"
+          export PG_CON="postgres://user:password@localhost:5432/drua"
           export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
 
           cleanup() {
@@ -234,13 +234,13 @@
             name = "default-config-check";
             src = src;
             nativeBuildInputs = [ pkgs.diffutils ];
-            buildInputs = [ galoy-agents ];
+            buildInputs = [ drua ];
             buildPhase = ''
               echo "Generating default config..."
-              ${galoy-agents}/bin/galoy-agents dump-default-config > default-config-generated.yml
+              ${drua}/bin/drua dump-default-config > default-config-generated.yml
 
               echo "Comparing with committed default config..."
-              if ! diff -u dev/galoy-agents.default.yml default-config-generated.yml; then
+              if ! diff -u dev/drua.default.yml default-config-generated.yml; then
                 echo "ERROR: Default config is out of date!"
                 echo "Run 'make generate-default-config' to update the config"
                 exit 1
@@ -255,11 +255,11 @@
           };
         };
 
-        packages.galoy-agents-unwrapped = galoy-agents;
+        packages.drua-unwrapped = drua;
 
-        packages.default = pkgs.writeShellScriptBin "galoy-agents" ''
+        packages.default = pkgs.writeShellScriptBin "drua" ''
           export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
-          exec "${galoy-agents}/bin/galoy-agents" "$@"
+          exec "${drua}/bin/drua" "$@"
         '';
 
         packages.code-assistant = pkgs.writeShellScriptBin "code-assistant" ''
@@ -277,7 +277,7 @@
               # production sandbox image bakes it in separately).
               export PATH="${pkgs.lib.makeBinPath [
                 bats-runner
-                galoy-agents
+                drua
                 podmanPkgs.podman-compose-runner
                 pkgs.bats
                 pkgs.jq
@@ -386,15 +386,15 @@
         };
 
         packages.docker-image = pkgs.dockerTools.buildLayeredImage {
-          name = "galoy-agents";
+          name = "drua";
           tag = "latest";
           contents = [
-            galoy-agents
+            drua
             pkgs.cacert
             pkgs.onnxruntime
           ];
           config = {
-            Cmd = [ "${galoy-agents}/bin/galoy-agents" ];
+            Cmd = [ "${drua}/bin/drua" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "ORT_DYLIB_PATH=${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
@@ -454,7 +454,7 @@
               export ENGINE_DEFAULT=docker
             fi
 
-            echo "galoy-agents dev shell loaded (engine: $ENGINE_DEFAULT)"
+            echo "drua dev shell loaded (engine: $ENGINE_DEFAULT)"
           '';
         };
       }

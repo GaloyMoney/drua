@@ -1,5 +1,5 @@
-use galoy_agents_core::primitives::AuthSubject;
-use galoy_agents_core::toolset::*;
+use drua_core::primitives::AuthSubject;
+use drua_core::toolset::*;
 
 #[tokio::test]
 async fn init_toolsets() {

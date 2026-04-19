@@ -7,10 +7,10 @@ use tower_sessions::{cookie::SameSite, SessionManagerLayer};
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use galoy_agents_core::audit::primitives::{InteractionOutcome, InteractionType};
-use galoy_agents_core::audit::Audit;
-use galoy_agents_core::auth::AuthSubject;
-use galoy_agents_core::primitives::WorkspaceId;
+use drua_core::audit::primitives::{InteractionOutcome, InteractionType};
+use drua_core::audit::Audit;
+use drua_core::auth::AuthSubject;
+use drua_core::primitives::WorkspaceId;
 
 use crate::auth::session_store::PgSessionStore;
 use crate::AppState;

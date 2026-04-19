@@ -16,8 +16,8 @@
 #[macro_export]
 macro_rules! app_and_sub_from_ctx {
     ($ctx:expr) => {{
-        let app = $ctx.data_unchecked::<galoy_agents_core::App>();
-        let sub: &galoy_agents_core::auth::AuthSubject = $ctx.data()?;
+        let app = $ctx.data_unchecked::<drua_core::App>();
+        let sub: &drua_core::auth::AuthSubject = $ctx.data()?;
         (app, sub)
     }};
 }
