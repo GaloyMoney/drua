@@ -54,6 +54,10 @@ pub enum UserBlock {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    SandboxInfo {
+        sandbox_name: String,
+        sandbox_operation: SandboxOperation,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +191,13 @@ impl From<UserBlock> for llm::prompt::UserBlock {
                 is_error,
                 cache_control: None,
             },
+            UserBlock::SandboxInfo {
+                sandbox_name,
+                sandbox_operation,
+            } => llm::prompt::UserBlock::Text {
+                text: sandbox_notification_text(&sandbox_name, &sandbox_operation),
+                cache_control: None,
+            },
         }
     }
 }
@@ -264,6 +275,45 @@ impl From<llm::prompt::SystemBlock> for SystemBlock {
     fn from(b: llm::prompt::SystemBlock) -> Self {
         match b {
             llm::prompt::SystemBlock::Text { text, .. } => SystemBlock::Text { text },
+        }
+    }
+}
+
+// ============================================================================
+// Sandbox notification helpers
+// ============================================================================
+
+/// What happened to a sandbox from the agent's perspective.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxOperation {
+    Attach {
+        mode: String,
+        workspace_path: String,
+    },
+    Detach,
+}
+
+/// Build the XML text injected into the agent's session when a sandbox is
+/// attached or detached. Matches the `<sandbox>` tag format described in the
+/// agent system prompt.
+pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> String {
+    match op {
+        SandboxOperation::Attach {
+            mode,
+            workspace_path,
+        } => {
+            format!(
+                "<sandbox>\n\
+                 Attached sandbox \"{sandbox_name}\" in {mode} mode.\n\
+                 The workspace is mounted at {workspace_path}. \
+                 All file operations and command execution are confined to this path — \
+                 do not attempt to read, write, or execute anything outside it.\n\
+                 </sandbox>"
+            )
+        }
+        SandboxOperation::Detach => {
+            format!("<sandbox>\nDetached sandbox \"{sandbox_name}\".\n</sandbox>")
         }
     }
 }

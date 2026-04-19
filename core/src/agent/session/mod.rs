@@ -133,6 +133,19 @@ impl Sessions {
         Ok(result)
     }
 
+    #[instrument(name = "domain.agent_session.sandbox_notification", skip(self))]
+    pub async fn sandbox_notification(
+        &self,
+        agent_id: AgentId,
+        sandbox_name: String,
+        operation: message::SandboxOperation,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let response = session.add_sandbox_notification(sandbox_name, operation)?;
+        self.repo.update(&mut session).await?;
+        Ok(response)
+    }
+
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]
     pub async fn delete_for_agent_in_op(
         &self,

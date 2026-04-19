@@ -313,6 +313,12 @@ impl Sandboxes {
         Ok(())
     }
 
+    /// Return the absolute path to the workspace directory for `sandbox`.
+    /// Delegates to the admin client, which knows the mount layout.
+    pub fn workspace_path(&self, sandbox: &Sandbox) -> String {
+        self.admin.workspace_path(&sandbox.resource_name())
+    }
+
     #[instrument(name = "domain.sandbox.find_by_id", skip(self, _sub))]
     pub async fn find_by_id(
         &self,

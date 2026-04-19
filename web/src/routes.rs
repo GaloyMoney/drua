@@ -1423,11 +1423,9 @@ async fn workspace_agent_create(
     Path(id): Path<uuid::Uuid>,
     Form(form): Form<CreateAgentForm>,
 ) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
+    if extract_user_id(&session).await.is_none() {
+        return Redirect::to("/").into_response();
+    }
 
     let workspace_id = domain::primitives::WorkspaceId::from(id);
 
@@ -1451,13 +1449,7 @@ async fn workspace_agent_create(
     match state
         .app
         .agents()
-        .create(
-            &sub,
-            workspace_id,
-            domain::agent::AgentRole::Agent,
-            form.name,
-            attach,
-        )
+        .create_agent(workspace_id, form.name, attach)
         .await
     {
         Ok(agent) => {

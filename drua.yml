@@ -14,23 +14,10 @@ agents:
       model: claude-haiku-4-5-20251001
       max_tokens: 4096
       reset_time_delta_seconds: 600
-      system:
-        - type: text
-          text: |
-            You are the workspace lead agent. You coordinate tasks,
-            answer questions, and use the available tools to help the
-            user accomplish their goals. Be concise and action-oriented.
     agent:
       model: claude-haiku-4-5-20251001
       max_tokens: 4096
       reset_time_delta_seconds: 600
-      system:
-        - type: text
-          text: |
-            You are an agent operating inside a Drua workspace.
-            You work on the tasks assigned to you and, when attached to
-            a sandbox, you run commands and edit files inside it. Be
-            concise and action-oriented.
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.

@@ -13,7 +13,7 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
-use crate::agent::{AgentRole, Agents};
+use crate::agent::Agents;
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -44,14 +44,7 @@ impl Workspaces {
         let workspace = self.repo.create_in_op(&mut op, new_workspace).await?;
 
         self.agents
-            .create_in_op(
-                &mut op,
-                lead_agent_id,
-                workspace_id,
-                AgentRole::WorkspaceLead,
-                "lead",
-                None,
-            )
+            .create_workspace_lead_in_op(&mut op, lead_agent_id, workspace_id, "lead", &name)
             .await?;
 
         op.commit().await?;

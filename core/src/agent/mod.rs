@@ -3,6 +3,7 @@ mod entity;
 pub mod error;
 pub mod repo;
 pub mod session;
+mod system_prompt;
 
 use std::sync::Arc;
 
@@ -81,35 +82,113 @@ impl Agents {
         &self.skills
     }
 
-    #[instrument(name = "domain.agent.create", skip(self, _sub))]
-    pub async fn create(
+    /// Create a workspace lead agent. The workspace name is passed directly
+    /// because it's known at workspace creation time.
+    #[instrument(name = "domain.agent.create_workspace_lead", skip(self))]
+    pub async fn create_workspace_lead(
         &self,
-        _sub: &AuthSubject,
         workspace_id: WorkspaceId,
-        agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
-        attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+        workspace_name: &str,
     ) -> Result<Agent, AgentError> {
         let id = AgentId::new();
         let mut op = self.repo.begin_op().await?;
         let agent = self
-            .create_in_op(&mut op, id, workspace_id, agent_role, name, attach_sandbox)
+            .create_in_op(
+                &mut op,
+                id,
+                workspace_id,
+                AgentRole::WorkspaceLead,
+                name,
+                None,
+                workspace_name,
+            )
             .await?;
         op.commit().await?;
         Ok(agent)
     }
 
-    /// Composable variant of [`Self::create`]. When `attach_sandbox` is
-    /// `Some((sandbox_id, mode))`, the agent is attached to the sandbox as
-    /// part of the same op — the entity-level invariants (workspace match,
-    /// single-writer) are enforced by
-    /// [`crate::sandbox::Sandboxes::attach_to_agent_in_op`] and the
-    /// matching `SandboxRead`/`SandboxWrite` scopes are written via
-    /// [`Agent::sandbox_attached`]. Bypasses the subject-based authz check
-    /// that [`Self::attach_sandbox`] performs — callers of `create_in_op`
-    /// are trusted to have authorized the action upstream.
+    /// Create a regular agent. The workspace name is resolved automatically
+    /// from the existing lead agent in the workspace.
+    #[instrument(name = "domain.agent.create_agent", skip(self))]
+    pub async fn create_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        name: impl Into<String> + std::fmt::Debug,
+        attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+    ) -> Result<Agent, AgentError> {
+        let workspace_name = self.resolve_workspace_name(workspace_id).await?;
+        let id = AgentId::new();
+        let mut op = self.repo.begin_op().await?;
+        let agent = self
+            .create_in_op(
+                &mut op,
+                id,
+                workspace_id,
+                AgentRole::Agent,
+                name,
+                attach_sandbox,
+                &workspace_name,
+            )
+            .await?;
+        op.commit().await?;
+        Ok(agent)
+    }
+
+    /// Resolve the workspace display name from the lead agent.
+    async fn resolve_workspace_name(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<String, AgentError> {
+        let query = es_entity::PaginatedQueryArgs {
+            first: 1,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                workspace_id,
+                query,
+                es_entity::ListDirection::Ascending,
+            )
+            .await?;
+        result
+            .entities
+            .into_iter()
+            .next()
+            .map(|a| a.workspace_name)
+            .ok_or(AgentError::NoLeadAgent(workspace_id))
+    }
+
+    /// Composable variant of [`Self::create_workspace_lead`] — creates a
+    /// lead agent inside an existing op with a pre-determined id.
+    #[instrument(name = "domain.agent.create_workspace_lead_in_op", skip(self, op))]
+    pub async fn create_workspace_lead_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        id: AgentId,
+        workspace_id: WorkspaceId,
+        name: impl Into<String> + std::fmt::Debug,
+        workspace_name: &str,
+    ) -> Result<Agent, AgentError> {
+        self.create_in_op(
+            op,
+            id,
+            workspace_id,
+            AgentRole::WorkspaceLead,
+            name,
+            None,
+            workspace_name,
+        )
+        .await
+    }
+
+    /// Shared inner: creates an agent of any role with all arguments
+    /// explicit. [`Self::create_workspace_lead`] and [`Self::create_agent`]
+    /// delegate here after resolving the workspace name.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
-    pub async fn create_in_op(
+    async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         id: AgentId,
@@ -117,6 +196,7 @@ impl Agents {
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+        workspace_name: &str,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -133,6 +213,7 @@ impl Agents {
             .agent_role(agent_role)
             .name(name)
             .authz_scopes(authz_scopes)
+            .workspace_name(workspace_name)
             .build()
             .expect("NewAgent build");
 
@@ -147,11 +228,12 @@ impl Agents {
             .top_level_tools(&agent_subject)
             .map(|t| session::message::ToolDefinition::from(llm::prompt::Tool::from(t.as_ref())))
             .collect();
-        let system_blocks: Vec<session::message::SystemBlock> = role_config
-            .system
-            .into_iter()
-            .map(session::message::SystemBlock::from)
-            .collect();
+        let system_blocks = system_prompt::system_blocks_for_role(
+            agent_role,
+            &self.toolsets,
+            &agent_subject,
+            &agent.workspace_name,
+        );
 
         self.sessions
             .create_in_op(
@@ -267,6 +349,21 @@ impl Agents {
             .await?;
 
         op.commit().await?;
+
+        // Notify the agent's session so the LLM knows a sandbox was attached.
+        let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
+        let workspace_path = self.sandboxes.workspace_path(&sandbox);
+        self.sessions
+            .sandbox_notification(
+                agent_id,
+                sandbox.name,
+                session::message::SandboxOperation::Attach {
+                    mode: format!("{mode:?}").to_lowercase(),
+                    workspace_path,
+                },
+            )
+            .await?;
+
         Ok(agent)
     }
 
@@ -300,6 +397,17 @@ impl Agents {
             .await?;
 
         op.commit().await?;
+
+        // Notify the agent's session so the LLM knows a sandbox was detached.
+        let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
+        self.sessions
+            .sandbox_notification(
+                agent_id,
+                sandbox.name,
+                session::message::SandboxOperation::Detach,
+            )
+            .await?;
+
         Ok(agent)
     }
 

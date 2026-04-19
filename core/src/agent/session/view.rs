@@ -261,6 +261,13 @@ impl PromptDefinition {
                 AgentSessionEvent::UserInputAdded { text, .. } => {
                     all_user_texts.push(text.clone());
                 }
+                AgentSessionEvent::SandboxNotificationAdded {
+                    sandbox_name,
+                    operation,
+                    ..
+                } => {
+                    all_user_texts.push(sandbox_notification_text(sandbox_name, operation));
+                }
                 AgentSessionEvent::AssistantResponseReceived { content, .. } => {
                     all_assistant_blocks.extend(content.iter().cloned());
                 }

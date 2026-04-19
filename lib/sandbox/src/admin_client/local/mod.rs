@@ -195,6 +195,14 @@ impl AdminClient for LocalAdminClient {
     ) -> Result<SandboxView, AdminError> {
         self.get_sandbox(name).await
     }
+
+    fn workspace_path(&self, name: &str) -> String {
+        self.sandboxes_root
+            .join(name)
+            .join("workspace")
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// Allocate a free TCP port by binding to port 0. There's a small race window
