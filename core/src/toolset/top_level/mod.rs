@@ -96,6 +96,7 @@ mod ping;
 mod read;
 mod sandbox;
 mod text_editor;
+mod whoami;
 mod workspace;
 
 pub use agent::{
@@ -117,4 +118,5 @@ pub use sandbox::{
     WorkspaceGetSandbox, WorkspaceListSandboxes,
 };
 pub use text_editor::TextEditor;
+pub use whoami::WhoAmI;
 pub use workspace::{AdminWorkspaceCreate, AdminWorkspaceList};

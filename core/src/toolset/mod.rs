@@ -13,7 +13,7 @@ pub use top_level::{
     AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminAllLogs,
     AdminCreateSandbox, AdminGetSandbox, AdminInspectSandbox, AdminListAgents, AdminListSandboxes,
     AdminWorkspaceCreate, AdminWorkspaceList, Bash, CallCatalogTool, DescribeCatalogTool, GlobTool,
-    Grep, Ls, Ping, Read, SearchCatalog, TextEditor, WorkspaceAgentAttachSandbox,
+    Grep, Ls, Ping, Read, SearchCatalog, TextEditor, WhoAmI, WorkspaceAgentAttachSandbox,
     WorkspaceAgentCreate, WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
     WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
 };
@@ -70,6 +70,7 @@ impl ToolSets {
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
         let ping = Arc::new(Ping::new());
+        let whoami = Arc::new(WhoAmI::new());
 
         let mut top_level = HashMap::new();
         top_level.insert(search.name().to_string(), search as Arc<dyn TopLevelTool>);
@@ -79,6 +80,7 @@ impl ToolSets {
         );
         top_level.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
         top_level.insert(ping.name().to_string(), ping as Arc<dyn TopLevelTool>);
+        top_level.insert(whoami.name().to_string(), whoami as Arc<dyn TopLevelTool>);
 
         Ok(Self {
             sets,
