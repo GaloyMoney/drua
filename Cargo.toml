@@ -18,6 +18,22 @@ resolver = "2"
 edition = "2021"
 version = "0.1.0"
 
+[profile.dev]
+debug = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true
+
+[profile.release]
+incremental = false
+codegen-units = 64
+opt-level = 0
+strip = true
+
 [workspace.metadata.crane]
 name = "galoy-agents"
 
