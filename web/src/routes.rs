@@ -183,10 +183,7 @@ fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
         "drua": &server_config
     })
     .to_string();
-    let cli_command = format!(
-        "claude mcp add-json --scope user drua '{}'",
-        server_config
-    );
+    let cli_command = format!("claude mcp add-json --scope user drua '{}'", server_config);
     (mcp_json, cli_command)
 }
 
@@ -333,10 +330,7 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
     }
 }
 
-async fn lookup_user_label(
-    app: &drua_core::App,
-    user_id: drua_core::primitives::UserId,
-) -> String {
+async fn lookup_user_label(app: &drua_core::App, user_id: drua_core::primitives::UserId) -> String {
     app.users()
         .find_by_id(user_id)
         .await

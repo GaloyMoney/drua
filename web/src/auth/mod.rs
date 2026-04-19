@@ -101,9 +101,8 @@ async fn resolve_auth_context(
                         );
                     }
                     drua_core::primitives::McpCredsOwner::Agent { agent_id } => {
-                        let synthetic_user_id = drua_core::primitives::UserId::from(
-                            uuid::Uuid::from(*agent_id),
-                        );
+                        let synthetic_user_id =
+                            drua_core::primitives::UserId::from(uuid::Uuid::from(*agent_id));
                         return AuthSubject::ExportedAgent(
                             synthetic_user_id,
                             creds.id,
