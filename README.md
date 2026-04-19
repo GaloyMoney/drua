@@ -24,6 +24,22 @@ with `GITHUB_CLIENT_SECRET` set and an
 [OAuth App](https://github.com/settings/developers) configured with callback
 `http://localhost:4200/auth/github/callback`.
 
+## CLI (`drua`)
+
+`drua` is a terminal UI for managing workspaces and chatting with agents.
+
+```bash
+# Against the local dev server
+cargo run -p drua -- dashboard
+
+# Against production
+cargo run -p drua -- --server https://dashboard.agents.galoy.io dashboard
+```
+
+On first run it opens your browser to authenticate and generate an API token.
+Credentials are stored in `~/.drua/config.json`. See [`drua/README.md`](drua/README.md)
+for all commands and key bindings.
+
 ## Environment Variables
 
 All secrets are loaded from environment variables (or CLI flags). Non-secret
@@ -87,6 +103,7 @@ the included `galoy-agents.yml` for a complete local-dev example. Key sections:
 ## Project Layout
 
 ```
+drua/           Terminal UI client (login, dashboard, workspace management)
 cli/            CLI entrypoint (config loading, main server binary)
 core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
 web/            Axum web server (routes, OAuth, templates)
