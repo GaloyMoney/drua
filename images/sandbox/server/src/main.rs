@@ -1,11 +1,17 @@
+mod session;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+
+use session::{BashSession, SharedSession};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -63,9 +69,12 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn execute(Json(req): Json<ExecuteRequest>) -> Json<ExecuteResponse> {
+async fn execute(
+    State(session): State<SharedSession>,
+    Json(req): Json<ExecuteRequest>,
+) -> Json<ExecuteResponse> {
     let result = match req.tool.as_str() {
-        "bash" => execute_bash(&req.input).await,
+        "bash" => execute_bash(&session, &req.input).await,
         "str_replace_based_edit_tool" => execute_text_editor(&req.input).await,
         "Grep" => execute_grep(&req.input).await,
         "Glob" => execute_glob(&req.input).await,
@@ -85,20 +94,27 @@ async fn execute(Json(req): Json<ExecuteRequest>) -> Json<ExecuteResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Bash tool (Anthropic bash_20250124)
+// Bash tool (Anthropic bash_20250124) — persistent session
 //
 // Input: { command: string, restart?: bool }
+//
+// Commands are piped through a long-lived shell session so background
+// processes (postgres, docker-compose, nix services) survive between calls.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
-    // Handle restart: reset is a no-op for a stateless server
+async fn execute_bash(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
+    // Handle restart: kill and recreate the persistent session
     if input
         .get("restart")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
+        session.restart().await?;
         return Ok("Bash session restarted.".to_string());
     }
 
@@ -107,204 +123,12 @@ async fn execute_bash(input: &serde_json::Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing 'command' field")?;
 
-    let workspace = workspace_root();
-    let workspace_tmp = format!("{workspace}/tmp");
-    let _ = tokio::fs::create_dir_all(&workspace_tmp).await;
+    let result = session.execute(command, DEFAULT_TIMEOUT_MS).await?;
 
-    // Try bubblewrap first (Layer 3), fall back to uid-only (Layer 2)
-    match execute_bash_bwrap(command, &workspace, &workspace_tmp).await {
-        Ok(result) => Ok(result),
-        Err(bwrap_err) if is_bwrap_unavailable(&bwrap_err) => {
-            tracing::warn!("bwrap unavailable, falling back to uid isolation: {bwrap_err}");
-            execute_bash_uid_only(command, &workspace, &workspace_tmp).await
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Layer 3: Execute bash inside a bubblewrap mount namespace.
-///
-/// Mounts the workspace read-write, Nix store read-only, hides `/run/secrets`
-/// behind a tmpfs, and connects to the nix-daemon socket for `nix build` etc.
-#[cfg(unix)]
-async fn execute_bash_bwrap(
-    command: &str,
-    workspace: &str,
-    workspace_tmp: &str,
-) -> Result<String, String> {
-    let output = tokio::time::timeout(
-        Duration::from_millis(DEFAULT_TIMEOUT_MS),
-        Command::new("bwrap")
-            // Filesystem mounts
-            .args(["--ro-bind", "/nix/store", "/nix/store"])
-            .args(["--ro-bind", "/etc", "/etc"])
-            .args(["--bind", workspace, workspace])
-            .args(["--bind", workspace_tmp, "/tmp"])
-            .args(["--tmpfs", "/run"])
-            // Nix daemon access
-            .args([
-                "--bind",
-                "/nix/var/nix/daemon-socket",
-                "/nix/var/nix/daemon-socket",
-            ])
-            .args(["--ro-bind", "/nix/var/nix/db", "/nix/var/nix/db"])
-            .args(["--ro-bind", "/nix/var/nix/gcroots", "/nix/var/nix/gcroots"])
-            .args([
-                "--ro-bind",
-                "/nix/var/nix/profiles",
-                "/nix/var/nix/profiles",
-            ])
-            // Special filesystems
-            .args(["--proc", "/proc"])
-            .args(["--dev", "/dev"])
-            // Isolation flags
-            .args(["--unshare-pid", "--die-with-parent", "--new-session"])
-            // UID drop — use bwrap flags (not process-level .uid()/.gid())
-            // so that a missing bwrap binary gives "No such file" rather
-            // than a pre-exec setuid failure masking the real issue.
-            .args(["--uid", "1000", "--gid", "1000"])
-            // Environment
-            .env("HOME", workspace)
-            .env("USER", "agent")
-            .env("TMPDIR", "/tmp")
-            .env("NIX_REMOTE", "daemon")
-            .current_dir(workspace)
-            // Execute
-            .args(["--", "bash", "-c", command])
-            .output(),
-    )
-    .await
-    .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
-    .map_err(|e| format!("Failed to execute command: {e}"))?;
-
-    format_bash_output(&output)
-}
-
-#[cfg(not(unix))]
-async fn execute_bash_bwrap(
-    _command: &str,
-    _workspace: &str,
-    _workspace_tmp: &str,
-) -> Result<String, String> {
-    Err("bwrap not available on this platform".to_string())
-}
-
-/// Layer 2: Execute bash with UID/GID drop only (no mount namespace).
-///
-/// Used as fallback when bwrap is unavailable (e.g. nested containers without
-/// user namespace support). UID drop requires the parent to be root (UID 0);
-/// when not root (e.g. in dev/test), runs without privilege drop.
-///
-/// In fake-root environments (e.g. Nix build sandbox user namespaces), the
-/// process appears as UID 0 but cannot actually setuid. When that happens
-/// the spawn fails with a pre-exec error (EPERM, EINVAL, EACCES depending
-/// on the namespace config). We detect ALL spawn failures via the "Failed
-/// to execute command:" prefix and retry without uid drop. Real command
-/// failures inside bash produce "Exit code ..." errors and are never retried.
-#[cfg(unix)]
-async fn execute_bash_uid_only(
-    command: &str,
-    workspace: &str,
-    workspace_tmp: &str,
-) -> Result<String, String> {
-    if is_root() {
-        match execute_bash_as_uid(command, workspace, workspace_tmp, Some((1000, 1000))).await {
-            Ok(result) => return Ok(result),
-            Err(e) if is_spawn_failure(&e) => {
-                tracing::warn!("UID drop failed (fake-root?), falling back to plain bash: {e}");
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    execute_bash_as_uid(command, workspace, workspace_tmp, None).await
-}
-
-/// Detect pre-exec spawn failures (setuid, chdir, exec) vs. bash command
-/// failures. Spawn failures always carry the "Failed to execute command:"
-/// prefix from the map_err in execute_bash_as_uid, while command-level
-/// errors start with "Exit code".
-fn is_spawn_failure(err: &str) -> bool {
-    err.starts_with("Failed to execute command:")
-}
-
-/// Inner helper: run bash with optional UID/GID override.
-#[cfg(unix)]
-async fn execute_bash_as_uid(
-    command: &str,
-    workspace: &str,
-    workspace_tmp: &str,
-    uid_gid: Option<(u32, u32)>,
-) -> Result<String, String> {
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(workspace)
-        .env("HOME", workspace)
-        .env("USER", "agent")
-        .env("TMPDIR", workspace_tmp);
-
-    if let Some((uid, gid)) = uid_gid {
-        cmd.uid(uid).gid(gid);
-    }
-
-    let output = tokio::time::timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS), cmd.output())
-        .await
-        .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
-        .map_err(|e| format!("Failed to execute command: {e}"))?;
-
-    format_bash_output(&output)
-}
-
-#[cfg(not(unix))]
-async fn execute_bash_uid_only(
-    command: &str,
-    _workspace: &str,
-    _workspace_tmp: &str,
-) -> Result<String, String> {
-    let output = tokio::time::timeout(
-        Duration::from_millis(DEFAULT_TIMEOUT_MS),
-        Command::new("bash").arg("-c").arg(command).output(),
-    )
-    .await
-    .map_err(|_| format!("Command timed out after {DEFAULT_TIMEOUT_MS}ms"))?
-    .map_err(|e| format!("Failed to execute command: {e}"))?;
-
-    format_bash_output(&output)
-}
-
-/// Returns true if the current process is running as root (UID 0).
-#[cfg(unix)]
-fn is_root() -> bool {
-    extern "C" {
-        fn geteuid() -> u32;
-    }
-    // SAFETY: geteuid() is a POSIX function, always safe to call
-    unsafe { geteuid() == 0 }
-}
-
-/// Detect whether a bwrap error indicates the tool is unavailable vs. a real
-/// command failure. Returns `true` for platform/permission issues that warrant
-/// a fallback to uid-only isolation.
-fn is_bwrap_unavailable(err: &str) -> bool {
-    err.contains("No permissions to create new namespace")
-        || err.contains("No such file or directory")
-        || err.contains("Operation not permitted")
-}
-
-fn format_bash_output(output: &std::process::Output) -> Result<String, String> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if output.status.success() {
-        if stderr.is_empty() {
-            Ok(stdout.into_owned())
-        } else {
-            Ok(format!("{stdout}\n--- stderr ---\n{stderr}"))
-        }
+    if result.exit_code == 0 {
+        Ok(result.output)
     } else {
-        let code = output.status.code().unwrap_or(-1);
-        Err(format!("Exit code {code}\n{stdout}{stderr}"))
+        Err(format!("Exit code {}\n{}", result.exit_code, result.output))
     }
 }
 
@@ -1010,10 +834,13 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let session: SharedSession = Arc::new(BashSession::new());
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/execute", post(execute))
-        .route("/initialize", post(initialize));
+        .route("/initialize", post(initialize))
+        .with_state(session);
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -1049,20 +876,27 @@ mod tests {
         });
     }
 
+    fn test_session() -> SharedSession {
+        Arc::new(BashSession::new())
+    }
+
     #[tokio::test]
     async fn bash_executes_echo() {
         init_test_workspace();
+        let session = test_session();
         let input = serde_json::json!({"command": "echo hello"});
-        let result = execute_bash(&input).await;
+        let result = execute_bash(&session, &input).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "hello");
+        assert!(result.unwrap().contains("hello"));
     }
 
     #[tokio::test]
     async fn bash_returns_error_on_nonzero_exit() {
         init_test_workspace();
-        let input = serde_json::json!({"command": "exit 42"});
-        let result = execute_bash(&input).await;
+        let session = test_session();
+        // Use a sub-shell to get non-zero exit without killing the session
+        let input = serde_json::json!({"command": "bash -c 'exit 42'"});
+        let result = execute_bash(&session, &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Exit code 42"));
     }
@@ -1070,8 +904,9 @@ mod tests {
     #[tokio::test]
     async fn bash_restart_returns_ok() {
         init_test_workspace();
+        let session = test_session();
         let input = serde_json::json!({"restart": true});
-        let result = execute_bash(&input).await;
+        let result = execute_bash(&session, &input).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("restarted"));
     }
@@ -1079,8 +914,9 @@ mod tests {
     #[tokio::test]
     async fn bash_missing_command_returns_error() {
         init_test_workspace();
+        let session = test_session();
         let input = serde_json::json!({});
-        let result = execute_bash(&input).await;
+        let result = execute_bash(&session, &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("command"));
     }
@@ -1960,29 +1796,5 @@ mod tests {
             "expected ok for new file, got: {:?}",
             result
         );
-    }
-
-    // ── is_bwrap_unavailable ──────────────────────────────────────
-
-    #[test]
-    fn bwrap_unavailable_detects_namespace_error() {
-        assert!(is_bwrap_unavailable(
-            "No permissions to create new namespace"
-        ));
-    }
-
-    #[test]
-    fn bwrap_unavailable_detects_missing_binary() {
-        assert!(is_bwrap_unavailable("No such file or directory"));
-    }
-
-    #[test]
-    fn bwrap_unavailable_detects_operation_not_permitted() {
-        assert!(is_bwrap_unavailable("Operation not permitted"));
-    }
-
-    #[test]
-    fn bwrap_unavailable_returns_false_for_real_errors() {
-        assert!(!is_bwrap_unavailable("Exit code 1\ncommand not found: foo"));
     }
 }
