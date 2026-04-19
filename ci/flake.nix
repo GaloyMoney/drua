@@ -1,5 +1,5 @@
 {
-  description = "galoy-agents CI scripts";
+  description = "drua CI scripts";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
