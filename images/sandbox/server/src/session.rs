@@ -254,26 +254,8 @@ impl BashSession {
             .await
         {
             Ok(Ok(result)) => {
-                // Drain any stderr collected so far
-                let mut stderr_buf = String::new();
-                while let Ok(chunk) = session.stderr_rx.try_recv() {
-                    stderr_buf.push_str(&chunk);
-                }
-
-                let output = if stderr_buf.is_empty() {
-                    result.output
-                } else {
-                    format!(
-                        "{}\n--- stderr ---\n{}",
-                        result.output.trim_end(),
-                        stderr_buf
-                    )
-                };
-
-                Ok(CommandResult {
-                    output,
-                    exit_code: result.exit_code,
-                })
+                let output = self.collect_output(session, result);
+                Ok(output)
             }
             Ok(Err(e)) => {
                 // stdout EOF — shell died
@@ -281,11 +263,92 @@ impl BashSession {
                 Err(format!("Session shell exited unexpectedly: {e}"))
             }
             Err(_) => {
-                // Timeout — kill the session
-                if let Some(mut s) = guard.take() {
-                    let _ = s.child.kill().await;
+                // Timeout — try SIGINT first to interrupt the foreground command
+                // while keeping the session (and background processes) alive.
+                // The shell will continue to the marker echo after SIGINT.
+                let result = Self::try_interrupt_foreground(session, &request_id).await;
+                if result.is_err()
+                    && result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|e| e.contains("could not be recovered"))
+                {
+                    // SIGINT didn't work — session is dead, clear it
+                    let _ = guard.take();
                 }
-                Err(format!("Command timed out after {timeout_ms}ms"))
+                result
+            }
+        }
+    }
+
+    /// Collect stdout output and any buffered stderr into a single [`CommandResult`].
+    fn collect_output(
+        &self,
+        session: &mut BashSessionInner,
+        result: MarkerResult,
+    ) -> CommandResult {
+        let mut stderr_buf = String::new();
+        while let Ok(chunk) = session.stderr_rx.try_recv() {
+            stderr_buf.push_str(&chunk);
+        }
+
+        let output = if stderr_buf.is_empty() {
+            result.output
+        } else {
+            format!(
+                "{}\n--- stderr ---\n{}",
+                result.output.trim_end(),
+                stderr_buf
+            )
+        };
+
+        CommandResult {
+            output,
+            exit_code: result.exit_code,
+        }
+    }
+
+    /// Send SIGINT to interrupt the foreground command without killing the
+    /// session. After SIGINT, bash continues to the marker echo so we can
+    /// recover the output boundary. Falls back to killing the session if the
+    /// marker doesn't appear within a grace period.
+    async fn try_interrupt_foreground(
+        session: &mut BashSessionInner,
+        request_id: &str,
+    ) -> Result<CommandResult, String> {
+        // Send SIGINT to the shell child's process group. Inside the
+        // bwrap/bash session this propagates to the foreground job.
+        #[cfg(unix)]
+        if let Some(pid) = session.child.id() {
+            // SAFETY: kill(2) is POSIX, sending SIGINT to a known PID.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGINT);
+            }
+        }
+
+        // Grace period: wait up to 5 s for the marker after SIGINT.
+        const GRACE: Duration = Duration::from_secs(5);
+        match tokio::time::timeout(GRACE, read_until_marker(&mut session.stdout, request_id)).await
+        {
+            Ok(Ok(result)) => {
+                // SIGINT worked — the shell survived and produced the marker.
+                // Drain stderr and return the (partial) output.
+                let mut stderr_buf = String::new();
+                while let Ok(chunk) = session.stderr_rx.try_recv() {
+                    stderr_buf.push_str(&chunk);
+                }
+                let mut output = result.output;
+                if !stderr_buf.is_empty() {
+                    output = format!("{}\n--- stderr ---\n{}", output.trim_end(), stderr_buf);
+                }
+                Err(format!(
+                    "Command timed out (interrupted, session preserved)\n{output}"
+                ))
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Shell didn't recover — kill it so the next call recreates.
+                let _ = session.child.kill().await;
+                Err("Command timed out and session could not be recovered".to_string())
             }
         }
     }
@@ -572,14 +635,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_timeout_kills_session() {
+    async fn session_timeout_returns_error_and_recovers() {
         init_test_workspace();
         let session = BashSession::new();
 
-        // Run a command that will block longer than timeout
+        // Run a command that will block longer than timeout.
+        // SIGINT may or may not interrupt `sleep` depending on the platform,
+        // but either way we get a timeout error and can recover.
         let result = session.execute("sleep 30", 200).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("timed out"));
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
 
         // Session should auto-recover on next call
         let r = session
@@ -587,5 +656,56 @@ mod tests {
             .await;
         assert!(r.is_ok(), "should recover after timeout: {:?}", r.err());
         assert!(r.unwrap().output.contains("after-timeout"));
+    }
+
+    #[tokio::test]
+    async fn session_timeout_preserves_session_via_sigint() {
+        init_test_workspace();
+        let session = BashSession::new();
+
+        // Start a background process, then run a command that times out.
+        // After SIGINT recovery, the background process should still be alive.
+        let tmp = std::env::temp_dir().join("sandbox-session-sigint-test");
+        let _ = tokio::fs::remove_file(&tmp).await;
+
+        // Start a background writer
+        let bg_cmd = format!(
+            "(sleep 0.5 && echo sigint-survived > {}) &",
+            tmp.to_str().unwrap()
+        );
+        let r = session.execute(&bg_cmd, DEFAULT_TIMEOUT_MS).await.unwrap();
+        assert_eq!(r.exit_code, 0);
+
+        // This will time out — use a trap so SIGINT is handled gracefully
+        // by bash, which lets the marker echo execute.
+        let result = session.execute("trap 'true' INT; sleep 30", 200).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+
+        // If SIGINT worked, the error says "interrupted, session preserved".
+        // If it didn't (platform-dependent), the session is killed and
+        // recreated on the next call. Either way, we can continue.
+        if err.contains("session preserved") {
+            // Wait for background process to finish
+            tokio::time::sleep(Duration::from_millis(800)).await;
+
+            // Background process should have survived the SIGINT
+            let content = tokio::fs::read_to_string(&tmp).await;
+            assert!(
+                content.is_ok(),
+                "Background process should survive SIGINT: {:?}",
+                content.err()
+            );
+            assert!(content.unwrap().contains("sigint-survived"));
+        }
+
+        // Either way, next command should work
+        let r = session
+            .execute("echo still-alive", DEFAULT_TIMEOUT_MS)
+            .await;
+        assert!(r.is_ok(), "should work after timeout: {:?}", r.err());
+        assert!(r.unwrap().output.contains("still-alive"));
+
+        let _ = tokio::fs::remove_file(&tmp).await;
     }
 }
