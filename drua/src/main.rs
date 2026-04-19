@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Login => commands::login::run(cli.server).await,
         Command::Status => commands::status::run().await,
         Command::Logout => commands::logout::run(),
-        Command::Dashboard => commands::dashboard::run().await,
+        Command::Dashboard => commands::dashboard::run(cli.server).await,
         Command::Workspace { action } => match action {
             WorkspaceAction::List => commands::workspace::list().await,
             WorkspaceAction::Create { name, description } => {

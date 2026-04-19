@@ -301,11 +301,29 @@ fn parse_sse_block(block: &str) -> Option<ChatStreamEvent> {
     }
 }
 
-pub async fn run() -> Result<()> {
+async fn ensure_authenticated(server: Option<String>) -> Result<(Config, GraphqlClient, String)> {
+    // Try existing config first
+    if let Ok(config) = Config::load() {
+        let client = GraphqlClient::new(&config.server_url, &config.auth_token);
+        if let Ok(user_name) = fetch_user_name(&client).await {
+            return Ok((config, client, user_name));
+        }
+        println!("Session expired — starting login flow…");
+        println!();
+    } else {
+        println!("Not logged in — starting login flow…");
+        println!();
+    }
+
+    super::login::run(server).await?;
     let config = Config::load()?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
-
     let user_name = fetch_user_name(&client).await?;
+    Ok((config, client, user_name))
+}
+
+pub async fn run(server: Option<String>) -> Result<()> {
+    let (config, client, user_name) = ensure_authenticated(server).await?;
     let workspaces = fetch_workspaces(&client).await?;
 
     let mut app = App::new(workspaces, config.server_url.clone(), user_name);
