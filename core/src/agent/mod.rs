@@ -257,8 +257,21 @@ impl Agents {
             if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
                 self.repo.update_in_op(op, &mut agent).await?;
             }
-            self.sandboxes
+            let sandbox = self
+                .sandboxes
                 .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
+                .await?;
+
+            self.sessions
+                .sandbox_notification_in_op(
+                    op,
+                    agent.id,
+                    sandbox.name,
+                    session::message::SandboxOperation::Attach {
+                        mode: format!("{mode:?}").to_lowercase(),
+                        mount_path: sandbox.mount_path,
+                    },
+                )
                 .await?;
         }
 
