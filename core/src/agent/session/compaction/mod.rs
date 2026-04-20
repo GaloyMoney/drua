@@ -12,7 +12,7 @@ use super::thread::{NewSessionThread, SessionThreadId};
 use super::view::*;
 
 use prune::{build_pruning_plan, PruningPlan};
-use trigger::{evaluate, CompactionAction};
+use trigger::CompactionAction;
 
 /// Returns true if the given event belongs to (was produced on) the specified thread.
 ///
@@ -76,7 +76,7 @@ pub(super) fn maybe_prune<'a>(
     current_prompt_definition: &PromptDefinition,
     time_since_last_turn: Duration,
 ) -> Option<CompactionResult> {
-    let last_usage = estimation::last_usage(events.clone(), current_thread_id, is_main_thread);
+    let last_usage = estimation::last_usage(events.clone(), current_thread_id);
     let estimated_tokens = estimation::estimate_context_tokens(
         events.clone(),
         current_thread_id,
@@ -84,7 +84,7 @@ pub(super) fn maybe_prune<'a>(
         last_usage,
     );
 
-    let action = evaluate(estimated_tokens, time_since_last_turn, config);
+    let action = config.determine_action(estimated_tokens, time_since_last_turn);
 
     match action {
         CompactionAction::None => return None,

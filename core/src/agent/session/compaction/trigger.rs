@@ -1,7 +1,3 @@
-use std::time::Duration;
-
-use super::super::settings::CompactionConfig;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionAction {
     /// Under threshold, cache hot — do nothing.
@@ -14,35 +10,12 @@ pub enum CompactionAction {
     PruneThenSummarize,
 }
 
-/// Evaluate whether compaction should run, and which kind.
-///
-/// The trigger is **cache-aware**: pruning invalidates the provider's cached
-/// prefix, so we avoid it while the cache is hot (within `cache_ttl`).
-/// Once the cache has expired we prune opportunistically to set up a clean
-/// cacheable prefix for the next burst of turns.
-pub fn evaluate(
-    estimated_tokens: u64,
-    time_since_last_turn: Duration,
-    config: &CompactionConfig,
-) -> CompactionAction {
-    if !config.enabled {
-        return CompactionAction::None;
-    }
-
-    let threshold = (config.context_window_tokens as f64 * config.token_threshold_fraction) as u64;
-    let cache_ttl = Duration::from_secs(config.cache_ttl_seconds);
-    let cache_cold = time_since_last_turn > cache_ttl;
-
-    match (estimated_tokens > threshold, cache_cold) {
-        (false, false) => CompactionAction::None,
-        (false, true) => CompactionAction::PruneOpportunistic,
-        (true, _) => CompactionAction::PruneThenSummarize,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::agent::session::settings::CompactionConfig;
 
     fn config() -> CompactionConfig {
         CompactionConfig {
@@ -59,7 +32,7 @@ mod tests {
         let mut cfg = config();
         cfg.enabled = false;
         assert_eq!(
-            evaluate(999_999, Duration::from_secs(9999), &cfg),
+            cfg.determine_action(999_999, Duration::from_secs(9999)),
             CompactionAction::None
         );
     }
@@ -69,7 +42,7 @@ mod tests {
         let cfg = config();
         // 60_000 < 120_000 threshold, 60s < 300s cache_ttl
         assert_eq!(
-            evaluate(60_000, Duration::from_secs(60), &cfg),
+            cfg.determine_action(60_000, Duration::from_secs(60)),
             CompactionAction::None
         );
     }
@@ -79,7 +52,7 @@ mod tests {
         let cfg = config();
         // 60_000 < 120_000, but 600s > 300s cache_ttl
         assert_eq!(
-            evaluate(60_000, Duration::from_secs(600), &cfg),
+            cfg.determine_action(60_000, Duration::from_secs(600)),
             CompactionAction::PruneOpportunistic
         );
     }
@@ -89,7 +62,7 @@ mod tests {
         let cfg = config();
         // 150_000 > 120_000, 60s < 300s
         assert_eq!(
-            evaluate(150_000, Duration::from_secs(60), &cfg),
+            cfg.determine_action(150_000, Duration::from_secs(60)),
             CompactionAction::PruneThenSummarize
         );
     }
@@ -99,7 +72,7 @@ mod tests {
         let cfg = config();
         // 150_000 > 120_000, 600s > 300s
         assert_eq!(
-            evaluate(150_000, Duration::from_secs(600), &cfg),
+            cfg.determine_action(150_000, Duration::from_secs(600)),
             CompactionAction::PruneThenSummarize
         );
     }
