@@ -5,7 +5,9 @@
 //! values are converted to `OpenAiRequest` for the wire, and streaming
 //! response chunks are converted to `StreamDelta`.
 
-use llm::prompt::{AssistantBlock, Message, SystemBlock, Tool, ToolChoice, ToolResultBlock, UserBlock};
+use llm::prompt::{
+    AssistantBlock, Message, SystemBlock, Tool, ToolChoice, ToolResultBlock, UserBlock,
+};
 use llm::stream::{ContentBlockType, StreamDelta};
 use llm::StopReason;
 
@@ -453,10 +455,7 @@ mod tests {
 
         let req = prompt_to_request(&prompt);
         assert_eq!(req.messages.len(), 1);
-        assert_eq!(
-            req.messages[0].content.as_deref(),
-            Some("visible response")
-        );
+        assert_eq!(req.messages[0].content.as_deref(), Some("visible response"));
         assert!(req.messages[0].tool_calls.is_none());
     }
 
@@ -505,7 +504,9 @@ mod tests {
             .process_chunk(r#"{"choices":[{"delta":{"content":" world"},"finish_reason":null}]}"#)
             .unwrap();
         assert_eq!(deltas.len(), 1);
-        assert!(matches!(&deltas[0], StreamDelta::TextDelta { index: 0, text } if text == " world"));
+        assert!(
+            matches!(&deltas[0], StreamDelta::TextDelta { index: 0, text } if text == " world")
+        );
 
         // Finish.
         let deltas = synth
@@ -514,8 +515,12 @@ mod tests {
             )
             .unwrap();
         // MessageStart (from usage) + ContentBlockStop + MessageDelta
-        assert!(deltas.iter().any(|d| matches!(d, StreamDelta::MessageStart { input_tokens: 10 })));
-        assert!(deltas.iter().any(|d| matches!(d, StreamDelta::ContentBlockStop { index: 0 })));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::MessageStart { input_tokens: 10 })));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::ContentBlockStop { index: 0 })));
         assert!(deltas.iter().any(|d| matches!(
             d,
             StreamDelta::MessageDelta {
