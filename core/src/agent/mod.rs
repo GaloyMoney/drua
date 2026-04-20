@@ -354,10 +354,10 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         let agent = self.repo.find_by_id(agent_id).await?;
         let workspace_id = agent.workspace_id;
-
-        if !subject.has_any(&[AuthScope::Admin, AuthScope::WorkspaceAdmin(workspace_id)]) {
-            return Err(AgentError::Unauthorized);
-        }
+        subject.can(
+            AuthVerb::Update,
+            AuthResource::Agent(workspace_id, Some(agent.id)),
+        )?;
 
         let mut op = self.repo.begin_op().await?;
 
@@ -403,12 +403,10 @@ impl Agents {
         sandbox_id: SandboxId,
     ) -> Result<Agent, AgentError> {
         let agent = self.repo.find_by_id(agent_id).await?;
-        if !subject.has_any(&[
-            AuthScope::Admin,
-            AuthScope::WorkspaceAdmin(agent.workspace_id),
-        ]) {
-            return Err(AgentError::Unauthorized);
-        }
+        subject.can(
+            AuthVerb::Update,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
 
         let mut op = self.repo.begin_op().await?;
 

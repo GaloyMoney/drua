@@ -122,12 +122,6 @@ impl AuthSubject {
         }
     }
 
-    /// True if the subject carries any of the supplied scopes. Useful for
-    /// checks like "Admin OR WorkspaceWrite(ws)".
-    pub fn has_any(&self, scopes: &[AuthScope]) -> bool {
-        scopes.iter().any(|s| self.has_scope(s))
-    }
-
     /// True when the subject is an agent — i.e. `Agent` or
     /// `AgentOnBehalfOfUser`. Used by sandbox-backed tools to decide
     /// visibility (other subject kinds should never see sandbox tools).
