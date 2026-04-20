@@ -6,6 +6,7 @@ use super::state::{Focus, Mode, ScreenState};
 pub enum Action {
     None,
     Quit,
+    Suspend,
     Refresh,
     CreateWorkspace { name: String, description: String },
     SendChat { agent_id: String, prompt: String },
@@ -13,13 +14,36 @@ pub enum Action {
 
 /// Top-level key dispatcher — routes to mode/focus-specific handlers.
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Action::Quit;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    if ctrl {
+        match key.code {
+            KeyCode::Char('c') => return Action::Quit,
+            KeyCode::Char('z') => return Action::Suspend,
+            // Ctrl+O — jump to lead agent chat (global, like command-center)
+            KeyCode::Char('o') => {
+                state.select_lead_and_focus_chat();
+                return Action::None;
+            }
+            // Ctrl+R — refresh workspaces
+            KeyCode::Char('r') => return Action::Refresh,
+            // Ctrl+H / Ctrl+L — focus left / right
+            KeyCode::Char('h') => {
+                state.focus_left();
+                return Action::None;
+            }
+            KeyCode::Char('l') => {
+                state.focus_right();
+                return Action::None;
+            }
+            _ => {}
+        }
     }
 
     match state.mode {
         Mode::Browse => match state.focus {
             Focus::Sidebar => handle_sidebar_key(state, key),
+            Focus::Agents => handle_agents_key(state, key),
             Focus::Chat => handle_chat_key(state, key),
         },
         Mode::CreateWorkspace => handle_create_key(state, key),
@@ -38,14 +62,49 @@ fn handle_sidebar_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.cursor_up();
             Action::None
         }
+        KeyCode::Enter => {
+            state.select_lead_and_focus_chat();
+            Action::None
+        }
         KeyCode::Char('n') => {
             state.enter_create_mode();
             Action::None
         }
-        KeyCode::Char('r') => Action::Refresh,
         KeyCode::Tab => {
             state.toggle_focus();
             Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    state.status_message = None;
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.agent_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.agent_cursor_up();
+            Action::None
+        }
+        KeyCode::Tab => {
+            state.toggle_focus();
+            Action::None
+        }
+        KeyCode::Esc => {
+            state.focus = Focus::Sidebar;
+            Action::None
+        }
+        KeyCode::Enter => {
+            let input = state.chat_input.trim().to_string();
+            if input.is_empty() {
+                // Switch to chat pane for typing
+                state.focus = Focus::Chat;
+                return Action::None;
+            }
+            send_chat_to_selected_agent(state, input)
         }
         _ => Action::None,
     }
@@ -66,25 +125,7 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             if input.is_empty() {
                 return Action::None;
             }
-            match state.selected_lead_id.clone() {
-                Some(agent_id) => {
-                    state.chat_view.assistant.add_user_message(&input);
-                    state.chat_input.clear();
-                    state.chat_view.reset_scroll();
-                    Action::SendChat {
-                        agent_id,
-                        prompt: input,
-                    }
-                }
-                None => {
-                    state.status_message = Some("No lead agent selected".to_string());
-                    Action::None
-                }
-            }
-        }
-        KeyCode::Backspace => {
-            state.chat_input.pop();
-            Action::None
+            send_chat_to_selected_agent(state, input)
         }
         KeyCode::Up => {
             state.chat_view.scroll_up();
@@ -94,11 +135,31 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.chat_view.scroll_down();
             Action::None
         }
-        KeyCode::Char(c) => {
-            state.chat_input.push(c);
+        _ => {
+            handle_input_editing(state, &key);
             Action::None
         }
-        _ => Action::None,
+    }
+}
+
+// ── Shared input editing ────────────────────────────────────────────
+
+/// Handle common text-editing key events on the chat input.
+/// Follows the same readline-style shortcuts as command-center.
+fn handle_input_editing(state: &mut ScreenState, key: &KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('u') if ctrl => state.input_kill_to_start(),
+        KeyCode::Char('w') if ctrl => state.input_kill_word(),
+        KeyCode::Char('a') if ctrl => state.input_home(),
+        KeyCode::Char('e') if ctrl => state.input_end(),
+        KeyCode::Char(c) if !ctrl => state.input_insert_char(c),
+        KeyCode::Backspace => state.input_backspace(),
+        KeyCode::Left => state.input_move_left(),
+        KeyCode::Right => state.input_move_right(),
+        KeyCode::Home => state.input_home(),
+        KeyCode::End => state.input_end(),
+        _ => {}
     }
 }
 
@@ -130,5 +191,24 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Action::CreateWorkspace { name, description }
         }
         _ => Action::None,
+    }
+}
+
+/// Send chat to whichever agent is currently selected in the agents panel.
+fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action {
+    match state.selected_agent_id() {
+        Some(agent_id) => {
+            state.chat_view.assistant.add_user_message(&input);
+            state.input_clear();
+            state.chat_view.reset_scroll();
+            Action::SendChat {
+                agent_id,
+                prompt: input,
+            }
+        }
+        None => {
+            state.status_message = Some("No agent selected".to_string());
+            Action::None
+        }
     }
 }

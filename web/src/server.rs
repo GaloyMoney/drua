@@ -12,7 +12,6 @@ use drua_core::audit::Audit;
 use drua_core::auth::AuthSubject;
 use drua_core::primitives::WorkspaceId;
 
-use crate::auth::session_store::PgSessionStore;
 use crate::AppState;
 
 /// Extract W3C traceparent from incoming HTTP headers and attach to
@@ -115,12 +114,7 @@ pub struct ServerConfig {
 ///
 /// The `mcp_service` is the pre-built MCP gateway service (from
 /// [`McpGateway::service`]) that will be mounted at `/mcp`.
-pub fn build_app<M>(
-    config: &ServerConfig,
-    pool: &sqlx::PgPool,
-    app_state: AppState,
-    mcp_service: M,
-) -> axum::Router
+pub fn build_app<M>(config: &ServerConfig, app_state: AppState, mcp_service: M) -> axum::Router
 where
     M: tower_service::Service<axum::extract::Request, Error = Infallible>
         + Clone
@@ -130,8 +124,7 @@ where
     M::Response: axum::response::IntoResponse,
     M::Future: Send + 'static,
 {
-    let session_store = PgSessionStore::new(pool);
-    let session_layer = SessionManagerLayer::new(session_store)
+    let session_layer = SessionManagerLayer::new(app_state.session_store.clone())
         .with_same_site(SameSite::Lax)
         .with_secure(config.secure_cookies);
 

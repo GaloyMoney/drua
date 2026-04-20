@@ -20,11 +20,23 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
 
     let panels = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(24),
+            Constraint::Min(1),
+            Constraint::Length(44),
+        ])
         .split(main_area);
+
+    // Right column: agents list (top) + agent details (bottom)
+    let right_col = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(panels[2]);
 
     draw_workspace_list(frame, state, panels[0]);
     draw_chat_pane(frame, state, panels[1]);
+    draw_agents_list(frame, state, right_col[0]);
+    draw_agent_details(frame, state, right_col[1]);
     draw_status_bar(frame, state, status_area);
 
     if state.mode == Mode::CreateWorkspace {
@@ -79,6 +91,140 @@ fn draw_workspace_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
     frame.render_widget(list, area);
 }
 
+fn draw_agents_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let border_color = if state.focus == Focus::Agents {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let agents = state
+        .selected_workspace()
+        .map(|ws| ws.agents.as_slice())
+        .unwrap_or_default();
+
+    let title = if agents.is_empty() {
+        " Agents ".to_string()
+    } else {
+        format!(" Agents ({}/{}) ", state.agent_cursor + 1, agents.len())
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border_color));
+
+    if agents.is_empty() {
+        let hint = if state.selected_workspace().is_some() {
+            "No agents"
+        } else {
+            "No workspace"
+        };
+        let paragraph = Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        )))
+        .block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = agents
+        .iter()
+        .enumerate()
+        .map(|(i, agent)| {
+            let prefix = if i == state.agent_cursor { ">" } else { " " };
+            let selected = i == state.agent_cursor;
+
+            let name_style = if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let mut spans = vec![Span::styled(format!("{prefix} {}", agent.name), name_style)];
+
+            if agent.role == "WORKSPACE_LEAD" {
+                spans.push(Span::styled(" lead", Style::default().fg(Color::DarkGray)));
+            }
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
+}
+
+fn draw_agent_details(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let border_color = if state.focus == Focus::Agents {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Details ")
+        .border_style(Style::default().fg(border_color));
+
+    let agent = match state.selected_agent() {
+        Some(a) => a,
+        None => {
+            let paragraph = Paragraph::new(Line::from(Span::styled(
+                "No agent selected",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .block(block);
+            frame.render_widget(paragraph, area);
+            return;
+        }
+    };
+
+    let role_label = match agent.role.as_str() {
+        "WORKSPACE_LEAD" => "Workspace Lead",
+        "AGENT" => "Agent",
+        other => other,
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Name:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&agent.name, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Role:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(role_label, Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    if let Some(ref sandbox) = agent.sandbox {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Sandbox",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  name: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&sandbox.name, Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  mode: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&sandbox.mode, Style::default().fg(Color::White)),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_chat_pane(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
     let chat_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -105,12 +251,12 @@ fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
         Color::Cyan
     };
 
-    let title = match state.selected_workspace() {
-        Some(ws) => match &ws.lead {
-            Some(lead) => format!(" Chat — {} ", lead.name),
-            None => " Chat — no lead agent ".to_string(),
+    let title = match state.selected_agent() {
+        Some(agent) => format!(" Chat — {} ", agent.name),
+        None => match state.selected_workspace() {
+            Some(_) => " Chat — select an agent ".to_string(),
+            None => " Chat — no workspace ".to_string(),
         },
-        None => " Chat — no workspace ".to_string(),
     };
 
     let block = Block::default()
@@ -121,10 +267,10 @@ fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let messages = &state.chat_view.assistant.messages;
 
     if messages.is_empty() {
-        let hint = if state.selected_lead_id.is_some() {
-            "Press Tab then type a message…"
+        let hint = if state.selected_agent_id().is_some() {
+            "Press Tab to chat, then type a message…"
         } else {
-            "Select a workspace with a lead agent"
+            "Select an agent to start chatting"
         };
         let paragraph = Paragraph::new(Line::from(Span::styled(
             hint,
@@ -219,27 +365,40 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
 }
 
 fn draw_chat_input(frame: &mut Frame, state: &ScreenState, area: Rect) {
-    let border_color = if state.focus == Focus::Chat {
-        Color::Yellow
+    let focused = state.focus == Focus::Chat;
+    let border_color = if focused { Color::Yellow } else { Color::Cyan };
+
+    let prefix = match (state.selected_workspace(), state.selected_agent()) {
+        (Some(ws), Some(agent)) => format!("[{}: {}] > ", ws.name, agent.name),
+        (Some(ws), None) => format!("[{}] > ", ws.name),
+        _ => "> ".to_string(),
+    };
+    let prefix_len = prefix.len() as u16;
+
+    let visible_width = area.width.saturating_sub(2);
+    let cursor_pos = prefix_len + state.input_cursor as u16;
+    let scroll = if cursor_pos >= visible_width {
+        cursor_pos - visible_width + 1
     } else {
-        Color::Cyan
+        0
     };
 
-    let cursor = if state.focus == Focus::Chat {
-        "▎"
-    } else {
-        ""
-    };
-    let display = format!("{}{cursor}", state.chat_input);
-
-    let paragraph = Paragraph::new(display).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Input ")
-            .border_style(Style::default().fg(border_color)),
-    );
+    let display = format!("{prefix}{}", state.chat_input);
+    let paragraph = Paragraph::new(display)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .scroll((0, scroll));
 
     frame.render_widget(paragraph, area);
+
+    if focused {
+        let x = area.x + 1 + cursor_pos - scroll;
+        let y = area.y + 1;
+        frame.set_cursor_position((x, y));
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
@@ -262,7 +421,8 @@ fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
     }
 
     let keys = match state.focus {
-        Focus::Sidebar => " │ ↑/↓:nav  n:new  r:refresh  Tab:chat  q:quit ",
+        Focus::Sidebar => " │ ↑/↓:nav  n:new  r:refresh  Tab:agents  q:quit ",
+        Focus::Agents => " │ ↑/↓:nav  Enter:chat  Tab:chat  Esc:sidebar ",
         Focus::Chat => " │ Enter:send  Esc:sidebar  ↑/↓:scroll ",
     };
     spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));

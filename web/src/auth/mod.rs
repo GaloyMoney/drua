@@ -11,6 +11,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tower_sessions::session::{Id, Record};
+use tower_sessions::session_store::SessionStore;
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -20,7 +22,7 @@ pub use error::AuthError;
 use drua_core as domain;
 
 use domain::auth::AuthSubject;
-use domain::mcp_creds::token::{generate_token, hash_token};
+use domain::mcp_creds::token::hash_token;
 use domain::primitives::UserId;
 
 use crate::templates::{CliLoginTemplate, CliTokenTemplate};
@@ -88,7 +90,22 @@ async fn resolve_auth_context(
 
     // 1. Check Authorization: Bearer header
     if let Some(raw_token) = bearer_token {
-        // 1a. Hash-based lookup (user-created MCP credentials + legacy agent tokens)
+        // 1a. Session-ID resolution (CLI tokens created by /auth/cli-login).
+        //     Session IDs are 22-char base64url; MCP tokens are 43-char — the
+        //     parse naturally rejects non-session tokens with zero ambiguity.
+        if let Ok(session_id) = raw_token.parse::<Id>() {
+            if let Ok(Some(record)) = state.session_store.load(&session_id).await {
+                if let Some(user_id) = record
+                    .data
+                    .get("user_id")
+                    .and_then(|v| serde_json::from_value::<UserId>(v.clone()).ok())
+                {
+                    return AuthSubject::User(user_id);
+                }
+            }
+        }
+
+        // 1b. Hash-based lookup (user-created MCP credentials + legacy agent tokens)
         let token_hash = hash_token(&raw_token);
         if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
             if !creds.is_revoked() {
@@ -113,7 +130,7 @@ async fn resolve_auth_context(
             }
         }
 
-        // 1b. SA token validation (sandbox pods with projected ServiceAccount tokens)
+        // 1c. SA token validation (sandbox pods with projected ServiceAccount tokens)
         if sa_token::looks_like_jwt(&raw_token) {
             if let Some(ref validator) = state.sa_token_validator {
                 if let Ok(id_str) = validator.validate(&raw_token).await {
@@ -187,16 +204,21 @@ async fn logout(session: Session) -> axum::response::Redirect {
 
 #[instrument(name = "web.auth.cli_login", skip_all)]
 async fn cli_login(State(state): State<AppState>, session: Session) -> Result<Response, AuthError> {
-    // If user is already logged in, auto-create a token and display it
+    // If user is already logged in, create a long-lived session and return its ID as the CLI token
     if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
-        let sub = AuthSubject::User(user_id);
-        let (raw_token, token_hash) = generate_token();
-        state
-            .app
-            .mcp_creds()
-            .create_for_user(&sub, user_id, "cli", token_hash, vec![])
-            .await?;
-        return Ok(CliTokenTemplate { token: raw_token }.into_response());
+        let mut record = Record {
+            id: Id::default(),
+            data: Default::default(),
+            expiry_date: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+        };
+        record.data.insert(
+            "user_id".to_string(),
+            serde_json::to_value(user_id).unwrap(),
+        );
+        state.session_store.create(&mut record).await?;
+
+        let token = record.id.to_string();
+        return Ok(CliTokenTemplate { token }.into_response());
     }
 
     // Not logged in — set return-to flag and show login buttons

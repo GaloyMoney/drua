@@ -21,6 +21,8 @@ pub enum AuthError {
     Session(#[from] tower_sessions::session::Error),
     #[error("AuthError - GitHubApi: {0}")]
     GitHubApi(#[from] reqwest::Error),
+    #[error("AuthError - SessionStore: {0}")]
+    SessionStore(#[from] tower_sessions::session_store::Error),
     #[error("AuthError - InvalidToken")]
     InvalidToken,
 }

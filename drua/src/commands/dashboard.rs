@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
-use crate::tui::state::{AgentItem, ScreenState, WorkspaceItem};
+use crate::tui::state::{AgentItem, SandboxInfo, ScreenState, WorkspaceItem};
 use crate::tui::{handlers, ui};
 
 // ---------------------------------------------------------------------------
@@ -57,13 +57,23 @@ struct WorkspaceNode {
     description: Option<String>,
     created_at: Option<String>,
     lead: Option<AgentNode>,
+    #[serde(default)]
+    agents: Vec<AgentNode>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AgentNode {
     id: String,
     name: String,
     role: String,
+    attached_sandbox: Option<SandboxAttachmentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SandboxAttachmentNode {
+    name: String,
+    mode: String,
 }
 
 const WORKSPACES_QUERY: &str = r#"
@@ -79,6 +89,13 @@ const WORKSPACES_QUERY: &str = r#"
                         id
                         name
                         role
+                        attachedSandbox { name mode }
+                    }
+                    agents {
+                        id
+                        name
+                        role
+                        attachedSandbox { name mode }
                     }
                 }
             }
@@ -270,6 +287,18 @@ async fn create_workspace(client: &GraphqlClient, name: &str, description: &str)
     Ok(resp.workspace_create.workspace.name)
 }
 
+fn agent_node_to_item(a: AgentNode) -> AgentItem {
+    AgentItem {
+        id: a.id,
+        name: a.name,
+        role: a.role,
+        sandbox: a.attached_sandbox.map(|s| SandboxInfo {
+            name: s.name,
+            mode: s.mode,
+        }),
+    }
+}
+
 async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> {
     let resp: WorkspacesResponse = client
         .query(WORKSPACES_QUERY, serde_json::json!({}))
@@ -286,11 +315,8 @@ async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> 
                 name: node.name,
                 description: node.description,
                 created_at: node.created_at,
-                lead: node.lead.map(|a| AgentItem {
-                    id: a.id,
-                    name: a.name,
-                    role: a.role,
-                }),
+                lead: node.lead.map(agent_node_to_item),
+                agents: node.agents.into_iter().map(agent_node_to_item).collect(),
             }
         })
         .collect();
@@ -400,6 +426,8 @@ async fn run_event_loop(
 ) -> Result<()> {
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
     let mut event_stream = EventStream::new();
+    let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
+    refresh_interval.tick().await; // consume the immediate first tick
 
     loop {
         terminal.draw(|frame| ui::draw(frame, state))?;
@@ -420,6 +448,15 @@ async fn run_event_loop(
                     if key.kind == KeyEventKind::Press {
                         match handlers::handle_key(state, key) {
                             handlers::Action::Quit => state.should_quit = true,
+                            handlers::Action::Suspend => {
+                                disable_raw_mode()?;
+                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                                terminal.show_cursor()?;
+                                unsafe { libc::raise(libc::SIGTSTP); }
+                                enable_raw_mode()?;
+                                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                                terminal.clear()?;
+                            }
                             handlers::Action::Refresh => {
                                 if let Ok(workspaces) = fetch_workspaces(client).await {
                                     state.replace_workspaces(workspaces);
@@ -457,6 +494,11 @@ async fn run_event_loop(
             event = stream_rx.recv() => {
                 if let Some(evt) = event {
                     dispatch_stream_event(state, evt);
+                }
+            }
+            _ = refresh_interval.tick() => {
+                if let Ok(workspaces) = fetch_workspaces(client).await {
+                    state.replace_workspaces(workspaces);
                 }
             }
             _ = tokio::time::sleep(timeout) => {}

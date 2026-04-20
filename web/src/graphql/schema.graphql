@@ -1,4 +1,8 @@
 type Agent {
+	"""
+	The sandbox this agent is attached to, if any.
+	"""
+	attachedSandbox: SandboxAttachment
 	id: AgentId!
 	name: String!
 	role: AgentRole!
@@ -61,6 +65,19 @@ type Query {
 	workspaces(after: String, first: Int!): WorkspaceConnection!
 }
 
+type SandboxAttachment {
+	mode: SandboxAttachmentMode!
+	name: String!
+	sandboxId: SandboxId!
+}
+
+enum SandboxAttachmentMode {
+	READ
+	WRITE
+}
+
+scalar SandboxId
+
 """
 An ISO 8601 UTC timestamp (e.g., 2024-01-15T09:30:00Z). Always in UTC.
 """
@@ -69,6 +86,10 @@ scalar Timestamp
 scalar UUID
 
 type Workspace {
+	"""
+	All agents in this workspace (lead agent first).
+	"""
+	agents: [Agent!]!
 	createdAt: Timestamp!
 	description: String
 	id: WorkspaceId!

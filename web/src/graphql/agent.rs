@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use async_graphql::{Enum, SimpleObject};
+use async_graphql::{ComplexObject, Context, Enum, SimpleObject};
 
 use super::primitives::*;
 
 use drua_core::agent::Agent as DomainAgent;
 use drua_core::agent::AgentRole as DomainAgentRole;
+use drua_core::sandbox::SandboxAgentMode;
 
 #[derive(SimpleObject, Clone)]
+#[graphql(complex)]
 pub struct Agent {
     id: AgentId,
     workspace_id: WorkspaceId,
@@ -15,8 +17,28 @@ pub struct Agent {
     role: AgentRole,
 
     #[graphql(skip)]
-    #[allow(dead_code)]
     pub(super) entity: Arc<DomainAgent>,
+}
+
+#[ComplexObject]
+impl Agent {
+    /// The sandbox this agent is attached to, if any.
+    async fn attached_sandbox(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<Option<SandboxAttachment>> {
+        let (sandbox_id, mode) = match self.entity.attached_sandbox {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let sandbox = app.sandboxes().find_by_id(sub, sandbox_id).await?;
+        Ok(Some(SandboxAttachment {
+            sandbox_id,
+            name: sandbox.name.clone(),
+            mode: SandboxAttachmentMode::from(mode),
+        }))
+    }
 }
 
 impl From<DomainAgent> for Agent {
@@ -27,6 +49,28 @@ impl From<DomainAgent> for Agent {
             name: entity.name.clone(),
             role: AgentRole::from(entity.agent_role),
             entity: Arc::new(entity),
+        }
+    }
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct SandboxAttachment {
+    sandbox_id: SandboxId,
+    name: String,
+    mode: SandboxAttachmentMode,
+}
+
+#[derive(Enum, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxAttachmentMode {
+    Read,
+    Write,
+}
+
+impl From<SandboxAgentMode> for SandboxAttachmentMode {
+    fn from(mode: SandboxAgentMode) -> Self {
+        match mode {
+            SandboxAgentMode::Read => Self::Read,
+            SandboxAgentMode::Write => Self::Write,
         }
     }
 }
