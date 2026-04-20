@@ -312,6 +312,7 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
                     workspace,
                     acting_agent,
                     on_behalf_of,
+                    entrypoint: entry.entrypoint,
                     action: entry.action,
                     outcome: entry.outcome,
                     error: entry.error.unwrap_or(false),

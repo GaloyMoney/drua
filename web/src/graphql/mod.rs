@@ -59,6 +59,11 @@ async fn graphql_handler(
         .unwrap_or(domain::auth::AuthSubject::Anonymous);
     request = request.data(auth_subject);
 
+    // Override the REST middleware's generic "api: POST /graphql" entrypoint
+    // with the concrete operation name so audit entries are useful.
+    let op_name = request.operation_name.as_deref().unwrap_or("anonymous");
+    drua_core::audit::Audit::record_entrypoint(format!("graphql: {}", op_name));
+
     schema.execute(request).await.into()
 }
 

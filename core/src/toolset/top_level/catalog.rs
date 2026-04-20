@@ -12,6 +12,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
@@ -380,6 +381,10 @@ impl TopLevelTool for CallCatalogTool {
         let (set, name, tool_default_filter) = self
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
+
+        // Override the entrypoint-level action with the concrete upstream
+        // tool name. This is the terminal handler — no domain service involved.
+        Audit::record_action(format!("catalog: {}", tool_name));
 
         let result = set.call(subject, &name, inner_args).await;
         let filter = output_filter

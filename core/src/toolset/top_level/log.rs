@@ -24,7 +24,9 @@ use crate::primitives::{AgentId, SandboxId, UserId};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AuditLogParams {
-    /// Substring filter on action (e.g. 'mcp', 'POST /workspaces').
+    /// Substring filter on entrypoint (e.g. 'api', 'mcp', 'graphql').
+    entrypoint: Option<String>,
+    /// Substring filter on action (e.g. 'workspace.create', 'catalog:').
     action: Option<String>,
     /// Substring filter on outcome (e.g. 'success', 'error').
     outcome: Option<String>,
@@ -53,6 +55,10 @@ fn default_limit() -> i64 {
 
 impl AuditLogParams {
     fn into_query(self) -> AuditLogQuery {
+        let entrypoint = self
+            .entrypoint
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
         let action = self
             .action
             .filter(|s| !s.is_empty())
@@ -65,6 +71,7 @@ impl AuditLogParams {
 
         AuditLogQuery {
             limit: self.limit.clamp(1, 100),
+            entrypoint,
             action,
             outcome,
             acting_user_id: self.user_id,
@@ -193,20 +200,22 @@ fn format_entries(entries: &[AuditEntry]) -> String {
 
     let mut lines = Vec::with_capacity(entries.len() + 2);
     lines.push(format!(
-        "{:<6} {:<20} {:<10} {:<30} {:<8} {:>8}",
-        "ID", "TIME", "TYPE", "ACTION", "OUTCOME", "MS"
+        "{:<6} {:<20} {:<10} {:<26} {:<26} {:<8} {:>8}",
+        "ID", "TIME", "TYPE", "ENTRYPOINT", "ACTION", "OUTCOME", "MS"
     ));
-    lines.push("-".repeat(86));
+    lines.push("-".repeat(108));
 
     for e in entries {
         let ts = e.recorded_at.format("%Y-%m-%d %H:%M:%S");
         let dur = e.duration_ms.map(|ms| format!("{ms}")).unwrap_or_default();
+        let ep = e.entrypoint.as_deref().unwrap_or("");
         lines.push(format!(
-            "{:<6} {:<20} {:<10} {:<30} {:<8} {:>8}",
+            "{:<6} {:<20} {:<10} {:<26} {:<26} {:<8} {:>8}",
             e.id,
             ts,
             truncate(&e.interaction_type, 10),
-            truncate(&e.action, 30),
+            truncate(ep, 26),
+            truncate(&e.action, 26),
             truncate(&e.outcome, 8),
             dur,
         ));

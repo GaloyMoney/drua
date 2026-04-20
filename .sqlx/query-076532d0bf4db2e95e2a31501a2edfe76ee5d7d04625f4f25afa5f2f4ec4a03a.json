@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                id AS \"id: AuditEntryId\",\n                acting_user_id AS \"acting_user_id: UserId\",\n                acting_agent_id AS \"acting_agent_id: AgentId\",\n                on_behalf_of_user_id AS \"on_behalf_of_user_id: UserId\",\n                resource_ids AS \"resource_ids: serde_json::Value\",\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                error,\n                duration_ms,\n                tokens_returned,\n                recorded_at\n            FROM audit_entries\n            WHERE ($1::text IS NULL OR resource_ids->>'workspace_id' = $1)\n              AND ($2::uuid IS NULL OR acting_user_id = $2)\n              AND ($3::uuid IS NULL OR acting_agent_id = $3)\n              AND ($4::uuid IS NULL OR acting_agent_id IS NULL OR acting_agent_id != $4)\n              AND ($5::text IS NULL OR resource_ids->>'sandbox_id' = $5)\n              AND ($6::text IS NULL OR action ILIKE $6)\n              AND ($7::text IS NULL OR outcome ILIKE $7)\n              AND ($8::bool IS NULL OR error = $8)\n            ORDER BY id DESC\n            LIMIT $9",
+  "query": "INSERT INTO audit_entries\n                (acting_user_id, acting_agent_id, on_behalf_of_user_id,\n                 resource_ids, entrypoint, interaction_type, action, metadata,\n                 outcome, error, duration_ms, tokens_returned)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n            RETURNING\n                id AS \"id: AuditEntryId\",\n                acting_user_id AS \"acting_user_id: UserId\",\n                acting_agent_id AS \"acting_agent_id: AgentId\",\n                on_behalf_of_user_id AS \"on_behalf_of_user_id: UserId\",\n                resource_ids AS \"resource_ids: serde_json::Value\",\n                entrypoint,\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                error,\n                duration_ms,\n                tokens_returned,\n                recorded_at",
   "describe": {
     "columns": [
       {
@@ -30,55 +30,63 @@
       },
       {
         "ordinal": 5,
+        "name": "entrypoint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
         "name": "interaction_type",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "action",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "metadata: serde_json::Value",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "outcome",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "error",
         "type_info": "Bool"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "duration_ms",
         "type_info": "Int8"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "tokens_returned",
         "type_info": "Int8"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "recorded_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Uuid",
         "Uuid",
         "Uuid",
+        "Jsonb",
         "Text",
-        "Text",
-        "Text",
+        "Varchar",
+        "Varchar",
+        "Jsonb",
+        "Varchar",
         "Bool",
+        "Int8",
         "Int8"
       ]
     },
@@ -88,6 +96,7 @@
       true,
       true,
       false,
+      true,
       false,
       false,
       false,
@@ -98,5 +107,5 @@
       false
     ]
   },
-  "hash": "8ff88dad3a49a9c79310e4e4183664dbfc4b0204006c18af34ca921169ad4b4a"
+  "hash": "076532d0bf4db2e95e2a31501a2edfe76ee5d7d04625f4f25afa5f2f4ec4a03a"
 }

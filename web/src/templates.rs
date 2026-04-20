@@ -91,6 +91,7 @@ pub struct AuditEntryView {
     pub workspace: Option<String>,
     pub acting_agent: Option<String>,
     pub on_behalf_of: Option<String>,
+    pub entrypoint: Option<String>,
     pub action: String,
     pub outcome: String,
     pub error: bool,
