@@ -46,7 +46,8 @@ impl Skills {
 
     #[instrument(name = "skill.find_by_id", skip_all)]
     pub async fn find_by_id(&self, _sub: &AuthSubject, id: SkillId) -> Result<Skill, SkillError> {
-        Ok(self.repo.find_by_id(id).await?)
+        let skill = self.repo.find_by_id(id).await?;
+        Ok(skill)
     }
 
     /// Resolve a skill by name and return its body, falling back to the

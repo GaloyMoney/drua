@@ -35,6 +35,7 @@ impl Workspaces {
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
+        sub.can(AuthVerb::Create, AuthResource::Workspace(None))?;
         let name = name.into();
         let lead_agent_id = AgentId::new();
         let new_workspace = build_new_workspace(lead_agent_id, &name, description);
@@ -58,50 +59,58 @@ impl Workspaces {
         Ok(workspace)
     }
 
-    #[instrument(name = "domain.workspace.find_by_id", skip(self, _sub))]
+    #[instrument(name = "domain.workspace.find_by_id", skip(self, sub))]
     pub async fn find_by_id(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
-        Ok(self.repo.find_by_id(id.into()).await?)
+        let id = id.into();
+        sub.can(AuthVerb::Read, AuthResource::Workspace(Some(id)))?;
+        Ok(self.repo.find_by_id(id).await?)
     }
 
-    #[instrument(name = "domain.workspace.list", skip(self))]
+    #[instrument(name = "domain.workspace.list", skip(self, sub))]
     pub async fn list(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         query: PaginatedQueryArgs<WorkspaceByCreatedAtCursor>,
         direction: ListDirection,
     ) -> Result<PaginatedQueryRet<Workspace, WorkspaceByCreatedAtCursor>, WorkspaceError> {
+        sub.can(AuthVerb::Read, AuthResource::Workspace(None))?;
         Ok(self.repo.list_by_created_at(query, direction).await?)
     }
 
-    #[instrument(name = "domain.workspace.list_all", skip(self, _sub))]
-    pub async fn list_all(&self, _sub: &AuthSubject) -> Result<Vec<Workspace>, WorkspaceError> {
+    #[instrument(name = "domain.workspace.list_all", skip(self, sub))]
+    pub async fn list_all(&self, sub: &AuthSubject) -> Result<Vec<Workspace>, WorkspaceError> {
+        sub.can(AuthVerb::Read, AuthResource::Workspace(None))?;
         Ok(self.repo.list_all().await?)
     }
 
-    #[instrument(name = "domain.workspace.update", skip(self))]
+    #[instrument(name = "domain.workspace.update", skip(self, sub))]
     pub async fn update(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
-        let mut workspace = self.repo.find_by_id(id.into()).await?;
+        let id = id.into();
+        sub.can(AuthVerb::Update, AuthResource::Workspace(Some(id)))?;
+        let mut workspace = self.repo.find_by_id(id).await?;
         workspace.update(name, description);
         self.repo.update(&mut workspace).await?;
         Ok(workspace)
     }
 
-    #[instrument(name = "domain.workspace.delete", skip(self))]
+    #[instrument(name = "domain.workspace.delete", skip(self, sub))]
     pub async fn delete(
         &self,
         sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
+        let id = id.into();
+        sub.can(AuthVerb::Delete, AuthResource::Workspace(Some(id)))?;
         let mut op = self.repo.begin_op().await?;
         let workspace = self.delete_in_op(&mut op, sub, id).await?;
         op.commit().await?;

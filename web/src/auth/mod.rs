@@ -120,12 +120,12 @@ async fn resolve_auth_context(
                     let agent_id = domain::primitives::AgentId::from(
                         id_str.parse::<uuid::Uuid>().expect("validated as UUID"),
                     );
-                    if let Ok(agent) = state
-                        .app
-                        .agents()
-                        .find_by_id(&AuthSubject::Anonymous, agent_id)
-                        .await
-                    {
+                    // Internal lookup — use a system-level User subject to
+                    // bypass authz.  This runs during token resolution, before
+                    // the per-request AuthSubject is known.
+                    let system_sub =
+                        AuthSubject::User(domain::primitives::UserId::from(uuid::Uuid::nil()));
+                    if let Ok(agent) = state.app.agents().find_by_id(&system_sub, agent_id).await {
                         return agent.auth_subject();
                     }
                 }

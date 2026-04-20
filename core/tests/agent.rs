@@ -58,7 +58,7 @@ async fn send_message_round_trip_via_prompt_channel() {
 
     let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create_workspace_lead(WorkspaceId::new(), "lead", "test-workspace")
+        .create_workspace_lead(&sub, WorkspaceId::new(), "lead", "test-workspace")
         .await
         .expect("create agent");
 
@@ -198,7 +198,7 @@ async fn send_message_dispatches_registered_tool_call() {
 
     let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create_workspace_lead(WorkspaceId::new(), "lead", "test-workspace")
+        .create_workspace_lead(&sub, WorkspaceId::new(), "lead", "test-workspace")
         .await
         .expect("create agent");
 

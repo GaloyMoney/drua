@@ -6,10 +6,10 @@
 //!
 //! Visibility / authz mirrors [`super::Bash`]:
 //! - Visible only to [`AuthSubject::Agent`] / [`AuthSubject::AgentOnBehalfOfUser`].
-//! - `view` is read-only → executable with either `SandboxUseAll` *or*
-//!   `SandboxUseReadOnly`.
+//! - `view` is read-only → executable with either `SandboxUse` *or*
+//!   `SandboxRead`.
 //! - `create` / `str_replace` / `insert` mutate state → require
-//!   `SandboxUseAll`. Enforced inside [`TextEditor::call`] after parsing
+//!   `SandboxUse`. Enforced inside [`TextEditor::call`] after parsing
 //!   the command, so the tool is visible-but-unauthorized for read-only
 //!   attachments calling a write command (clear error, model can ask to
 //!   upgrade the attachment).
@@ -84,10 +84,10 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-/// First sandbox the subject can write to (full UseAll attach).
+/// First sandbox the subject can write to (full Use attach).
 fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
     subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUseAll(id) => Some(*id),
+        AuthScope::SandboxUse(id) => Some(*id),
         _ => None,
     })
 }
@@ -133,7 +133,7 @@ impl TopLevelTool for TextEditor {
             .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?;
 
         // Resolve target sandbox + per-command authz.  Mutating commands
-        // require SandboxUseAll; `view` falls back to SandboxUseReadOnly.
+        // require SandboxUse; `view` falls back to SandboxRead.
         let sandbox_id = if command_is_mutating(command) {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {

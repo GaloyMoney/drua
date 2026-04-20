@@ -1,4 +1,5 @@
-use super::{AgentId, AuthScope, McpCredsId, SandboxId, UserId, UserMessageSource, WorkspaceId};
+use super::{error::AuthorizationError, AuthResource, AuthScope, AuthVerb};
+use crate::primitives::{AgentId, McpCredsId, SandboxId, UserId, UserMessageSource, WorkspaceId};
 
 /// Unified authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
@@ -19,6 +20,24 @@ pub enum AuthSubject {
 }
 
 impl AuthSubject {
+    /// Check whether this subject is allowed to perform `verb` on `resource`.
+    /// Users (session-based) are implicitly permitted everything. For scoped
+    /// subjects the check delegates to [`AuthScope::permits`] — if any
+    /// carried scope grants the action, the call succeeds.
+    pub fn can(&self, verb: AuthVerb, resource: AuthResource) -> Result<(), AuthorizationError> {
+        match self {
+            AuthSubject::User(_) => Ok(()),
+            AuthSubject::Anonymous => Err(AuthorizationError::AuthenticationRequired),
+            _ => {
+                if self.scopes().iter().any(|s| s.permits(verb, &resource)) {
+                    Ok(())
+                } else {
+                    Err(AuthorizationError::Forbidden { verb, resource })
+                }
+            }
+        }
+    }
+
     pub fn user_id(&self) -> Result<UserId, &'static str> {
         match self {
             AuthSubject::User(user_id) => Ok(*user_id),
@@ -129,12 +148,12 @@ impl AuthSubject {
             .any(|s| matches!(s, AuthScope::WorkspaceAdmin(_)))
     }
 
-    /// First sandbox the subject can read from. `SandboxUseAll` always
-    /// implies `SandboxUseReadOnly`, so we accept either. Returns `None`
+    /// First sandbox the subject can read from. `SandboxUse` always
+    /// implies read capability, so we accept either. Returns `None`
     /// when the subject has no sandbox attachment at all.
     pub fn readable_sandbox_id(&self) -> Option<SandboxId> {
         self.scopes().iter().find_map(|s| match s {
-            AuthScope::SandboxUseAll(id) | AuthScope::SandboxUseReadOnly(id) => Some(*id),
+            AuthScope::SandboxUse(id) | AuthScope::SandboxRead(id) => Some(*id),
             _ => None,
         })
     }

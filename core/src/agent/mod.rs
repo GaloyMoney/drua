@@ -14,7 +14,7 @@ use crate::toolset::ToolSets;
 /// Default authorization scopes granted to an agent when it's created.
 /// The `WorkspaceLead` role gets the `WorkspaceAdmin` workspace-level
 /// scope (the only one for now); plain agents get nothing from this
-/// function — they pick up `SandboxUseAll` / `SandboxUseReadOnly` later
+/// function — they pick up `SandboxUse` / `SandboxRead` later
 /// when they're attached to a sandbox via [`Agent::sandbox_attached`].
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
     match role {
@@ -39,7 +39,10 @@ fn parse_slash_skill(prompt: &str) -> Option<&str> {
 
 use tracing::instrument;
 
-use crate::primitives::{AgentId, AuthScope, AuthSubject, ChatOutputEvent, SandboxId, WorkspaceId};
+use crate::primitives::{
+    AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, SandboxId,
+    WorkspaceId,
+};
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
@@ -84,13 +87,15 @@ impl Agents {
 
     /// Create a workspace lead agent. The workspace name is passed directly
     /// because it's known at workspace creation time.
-    #[instrument(name = "domain.agent.create_workspace_lead", skip(self))]
+    #[instrument(name = "domain.agent.create_workspace_lead", skip(self, sub))]
     pub async fn create_workspace_lead(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         name: impl Into<String> + std::fmt::Debug,
         workspace_name: &str,
     ) -> Result<Agent, AgentError> {
+        sub.can(AuthVerb::Create, AuthResource::Agent(workspace_id, None))?;
         let id = AgentId::new();
         let mut op = self.repo.begin_op().await?;
         let agent = self
@@ -110,13 +115,15 @@ impl Agents {
 
     /// Create a regular agent. The workspace name is resolved automatically
     /// from the existing lead agent in the workspace.
-    #[instrument(name = "domain.agent.create_agent", skip(self))]
+    #[instrument(name = "domain.agent.create_agent", skip(self, sub))]
     pub async fn create_agent(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
+        sub.can(AuthVerb::Create, AuthResource::Agent(workspace_id, None))?;
         let workspace_name = self.resolve_workspace_name(workspace_id).await?;
         let id = AgentId::new();
         let mut op = self.repo.begin_op().await?;
@@ -278,21 +285,27 @@ impl Agents {
         Ok(agent)
     }
 
-    #[instrument(name = "domain.agent.find_by_id", skip(self, _sub))]
+    #[instrument(name = "domain.agent.find_by_id", skip(self, sub))]
     pub async fn find_by_id(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<AgentId> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
-        Ok(self.repo.find_by_id(id.into()).await?)
+        let agent = self.repo.find_by_id(id.into()).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Ok(agent)
     }
 
-    #[instrument(name = "domain.agent.list_for_workspace", skip(self, _sub))]
+    #[instrument(name = "domain.agent.list_for_workspace", skip(self, sub))]
     pub async fn list_for_workspace(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Agent>, AgentError> {
+        sub.can(AuthVerb::Read, AuthResource::Agent(workspace_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,

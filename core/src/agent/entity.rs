@@ -175,8 +175,8 @@ impl Agent {
     }
 
     /// Record that this agent has been detached from `sandbox_id` — clears
-    /// the tracked attachment and drops both `SandboxUseAll` and
-    /// `SandboxUseReadOnly` scopes for that id. Idempotent: no-op when the
+    /// the tracked attachment and drops both `SandboxUse` and
+    /// `SandboxRead` scopes for that id. Idempotent: no-op when the
     /// agent isn't attached to that sandbox.
     pub(super) fn sandbox_detached(&mut self, sandbox_id: SandboxId) -> Idempotent<()> {
         let is_attached = matches!(self.attached_sandbox, Some((id, _)) if id == sandbox_id);
@@ -190,8 +190,8 @@ impl Agent {
         let _ = self.update_auth_scopes(
             &[],
             &[
-                AuthScope::SandboxUseAll(sandbox_id),
-                AuthScope::SandboxUseReadOnly(sandbox_id),
+                AuthScope::SandboxUse(sandbox_id),
+                AuthScope::SandboxRead(sandbox_id),
             ],
         );
         self.events.push(AgentEvent::SandboxDetached { sandbox_id });
@@ -199,8 +199,8 @@ impl Agent {
     }
 
     /// Apply the correct scope delta for an attachment `mode`. Read mode
-    /// grants `SandboxUseReadOnly` (and removes `SandboxUseAll` in case of
-    /// downgrade); Write mode grants `SandboxUseAll` (and removes the
+    /// grants `SandboxRead` (and removes `SandboxUse` in case of
+    /// downgrade); Write mode grants `SandboxUse` (and removes the
     /// read-only scope).
     fn apply_sandbox_scopes(
         &mut self,
@@ -209,12 +209,12 @@ impl Agent {
     ) -> Idempotent<()> {
         let (added, removed) = match mode {
             SandboxAgentMode::Read => (
-                vec![AuthScope::SandboxUseReadOnly(sandbox_id)],
-                vec![AuthScope::SandboxUseAll(sandbox_id)],
+                vec![AuthScope::SandboxRead(sandbox_id)],
+                vec![AuthScope::SandboxUse(sandbox_id)],
             ),
             SandboxAgentMode::Write => (
-                vec![AuthScope::SandboxUseAll(sandbox_id)],
-                vec![AuthScope::SandboxUseReadOnly(sandbox_id)],
+                vec![AuthScope::SandboxUse(sandbox_id)],
+                vec![AuthScope::SandboxRead(sandbox_id)],
             ),
         };
         self.update_auth_scopes(&added, &removed)

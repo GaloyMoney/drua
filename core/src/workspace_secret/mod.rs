@@ -40,12 +40,16 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.create", skip_all)]
     pub async fn create(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         name: &str,
         secret_type: SecretType,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
+        sub.can(
+            AuthVerb::Create,
+            AuthResource::WorkspaceSecret(workspace_id, None),
+        )?;
         let encrypted_value = self.encryption_key.encrypt_string(value);
 
         let new = NewWorkspaceSecret::builder()
@@ -64,9 +68,13 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.list_by_workspace", skip_all)]
     pub async fn list_by_workspace(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<WorkspaceSecret>, WorkspaceSecretError> {
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::WorkspaceSecret(workspace_id, None),
+        )?;
         self.list_all_for_workspace(workspace_id).await
     }
 
@@ -93,21 +101,30 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: WorkspaceSecretId,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
-        Ok(self.repo.find_by_id(id).await?)
+        let secret = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::WorkspaceSecret(secret.workspace_id, Some(secret.id)),
+        )?;
+        Ok(secret)
     }
 
     /// Update a secret's value.
     #[instrument(name = "workspace_secret.update_value", skip_all)]
     pub async fn update_value(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: WorkspaceSecretId,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
         let mut secret = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::WorkspaceSecret(secret.workspace_id, Some(secret.id)),
+        )?;
         let encrypted_value = self.encryption_key.encrypt_string(value);
         if secret.update_value(encrypted_value).did_execute() {
             self.repo.update(&mut secret).await?;
@@ -119,10 +136,14 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.delete", skip_all)]
     pub async fn delete(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: WorkspaceSecretId,
     ) -> Result<(), WorkspaceSecretError> {
         let secret = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::WorkspaceSecret(secret.workspace_id, Some(secret.id)),
+        )?;
         self.repo.delete(secret).await?;
         Ok(())
     }
@@ -131,9 +152,13 @@ impl WorkspaceSecrets {
     #[instrument(name = "workspace_secret.list_decrypted", skip_all)]
     pub async fn list_decrypted(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<DecryptedSecret>, WorkspaceSecretError> {
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::WorkspaceSecret(workspace_id, None),
+        )?;
         let secrets = self.list_all_for_workspace(workspace_id).await?;
 
         let mut result = Vec::with_capacity(secrets.len());
