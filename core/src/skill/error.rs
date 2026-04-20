@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::auth::error::AuthorizationError;
-
 use super::repo::{SkillCreateError, SkillFindError, SkillModifyError, SkillQueryError};
 
 #[derive(Error, Debug)]
@@ -16,6 +14,4 @@ pub enum SkillError {
     Query(#[from] SkillQueryError),
     #[error("SkillError - SandboxLookup: {0}")]
     SandboxLookup(String),
-    #[error("SkillError - Authorization: {0}")]
-    Authorization(#[from] AuthorizationError),
 }
