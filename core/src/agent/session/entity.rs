@@ -427,11 +427,13 @@ impl AgentSession {
     ) -> Option<(SessionThreadId, PromptDefinition)> {
         let time_since = self.time_since_last_assistant_response();
 
+        let is_main_thread = self.current_main_thread == Some(current_thread_id);
         let result = compaction::maybe_prune(
             self.events.iter_all(),
             &self.compaction_config,
             self.id,
             current_thread_id,
+            is_main_thread,
             current_prompt_def,
             time_since,
         )?;

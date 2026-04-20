@@ -18,13 +18,14 @@ use trigger::{evaluate, CompactionAction};
 ///
 /// Events with an explicit `thread_id` field match directly.
 /// Events with a `target: TargetThread` field match if:
-/// - `TargetThread::Main` — always matches (compaction only runs on the main thread)
+/// - `TargetThread::Main` — matches only when `is_main_thread` is true
 /// - `TargetThread::Id(id)` — matches when `id == thread_id`
 ///
 /// Global events (Initialized, ToolDefsUpdated, etc.) return `false`.
 pub(super) fn event_belongs_to_thread(
     event: &AgentSessionEvent,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
 ) -> bool {
     match event {
         AgentSessionEvent::AssistantResponseReceived { thread_id: tid, .. }
@@ -33,7 +34,7 @@ pub(super) fn event_belongs_to_thread(
 
         AgentSessionEvent::UserInputAdded { target, .. }
         | AgentSessionEvent::SandboxNotificationAdded { target, .. } => match target {
-            TargetThread::Main => true,
+            TargetThread::Main => is_main_thread,
             TargetThread::Id(id) => *id == thread_id,
         },
 
@@ -71,12 +72,17 @@ pub(super) fn maybe_prune<'a>(
     config: &CompactionConfig,
     session_id: super::AgentSessionId,
     current_thread_id: SessionThreadId,
+    is_main_thread: bool,
     current_prompt_definition: &PromptDefinition,
     time_since_last_turn: Duration,
 ) -> Option<CompactionResult> {
-    let last_usage = estimation::last_usage(events.clone(), current_thread_id);
-    let estimated_tokens =
-        estimation::estimate_context_tokens(events.clone(), current_thread_id, last_usage);
+    let last_usage = estimation::last_usage(events.clone(), current_thread_id, is_main_thread);
+    let estimated_tokens = estimation::estimate_context_tokens(
+        events.clone(),
+        current_thread_id,
+        is_main_thread,
+        last_usage,
+    );
 
     let action = evaluate(estimated_tokens, time_since_last_turn, config);
 
@@ -85,7 +91,7 @@ pub(super) fn maybe_prune<'a>(
         CompactionAction::PruneOpportunistic | CompactionAction::PruneThenSummarize => {}
     }
 
-    let plan = build_pruning_plan(events, current_thread_id, config);
+    let plan = build_pruning_plan(events, current_thread_id, is_main_thread, config);
     if plan.is_empty() {
         return None;
     }

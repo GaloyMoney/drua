@@ -34,18 +34,20 @@ impl PruningPlan {
 pub fn build_pruning_plan<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent> + Clone,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
     config: &CompactionConfig,
 ) -> PruningPlan {
-    let sandbox_tracker = SandboxTracker::from_events(events.clone(), thread_id);
+    let sandbox_tracker = SandboxTracker::from_events(events.clone(), thread_id, is_main_thread);
 
     let (masked, mask_tokens) = plan_tool_result_masking(
         events.clone(),
         thread_id,
+        is_main_thread,
         config.keep_recent_tool_results,
         &sandbox_tracker,
     );
-    let (cleared, think_tokens) = plan_thinking_clearing(events.clone(), thread_id);
-    let (stripped, sandbox_tokens) = plan_sandbox_stripping(events, thread_id);
+    let (cleared, think_tokens) = plan_thinking_clearing(events.clone(), thread_id, is_main_thread);
+    let (stripped, sandbox_tokens) = plan_sandbox_stripping(events, thread_id, is_main_thread);
 
     PruningPlan {
         masked_tool_results: masked,
@@ -65,6 +67,7 @@ pub fn build_pruning_plan<'a>(
 fn plan_tool_result_masking<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
     keep_recent: usize,
     sandbox_tracker: &SandboxTracker,
 ) -> (Vec<MaskedToolResult>, u64) {
@@ -84,7 +87,7 @@ fn plan_tool_result_masking<'a>(
                 block_idx += content.len();
             }
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
-                let belongs = event_belongs_to_thread(event, thread_id);
+                let belongs = event_belongs_to_thread(event, thread_id, is_main_thread);
                 for result in results {
                     if belongs {
                         all_results.push((MessageBlockIndex::new(block_idx), event_idx, result));
@@ -151,6 +154,7 @@ fn plan_tool_result_masking<'a>(
 fn plan_thinking_clearing<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
 ) -> (HashSet<MessageBlockIndex>, u64) {
     let mut thinking_groups: Vec<(Vec<MessageBlockIndex>, u64)> = Vec::new();
     let mut block_idx = 0usize;
@@ -162,7 +166,7 @@ fn plan_thinking_clearing<'a>(
                 block_idx += 1;
             }
             AgentSessionEvent::AssistantResponseReceived { content, .. } => {
-                let belongs = event_belongs_to_thread(event, thread_id);
+                let belongs = event_belongs_to_thread(event, thread_id, is_main_thread);
                 let mut group_indexes = Vec::new();
                 let mut group_tokens = 0u64;
 
@@ -222,6 +226,7 @@ fn plan_thinking_clearing<'a>(
 fn plan_sandbox_stripping<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
 ) -> (HashSet<MessageBlockIndex>, u64) {
     // Track: sandbox_name → (most_recent_attach_block_idx, is_attached)
     let mut sandbox_state: HashMap<String, (MessageBlockIndex, bool)> = HashMap::new();
@@ -240,7 +245,7 @@ fn plan_sandbox_stripping<'a>(
                 ..
             } => {
                 let idx = MessageBlockIndex::new(block_idx);
-                let belongs = event_belongs_to_thread(event, thread_id);
+                let belongs = event_belongs_to_thread(event, thread_id, is_main_thread);
 
                 if belongs {
                     let is_attach = matches!(operation, SandboxOperation::Attach { .. });
@@ -306,6 +311,7 @@ impl SandboxTracker {
     pub fn from_events<'a>(
         events: impl Iterator<Item = &'a AgentSessionEvent>,
         thread_id: SessionThreadId,
+        is_main_thread: bool,
     ) -> Self {
         let mut current: Option<String> = None;
         let mut active_at_event = Vec::new();
@@ -317,7 +323,7 @@ impl SandboxTracker {
                 ..
             } = event
             {
-                if event_belongs_to_thread(event, thread_id) {
+                if event_belongs_to_thread(event, thread_id, is_main_thread) {
                     match operation {
                         SandboxOperation::Attach { .. } => {
                             current = Some(sandbox_name.clone());
@@ -386,7 +392,7 @@ mod tests {
                 is_error: false,
             }],
         }];
-        let plan = build_pruning_plan(events.iter(), thread_id, &make_config(10));
+        let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(10));
         assert!(plan.is_empty());
     }
 
@@ -427,7 +433,7 @@ mod tests {
             },
         ];
 
-        let (cleared, _) = plan_thinking_clearing(events.iter(), thread_id);
+        let (cleared, _) = plan_thinking_clearing(events.iter(), thread_id, true);
         // First thinking (index 0) should be cleared, second (index 2) kept
         assert!(cleared.contains(&MessageBlockIndex::new(0)));
         assert!(!cleared.contains(&MessageBlockIndex::new(2)));

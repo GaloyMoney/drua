@@ -14,57 +14,50 @@ const CHARS_PER_TOKEN: usize = 4;
 pub fn estimate_context_tokens<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
     last_usage: Option<&Usage>,
 ) -> u64 {
     if let Some(usage) = last_usage {
         let baseline = usage.input + usage.output;
-        let trailing = estimate_trailing_tokens(events, thread_id);
+        let trailing = estimate_trailing_tokens(events, thread_id, is_main_thread);
         baseline.saturating_add(trailing)
     } else {
-        estimate_all_tokens(events, thread_id)
+        estimate_all_tokens(events, thread_id, is_main_thread)
     }
 }
 
 /// Estimate tokens for events after the last known usage checkpoint.
 ///
-/// We walk backwards to find the last `AssistantResponseReceived` for this
-/// thread, then estimate everything after it that belongs to this thread.
+/// Single reverse pass: walk backwards, summing tokens for thread events
+/// until we hit the last `AssistantResponseReceived` for this thread.
 fn estimate_trailing_tokens<'a>(
-    events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
+    events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
 ) -> u64 {
-    let events_vec: Vec<&AgentSessionEvent> = events
-        .filter(|e| event_belongs_to_thread(e, thread_id))
-        .collect();
-
-    let last_response_idx = events_vec
-        .iter()
-        .rposition(|e| matches!(e, AgentSessionEvent::AssistantResponseReceived { .. }));
-
-    let start = match last_response_idx {
-        Some(idx) => idx + 1,
-        None => return estimate_all_tokens_from_slice(&events_vec),
-    };
-
-    events_vec[start..]
-        .iter()
-        .map(|e| estimate_event_tokens(e))
-        .sum()
+    let mut trailing = 0u64;
+    for event in events.rev() {
+        if !event_belongs_to_thread(event, thread_id, is_main_thread) {
+            continue;
+        }
+        if matches!(event, AgentSessionEvent::AssistantResponseReceived { .. }) {
+            break;
+        }
+        trailing += estimate_event_tokens(event);
+    }
+    trailing
 }
 
 /// Estimate tokens for all events belonging to a thread (fallback when no usage baseline exists).
 fn estimate_all_tokens<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
+    is_main_thread: bool,
 ) -> u64 {
     events
-        .filter(|e| event_belongs_to_thread(e, thread_id))
+        .filter(|e| event_belongs_to_thread(e, thread_id, is_main_thread))
         .map(estimate_event_tokens)
         .sum()
-}
-
-fn estimate_all_tokens_from_slice(events: &[&AgentSessionEvent]) -> u64 {
-    events.iter().map(|e| estimate_event_tokens(e)).sum()
 }
 
 fn estimate_event_tokens(event: &AgentSessionEvent) -> u64 {
@@ -118,9 +111,13 @@ pub fn estimate_event_tokens_for_content(content_len: usize) -> u64 {
 }
 
 /// Extract the most recent `Usage` from the session event stream for a specific thread.
+///
+/// `AssistantResponseReceived` always carries an explicit `thread_id`, so
+/// `is_main_thread` is accepted for API consistency but not needed here.
 pub fn last_usage<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
+    _is_main_thread: bool,
 ) -> Option<&'a Usage> {
     events.rev().find_map(|e| match e {
         AgentSessionEvent::AssistantResponseReceived {
@@ -148,6 +145,9 @@ mod tests {
     fn estimate_empty_events() {
         let events: Vec<AgentSessionEvent> = vec![];
         let thread_id = SessionThreadId::new();
-        assert_eq!(estimate_context_tokens(events.iter(), thread_id, None), 0);
+        assert_eq!(
+            estimate_context_tokens(events.iter(), thread_id, true, None),
+            0
+        );
     }
 }
