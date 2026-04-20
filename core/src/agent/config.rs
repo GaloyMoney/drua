@@ -47,9 +47,16 @@ impl From<u32> for ResetTimeDeltaSeconds {
     }
 }
 
+fn default_provider() -> String {
+    "anthropic".to_string()
+}
+
 /// Per-role defaults applied when an agent with that role is created.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleConfig {
+    /// LLM provider: `"anthropic"` or `"openai"`.
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub model: String,
     pub max_tokens: u32,
     /// If set, a new thread is started when a user message arrives more

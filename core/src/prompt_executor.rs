@@ -6,7 +6,9 @@ use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use anthropic_client::AnthropicClient;
+use llm::provider::LlmProvider;
 use llm::{Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
+use openai_client::OpenAiClient;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptExecutorConfig {
@@ -26,6 +28,7 @@ pub struct ModelConfig {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Provider {
     Anthropic { api_key: String },
+    OpenAi { api_key: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -47,12 +50,6 @@ impl PromptExecutorConfig {
                     );
                 }
                 Provider::Anthropic { api_key } => {
-                    // Anthropic production keys start with `sk-ant-`. A
-                    // different prefix is usually a paste-swap with some
-                    // other vendor's key (OpenAI, AWS, etc.) and will
-                    // always 401 at the Messages API. Warn loudly and log
-                    // a masked preview so the operator can eyeball the
-                    // value that actually reached the process.
                     let preview = masked_preview(api_key);
                     if !api_key.starts_with("sk-ant-") {
                         tracing::warn!(
@@ -66,6 +63,29 @@ impl PromptExecutorConfig {
                             model = %model.name,
                             key_preview = %preview,
                             "Anthropic credential loaded"
+                        );
+                    }
+                }
+                Provider::OpenAi { api_key } if api_key.is_empty() => {
+                    tracing::warn!(
+                        model = %model.name,
+                        "OpenAI credential is empty — agent prompts will fail until OPENAI_API_KEY is set",
+                    );
+                }
+                Provider::OpenAi { api_key } => {
+                    let preview = masked_preview(api_key);
+                    if !api_key.starts_with("sk-") {
+                        tracing::warn!(
+                            model = %model.name,
+                            key_preview = %preview,
+                            key_len = api_key.len(),
+                            "OpenAI credential does not start with `sk-` — this will most likely 401 at the Chat Completions API",
+                        );
+                    } else {
+                        tracing::info!(
+                            model = %model.name,
+                            key_preview = %preview,
+                            "OpenAI credential loaded"
                         );
                     }
                 }
@@ -173,26 +193,18 @@ impl ExecutorState {
                 if request.prompt.max_tokens.is_none() {
                     request.prompt.max_tokens = model.default_max_tokens;
                 }
-                match model.client {
-                    ProviderClient::Anthropic(client) => {
-                        tokio::spawn(async move {
-                            evaluate_with_anthropic_streaming(
-                                client,
-                                request.prompt,
-                                request.response_channel,
-                            )
-                            .await;
-                        });
-                    }
-                }
+                let client = model.client.clone();
+                tokio::spawn(async move {
+                    evaluate_streaming(client, request.prompt, request.response_channel).await;
+                });
             }
         }
     }
 }
 
 #[instrument(name = "domain.prompt_executor.evaluate_streaming", skip_all)]
-async fn evaluate_with_anthropic_streaming(
-    client: AnthropicClient,
+async fn evaluate_streaming(
+    client: Arc<dyn LlmProvider>,
     prompt: Prompt,
     response: PromptResponseChannel,
 ) {
@@ -208,30 +220,16 @@ async fn evaluate_with_anthropic_streaming(
         return; // caller dropped
     }
 
-    // The anthropic client already converts SSE → StreamDelta internally,
-    // so we just pipe deltas through to the agent loop.
     match client.send_prompt_streaming(&prompt).await {
-        Ok(mut delta_rx) => {
-            while let Some(result) = delta_rx.recv().await {
-                match result {
-                    Ok(delta) => {
-                        if delta_tx.send(Ok(delta)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = delta_tx
-                            .send(Err(PromptError::Provider(e.to_string())))
-                            .await;
-                        break;
-                    }
+        Ok(mut provider_rx) => {
+            while let Some(result) = provider_rx.recv().await {
+                if delta_tx.send(result).await.is_err() {
+                    break;
                 }
             }
         }
         Err(e) => {
-            let _ = delta_tx
-                .send(Err(PromptError::Provider(e.to_string())))
-                .await;
+            let _ = delta_tx.send(Err(e)).await;
         }
     }
 }
@@ -240,15 +238,14 @@ async fn evaluate_with_anthropic_streaming(
 struct ResolvedModel {
     name: String,
     default_max_tokens: Option<u32>,
-    client: ProviderClient,
+    client: Arc<dyn LlmProvider>,
 }
 
 impl ResolvedModel {
     fn from_config(config: ModelConfig) -> Self {
-        let client = match config.provider {
-            Provider::Anthropic { api_key } => {
-                ProviderClient::Anthropic(AnthropicClient::new(api_key))
-            }
+        let client: Arc<dyn LlmProvider> = match config.provider {
+            Provider::Anthropic { api_key } => Arc::new(AnthropicClient::new(api_key)),
+            Provider::OpenAi { api_key } => Arc::new(OpenAiClient::new(api_key)),
         };
         Self {
             name: config.name,
@@ -256,9 +253,4 @@ impl ResolvedModel {
             client,
         }
     }
-}
-
-#[derive(Clone)]
-enum ProviderClient {
-    Anthropic(AnthropicClient),
 }

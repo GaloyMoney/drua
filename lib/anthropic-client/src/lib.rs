@@ -10,10 +10,12 @@ mod sse;
 mod stream;
 mod types;
 
+use async_trait::async_trait;
 use thiserror::Error;
 use tracing::instrument;
 
-use llm::{Prompt, PromptResponse};
+use llm::provider::LlmProvider;
+use llm::{Prompt, PromptError, PromptResponse};
 
 use llm::stream::StreamDelta;
 
@@ -184,5 +186,34 @@ impl AnthropicClient {
             .await;
         });
         Ok(rx)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for AnthropicClient {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    async fn send_prompt_streaming(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
+        let rx = AnthropicClient::send_prompt_streaming(self, prompt)
+            .await
+            .map_err(|e| PromptError::Provider(e.to_string()))?;
+
+        // Re-map the error type from AnthropicError to PromptError.
+        let (tx, out_rx) = tokio::sync::mpsc::channel(128);
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while let Some(result) = rx.recv().await {
+                let mapped = result.map_err(|e| PromptError::Provider(e.to_string()));
+                if tx.send(mapped).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(out_rx)
     }
 }

@@ -28,33 +28,39 @@ pub struct Config {
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(skip)]
     pub anthropic_api_key: String,
+    #[serde(skip)]
+    pub openai_api_key: String,
 }
 
 impl Config {
     /// Build a `PromptExecutorConfig` registering every model that the
-    /// configured `agents.builtin_roles` reference, all bound to Anthropic
-    /// using the API key provided via env.
+    /// configured `agents.builtin_roles` reference, each bound to the
+    /// provider specified in its role config.
     pub fn prompt_executor_config(&self) -> PromptExecutorConfig {
-        let mut models: Vec<String> = self
-            .agents
-            .builtin_roles
-            .values()
-            .map(|r| r.model.clone())
-            .collect();
-        models.sort();
-        models.dedup();
-        PromptExecutorConfig {
-            models: models
-                .into_iter()
-                .map(|name| ModelConfig {
-                    name,
-                    provider: Provider::Anthropic {
+        // Collect unique (provider, model) pairs.
+        let mut seen = std::collections::HashSet::new();
+        let mut models = Vec::new();
+
+        for role in self.agents.builtin_roles.values() {
+            let key = (role.provider.clone(), role.model.clone());
+            if seen.insert(key) {
+                let provider = match role.provider.as_str() {
+                    "openai" => Provider::OpenAi {
+                        api_key: self.openai_api_key.clone(),
+                    },
+                    _ => Provider::Anthropic {
                         api_key: self.anthropic_api_key.clone(),
                     },
+                };
+                models.push(ModelConfig {
+                    name: role.model.clone(),
+                    provider,
                     default_max_tokens: None,
-                })
-                .collect(),
+                });
+            }
         }
+
+        PromptExecutorConfig { models }
     }
 }
 
@@ -140,6 +146,7 @@ pub struct EnvSecrets {
     pub github_client_secret: String,
     pub github_allowed_teams: Vec<String>,
     pub anthropic_api_key: String,
+    pub openai_api_key: String,
 }
 
 impl Config {
@@ -175,6 +182,7 @@ impl Config {
         // sneaks in when the key was piped from `echo` or a broken
         // `.env`; both render the key invalid upstream for opaque reasons.
         config.anthropic_api_key = secrets.anthropic_api_key.trim().to_string();
+        config.openai_api_key = secrets.openai_api_key.trim().to_string();
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }

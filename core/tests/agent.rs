@@ -28,6 +28,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     builtin_roles.insert(
         AgentRole::WorkspaceLead,
         RoleConfig {
+            provider: "anthropic".to_string(),
             model: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: 1024,
             reset_time_delta_seconds: None,
@@ -167,6 +168,7 @@ async fn send_message_dispatches_registered_tool_call() {
     builtin_roles.insert(
         AgentRole::WorkspaceLead,
         RoleConfig {
+            provider: "anthropic".to_string(),
             model: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: 1024,
             reset_time_delta_seconds: None,
