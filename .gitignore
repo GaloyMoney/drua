@@ -20,3 +20,4 @@ code-assistant/models/
 test-sandbox.sh
 .sandboxes/
 .bacon-locations
+style-agent/

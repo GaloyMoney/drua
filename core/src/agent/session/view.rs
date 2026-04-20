@@ -14,20 +14,16 @@ pub struct SystemBlockIndex(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDefinitionIndex(usize);
 
+/// A unified index that increments across all message block types
+/// (user messages, assistant blocks, and tool results).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserMessageIndex(usize);
+pub struct MessageBlockIndex(usize);
 
-impl UserMessageIndex {
+impl MessageBlockIndex {
     pub(super) fn new(idx: usize) -> Self {
         Self(idx)
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssistantMessageIndex(pub(super) usize);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolResultIndex(pub(super) usize);
 
 // ============================================================================
 // View types (persisted on threads)
@@ -45,17 +41,17 @@ pub struct ToolDefinitionsView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMessagesView {
-    pub(super) indexes: Vec<UserMessageIndex>,
+    pub(super) indexes: Vec<MessageBlockIndex>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessageView {
-    pub(super) indexes: Vec<AssistantMessageIndex>,
+    pub(super) indexes: Vec<MessageBlockIndex>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultsView {
-    pub(super) indexes: Vec<ToolResultIndex>,
+    pub(super) indexes: Vec<MessageBlockIndex>,
 }
 
 // ============================================================================
@@ -70,12 +66,10 @@ pub(super) struct MaterializedSession<'a> {
     system_breakpoints: Vec<SystemBlockIndex>,
     tool_defs: Vec<&'a ToolDefinition>,
     tool_breakpoints: Vec<ToolDefinitionIndex>,
-    user_message_count: usize,
-    user_message_indexes: Vec<UserMessageIndex>,
-    assistant_block_count: usize,
-    assistant_breakpoints: Vec<AssistantMessageIndex>,
-    tool_result_count: usize,
-    tool_result_breakpoints: Vec<ToolResultIndex>,
+    block_count: usize,
+    user_message_indexes: Vec<MessageBlockIndex>,
+    assistant_breakpoints: Vec<MessageBlockIndex>,
+    tool_result_breakpoints: Vec<MessageBlockIndex>,
 }
 
 impl<'a> MaterializedSession<'a> {
@@ -87,11 +81,9 @@ impl<'a> MaterializedSession<'a> {
             system_breakpoints: Vec::new(),
             tool_defs: Vec::new(),
             tool_breakpoints: Vec::new(),
-            user_message_count: 0,
+            block_count: 0,
             user_message_indexes: Vec::new(),
-            assistant_block_count: 0,
             assistant_breakpoints: Vec::new(),
-            tool_result_count: 0,
             tool_result_breakpoints: Vec::new(),
         }
     }
@@ -109,17 +101,22 @@ impl<'a> MaterializedSession<'a> {
     }
 
     pub fn push_user_message(&mut self) {
-        let idx = UserMessageIndex(self.user_message_count);
-        self.user_message_count += 1;
+        let idx = MessageBlockIndex(self.block_count);
+        self.block_count += 1;
         self.user_message_indexes.push(idx);
     }
 
-    pub fn push_assistant_blocks(&mut self, block_count: usize) {
+    pub fn push_assistant_blocks(&mut self, count: usize) {
         self.assistant_breakpoints
-            .push(AssistantMessageIndex(self.assistant_block_count));
-        self.assistant_block_count += block_count;
+            .push(MessageBlockIndex(self.block_count));
+        self.block_count += count;
     }
 
+    /// Returns the assistant block indexes from the most recent
+    /// `push_assistant_blocks` call.
+    ///
+    /// **Invariant**: must be called before any subsequent `push_*` call
+    /// that would advance `block_count`.
     pub fn assistant_blocks_since_last_breakpoint(&self) -> AssistantMessageView {
         let start = self
             .assistant_breakpoints
@@ -127,18 +124,21 @@ impl<'a> MaterializedSession<'a> {
             .map(|idx| idx.0)
             .unwrap_or(0);
         AssistantMessageView {
-            indexes: (start..self.assistant_block_count)
-                .map(AssistantMessageIndex)
-                .collect(),
+            indexes: (start..self.block_count).map(MessageBlockIndex).collect(),
         }
     }
 
-    pub fn push_tool_results(&mut self, result_count: usize) {
+    pub fn push_tool_results(&mut self, count: usize) {
         self.tool_result_breakpoints
-            .push(ToolResultIndex(self.tool_result_count));
-        self.tool_result_count += result_count;
+            .push(MessageBlockIndex(self.block_count));
+        self.block_count += count;
     }
 
+    /// Returns the tool result indexes from the most recent
+    /// `push_tool_results` call.
+    ///
+    /// **Invariant**: must be called before any subsequent `push_*` call
+    /// that would advance `block_count`.
     pub fn tool_results_since_last_breakpoint(&self) -> ToolResultsView {
         let start = self
             .tool_result_breakpoints
@@ -146,9 +146,7 @@ impl<'a> MaterializedSession<'a> {
             .map(|idx| idx.0)
             .unwrap_or(0);
         ToolResultsView {
-            indexes: (start..self.tool_result_count)
-                .map(ToolResultIndex)
-                .collect(),
+            indexes: (start..self.block_count).map(MessageBlockIndex).collect(),
         }
     }
 
@@ -188,6 +186,16 @@ impl<'a> MaterializedSession<'a> {
             messages: vec![MessageView::User(initial_user_messages)],
         }
     }
+}
+
+// ============================================================================
+// BlockContent (used internally for prompt resolution)
+// ============================================================================
+
+enum BlockContent {
+    UserText(String),
+    AssistantBlock(AssistantBlock),
+    ToolResult(ToolResultInput),
 }
 
 // ============================================================================
@@ -238,9 +246,7 @@ impl PromptDefinition {
     ) -> Result<Prompt, AgentSessionError> {
         let mut all_system_blocks = Vec::new();
         let mut all_tool_defs = Vec::new();
-        let mut all_user_texts = Vec::new();
-        let mut all_assistant_blocks: Vec<AssistantBlock> = Vec::new();
-        let mut all_tool_results: Vec<ToolResultInput> = Vec::new();
+        let mut all_blocks: Vec<BlockContent> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -259,20 +265,27 @@ impl PromptDefinition {
                     all_tool_defs.extend(tool_defs.iter().cloned());
                 }
                 AgentSessionEvent::UserInputAdded { text, .. } => {
-                    all_user_texts.push(text.clone());
+                    all_blocks.push(BlockContent::UserText(text.clone()));
                 }
                 AgentSessionEvent::SandboxNotificationAdded {
                     sandbox_name,
                     operation,
                     ..
                 } => {
-                    all_user_texts.push(sandbox_notification_text(sandbox_name, operation));
+                    all_blocks.push(BlockContent::UserText(sandbox_notification_text(
+                        sandbox_name,
+                        operation,
+                    )));
                 }
                 AgentSessionEvent::AssistantResponseReceived { content, .. } => {
-                    all_assistant_blocks.extend(content.iter().cloned());
+                    for block in content {
+                        all_blocks.push(BlockContent::AssistantBlock(block.clone()));
+                    }
                 }
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {
-                    all_tool_results.extend(results.iter().cloned());
+                    for result in results {
+                        all_blocks.push(BlockContent::ToolResult(result.clone()));
+                    }
                 }
                 _ => {}
             }
@@ -299,8 +312,11 @@ impl PromptDefinition {
                     let content = user_view
                         .indexes
                         .iter()
-                        .map(|idx| UserBlock::Text {
-                            text: all_user_texts[idx.0].clone(),
+                        .map(|idx| match &all_blocks[idx.0] {
+                            BlockContent::UserText(text) => UserBlock::Text { text: text.clone() },
+                            _ => {
+                                panic!("BlockIndex in UserMessagesView does not point to UserText")
+                            }
                         })
                         .collect();
                     messages.push(Message::User { content });
@@ -309,7 +325,12 @@ impl PromptDefinition {
                     let content = assistant_view
                         .indexes
                         .iter()
-                        .map(|idx| all_assistant_blocks[idx.0].clone())
+                        .map(|idx| match &all_blocks[idx.0] {
+                            BlockContent::AssistantBlock(block) => block.clone(),
+                            _ => panic!(
+                                "BlockIndex in AssistantMessageView does not point to AssistantBlock"
+                            ),
+                        })
                         .collect();
                     messages.push(Message::Assistant { content });
                 }
@@ -317,14 +338,16 @@ impl PromptDefinition {
                     let content = tool_results_view
                         .indexes
                         .iter()
-                        .map(|idx| {
-                            let result = &all_tool_results[idx.0];
-                            UserBlock::ToolResult {
+                        .map(|idx| match &all_blocks[idx.0] {
+                            BlockContent::ToolResult(result) => UserBlock::ToolResult {
                                 tool_use_id: result.tool_use_id.clone(),
                                 content: vec![ToolResultBlock::Text {
                                     text: result.content.clone(),
                                 }],
                                 is_error: result.is_error,
+                            },
+                            _ => {
+                                panic!("BlockIndex in ToolResultsView does not point to ToolResult")
                             }
                         })
                         .collect();

@@ -180,19 +180,15 @@ impl AgentSession {
         }
         let thread_id = thread_id.unwrap();
 
-        // Collect pending UserMessageIndexes since last PromptSent for this thread (scan backwards)
-        let total_user_msgs = self
-            .events
-            .iter_all()
-            .filter(|e| {
-                matches!(
-                    e,
-                    AgentSessionEvent::UserInputAdded { .. }
-                        | AgentSessionEvent::SandboxNotificationAdded { .. }
-                )
-            })
-            .count();
-        let mut user_msg_counter = total_user_msgs;
+        // Collect pending BlockIndexes since last PromptSent for this thread (scan backwards)
+        let total_blocks = self.events.iter_all().fold(0usize, |acc, e| match e {
+            AgentSessionEvent::UserInputAdded { .. }
+            | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
+            AgentSessionEvent::AssistantResponseReceived { content, .. } => acc + content.len(),
+            AgentSessionEvent::ToolResultsAdded { results, .. } => acc + results.len(),
+            _ => acc,
+        });
+        let mut block_counter = total_blocks;
         let mut pending_indexes = Vec::new();
         for event in self.events.iter_all().rev() {
             match event {
@@ -205,14 +201,20 @@ impl AgentSession {
                 | AgentSessionEvent::SandboxNotificationAdded {
                     target: msg_target, ..
                 } => {
-                    user_msg_counter -= 1;
+                    block_counter -= 1;
                     let targets_this = match msg_target {
                         TargetThread::Main => self.current_main_thread == Some(thread_id),
                         TargetThread::Id(id) => *id == thread_id,
                     };
                     if targets_this {
-                        pending_indexes.push(UserMessageIndex::new(user_msg_counter));
+                        pending_indexes.push(MessageBlockIndex::new(block_counter));
                     }
+                }
+                AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                    block_counter -= content.len();
+                }
+                AgentSessionEvent::ToolResultsAdded { results, .. } => {
+                    block_counter -= results.len();
                 }
                 _ => {}
             }
