@@ -258,9 +258,6 @@ impl Agents {
                     model: role_config.model,
                     max_tokens: role_config.max_tokens,
                 },
-                session::ThreadSimplificationSettings {
-                    simplify_after_idle_seconds: None,
-                },
                 system_blocks,
                 tool_defs,
             )

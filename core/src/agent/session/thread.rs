@@ -29,6 +29,16 @@ pub enum SessionThreadEvent {
         tool_definitions_view: ToolDefinitionsView,
         initial_user_messages: UserMessagesView,
     },
+    InitializedFromCompaction {
+        id: SessionThreadId,
+        session_id: AgentSessionId,
+        model: String,
+        max_tokens: u32,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    },
     UserTurn {
         user_messages_view: UserMessagesView,
     },
@@ -115,6 +125,20 @@ impl SessionThread {
                     tool_definitions_view = tdv.clone();
                     messages.push(MessageView::User(initial_user_messages.clone()));
                 }
+                SessionThreadEvent::InitializedFromCompaction {
+                    model: m,
+                    max_tokens: mt,
+                    system_view: sv,
+                    tool_definitions_view: tdv,
+                    messages: init_messages,
+                    ..
+                } => {
+                    model = m.clone();
+                    max_tokens = *mt;
+                    system_view = sv.clone();
+                    tool_definitions_view = tdv.clone();
+                    messages.extend(init_messages.iter().cloned());
+                }
                 SessionThreadEvent::UserTurn {
                     user_messages_view, ..
                 } => {
@@ -144,6 +168,7 @@ impl SessionThread {
             system_view,
             tool_definitions_view,
             messages,
+            compaction: None,
         }
     }
 }
@@ -158,6 +183,22 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
             match event {
                 SessionThreadEvent::Initialized { id, session_id, .. } => {
                     builder = builder.id(*id).session_id(*session_id);
+                }
+                SessionThreadEvent::InitializedFromCompaction {
+                    id,
+                    session_id,
+                    messages,
+                    ..
+                } => {
+                    builder = builder.id(*id).session_id(*session_id);
+                    // Determine turn from last message in compacted history
+                    let turn = match messages.last() {
+                        Some(MessageView::User(_)) => NextTurn::Assistant,
+                        Some(MessageView::Assistant(_)) => NextTurn::User,
+                        Some(MessageView::ToolResults(_)) => NextTurn::Assistant,
+                        None => NextTurn::User,
+                    };
+                    builder = builder.turn(turn);
                 }
                 SessionThreadEvent::UserTurn { .. } => {
                     builder = builder.turn(NextTurn::Assistant);
@@ -178,40 +219,173 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
     }
 }
 
-#[derive(Debug, Builder)]
+#[derive(Debug)]
 pub struct NewSessionThread {
-    #[builder(setter(into))]
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
-    #[builder(setter(into))]
     pub(super) model: String,
     pub(super) max_tokens: u32,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
-    pub(super) initial_user_messages: UserMessagesView,
+    init: ThreadInitData,
+}
+
+#[derive(Debug)]
+enum ThreadInitData {
+    Initial {
+        initial_user_messages: UserMessagesView,
+    },
+    Compacted {
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    },
 }
 
 impl NewSessionThread {
     pub fn builder() -> NewSessionThreadBuilder {
-        let mut builder = NewSessionThreadBuilder::default();
-        builder.id(SessionThreadId::new());
-        builder
+        NewSessionThreadBuilder {
+            id: SessionThreadId::new(),
+            session_id: None,
+            model: None,
+            max_tokens: None,
+            system_view: None,
+            tool_definitions_view: None,
+            initial_user_messages: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn compacted(
+        id: SessionThreadId,
+        session_id: AgentSessionId,
+        model: String,
+        max_tokens: u32,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    ) -> Self {
+        Self {
+            id,
+            session_id,
+            model,
+            max_tokens,
+            system_view,
+            tool_definitions_view,
+            init: ThreadInitData::Compacted {
+                messages,
+                follows_from,
+            },
+        }
+    }
+}
+
+/// Builder for the initial thread case (preserves existing API).
+pub struct NewSessionThreadBuilder {
+    id: SessionThreadId,
+    session_id: Option<AgentSessionId>,
+    model: Option<String>,
+    max_tokens: Option<u32>,
+    system_view: Option<SystemView>,
+    tool_definitions_view: Option<ToolDefinitionsView>,
+    initial_user_messages: Option<UserMessagesView>,
+}
+
+impl NewSessionThreadBuilder {
+    pub fn id(mut self, id: SessionThreadId) -> Self {
+        self.id = id;
+        self
+    }
+
+    pub fn session_id(mut self, session_id: AgentSessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn system_view(mut self, system_view: SystemView) -> Self {
+        self.system_view = Some(system_view);
+        self
+    }
+
+    pub fn tool_definitions_view(mut self, tool_definitions_view: ToolDefinitionsView) -> Self {
+        self.tool_definitions_view = Some(tool_definitions_view);
+        self
+    }
+
+    pub fn initial_user_messages(mut self, initial_user_messages: UserMessagesView) -> Self {
+        self.initial_user_messages = Some(initial_user_messages);
+        self
+    }
+
+    pub fn build(self) -> Result<NewSessionThread, EntityHydrationError> {
+        Ok(NewSessionThread {
+            id: self.id,
+            session_id: self.session_id.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("session_id"),
+            ))?,
+            model: self.model.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("model"),
+            ))?,
+            max_tokens: self.max_tokens.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("max_tokens"),
+            ))?,
+            system_view: self.system_view.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("system_view"),
+            ))?,
+            tool_definitions_view: self
+                .tool_definitions_view
+                .ok_or(EntityHydrationError::from(
+                    derive_builder::UninitializedFieldError::from("tool_definitions_view"),
+                ))?,
+            init: ThreadInitData::Initial {
+                initial_user_messages: self.initial_user_messages.ok_or(
+                    EntityHydrationError::from(derive_builder::UninitializedFieldError::from(
+                        "initial_user_messages",
+                    )),
+                )?,
+            },
+        })
     }
 }
 
 impl IntoEvents<SessionThreadEvent> for NewSessionThread {
     fn into_events(self) -> EntityEvents<SessionThreadEvent> {
-        EntityEvents::init(
-            self.id,
-            [SessionThreadEvent::Initialized {
+        let event = match self.init {
+            ThreadInitData::Initial {
+                initial_user_messages,
+            } => SessionThreadEvent::Initialized {
                 id: self.id,
                 session_id: self.session_id,
                 model: self.model,
                 max_tokens: self.max_tokens,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
-                initial_user_messages: self.initial_user_messages,
-            }],
-        )
+                initial_user_messages,
+            },
+            ThreadInitData::Compacted {
+                messages,
+                follows_from,
+            } => SessionThreadEvent::InitializedFromCompaction {
+                id: self.id,
+                session_id: self.session_id,
+                model: self.model,
+                max_tokens: self.max_tokens,
+                system_view: self.system_view,
+                tool_definitions_view: self.tool_definitions_view,
+                messages,
+                follows_from,
+            },
+        };
+        EntityEvents::init(self.id, [event])
     }
 }

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
@@ -5,7 +7,7 @@ use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
 
 use super::{
-    error::AgentSessionError, message::*, metadata::*, settings::*, thread::*, view::*,
+    compaction, error::AgentSessionError, message::*, metadata::*, settings::*, thread::*, view::*,
     AgentSessionId,
 };
 
@@ -18,6 +20,7 @@ use super::{
 pub enum ThreadStartReason {
     InitialThread,
     ToolDefsUpdated,
+    Compaction { from_thread: SessionThreadId },
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +31,10 @@ pub enum AgentSessionEvent {
         id: AgentSessionId,
         agent_id: AgentId,
         model_settings: ModelSettings,
+        #[serde(default)]
         thread_simplification_settings: ThreadSimplificationSettings,
+        #[serde(default)]
+        compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     },
@@ -47,6 +53,9 @@ pub enum AgentSessionEvent {
         target: TargetThread,
         sandbox_name: String,
         operation: SandboxOperation,
+        /// Pre-computed notification text. Persisted so the chat history
+        /// remains accurate even if the template changes in a future version.
+        text: String,
     },
     ThreadStarted {
         thread_id: SessionThreadId,
@@ -68,6 +77,27 @@ pub enum AgentSessionEvent {
         thread_id: SessionThreadId,
         results: Vec<ToolResultInput>,
     },
+    /// Masked tool results pushed into the main event stream so they
+    /// participate in block indexing and can be shared across threads.
+    ToolResultsMasked {
+        results: Vec<MaskedToolResult>,
+    },
+    CompactionApplied {
+        from_thread_id: SessionThreadId,
+        new_thread_id: SessionThreadId,
+        masked_tool_results: Vec<MessageBlockIndex>,
+        cleared_thinking: Vec<MessageBlockIndex>,
+        stripped_user_messages: Vec<MessageBlockIndex>,
+        estimated_tokens_saved: u64,
+    },
+}
+
+/// A tool result that was masked during compaction, carrying both the
+/// original view index and the replacement content (placeholder text).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaskedToolResult {
+    pub original_index: MessageBlockIndex,
+    pub replacement: ToolResultInput,
 }
 
 #[derive(EsEntity, Builder)]
@@ -78,6 +108,9 @@ pub struct AgentSession {
 
     #[builder(default)]
     current_main_thread: Option<SessionThreadId>,
+
+    #[builder(default)]
+    compaction_config: CompactionConfig,
 
     events: EntityEvents<AgentSessionEvent>,
 
@@ -127,11 +160,13 @@ impl AgentSession {
         operation: SandboxOperation,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
         let target = TargetThread::Main;
+        let text = sandbox_notification_text(&sandbox_name, &operation);
         self.events
             .push(AgentSessionEvent::SandboxNotificationAdded {
                 target,
                 sandbox_name,
                 operation,
+                text,
             });
         self.user_message_response(target)
     }
@@ -186,6 +221,7 @@ impl AgentSession {
             | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
             AgentSessionEvent::AssistantResponseReceived { content, .. } => acc + content.len(),
             AgentSessionEvent::ToolResultsAdded { results, .. } => acc + results.len(),
+            AgentSessionEvent::ToolResultsMasked { results, .. } => acc + results.len(),
             _ => acc,
         });
         let mut block_counter = total_blocks;
@@ -216,6 +252,9 @@ impl AgentSession {
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {
                     block_counter -= results.len();
                 }
+                AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                    block_counter -= results.len();
+                }
                 _ => {}
             }
         }
@@ -237,6 +276,17 @@ impl AgentSession {
             .get_persisted(&thread_id)
             .ok_or(AgentSessionError::ThreadNotFound)?;
         let prompt_definition = thread.prompt_definition();
+
+        // --- Compaction check ---
+        let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
+            Some(result) => result,
+            None => (thread_id, prompt_definition),
+        };
+        let target = if self.current_main_thread == Some(thread_id) {
+            TargetThread::Main
+        } else {
+            TargetThread::Id(thread_id)
+        };
 
         let user_messages_view = prompt_definition.user_messages_view();
         self.events.push(AgentSessionEvent::PromptSent {
@@ -371,6 +421,57 @@ impl AgentSession {
         }
     }
 
+    /// Attempt pruning compaction for the given thread. Returns the new
+    /// thread id and prompt definition if compaction was applied, or `None`
+    /// if no compaction was needed.
+    fn try_prune(
+        &mut self,
+        current_thread_id: SessionThreadId,
+        current_prompt_def: &PromptDefinition,
+    ) -> Option<(SessionThreadId, PromptDefinition)> {
+        let time_since = self.time_since_last_assistant_response();
+
+        let is_main_thread = self.current_main_thread == Some(current_thread_id);
+        let result = compaction::maybe_prune(
+            self.events.iter_all(),
+            &self.compaction_config,
+            self.id,
+            current_thread_id,
+            is_main_thread,
+            current_prompt_def,
+            time_since,
+        )?;
+
+        // Apply compaction: push events and add new thread
+        for event in result.events {
+            self.events.push(event);
+        }
+        self.threads.add_new(result.new_thread);
+        self.current_main_thread = Some(result.new_thread_id);
+
+        Some((result.new_thread_id, result.prompt_definition))
+    }
+
+    /// Compute duration since the last assistant response was persisted.
+    /// Falls back to Duration::ZERO when no assistant response has been persisted yet.
+    fn time_since_last_assistant_response(&self) -> Duration {
+        let last_ts = self
+            .events
+            .iter_persisted()
+            .rev()
+            .find_map(|pe| match &pe.event {
+                AgentSessionEvent::AssistantResponseReceived { .. } => Some(pe.recorded_at),
+                _ => None,
+            });
+        match last_ts {
+            Some(ts) => {
+                let elapsed = chrono::Utc::now() - ts;
+                elapsed.to_std().unwrap_or(Duration::ZERO)
+            }
+            None => Duration::ZERO,
+        }
+    }
+
     fn create_initial_thread(&mut self) -> PromptDefinition {
         let prompt_definition = self.materialize().initial_prompt_definition();
         let thread_id = SessionThreadId::new();
@@ -424,6 +525,9 @@ impl AgentSession {
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {
                     materialized.push_tool_results(results.len());
                 }
+                AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                    materialized.push_tool_results(results.len());
+                }
                 _ => {}
             }
         }
@@ -439,8 +543,16 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
 
         for event in events.iter_all() {
             match event {
-                AgentSessionEvent::Initialized { id, agent_id, .. } => {
-                    builder = builder.id(*id).agent_id(*agent_id);
+                AgentSessionEvent::Initialized {
+                    id,
+                    agent_id,
+                    compaction_config,
+                    ..
+                } => {
+                    builder = builder
+                        .id(*id)
+                        .agent_id(*agent_id)
+                        .compaction_config(compaction_config.clone());
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_main_thread(Some(*thread_id));
@@ -452,6 +564,8 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::SystemBlocksUpdated { .. } => {}
                 AgentSessionEvent::PromptSent { .. } => {}
                 AgentSessionEvent::ToolResultsAdded { .. } => {}
+                AgentSessionEvent::ToolResultsMasked { .. } => {}
+                AgentSessionEvent::CompactionApplied { .. } => {}
             }
         }
 
@@ -465,7 +579,8 @@ pub struct NewAgentSession {
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
     pub(super) model_settings: ModelSettings,
-    pub(super) thread_simplification_settings: ThreadSimplificationSettings,
+    #[builder(default)]
+    pub(super) compaction_config: CompactionConfig,
     pub(super) system_blocks: Vec<SystemBlock>,
     pub(super) tool_defs: Vec<ToolDefinition>,
 }
@@ -486,7 +601,8 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
                 id: self.id,
                 agent_id: self.agent_id,
                 model_settings: self.model_settings,
-                thread_simplification_settings: self.thread_simplification_settings,
+                thread_simplification_settings: ThreadSimplificationSettings::default(),
+                compaction_config: self.compaction_config,
                 system_blocks: self.system_blocks,
                 tool_defs: self.tool_defs,
             }],
@@ -507,9 +623,6 @@ mod tests {
             .model_settings(ModelSettings {
                 model: "test-model".into(),
                 max_tokens: 1024,
-            })
-            .thread_simplification_settings(ThreadSimplificationSettings {
-                simplify_after_idle_seconds: None,
             })
             .system_blocks(vec![])
             .tool_defs(vec![])
@@ -892,5 +1005,266 @@ mod tests {
             result,
             Ok(AgentSessionResponse::AwaitingAssistantResponse)
         ));
+    }
+
+    fn new_session_with_compaction(keep_recent: usize) -> AgentSession {
+        let new = NewAgentSession::builder()
+            .agent_id(AgentId::new())
+            .model_settings(ModelSettings {
+                model: "test-model".into(),
+                max_tokens: 1024,
+            })
+            .compaction_config(CompactionConfig {
+                enabled: true,
+                token_threshold_fraction: 0.0, // always over threshold
+                context_window_tokens: 100,
+                keep_recent_tool_results: keep_recent,
+                cache_ttl_seconds: 0, // cache always cold
+            })
+            .system_blocks(vec![SystemBlock::Text {
+                text: "You are helpful.".into(),
+            }])
+            .tool_defs(vec![ToolDefinition {
+                name: "get_weather".into(),
+                description: Some("Get weather".into()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }])
+            .build()
+            .expect("NewAgentSession build");
+        AgentSession::try_from_events(new.into_events()).expect("hydrate")
+    }
+
+    /// Helper: drive session through a complete tool-use turn (user → prompt →
+    /// assistant tool_use → tool_results → prompt → assistant stop).
+    ///
+    /// Always uses the current main thread — handles thread switches from compaction.
+    fn drive_tool_turn(session: &mut AgentSession, tool_result_content: &str) {
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(session);
+
+        // Assistant responds with tool use
+        let tool_id = format!("tool_{}", uuid::Uuid::new_v4());
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![
+                    AssistantBlock::Text {
+                        text: "Let me check.".into(),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: tool_id.clone(),
+                        name: "get_weather".into(),
+                        input: serde_json::json!({"city": "NYC"}),
+                    },
+                ],
+                StopReason::ToolUse,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        // Add tool results (thread_id stays the same here — no compaction mid-turn)
+        session
+            .add_tool_results(
+                thread_id,
+                vec![ToolResultInput {
+                    tool_use_id: tool_id,
+                    content: tool_result_content.into(),
+                    is_error: false,
+                }],
+            )
+            .unwrap();
+
+        // Get prompt for tool results turn — this may trigger compaction and
+        // switch to a new thread, so re-read current_main_thread after.
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(session);
+
+        let thread_id = session.current_main_thread.unwrap();
+
+        // Assistant provides final response
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "Done.".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn compaction_disabled_does_not_compact() {
+        let mut session = new_session(); // compaction disabled by default
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let original_thread = session.current_main_thread.unwrap();
+
+        hydrate_threads(&mut session);
+        session
+            .assistant_response_received(
+                original_thread,
+                vec![AssistantBlock::Text { text: "Hi".into() }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Next".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+
+        // Thread should NOT have changed (no compaction)
+        assert_eq!(session.current_main_thread.unwrap(), original_thread);
+    }
+
+    #[test]
+    fn compaction_spawns_new_thread_and_preserves_conversation() {
+        // keep_recent=1: all but the most recent tool result will be masked
+        let mut session = new_session_with_compaction(1);
+
+        // Initial user message + first prompt
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+        let original_thread = session.current_main_thread.unwrap();
+
+        // Drive tool-use turns with large results. Compaction triggers once
+        // there are ≥2 tool results on the current thread (keep_recent=1).
+        // We check EVERY next_prompt call (including inside the tool-use flow).
+        let large_content = "x".repeat(500);
+        let mut compacted_prompt = None;
+
+        let check_prompt = |p: &Prompt, cp: &mut Option<Prompt>| {
+            if p.compaction.is_some() && cp.is_none() {
+                *cp = Some(p.clone());
+            }
+        };
+
+        for i in 0..5 {
+            // User input → prompt (may trigger compaction)
+            session
+                .add_user_input(TargetThread::Main, user_source(), format!("Turn {i}"))
+                .unwrap();
+            let prompt = session.next_prompt(TargetThread::Main).unwrap();
+            hydrate_threads(&mut session);
+            check_prompt(&prompt, &mut compacted_prompt);
+
+            // Assistant tool use
+            let thread_id = session.current_main_thread.unwrap();
+            let tool_id = format!("tool_{i}");
+            session
+                .assistant_response_received(
+                    thread_id,
+                    vec![
+                        AssistantBlock::Text {
+                            text: "Let me check.".into(),
+                        },
+                        AssistantBlock::ToolUse {
+                            id: tool_id.clone(),
+                            name: "get_weather".into(),
+                            input: serde_json::json!({"city": "NYC"}),
+                        },
+                    ],
+                    StopReason::ToolUse,
+                    None,
+                    dummy_metadata(),
+                )
+                .unwrap();
+
+            // Tool results
+            session
+                .add_tool_results(
+                    thread_id,
+                    vec![ToolResultInput {
+                        tool_use_id: tool_id,
+                        content: large_content.clone(),
+                        is_error: false,
+                    }],
+                )
+                .unwrap();
+
+            // Prompt for tool results turn (may trigger compaction)
+            let prompt = session.next_prompt(TargetThread::Main).unwrap();
+            hydrate_threads(&mut session);
+            check_prompt(&prompt, &mut compacted_prompt);
+
+            // Final assistant response
+            let thread_id = session.current_main_thread.unwrap();
+            session
+                .assistant_response_received(
+                    thread_id,
+                    vec![AssistantBlock::Text {
+                        text: "Done.".into(),
+                    }],
+                    StopReason::Stop,
+                    None,
+                    dummy_metadata(),
+                )
+                .unwrap();
+        }
+
+        // Compaction must have fired at least once
+        let prompt = compacted_prompt.expect("compaction should have fired during tool turns");
+
+        // Should have switched to a new thread
+        let new_thread = session.current_main_thread.unwrap();
+        assert_ne!(new_thread, original_thread);
+
+        // Prompt should have compaction metadata
+        let meta = prompt.compaction.unwrap();
+        assert!(meta.tool_results_masked > 0);
+        // follows_from should not reference the final thread
+        assert_ne!(meta.follows_from, new_thread);
+
+        // Prompt should still have the conversation
+        assert!(!prompt.messages.is_empty());
+    }
+
+    #[test]
+    fn compaction_event_is_recorded() {
+        let mut session = new_session_with_compaction(1);
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let large_content = "x".repeat(500);
+        for i in 0..3 {
+            session
+                .add_user_input(TargetThread::Main, user_source(), format!("Turn {i}"))
+                .unwrap();
+            let _ = session.next_prompt(TargetThread::Main).unwrap();
+            hydrate_threads(&mut session);
+            drive_tool_turn(&mut session, &large_content);
+        }
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "What next?".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+
+        // Should have a CompactionApplied event
+        let compaction_events: Vec<_> = session
+            .events
+            .iter_all()
+            .filter(|e| matches!(e, AgentSessionEvent::CompactionApplied { .. }))
+            .collect();
+        assert!(
+            !compaction_events.is_empty(),
+            "expected CompactionApplied event"
+        );
     }
 }

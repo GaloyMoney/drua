@@ -9,6 +9,16 @@ pub enum TargetThread {
     Id(SessionThreadId),
 }
 
+/// Metadata attached to a prompt built from a compacted thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionMetadata {
+    pub follows_from: SessionThreadId,
+    pub tool_results_masked: usize,
+    pub thinking_blocks_cleared: usize,
+    pub sandbox_notifications_stripped: usize,
+    pub estimated_tokens_saved: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
     pub target_thread: TargetThread,
@@ -19,6 +29,8 @@ pub struct Prompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDefinition>,
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
