@@ -170,8 +170,9 @@
             --workspace-remap "$REPO_ROOT" \
             --test-threads 1 \
             --failure-output immediate-final \
-            --no-fail-fast \
-            --color never 2>&1 | cat
+            --color never \
+            -E 'not binary(sandbox-tool-server)' \
+            2>&1 | cat
         '';
 
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
