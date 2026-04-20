@@ -75,6 +75,7 @@ fn plan_tool_result_masking<'a>(
     // block_idx increments for ALL events (global), but we only collect results
     // from events belonging to the current thread.
     let mut all_results: Vec<(MessageBlockIndex, usize, &ToolResultInput)> = Vec::new();
+    let mut already_masked: HashSet<MessageBlockIndex> = HashSet::new();
     let mut block_idx = 0usize;
 
     for (event_idx, event) in events.enumerate() {
@@ -96,6 +97,9 @@ fn plan_tool_result_masking<'a>(
                 }
             }
             AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                for masked in results {
+                    already_masked.insert(masked.original_index);
+                }
                 block_idx += results.len();
             }
             _ => {}
@@ -113,7 +117,12 @@ fn plan_tool_result_masking<'a>(
     let mut tokens_saved = 0u64;
 
     for (idx, event_idx, result) in to_mask {
-        // Skip results that are already tiny (previously masked)
+        // Skip results already masked by a previous compaction
+        if already_masked.contains(idx) {
+            continue;
+        }
+
+        // Skip results that are already tiny
         let content_len = result.content.len();
         if content_len <= MASK_PLACEHOLDER.len() + 50 {
             continue;
