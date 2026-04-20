@@ -81,6 +81,7 @@ pub struct ScreenState {
     // Chat
     pub chat_view: ChatViewState,
     pub chat_input: String,
+    pub input_cursor: usize,
 
     // Create workspace modal
     pub mode: Mode,
@@ -109,6 +110,7 @@ impl ScreenState {
 
             chat_view: ChatViewState::default(),
             chat_input: String::new(),
+            input_cursor: 0,
 
             mode: Mode::default(),
             input_name: String::new(),
@@ -199,6 +201,100 @@ impl ScreenState {
         };
     }
 
+    pub fn focus_left(&mut self) {
+        self.focus = match self.focus {
+            Focus::Sidebar => Focus::Agents,
+            Focus::Chat => Focus::Sidebar,
+            Focus::Agents => Focus::Chat,
+        };
+    }
+
+    pub fn focus_right(&mut self) {
+        self.focus = match self.focus {
+            Focus::Sidebar => Focus::Chat,
+            Focus::Chat => Focus::Agents,
+            Focus::Agents => Focus::Sidebar,
+        };
+    }
+
+    // ── Cursor-aware chat input helpers ──────────────────────────────
+
+    pub fn input_insert_char(&mut self, c: char) {
+        self.chat_input.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    pub fn input_backspace(&mut self) {
+        if self.input_cursor > 0 {
+            // Find the previous char boundary
+            let prev = self.chat_input[..self.input_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.chat_input.drain(prev..self.input_cursor);
+            self.input_cursor = prev;
+        }
+    }
+
+    /// Ctrl+A — move cursor to start of line.
+    pub fn input_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    /// Ctrl+E — move cursor to end of line.
+    pub fn input_end(&mut self) {
+        self.input_cursor = self.chat_input.len();
+    }
+
+    /// Ctrl+U — delete from cursor to start of line.
+    pub fn input_kill_to_start(&mut self) {
+        self.chat_input.drain(..self.input_cursor);
+        self.input_cursor = 0;
+    }
+
+    /// Ctrl+W — delete the word before the cursor.
+    pub fn input_kill_word(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let before = &self.chat_input[..self.input_cursor];
+        // Skip trailing whitespace, then skip non-whitespace
+        let end = before.len();
+        let after_spaces = before.trim_end().len();
+        let word_start = before[..after_spaces]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.chat_input.drain(word_start..end);
+        self.input_cursor = word_start;
+    }
+
+    pub fn input_move_left(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor = self.chat_input[..self.input_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn input_move_right(&mut self) {
+        if self.input_cursor < self.chat_input.len() {
+            self.input_cursor = self.chat_input[self.input_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.input_cursor + i)
+                .unwrap_or(self.chat_input.len());
+        }
+    }
+
+    pub fn input_clear(&mut self) {
+        self.chat_input.clear();
+        self.input_cursor = 0;
+    }
+
     fn sync_lead_and_clear_chat(&mut self) {
         self.selected_lead_id = self
             .selected_workspace()
@@ -206,7 +302,7 @@ impl ScreenState {
             .map(|l| l.id.clone());
         self.agent_cursor = 0;
         self.chat_view.assistant.clear();
-        self.chat_input.clear();
+        self.input_clear();
         self.chat_view.reset_scroll();
     }
 }

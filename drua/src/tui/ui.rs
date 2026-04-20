@@ -297,12 +297,12 @@ fn draw_chat_input(frame: &mut Frame, state: &ScreenState, area: Rect) {
         Color::Cyan
     };
 
-    let cursor = if state.focus == Focus::Chat {
-        "▎"
+    let display = if state.focus == Focus::Chat {
+        let (before, after) = state.chat_input.split_at(state.input_cursor);
+        format!("{before}▎{after}")
     } else {
-        ""
+        state.chat_input.clone()
     };
-    let display = format!("{}{cursor}", state.chat_input);
 
     let paragraph = Paragraph::new(display).block(
         Block::default()

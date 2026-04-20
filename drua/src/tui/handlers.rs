@@ -13,8 +13,25 @@ pub enum Action {
 
 /// Top-level key dispatcher — routes to mode/focus-specific handlers.
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    if ctrl && key.code == KeyCode::Char('c') {
         return Action::Quit;
+    }
+
+    // Ctrl+H / Ctrl+L — focus left / right (global, like command-center)
+    if ctrl {
+        match key.code {
+            KeyCode::Char('h') => {
+                state.focus_left();
+                return Action::None;
+            }
+            KeyCode::Char('l') => {
+                state.focus_right();
+                return Action::None;
+            }
+            _ => {}
+        }
     }
 
     match state.mode {
@@ -101,10 +118,6 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             }
             send_chat_to_selected_agent(state, input)
         }
-        KeyCode::Backspace => {
-            state.chat_input.pop();
-            Action::None
-        }
         KeyCode::Up => {
             state.chat_view.scroll_up();
             Action::None
@@ -113,11 +126,31 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.chat_view.scroll_down();
             Action::None
         }
-        KeyCode::Char(c) => {
-            state.chat_input.push(c);
+        _ => {
+            handle_input_editing(state, &key);
             Action::None
         }
-        _ => Action::None,
+    }
+}
+
+// ── Shared input editing ────────────────────────────────────────────
+
+/// Handle common text-editing key events on the chat input.
+/// Follows the same readline-style shortcuts as command-center.
+fn handle_input_editing(state: &mut ScreenState, key: &KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('u') if ctrl => state.input_kill_to_start(),
+        KeyCode::Char('w') if ctrl => state.input_kill_word(),
+        KeyCode::Char('a') if ctrl => state.input_home(),
+        KeyCode::Char('e') if ctrl => state.input_end(),
+        KeyCode::Char(c) if !ctrl => state.input_insert_char(c),
+        KeyCode::Backspace => state.input_backspace(),
+        KeyCode::Left => state.input_move_left(),
+        KeyCode::Right => state.input_move_right(),
+        KeyCode::Home => state.input_home(),
+        KeyCode::End => state.input_end(),
+        _ => {}
     }
 }
 
@@ -157,7 +190,7 @@ fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action
     match state.selected_agent_id() {
         Some(agent_id) => {
             state.chat_view.assistant.add_user_message(&input);
-            state.chat_input.clear();
+            state.input_clear();
             state.chat_view.reset_scroll();
             Action::SendChat {
                 agent_id,
