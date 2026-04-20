@@ -45,7 +45,8 @@ pub(super) fn event_belongs_to_thread(
         AgentSessionEvent::Initialized { .. }
         | AgentSessionEvent::ToolDefsUpdated { .. }
         | AgentSessionEvent::SystemBlocksUpdated { .. }
-        | AgentSessionEvent::ThreadStarted { .. } => false,
+        | AgentSessionEvent::ThreadStarted { .. }
+        | AgentSessionEvent::ToolResultsMasked { .. } => false,
     }
 }
 
@@ -137,26 +138,39 @@ pub(super) fn maybe_prune<'a>(
     );
 
     // Build session-level events
+    let masked_indexes: Vec<MessageBlockIndex> = plan
+        .masked_tool_results
+        .iter()
+        .map(|m| m.original_index)
+        .collect();
     let cleared_thinking: Vec<MessageBlockIndex> = plan.cleared_thinking.into_iter().collect();
     let stripped_user_messages: Vec<MessageBlockIndex> =
         plan.stripped_user_messages.into_iter().collect();
 
-    let session_events = vec![
-        AgentSessionEvent::CompactionApplied {
-            from_thread_id: current_thread_id,
-            new_thread_id,
-            masked_tool_results: plan.masked_tool_results,
-            cleared_thinking,
-            stripped_user_messages,
-            estimated_tokens_saved: plan.estimated_tokens_saved,
+    let mut session_events = Vec::new();
+
+    // Emit masked tool results into the main event stream first so they
+    // participate in block indexing and can be shared across threads.
+    if !plan.masked_tool_results.is_empty() {
+        session_events.push(AgentSessionEvent::ToolResultsMasked {
+            results: plan.masked_tool_results,
+        });
+    }
+
+    session_events.push(AgentSessionEvent::CompactionApplied {
+        from_thread_id: current_thread_id,
+        new_thread_id,
+        masked_tool_results: masked_indexes,
+        cleared_thinking,
+        stripped_user_messages,
+        estimated_tokens_saved: plan.estimated_tokens_saved,
+    });
+    session_events.push(AgentSessionEvent::ThreadStarted {
+        thread_id: new_thread_id,
+        start_reason: ThreadStartReason::Compaction {
+            from_thread: current_thread_id,
         },
-        AgentSessionEvent::ThreadStarted {
-            thread_id: new_thread_id,
-            start_reason: ThreadStartReason::Compaction {
-                from_thread: current_thread_id,
-            },
-        },
-    ];
+    });
 
     Some(CompactionResult {
         events: session_events,

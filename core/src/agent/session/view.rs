@@ -283,11 +283,8 @@ impl PromptDefinition {
                         all_blocks.push(BlockContent::ToolResult(result.clone()));
                     }
                 }
-                AgentSessionEvent::CompactionApplied {
-                    masked_tool_results,
-                    ..
-                } => {
-                    for masked in masked_tool_results {
+                AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                    for masked in results {
                         all_blocks.push(BlockContent::ToolResult(masked.replacement.clone()));
                     }
                 }

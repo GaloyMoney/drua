@@ -95,11 +95,8 @@ fn plan_tool_result_masking<'a>(
                     block_idx += 1;
                 }
             }
-            AgentSessionEvent::CompactionApplied {
-                masked_tool_results,
-                ..
-            } => {
-                block_idx += masked_tool_results.len();
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                block_idx += results.len();
             }
             _ => {}
         }
@@ -188,11 +185,8 @@ fn plan_thinking_clearing<'a>(
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
                 block_idx += results.len();
             }
-            AgentSessionEvent::CompactionApplied {
-                masked_tool_results,
-                ..
-            } => {
-                block_idx += masked_tool_results.len();
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                block_idx += results.len();
             }
             _ => {}
         }
@@ -266,11 +260,8 @@ fn plan_sandbox_stripping<'a>(
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
                 block_idx += results.len();
             }
-            AgentSessionEvent::CompactionApplied {
-                masked_tool_results,
-                ..
-            } => {
-                block_idx += masked_tool_results.len();
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                block_idx += results.len();
             }
             _ => {}
         }

@@ -45,8 +45,7 @@ impl CompactionConfig {
             return CompactionAction::None;
         }
 
-        let threshold =
-            (self.context_window_tokens as f64 * self.token_threshold_fraction) as u64;
+        let threshold = (self.context_window_tokens as f64 * self.token_threshold_fraction) as u64;
         let cache_ttl = Duration::from_secs(self.cache_ttl_seconds);
         let cache_cold = time_since_last_turn > cache_ttl;
 

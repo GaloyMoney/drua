@@ -70,10 +70,7 @@ fn estimate_event_tokens(event: &AgentSessionEvent) -> u64 {
             .iter()
             .map(|r| chars_to_tokens(r.content.len()))
             .sum(),
-        AgentSessionEvent::CompactionApplied {
-            masked_tool_results,
-            ..
-        } => masked_tool_results
+        AgentSessionEvent::ToolResultsMasked { results, .. } => results
             .iter()
             .map(|m| chars_to_tokens(m.replacement.content.len()))
             .sum(),

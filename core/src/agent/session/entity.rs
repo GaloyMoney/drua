@@ -77,10 +77,15 @@ pub enum AgentSessionEvent {
         thread_id: SessionThreadId,
         results: Vec<ToolResultInput>,
     },
+    /// Masked tool results pushed into the main event stream so they
+    /// participate in block indexing and can be shared across threads.
+    ToolResultsMasked {
+        results: Vec<MaskedToolResult>,
+    },
     CompactionApplied {
         from_thread_id: SessionThreadId,
         new_thread_id: SessionThreadId,
-        masked_tool_results: Vec<MaskedToolResult>,
+        masked_tool_results: Vec<MessageBlockIndex>,
         cleared_thinking: Vec<MessageBlockIndex>,
         stripped_user_messages: Vec<MessageBlockIndex>,
         estimated_tokens_saved: u64,
@@ -216,10 +221,7 @@ impl AgentSession {
             | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
             AgentSessionEvent::AssistantResponseReceived { content, .. } => acc + content.len(),
             AgentSessionEvent::ToolResultsAdded { results, .. } => acc + results.len(),
-            AgentSessionEvent::CompactionApplied {
-                masked_tool_results,
-                ..
-            } => acc + masked_tool_results.len(),
+            AgentSessionEvent::ToolResultsMasked { results, .. } => acc + results.len(),
             _ => acc,
         });
         let mut block_counter = total_blocks;
@@ -250,11 +252,8 @@ impl AgentSession {
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {
                     block_counter -= results.len();
                 }
-                AgentSessionEvent::CompactionApplied {
-                    masked_tool_results,
-                    ..
-                } => {
-                    block_counter -= masked_tool_results.len();
+                AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                    block_counter -= results.len();
                 }
                 _ => {}
             }
@@ -526,11 +525,8 @@ impl AgentSession {
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {
                     materialized.push_tool_results(results.len());
                 }
-                AgentSessionEvent::CompactionApplied {
-                    masked_tool_results,
-                    ..
-                } => {
-                    materialized.push_tool_results(masked_tool_results.len());
+                AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                    materialized.push_tool_results(results.len());
                 }
                 _ => {}
             }
@@ -568,6 +564,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::SystemBlocksUpdated { .. } => {}
                 AgentSessionEvent::PromptSent { .. } => {}
                 AgentSessionEvent::ToolResultsAdded { .. } => {}
+                AgentSessionEvent::ToolResultsMasked { .. } => {}
                 AgentSessionEvent::CompactionApplied { .. } => {}
             }
         }
