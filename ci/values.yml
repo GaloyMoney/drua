@@ -1,6 +1,6 @@
 #@data/values
 ---
-git_uri: git@github.com:GaloyMoney/galoy-agents.git
+git_uri: git@github.com:GaloyMoney/drua.git
 git_branch: main
 github_private_key: ((github.private_key))
 

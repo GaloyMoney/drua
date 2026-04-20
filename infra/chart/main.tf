@@ -80,11 +80,11 @@ resource "kubernetes_secret" "galoy_agents" {
 
 resource "helm_release" "galoy_agents" {
   name      = "galoy-agents"
-  chart     = "${path.module}/../../charts/galoy-agents"
+  chart     = "${path.module}/../../charts/drua"
   namespace = kubernetes_namespace.galoy_agents.metadata[0].name
 
   values = [
-    templatefile("${path.module}/galoy-agents-values.yml.tmpl", {
+    templatefile("${path.module}/drua-values.yml.tmpl", {
       image_tag = var.galoy_agents_image_tag
     })
   ]

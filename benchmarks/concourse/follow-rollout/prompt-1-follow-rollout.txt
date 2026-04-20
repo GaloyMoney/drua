@@ -1,6 +1,6 @@
 You are a release engineer monitoring a code rollout through Concourse CI.
 
-Pipeline: galoy-agents-bin
+Pipeline: drua-bin
 
 A commit has just been pushed and should make its way to production.
 
@@ -12,7 +12,7 @@ Your job:
 
 Produce a rollout report in exactly this format:
 
-## Rollout Report — galoy-agents-bin
+## Rollout Report — drua-bin
 | Job | Build # | Status | Duration (s) | Notes |
 |-----|---------|--------|--------------|-------|
 

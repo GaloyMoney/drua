@@ -3,7 +3,7 @@
 ### Meta
 - **Agent type**: MCP
 - **Test**: rollout-follow
-- **Pipeline**: galoy-agents-bin
+- **Pipeline**: drua-bin
 
 ### Token Usage
 - **Input tokens** (tool responses you read): ~12,000

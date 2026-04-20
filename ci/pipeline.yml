@@ -164,8 +164,8 @@ jobs:
             DIGEST=$(cat edge-image/digest)
             SANDBOX_DIGEST=$(cat sandbox-edge-image/digest)
 
-            cp -r repo/ci/deploy/galoy-agents deployment/tf
-            cp -r repo/charts/galoy-agents deployment/tf/chart
+            cp -r repo/ci/deploy/drua deployment/tf
+            cp -r repo/charts/drua deployment/tf/chart
 
             set +x
             cat <<EOF > deployment/tf/terraform.tfvars
@@ -295,11 +295,11 @@ jobs:
             cp -a repo/. repo-updated/
             cd repo-updated
             nix run ./ci#commit-hash -- "$(pwd)" \
-              charts/galoy-agents/values.yaml \
+              charts/drua/values.yaml \
               "galoyAgents.codeAssistant.indexHash" \
               "$INDEX_HASH"
             nix run ./ci#commit-hash -- "$(pwd)" \
-              charts/galoy-agents/values.yaml \
+              charts/drua/values.yaml \
               "galoyAgents.codeAssistant.embedderHash" \
               "$EMBEDDER_HASH"
   - put: repo-chart-values
@@ -388,7 +388,7 @@ resources:
     - ci/values.yml
     - ci/repipe
     - ci/fragments.lib.yml
-    - charts/galoy-agents/values.yaml
+    - charts/drua/values.yaml
     - code-assistant/labels/*
   webhook_token: ((webhook.secret))
 
@@ -427,7 +427,7 @@ resources:
     branch: #@ data.values.git_branch
     private_key: #@ data.values.github_private_key
     paths:
-    - charts/galoy-agents/
+    - charts/drua/
     - ci/deploy/
 
 - name: cala-repo
