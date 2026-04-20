@@ -8,15 +8,15 @@ use super::{entity::AgentSessionEvent, error::AgentSessionError, message::*};
 // Index types
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SystemBlockIndex(usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolDefinitionIndex(usize);
 
 /// A unified index that increments across all message block types
 /// (user messages, assistant blocks, and tool results).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageBlockIndex(usize);
 
 impl MessageBlockIndex {
@@ -184,6 +184,7 @@ impl<'a> MaterializedSession<'a> {
             system_view,
             tool_definitions_view,
             messages: vec![MessageView::User(initial_user_messages)],
+            compaction: None,
         }
     }
 }
@@ -217,6 +218,8 @@ pub struct PromptDefinition {
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     pub(super) messages: Vec<MessageView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) compaction: Option<CompactionMetadata>,
 }
 
 impl PromptDefinition {
@@ -285,6 +288,14 @@ impl PromptDefinition {
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {
                     for result in results {
                         all_blocks.push(BlockContent::ToolResult(result.clone()));
+                    }
+                }
+                AgentSessionEvent::CompactionApplied {
+                    masked_tool_results,
+                    ..
+                } => {
+                    for masked in masked_tool_results {
+                        all_blocks.push(BlockContent::ToolResult(masked.replacement.clone()));
                     }
                 }
                 _ => {}
@@ -381,6 +392,7 @@ impl PromptDefinition {
             system,
             tools,
             messages: merged,
+            compaction: self.compaction,
         })
     }
 }

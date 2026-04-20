@@ -1,3 +1,4 @@
+mod compaction;
 mod entity;
 pub mod error;
 pub(super) mod message;
