@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
-use crate::tui::state::{AgentItem, ScreenState, WorkspaceItem};
+use crate::tui::state::{AgentItem, SandboxInfo, ScreenState, WorkspaceItem};
 use crate::tui::{handlers, ui};
 
 // ---------------------------------------------------------------------------
@@ -62,10 +62,18 @@ struct WorkspaceNode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AgentNode {
     id: String,
     name: String,
     role: String,
+    attached_sandbox: Option<SandboxAttachmentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SandboxAttachmentNode {
+    name: String,
+    mode: String,
 }
 
 const WORKSPACES_QUERY: &str = r#"
@@ -81,11 +89,13 @@ const WORKSPACES_QUERY: &str = r#"
                         id
                         name
                         role
+                        attachedSandbox { name mode }
                     }
                     agents {
                         id
                         name
                         role
+                        attachedSandbox { name mode }
                     }
                 }
             }
@@ -277,6 +287,18 @@ async fn create_workspace(client: &GraphqlClient, name: &str, description: &str)
     Ok(resp.workspace_create.workspace.name)
 }
 
+fn agent_node_to_item(a: AgentNode) -> AgentItem {
+    AgentItem {
+        id: a.id,
+        name: a.name,
+        role: a.role,
+        sandbox: a.attached_sandbox.map(|s| SandboxInfo {
+            name: s.name,
+            mode: s.mode,
+        }),
+    }
+}
+
 async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> {
     let resp: WorkspacesResponse = client
         .query(WORKSPACES_QUERY, serde_json::json!({}))
@@ -293,20 +315,8 @@ async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> 
                 name: node.name,
                 description: node.description,
                 created_at: node.created_at,
-                lead: node.lead.map(|a| AgentItem {
-                    id: a.id,
-                    name: a.name,
-                    role: a.role,
-                }),
-                agents: node
-                    .agents
-                    .into_iter()
-                    .map(|a| AgentItem {
-                        id: a.id,
-                        name: a.name,
-                        role: a.role,
-                    })
-                    .collect(),
+                lead: node.lead.map(agent_node_to_item),
+                agents: node.agents.into_iter().map(agent_node_to_item).collect(),
             }
         })
         .collect();

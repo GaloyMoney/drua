@@ -10,11 +10,17 @@ pub struct WorkspaceItem {
     pub agents: Vec<AgentItem>,
 }
 
+pub struct SandboxInfo {
+    pub name: String,
+    pub mode: String,
+}
+
 #[allow(dead_code)]
 pub struct AgentItem {
     pub id: String,
     pub name: String,
     pub role: String,
+    pub sandbox: Option<SandboxInfo>,
 }
 
 #[derive(Default, PartialEq, Eq)]

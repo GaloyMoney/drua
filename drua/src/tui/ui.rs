@@ -23,13 +23,20 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
         .constraints([
             Constraint::Length(24),
             Constraint::Min(1),
-            Constraint::Length(22),
+            Constraint::Length(28),
         ])
         .split(main_area);
 
+    // Right column: agents list (top) + agent details (bottom)
+    let right_col = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(panels[2]);
+
     draw_workspace_list(frame, state, panels[0]);
     draw_chat_pane(frame, state, panels[1]);
-    draw_agents_list(frame, state, panels[2]);
+    draw_agents_list(frame, state, right_col[0]);
+    draw_agent_details(frame, state, right_col[1]);
     draw_status_bar(frame, state, status_area);
 
     if state.mode == Mode::CreateWorkspace {
@@ -149,6 +156,73 @@ fn draw_agents_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
+}
+
+fn draw_agent_details(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let border_color = if state.focus == Focus::Agents {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Details ")
+        .border_style(Style::default().fg(border_color));
+
+    let agent = match state.selected_agent() {
+        Some(a) => a,
+        None => {
+            let paragraph = Paragraph::new(Line::from(Span::styled(
+                "No agent selected",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .block(block);
+            frame.render_widget(paragraph, area);
+            return;
+        }
+    };
+
+    let role_label = match agent.role.as_str() {
+        "WORKSPACE_LEAD" => "Workspace Lead",
+        "AGENT" => "Agent",
+        other => other,
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Name:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&agent.name, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Role:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(role_label, Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    if let Some(ref sandbox) = agent.sandbox {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Sandbox",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  name: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&sandbox.name, Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  mode: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&sandbox.mode, Style::default().fg(Color::White)),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_chat_pane(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
