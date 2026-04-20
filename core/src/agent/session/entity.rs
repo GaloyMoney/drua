@@ -8,8 +8,7 @@ use es_entity::*;
 
 use super::{
     compaction, error::AgentSessionError, history, message::*, metadata::*, settings::*, thread::*,
-    view::*,
-    AgentSessionId,
+    view::*, AgentSessionId,
 };
 
 // ============================================================================

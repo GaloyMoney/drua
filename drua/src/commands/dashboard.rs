@@ -183,9 +183,15 @@ struct ChatHistoryMessage {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "__typename")]
 enum ChatHistoryContentBlock {
-    TextContent { text: String },
-    ToolUseContent { name: String },
-    ThinkingContent { text: String },
+    TextContent {
+        text: String,
+    },
+    ToolUseContent {
+        name: String,
+    },
+    ThinkingContent {
+        text: String,
+    },
     ToolResultContent {
         #[serde(rename = "toolUseId")]
         #[allow(dead_code)]

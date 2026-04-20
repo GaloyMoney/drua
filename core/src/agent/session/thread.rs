@@ -202,12 +202,11 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                     follows_from,
                     ..
                 } => {
-                    builder = builder
-                        .id(*id)
-                        .session_id(*session_id)
-                        .start_reason(ThreadStartReason::Compaction {
+                    builder = builder.id(*id).session_id(*session_id).start_reason(
+                        ThreadStartReason::Compaction {
                             from_thread: *follows_from,
-                        });
+                        },
+                    );
                     // Determine turn from last message in compacted history
                     let turn = match messages.last() {
                         Some(MessageView::User(_)) => NextTurn::Assistant,
