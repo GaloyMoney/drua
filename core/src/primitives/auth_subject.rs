@@ -139,6 +139,25 @@ impl AuthSubject {
         })
     }
 
+    /// True when the subject carries an [`AuthScope::Tunnel`] authorizing
+    /// registration of a tunnel connector for `deployment_id`. Session
+    /// `User` subjects bypass this check (they already have effectively
+    /// all scopes); bearer-authenticated subjects must hold the exact
+    /// scope — a token scoped to `galoy-staging` cannot register as
+    /// `galoy-production`.
+    pub fn can_register_tunnel(&self, deployment_id: &str) -> bool {
+        // Short-circuit for session-authenticated humans — session auth
+        // already implies full scopes (see `has_scope`). Also avoids a
+        // `String` allocation on every check when the Tunnel scope is
+        // unused.
+        if matches!(self, AuthSubject::User(_)) {
+            return true;
+        }
+        self.scopes()
+            .iter()
+            .any(|s| matches!(s, AuthScope::Tunnel(id) if id == deployment_id))
+    }
+
     /// Convert the subject into the principal that should be recorded as the
     /// originator of a message. Panics for `Anonymous` (callers must
     /// authenticate before sending messages).
@@ -155,5 +174,80 @@ impl AuthSubject {
             },
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{AgentId, McpCredsId, UserId};
+    use super::*;
+
+    fn a_user_id() -> UserId {
+        UserId::from(uuid::Uuid::new_v4())
+    }
+
+    fn exported_agent_with(scopes: Vec<AuthScope>) -> AuthSubject {
+        AuthSubject::ExportedAgent(a_user_id(), McpCredsId::from(uuid::Uuid::new_v4()), scopes)
+    }
+
+    fn agent_with(scopes: Vec<AuthScope>) -> AuthSubject {
+        AuthSubject::Agent(
+            WorkspaceId::from(uuid::Uuid::new_v4()),
+            AgentId::from(uuid::Uuid::new_v4()),
+            scopes,
+        )
+    }
+
+    #[test]
+    fn can_register_tunnel_matches_scoped_deployment_id() {
+        let subject = exported_agent_with(vec![AuthScope::Tunnel("galoy-staging".to_owned())]);
+        assert!(subject.can_register_tunnel("galoy-staging"));
+    }
+
+    /// The core auth guarantee: a token scoped to one deployment cannot
+    /// register as another.
+    #[test]
+    fn can_register_tunnel_rejects_different_deployment_id() {
+        let subject = exported_agent_with(vec![AuthScope::Tunnel("galoy-staging".to_owned())]);
+        assert!(!subject.can_register_tunnel("galoy-production"));
+    }
+
+    /// A token without any Tunnel scope cannot register as anything —
+    /// even for a deployment_id that happens to match a Raw scope string.
+    #[test]
+    fn can_register_tunnel_rejects_no_tunnel_scope() {
+        let subject = exported_agent_with(vec![AuthScope::Admin]);
+        assert!(!subject.can_register_tunnel("galoy-staging"));
+
+        let subject_raw = exported_agent_with(vec![AuthScope::Raw("galoy-staging".to_owned())]);
+        assert!(!subject_raw.can_register_tunnel("galoy-staging"));
+    }
+
+    /// Session `User` subjects bypass the check (session auth implies
+    /// all scopes everywhere in the codebase).
+    #[test]
+    fn can_register_tunnel_user_subject_bypasses() {
+        let subject = AuthSubject::User(a_user_id());
+        assert!(subject.can_register_tunnel("anything"));
+        assert!(subject.can_register_tunnel("galoy-production"));
+    }
+
+    /// Anonymous and scope-free Agent subjects cannot register tunnels.
+    #[test]
+    fn can_register_tunnel_rejects_anonymous_and_scopeless() {
+        assert!(!AuthSubject::Anonymous.can_register_tunnel("galoy-staging"));
+        assert!(!agent_with(vec![]).can_register_tunnel("galoy-staging"));
+    }
+
+    /// A subject can hold multiple Tunnel scopes and match any of them.
+    #[test]
+    fn can_register_tunnel_multiple_scopes() {
+        let subject = exported_agent_with(vec![
+            AuthScope::Tunnel("galoy-staging".to_owned()),
+            AuthScope::Tunnel("galoy-qa".to_owned()),
+        ]);
+        assert!(subject.can_register_tunnel("galoy-staging"));
+        assert!(subject.can_register_tunnel("galoy-qa"));
+        assert!(!subject.can_register_tunnel("galoy-production"));
     }
 }

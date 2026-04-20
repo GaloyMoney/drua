@@ -168,6 +168,12 @@ pub struct CreateMcpCredsForm {
     name: String,
     #[serde(default)]
     admin: Option<String>,
+    /// When non-empty, the credential receives `AuthScope::Tunnel(<id>)`
+    /// — authorizes the holder to register a tunnel connector for that
+    /// exact `deployment_id` (and only that one). Leave empty for
+    /// regular user tokens.
+    #[serde(default)]
+    tunnel_deployment_id: Option<String>,
 }
 
 fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
@@ -202,11 +208,20 @@ async fn create_mcp_creds(
 
     let (raw_token, token_hash) = generate_token();
 
-    let scopes = if form.admin.as_deref() == Some("true") {
-        vec![domain::primitives::AuthScope::Admin]
-    } else {
-        vec![]
-    };
+    let mut scopes: Vec<domain::primitives::AuthScope> = Vec::new();
+    if form.admin.as_deref() == Some("true") {
+        scopes.push(domain::primitives::AuthScope::Admin);
+    }
+    if let Some(deployment_id) = form
+        .tunnel_deployment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        scopes.push(domain::primitives::AuthScope::Tunnel(
+            deployment_id.to_owned(),
+        ));
+    }
 
     match state
         .app

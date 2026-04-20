@@ -53,6 +53,11 @@ pub struct App {
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
+    /// Registry of currently-live tunnel connectors, keyed by
+    /// `deployment_id`. Used by the `/tunnel/ws` handler to evict a
+    /// previous tunnel when a new connector registers the same
+    /// `deployment_id`. See [`tunnel::TunnelRegistry`].
+    tunnels: Arc<tunnel::TunnelRegistry>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
     _prompt_executor: Arc<PromptExecutor>,
@@ -208,6 +213,7 @@ impl App {
             skills,
             sandboxes,
             github_app,
+            tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             _prompt_executor: prompt_executor,
         })
     }
@@ -254,6 +260,10 @@ impl App {
 
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
         self.github_app.as_deref()
+    }
+
+    pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
+        &self.tunnels
     }
 }
 

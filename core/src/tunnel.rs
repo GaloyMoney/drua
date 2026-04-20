@@ -138,6 +138,103 @@ impl TunnelHandle {
 }
 
 // ---------------------------------------------------------------------------
+// TunnelRegistry — enforces one live tunnel per deployment_id
+// ---------------------------------------------------------------------------
+
+/// Per-live-tunnel entry. The `close_tx` is how the registry signals the
+/// old WS loop to shut down when a new connector takes over the same
+/// `deployment_id`. The `session_id` lets an evicted loop avoid
+/// accidentally removing the *new* entry during its own cleanup.
+struct RegisteredTunnel {
+    session_id: uuid::Uuid,
+    close_tx: mpsc::Sender<()>,
+}
+
+/// Maps `deployment_id` → the currently live tunnel session for that
+/// deployment. At most one entry per `deployment_id` at any time — a
+/// new Register for an already-registered id evicts the previous
+/// connection (closes its WS with a `POLICY` close frame).
+///
+/// This closes gap #2 from drua#127's original "Known security gaps"
+/// list: without the registry, two connectors holding the same
+/// `deployment_id` would race-fight for tool call results via the
+/// shared `TunnelHandle::resolve` pending map. With the registry,
+/// the second connector's registration cleanly replaces the first.
+#[derive(Clone)]
+pub struct TunnelRegistry {
+    inner: Arc<std::sync::Mutex<HashMap<String, RegisteredTunnel>>>,
+}
+
+impl TunnelRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Claim `deployment_id` for a new session. If an entry already
+    /// exists, its `close_tx` is taken out, the new one inserted under
+    /// the lock, and the old `close_tx` signaled *after* the lock is
+    /// released (await outside the critical section). Returns `true` if
+    /// an existing tunnel was evicted.
+    pub async fn claim(
+        &self,
+        deployment_id: &str,
+        session_id: uuid::Uuid,
+        close_tx: mpsc::Sender<()>,
+    ) -> bool {
+        let evicted = {
+            let mut map = self.inner.lock().expect("tunnel registry lock poisoned");
+            map.insert(
+                deployment_id.to_string(),
+                RegisteredTunnel {
+                    session_id,
+                    close_tx,
+                },
+            )
+        };
+        if let Some(old) = evicted {
+            // Channel capacity is 1; ignore send errors — if the receiver
+            // already dropped, the old loop is already on its way out.
+            let _ = old.close_tx.send(()).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove the entry for `deployment_id` only if it still belongs to
+    /// `session_id`. Called during cleanup so an evicted loop doesn't
+    /// accidentally remove the *new* tunnel's registry entry.
+    pub fn release(&self, deployment_id: &str, session_id: uuid::Uuid) {
+        let mut map = self.inner.lock().expect("tunnel registry lock poisoned");
+        if let Some(entry) = map.get(deployment_id) {
+            if entry.session_id == session_id {
+                map.remove(deployment_id);
+            }
+        }
+    }
+
+    /// Number of currently-registered deployments. Test/observability helper.
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("tunnel registry lock poisoned")
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for TunnelRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TunnelToolSet — SearchableToolSet backed by a tunnel connection
 // ---------------------------------------------------------------------------
 
@@ -220,5 +317,109 @@ impl SearchableToolSet for TunnelToolSet {
         self.handle
             .call_tool(&self.upstream_name, tool_name, arguments)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh registry starts empty.
+    #[tokio::test]
+    async fn registry_starts_empty() {
+        let registry = TunnelRegistry::new();
+        assert!(registry.is_empty());
+    }
+
+    /// First claim for a deployment_id succeeds without eviction.
+    #[tokio::test]
+    async fn claim_first_does_not_evict() {
+        let registry = TunnelRegistry::new();
+        let (tx, _rx) = mpsc::channel::<()>(1);
+        let evicted = registry
+            .claim("galoy-staging", uuid::Uuid::new_v4(), tx)
+            .await;
+        assert!(!evicted);
+        assert_eq!(registry.len(), 1);
+    }
+
+    /// A second claim for the same deployment_id evicts the first.
+    /// The first session's `close_rx` receives the eviction signal.
+    #[tokio::test]
+    async fn second_claim_evicts_first() {
+        let registry = TunnelRegistry::new();
+
+        let (tx_a, mut rx_a) = mpsc::channel::<()>(1);
+        registry
+            .claim("galoy-staging", uuid::Uuid::new_v4(), tx_a)
+            .await;
+
+        let (tx_b, _rx_b) = mpsc::channel::<()>(1);
+        let evicted = registry
+            .claim("galoy-staging", uuid::Uuid::new_v4(), tx_b)
+            .await;
+
+        assert!(evicted);
+        // Still one entry — the new one replaced the old.
+        assert_eq!(registry.len(), 1);
+        // The evicted session received the close signal.
+        assert!(rx_a.try_recv().is_ok());
+    }
+
+    /// Different deployment_ids coexist without eviction.
+    #[tokio::test]
+    async fn distinct_deployments_coexist() {
+        let registry = TunnelRegistry::new();
+        let (tx_a, _rx_a) = mpsc::channel::<()>(1);
+        let (tx_b, _rx_b) = mpsc::channel::<()>(1);
+
+        assert!(
+            !registry
+                .claim("galoy-staging", uuid::Uuid::new_v4(), tx_a)
+                .await
+        );
+        assert!(
+            !registry
+                .claim("galoy-production", uuid::Uuid::new_v4(), tx_b)
+                .await
+        );
+        assert_eq!(registry.len(), 2);
+    }
+
+    /// `release` with the current session_id removes the entry.
+    #[tokio::test]
+    async fn release_removes_current_entry() {
+        let registry = TunnelRegistry::new();
+        let session = uuid::Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel::<()>(1);
+        registry.claim("galoy-staging", session, tx).await;
+
+        registry.release("galoy-staging", session);
+        assert!(registry.is_empty());
+    }
+
+    /// `release` with a *stale* session_id (e.g. an evicted loop cleaning
+    /// up after the new loop has taken over) must not remove the new
+    /// entry. This is the invariant that keeps eviction safe.
+    #[tokio::test]
+    async fn release_with_stale_session_id_is_noop() {
+        let registry = TunnelRegistry::new();
+
+        let stale_session = uuid::Uuid::new_v4();
+        let (tx_a, _rx_a) = mpsc::channel::<()>(1);
+        registry.claim("galoy-staging", stale_session, tx_a).await;
+
+        let fresh_session = uuid::Uuid::new_v4();
+        let (tx_b, _rx_b) = mpsc::channel::<()>(1);
+        registry.claim("galoy-staging", fresh_session, tx_b).await;
+
+        // Evicted loop calls release with its own (now stale) session id.
+        // Should not affect the fresh entry.
+        registry.release("galoy-staging", stale_session);
+        assert_eq!(registry.len(), 1);
+
+        // Fresh session can still release itself.
+        registry.release("galoy-staging", fresh_session);
+        assert!(registry.is_empty());
     }
 }

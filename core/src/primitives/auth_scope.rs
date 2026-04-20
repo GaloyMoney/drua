@@ -28,6 +28,11 @@ pub enum AuthScope {
     /// Read-only use access — the agent may invoke sandbox tools that
     /// don't modify state. Granted on a `Read` attach.
     SandboxUseReadOnly(SandboxId),
+    /// Authorizes the holder to register a tunnel connector for a specific
+    /// `deployment_id`. The `/tunnel/ws` handler matches this scope against
+    /// the `deployment_id` in the connector's Register frame; a token scoped
+    /// to `Tunnel("galoy-staging")` cannot register as `galoy-production`.
+    Tunnel(String),
     /// Catch-all for scope strings that don't (yet) have a dedicated variant.
     Raw(String),
 }
@@ -43,6 +48,7 @@ impl fmt::Display for AuthScope {
             AuthScope::WorkspaceAdmin(id) => write!(f, "ws:{id}:admin"),
             AuthScope::SandboxUseAll(id) => write!(f, "sandbox:{id}:use_all"),
             AuthScope::SandboxUseReadOnly(id) => write!(f, "sandbox:{id}:use_read_only"),
+            AuthScope::Tunnel(id) => write!(f, "tunnel:{id}"),
             AuthScope::Raw(s) => f.write_str(s),
         }
     }
@@ -75,6 +81,13 @@ impl FromStr for AuthScope {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::SandboxUseReadOnly(SandboxId::from(uuid)));
                 }
+            }
+        }
+
+        // Parse "tunnel:{deployment_id}"
+        if let Some(deployment_id) = s.strip_prefix("tunnel:") {
+            if !deployment_id.is_empty() {
+                return Ok(AuthScope::Tunnel(deployment_id.to_owned()));
             }
         }
 
@@ -140,6 +153,7 @@ mod tests {
             AuthScope::WorkspaceAdmin(ws_id),
             AuthScope::SandboxUseAll(sb_id),
             AuthScope::SandboxUseReadOnly(sb_id),
+            AuthScope::Tunnel("galoy-staging".to_owned()),
             AuthScope::Raw("custom:thing".to_owned()),
         ];
 
@@ -210,6 +224,24 @@ mod tests {
     fn from_str_unknown_falls_back_to_raw() {
         let scope: AuthScope = "read".parse().unwrap();
         assert_eq!(scope, AuthScope::Raw("read".to_owned()));
+    }
+
+    #[test]
+    fn tunnel_round_trip() {
+        let scope = AuthScope::Tunnel("galoy-staging".to_owned());
+        assert_eq!(scope.to_string(), "tunnel:galoy-staging");
+        let parsed: AuthScope = "tunnel:galoy-staging".parse().unwrap();
+        assert_eq!(parsed, scope);
+    }
+
+    #[test]
+    fn tunnel_empty_deployment_id_falls_back_to_raw() {
+        // `tunnel:` with no id must not silently become a Tunnel scope —
+        // guards against a malformed token accidentally matching any
+        // deployment. It falls through to Raw, which never matches a
+        // `Tunnel(X)` check via `has_scope`.
+        let scope: AuthScope = "tunnel:".parse().unwrap();
+        assert_eq!(scope, AuthScope::Raw("tunnel:".to_owned()));
     }
 
     /// Eq-based comparison works across all variants.

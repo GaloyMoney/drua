@@ -43,13 +43,36 @@ pub async fn tunnel_ws_handler(
     ws.on_upgrade(move |socket| handle_tunnel(socket, state, auth))
 }
 
-/// Main tunnel lifecycle: registration → relay loop → cleanup.
-async fn handle_tunnel(mut socket: WebSocket, state: AppState, _auth: AuthSubject) {
+/// Main tunnel lifecycle: registration → scope check → relay loop → cleanup.
+async fn handle_tunnel(mut socket: WebSocket, state: AppState, auth: AuthSubject) {
     // ── 1. Wait for registration ──────────────────────────────────────────
     let (deployment_id, toolset_registrations) = match read_registration(&mut socket).await {
         Some(r) => r,
         None => return,
     };
+
+    // ── 1b. Scope check ───────────────────────────────────────────────────
+    // The caller's bearer token must carry `AuthScope::Tunnel(deployment_id)`
+    // (session `User` subjects bypass — they already have all scopes).
+    // This stops a credential scoped to one deployment from registering
+    // as another: a `Tunnel("galoy-staging")`-scoped token cannot claim
+    // `galoy-production`.
+    if !auth.can_register_tunnel(&deployment_id) {
+        tracing::warn!(
+            deployment_id = %deployment_id,
+            "tunnel registration rejected: caller lacks Tunnel scope for this deployment_id"
+        );
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: format!(
+                    "missing AuthScope::Tunnel({deployment_id}) on caller credentials"
+                )
+                .into(),
+            })))
+            .await;
+        return;
+    }
 
     tracing::info!(
         deployment_id = %deployment_id,
@@ -60,6 +83,22 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, _auth: AuthSubjec
     // ── 2. Create channel and handle ──────────────────────────────────────
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<String>(256);
     let handle = TunnelHandle::new(outbound_tx);
+
+    // ── 2b. Claim deployment_id, evict previous tunnel if any ─────────────
+    // Capacity-1 channel: a single eviction signal is all we ever send.
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let session_id = uuid::Uuid::new_v4();
+    let evicted = state
+        .app
+        .tunnels()
+        .claim(&deployment_id, session_id, close_tx)
+        .await;
+    if evicted {
+        tracing::warn!(
+            deployment_id = %deployment_id,
+            "evicted previous tunnel with same deployment_id; new connector takes over"
+        );
+    }
 
     // ── 3. Register toolsets ──────────────────────────────────────────────
     let mut registered_names = Vec::new();
@@ -91,6 +130,22 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, _auth: AuthSubjec
     // ── 4. Relay loop ─────────────────────────────────────────────────────
     loop {
         tokio::select! {
+            // `biased` so an eviction signal always beats in-flight traffic.
+            biased;
+            // Eviction: another connector claimed the same deployment_id.
+            _ = close_rx.recv() => {
+                tracing::info!(
+                    deployment_id = %deployment_id,
+                    "tunnel evicted by new registration for the same deployment_id; closing"
+                );
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::POLICY,
+                        reason: "evicted by a new tunnel registration for the same deployment_id".into(),
+                    })))
+                    .await;
+                break;
+            }
             // Inbound: messages from the connector (tool results)
             ws_msg = socket.recv() => {
                 match ws_msg {
@@ -128,6 +183,10 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, _auth: AuthSubjec
     for name in &registered_names {
         state.app.toolsets().unregister_searchable(name);
     }
+    // `release` is a no-op if we were evicted (the new session owns the
+    // entry now) — the session_id check in `TunnelRegistry::release`
+    // ensures we only remove an entry that's still ours.
+    state.app.tunnels().release(&deployment_id, session_id);
     tracing::info!(
         deployment_id = %deployment_id,
         toolsets = registered_names.len(),
