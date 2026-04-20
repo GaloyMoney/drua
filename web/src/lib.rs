@@ -12,6 +12,7 @@ use domain::App;
 
 use auth::config::{LoginMethod, OAuthClient};
 use auth::sa_token::SaTokenValidator;
+use auth::session_store::PgSessionStore;
 use domain::code_assistant::CodeAssistant;
 
 /// Unified application state shared by all routes and middleware.
@@ -25,10 +26,13 @@ pub struct AppState {
     pub code_assistant: Option<CodeAssistant>,
     /// Optional SA token validator — present when running in-cluster.
     pub sa_token_validator: Option<SaTokenValidator>,
+    /// Postgres-backed session store shared with the session layer.
+    pub session_store: PgSessionStore,
 }
 
 impl AppState {
     pub fn new(
+        pool: &sqlx::PgPool,
         app: App,
         oauth_client: OAuthClient,
         login: LoginMethod,
@@ -44,6 +48,7 @@ impl AppState {
             github_allowed_teams,
             code_assistant,
             sa_token_validator: None,
+            session_store: PgSessionStore::new(pool),
         }
     }
 

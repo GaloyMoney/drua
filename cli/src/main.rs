@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
     let mcp_service = drua_mcp_gateway::McpGateway::service(app.clone());
 
     let mut app_state = drua_web::AppState::new(
+        &pool,
         app,
         oauth_client,
         auth_config.login,
@@ -141,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
         app_state = app_state.with_sa_token_validator(validator);
     }
 
-    let router = drua_web::server::build_app(&server_config, &pool, app_state, mcp_service);
+    let router = drua_web::server::build_app(&server_config, app_state, mcp_service);
 
     let addr: std::net::SocketAddr =
         format!("{}:{}", config.server.host, config.server.port).parse()?;
