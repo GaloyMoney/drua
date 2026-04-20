@@ -69,7 +69,6 @@ jobs:
     trigger: true
   - task: bats-e2e
     privileged: true
-    attempts: 2
     config:
       platform: linux
       image_resource: #@ nix_flake_image_config()
