@@ -23,7 +23,7 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
         .constraints([
             Constraint::Length(24),
             Constraint::Min(1),
-            Constraint::Length(28),
+            Constraint::Length(44),
         ])
         .split(main_area);
 
