@@ -149,6 +149,13 @@ impl ScreenState {
         self.selected_agent().map(|a| a.id.clone())
     }
 
+    /// Select the lead agent (index 0, since lead is always sorted first)
+    /// and focus the chat pane.
+    pub fn select_lead_and_focus_chat(&mut self) {
+        self.agent_cursor = 0;
+        self.focus = Focus::Chat;
+    }
+
     pub fn agent_cursor_down(&mut self) {
         if let Some(ws) = self.selected_workspace() {
             if !ws.agents.is_empty() && self.agent_cursor < ws.agents.len() - 1 {

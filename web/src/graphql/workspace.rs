@@ -34,10 +34,12 @@ impl Workspace {
         Ok(Agent::from(agent))
     }
 
-    /// All agents in this workspace.
+    /// All agents in this workspace (lead agent first).
     async fn agents(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Agent>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let agents = app.agents().list_for_workspace(sub, self.entity.id).await?;
+        let mut agents = app.agents().list_for_workspace(sub, self.entity.id).await?;
+        let lead_id = self.entity.lead_agent_id;
+        agents.sort_by_key(|a| if a.id == lead_id { 0 } else { 1 });
         Ok(agents.into_iter().map(Agent::from).collect())
     }
 }

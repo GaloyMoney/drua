@@ -19,9 +19,14 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
         return Action::Quit;
     }
 
-    // Ctrl+H / Ctrl+L — focus left / right (global, like command-center)
     if ctrl {
         match key.code {
+            // Ctrl+O — jump to lead agent chat (global, like command-center)
+            KeyCode::Char('o') => {
+                state.select_lead_and_focus_chat();
+                return Action::None;
+            }
+            // Ctrl+H / Ctrl+L — focus left / right
             KeyCode::Char('h') => {
                 state.focus_left();
                 return Action::None;
@@ -54,6 +59,10 @@ fn handle_sidebar_key(state: &mut ScreenState, key: KeyEvent) -> Action {
         }
         KeyCode::Char('k') | KeyCode::Up => {
             state.cursor_up();
+            Action::None
+        }
+        KeyCode::Enter => {
+            state.select_lead_and_focus_chat();
             Action::None
         }
         KeyCode::Char('n') => {
