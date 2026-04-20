@@ -1,8 +1,9 @@
-//! Agent management tools: workspace-scoped and admin-scoped wrappers for
-//! creating agents, listing agents, and attaching/detaching sandboxes.
+//! Agent management tools: workspace-scoped wrappers for creating agents,
+//! listing agents, and attaching/detaching sandboxes.
 //!
 //! Workspace-scoped tools require the `WorkspaceAdmin` scope on the
-//! caller's workspace.  Admin-scoped tools require the `Admin` scope.
+//! caller's workspace.  Admin-scoped tools live in
+//! [`super::super::searchable::admin`].
 
 use std::sync::{Arc, LazyLock};
 
@@ -11,7 +12,7 @@ use serde::Deserialize;
 
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::auth::AuthSubject;
-use crate::primitives::{AgentId, SandboxId, WorkspaceId};
+use crate::primitives::{AgentId, SandboxId};
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
 
 use super::super::error::ToolSetsError;
@@ -24,15 +25,6 @@ use super::{parse_params, schema_for};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AgentCreateParams {
-    /// Display name for the new agent.
-    name: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct AdminAgentCreateParams {
-    /// Workspace to create the agent in.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
     /// Display name for the new agent.
     name: String,
 }
@@ -58,13 +50,6 @@ struct DetachSandboxParams {
     /// ID of the sandbox to detach.
     #[schemars(with = "uuid::Uuid")]
     sandbox_id: SandboxId,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct AdminListAgentsParams {
-    /// Workspace to list agents for.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
 }
 
 fn default_mode() -> SandboxAgentMode {
@@ -127,60 +112,6 @@ impl TopLevelTool for WorkspaceAgentCreate {
 }
 
 // ---------------------------------------------------------------------------
-// create_agent (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminAgentCreate {
-    agents: Arc<Agents>,
-}
-
-impl AdminAgentCreate {
-    pub fn new(agents: Arc<Agents>) -> Self {
-        Self { agents }
-    }
-}
-
-static ADMIN_AGENT_CREATE_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<AdminAgentCreateParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminAgentCreate {
-    fn name(&self) -> &str {
-        "admin_create_agent"
-    }
-
-    fn description(&self) -> &str {
-        "Create a new agent in a specified workspace (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ADMIN_AGENT_CREATE_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AdminAgentCreateParams = parse_params(arguments)?;
-
-        let agent = self
-            .agents
-            .create_agent(subject, params.workspace_id, &params.name, None)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format_agent(
-            &agent,
-        ))]))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // workspace_attach_sandbox
 // ---------------------------------------------------------------------------
 
@@ -232,60 +163,6 @@ impl TopLevelTool for WorkspaceAgentAttachSandbox {
         if sandbox.workspace_id != workspace_id {
             return Err(ToolSetsError::Unauthorized);
         }
-
-        let agent = self
-            .agents
-            .attach_sandbox(subject, params.agent_id, params.sandbox_id, params.mode)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format_agent(
-            &agent,
-        ))]))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// attach_sandbox (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminAgentAttachSandbox {
-    agents: Arc<Agents>,
-}
-
-impl AdminAgentAttachSandbox {
-    pub fn new(agents: Arc<Agents>) -> Self {
-        Self { agents }
-    }
-}
-
-static ADMIN_ATTACH_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<AttachSandboxParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminAgentAttachSandbox {
-    fn name(&self) -> &str {
-        "admin_attach_sandbox"
-    }
-
-    fn description(&self) -> &str {
-        "Attach a sandbox to an agent (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ADMIN_ATTACH_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AttachSandboxParams = parse_params(arguments)?;
 
         let agent = self
             .agents
@@ -374,57 +251,6 @@ impl TopLevelTool for WorkspaceAgentDetachSandbox {
 }
 
 // ---------------------------------------------------------------------------
-// detach_sandbox (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminAgentDetachSandbox {
-    agents: Arc<Agents>,
-}
-
-impl AdminAgentDetachSandbox {
-    pub fn new(agents: Arc<Agents>) -> Self {
-        Self { agents }
-    }
-}
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminAgentDetachSandbox {
-    fn name(&self) -> &str {
-        "admin_detach_sandbox"
-    }
-
-    fn description(&self) -> &str {
-        "Detach a sandbox from an agent (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &WS_DETACH_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: DetachSandboxParams = parse_params(arguments)?;
-
-        let agent = self
-            .agents
-            .detach_sandbox(subject, params.agent_id, params.sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format_agent(
-            &agent,
-        ))]))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // workspace_list_agents
 // ---------------------------------------------------------------------------
 
@@ -474,60 +300,6 @@ impl TopLevelTool for WorkspaceListAgents {
         let agents = self
             .agents
             .list_for_workspace(subject, workspace_id)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format_agents(
-            &agents,
-        ))]))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// list_agents (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminListAgents {
-    agents: Arc<Agents>,
-}
-
-impl AdminListAgents {
-    pub fn new(agents: Arc<Agents>) -> Self {
-        Self { agents }
-    }
-}
-
-static ADMIN_LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<AdminListAgentsParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminListAgents {
-    fn name(&self) -> &str {
-        "admin_list_agents"
-    }
-
-    fn description(&self) -> &str {
-        "List all agents in a workspace (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ADMIN_LIST_AGENTS_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AdminListAgentsParams = parse_params(arguments)?;
-
-        let agents = self
-            .agents
-            .list_for_workspace(subject, params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
 

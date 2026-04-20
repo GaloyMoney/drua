@@ -1,10 +1,10 @@
-//! `workspace_log` and `all_logs` — audit log query tools.
+//! `workspace_log` — audit log query tool.
 //!
-//! `workspace_log` returns entries scoped to the caller's workspace and
-//! requires the `WorkspaceAdmin` scope.  It automatically excludes the
-//! calling agent's own entries so an agent doesn't see its own tool calls.
+//! Returns entries scoped to the caller's workspace and requires the
+//! `WorkspaceAdmin` scope.  Automatically excludes the calling agent's
+//! own entries so an agent doesn't see its own tool calls.
 //!
-//! `all_logs` is admin-only and returns entries across all workspaces.
+//! The admin variant (`all_logs`) lives in [`super::super::searchable::admin`].
 
 use std::sync::{Arc, LazyLock};
 
@@ -131,55 +131,6 @@ impl TopLevelTool for WorkspaceLog {
         query.workspace_id = Some(workspace_id);
         query.exclude_agent_id = subject.acting_agent_id();
 
-        let entries = self.audit.find(&query).await?;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            format_entries(&entries),
-        )]))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// all_logs
-// ---------------------------------------------------------------------------
-
-pub struct AdminAllLogs {
-    audit: Arc<Audit>,
-}
-
-impl AdminAllLogs {
-    pub fn new(audit: Arc<Audit>) -> Self {
-        Self { audit }
-    }
-}
-
-static ALL_LOGS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AuditLogParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminAllLogs {
-    fn name(&self) -> &str {
-        "admin_query_audit_log"
-    }
-
-    fn description(&self) -> &str {
-        "Query audit log entries across all workspaces."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ALL_LOGS_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        _subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AuditLogParams = parse_params(arguments)?;
-        let query = params.into_query();
         let entries = self.audit.find(&query).await?;
 
         Ok(CallToolResult::success(vec![Content::text(

@@ -28,12 +28,10 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminAgentAttachSandbox, AdminAgentCreate, AdminAgentDetachSandbox, AdminAllLogs,
-    AdminCreateSandbox, AdminGetSandbox, AdminInspectSandbox, AdminListAgents, AdminListSandboxes,
-    AdminToolSet, AdminWorkspaceCreate, AdminWorkspaceList, Bash, CodeAssistantToolSet, GlobTool,
-    Grep, Ls, Read, TextEditor, ToolSets, ToolSetsError, TopLevelTool, WorkspaceAgentAttachSandbox,
-    WorkspaceAgentCreate, WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
-    WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets,
+    ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate, WorkspaceAgentDetachSandbox,
+    WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceInspectSandbox, WorkspaceListAgents,
+    WorkspaceListSandboxes, WorkspaceLog,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -185,23 +183,15 @@ impl App {
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
 
-        // Admin tools move behind progressive disclosure (search_tools →
+        // Admin tools live behind progressive disclosure (search_tools →
         // describe_tool → call_tool) to declutter the top-level list_tools
         // response.
-        let admin_tools: Vec<Arc<dyn TopLevelTool>> = vec![
-            Arc::new(AdminAgentCreate::new(Arc::clone(&agents))),
-            Arc::new(AdminAgentAttachSandbox::new(Arc::clone(&agents))),
-            Arc::new(AdminAgentDetachSandbox::new(Arc::clone(&agents))),
-            Arc::new(AdminListAgents::new(Arc::clone(&agents))),
-            Arc::new(AdminCreateSandbox::new(Arc::clone(&sandboxes))),
-            Arc::new(AdminListSandboxes::new(Arc::clone(&sandboxes))),
-            Arc::new(AdminGetSandbox::new(Arc::clone(&sandboxes))),
-            Arc::new(AdminInspectSandbox::new(Arc::clone(&sandboxes))),
-            Arc::new(AdminAllLogs::new(Arc::clone(&audit))),
-            Arc::new(AdminWorkspaceCreate::new(Arc::clone(&workspaces))),
-            Arc::new(AdminWorkspaceList::new(Arc::clone(&workspaces))),
-        ];
-        toolsets.register_searchable(AdminToolSet::new(admin_tools));
+        toolsets.register_searchable(AdminToolSet::new(
+            Arc::clone(&agents),
+            Arc::clone(&sandboxes),
+            Arc::clone(&audit),
+            Arc::clone(&workspaces),
+        ));
 
         Ok(Self {
             users: Arc::new(Users::new(pool)),
