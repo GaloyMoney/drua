@@ -103,13 +103,9 @@ pub fn estimate_event_tokens_for_content(content_len: usize) -> u64 {
 }
 
 /// Extract the most recent `Usage` from the session event stream for a specific thread.
-///
-/// `AssistantResponseReceived` always carries an explicit `thread_id`, so
-/// `is_main_thread` is accepted for API consistency but not needed here.
 pub fn last_usage<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
-    _is_main_thread: bool,
 ) -> Option<&'a Usage> {
     events.rev().find_map(|e| match e {
         AgentSessionEvent::AssistantResponseReceived {
