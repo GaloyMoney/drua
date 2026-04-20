@@ -4,6 +4,7 @@ mod agent;
 mod mutation;
 pub(crate) mod primitives;
 mod query;
+mod session;
 mod types;
 mod workspace;
 

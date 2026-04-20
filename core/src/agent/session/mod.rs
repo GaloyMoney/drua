@@ -1,6 +1,7 @@
 mod compaction;
 mod entity;
 pub mod error;
+pub mod history;
 pub(super) mod message;
 mod metadata;
 pub mod repo;
@@ -18,6 +19,7 @@ use message::*;
 use metadata::*;
 use repo::AgentSessionRepo;
 pub use settings::*;
+pub use thread::SessionThreadId;
 
 es_entity::entity_id! { AgentSessionId }
 
@@ -147,6 +149,44 @@ impl Sessions {
         let response = session.add_sandbox_notification(sandbox_name, operation)?;
         self.repo.update_in_op(op, &mut session).await?;
         Ok(response)
+    }
+
+    #[instrument(name = "domain.agent_session.chat_history", skip(self))]
+    pub async fn chat_history(
+        &self,
+        agent_id: AgentId,
+        last_n: usize,
+    ) -> Result<Vec<history::ChatHistoryMessage>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.chat_history(last_n))
+    }
+
+    #[instrument(name = "domain.agent_session.thread_infos", skip(self))]
+    pub async fn thread_infos(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<history::SessionThreadInfo>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.thread_infos())
+    }
+
+    #[instrument(name = "domain.agent_session.thread_messages", skip(self))]
+    pub async fn thread_messages(
+        &self,
+        agent_id: AgentId,
+        thread_id: SessionThreadId,
+    ) -> Result<Vec<history::ThreadMessage>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        session.thread_messages(thread_id)
+    }
+
+    #[instrument(name = "domain.agent_session.current_thread_id", skip(self))]
+    pub async fn current_thread_id(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<SessionThreadId>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.current_main_thread_id())
     }
 
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]

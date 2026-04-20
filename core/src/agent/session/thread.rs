@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use super::entity::ThreadStartReason;
 use super::view::*;
 use super::AgentSessionId;
 
@@ -23,6 +24,7 @@ pub enum SessionThreadEvent {
     Initialized {
         id: SessionThreadId,
         session_id: AgentSessionId,
+        start_reason: ThreadStartReason,
         model: String,
         max_tokens: u32,
         system_view: SystemView,
@@ -58,6 +60,7 @@ pub enum SessionThreadEvent {
 pub struct SessionThread {
     pub id: SessionThreadId,
     pub session_id: AgentSessionId,
+    pub start_reason: ThreadStartReason,
     #[builder(default = "NextTurn::Assistant")]
     turn: NextTurn,
     events: EntityEvents<SessionThreadEvent>,
@@ -181,8 +184,16 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
 
         for event in events.iter_all() {
             match event {
-                SessionThreadEvent::Initialized { id, session_id, .. } => {
-                    builder = builder.id(*id).session_id(*session_id);
+                SessionThreadEvent::Initialized {
+                    id,
+                    session_id,
+                    start_reason,
+                    ..
+                } => {
+                    builder = builder
+                        .id(*id)
+                        .session_id(*session_id)
+                        .start_reason(*start_reason);
                 }
                 SessionThreadEvent::InitializedFromCompaction {
                     id,
@@ -366,6 +377,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::Initialized {
                 id: self.id,
                 session_id: self.session_id,
+                start_reason: self.start_reason,
                 model: self.model,
                 max_tokens: self.max_tokens,
                 system_view: self.system_view,

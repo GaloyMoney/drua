@@ -454,6 +454,59 @@ impl Agents {
         Ok(agent)
     }
 
+    #[instrument(name = "domain.agent.chat_history", skip(self, sub))]
+    pub async fn chat_history(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+        last_n: usize,
+    ) -> Result<Vec<session::history::ChatHistoryMessage>, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.chat_history");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        Ok(self.sessions.chat_history(agent_id, last_n).await?)
+    }
+
+    #[instrument(name = "domain.agent.thread_infos", skip(self, sub))]
+    pub async fn thread_infos(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+    ) -> Result<Vec<session::history::SessionThreadInfo>, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.thread_infos");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        Ok(self.sessions.thread_infos(agent_id).await?)
+    }
+
+    #[instrument(name = "domain.agent.thread_messages", skip(self, sub))]
+    pub async fn thread_messages(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+        thread_id: session::SessionThreadId,
+    ) -> Result<Vec<session::history::ThreadMessage>, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.thread_messages");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        Ok(self.sessions.thread_messages(agent_id, thread_id).await?)
+    }
+
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
         &self,
