@@ -184,6 +184,8 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         workspace_name: &str,
     ) -> Result<Agent, AgentError> {
+        Audit::record_workspace_id(workspace_id);
+        Audit::record_agent_id(id);
         self.create_in_op(
             op,
             id,
@@ -340,6 +342,8 @@ impl Agents {
     ) -> Result<(), AgentError> {
         let id = id.into();
         let agent = self.repo.find_by_id(id).await?;
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(id);
         // Cascade soft-delete to the agent's session and all its threads
         // before deleting the agent itself (mirrors workspace → agents).
         self.sessions.delete_for_agent_in_op(op, id).await?;
