@@ -55,7 +55,6 @@ pub enum AgentSessionEvent {
         operation: SandboxOperation,
         /// Pre-computed notification text. Persisted so the chat history
         /// remains accurate even if the template changes in a future version.
-        #[serde(default)]
         text: String,
     },
     ThreadStarted {

@@ -1,5 +1,4 @@
 use super::super::entity::AgentSessionEvent;
-use super::super::message::sandbox_notification_text;
 use super::super::metadata::Usage;
 use super::super::thread::SessionThreadId;
 use super::event_belongs_to_thread;
@@ -63,21 +62,7 @@ fn estimate_all_tokens<'a>(
 fn estimate_event_tokens(event: &AgentSessionEvent) -> u64 {
     match event {
         AgentSessionEvent::UserInputAdded { text, .. } => chars_to_tokens(text.len()),
-        AgentSessionEvent::SandboxNotificationAdded {
-            sandbox_name,
-            operation,
-            text,
-            ..
-        } => {
-            // Use pre-computed text from the event when available (new events).
-            // Fall back to reconstruction for old persisted events where text is empty.
-            let len = if text.is_empty() {
-                sandbox_notification_text(sandbox_name, operation).len()
-            } else {
-                text.len()
-            };
-            chars_to_tokens(len)
-        }
+        AgentSessionEvent::SandboxNotificationAdded { text, .. } => chars_to_tokens(text.len()),
         AgentSessionEvent::AssistantResponseReceived { content, .. } => {
             content.iter().map(estimate_assistant_block_tokens).sum()
         }
