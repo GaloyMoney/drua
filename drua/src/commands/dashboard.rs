@@ -426,9 +426,6 @@ async fn run_event_loop(
 ) -> Result<()> {
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
     let mut event_stream = EventStream::new();
-    let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
-    refresh_interval.tick().await; // consume the immediate first tick
-
     loop {
         terminal.draw(|frame| ui::draw(frame, state))?;
 
@@ -494,11 +491,6 @@ async fn run_event_loop(
             event = stream_rx.recv() => {
                 if let Some(evt) = event {
                     dispatch_stream_event(state, evt);
-                }
-            }
-            _ = refresh_interval.tick() => {
-                if let Ok(workspaces) = fetch_workspaces(client).await {
-                    state.replace_workspaces(workspaces);
                 }
             }
             _ = tokio::time::sleep(timeout) => {}
