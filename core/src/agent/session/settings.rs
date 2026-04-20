@@ -6,7 +6,7 @@ pub struct ModelSettings {
     pub max_tokens: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadSimplificationSettings {
     pub simplify_after_idle_seconds: Option<u32>,
 }

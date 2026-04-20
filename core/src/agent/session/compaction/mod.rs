@@ -6,14 +6,47 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
-use super::message::CompactionMetadata;
+use super::message::{CompactionMetadata, TargetThread};
 use super::settings::CompactionConfig;
 use super::thread::{NewSessionThread, SessionThreadId};
 use super::view::*;
 
-use estimation::estimate_context_tokens;
 use prune::{build_pruning_plan, PruningPlan};
 use trigger::{evaluate, CompactionAction};
+
+/// Returns true if the given event belongs to (was produced on) the specified thread.
+///
+/// Events with an explicit `thread_id` field match directly.
+/// Events with a `target: TargetThread` field match if:
+/// - `TargetThread::Main` — always matches (compaction only runs on the main thread)
+/// - `TargetThread::Id(id)` — matches when `id == thread_id`
+///
+/// Global events (Initialized, ToolDefsUpdated, etc.) return `false`.
+pub(super) fn event_belongs_to_thread(
+    event: &AgentSessionEvent,
+    thread_id: SessionThreadId,
+) -> bool {
+    match event {
+        AgentSessionEvent::AssistantResponseReceived { thread_id: tid, .. }
+        | AgentSessionEvent::ToolResultsAdded { thread_id: tid, .. }
+        | AgentSessionEvent::PromptSent { thread_id: tid, .. } => *tid == thread_id,
+
+        AgentSessionEvent::UserInputAdded { target, .. }
+        | AgentSessionEvent::SandboxNotificationAdded { target, .. } => match target {
+            TargetThread::Main => true,
+            TargetThread::Id(id) => *id == thread_id,
+        },
+
+        // CompactionApplied belongs to the source thread
+        AgentSessionEvent::CompactionApplied { from_thread_id, .. } => *from_thread_id == thread_id,
+
+        // Global events don't belong to any specific thread
+        AgentSessionEvent::Initialized { .. }
+        | AgentSessionEvent::ToolDefsUpdated { .. }
+        | AgentSessionEvent::SystemBlocksUpdated { .. }
+        | AgentSessionEvent::ThreadStarted { .. } => false,
+    }
+}
 
 /// The result of applying compaction to a session.
 pub(super) struct CompactionResult {
@@ -33,16 +66,17 @@ pub(super) struct CompactionResult {
 /// This function is pure: it reads the event stream and config, builds a
 /// pruning plan, and returns the events + new thread that the caller must
 /// apply to the session entity.
-pub(super) fn maybe_compact(
-    events: &[AgentSessionEvent],
+pub(super) fn maybe_prune<'a>(
+    events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     config: &CompactionConfig,
     session_id: super::AgentSessionId,
     current_thread_id: SessionThreadId,
     current_prompt_definition: &PromptDefinition,
     time_since_last_turn: Duration,
 ) -> Option<CompactionResult> {
-    let last_usage = estimation::last_usage(events);
-    let estimated_tokens = estimate_context_tokens(events, last_usage);
+    let last_usage = estimation::last_usage(events.clone(), current_thread_id);
+    let estimated_tokens =
+        estimation::estimate_context_tokens(events.clone(), current_thread_id, last_usage);
 
     let action = evaluate(estimated_tokens, time_since_last_turn, config);
 
@@ -51,7 +85,7 @@ pub(super) fn maybe_compact(
         CompactionAction::PruneOpportunistic | CompactionAction::PruneThenSummarize => {}
     }
 
-    let plan = build_pruning_plan(events, config);
+    let plan = build_pruning_plan(events, current_thread_id, config);
     if plan.is_empty() {
         return None;
     }

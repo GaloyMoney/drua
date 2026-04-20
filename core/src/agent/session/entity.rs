@@ -31,6 +31,7 @@ pub enum AgentSessionEvent {
         id: AgentSessionId,
         agent_id: AgentId,
         model_settings: ModelSettings,
+        #[serde(default)]
         thread_simplification_settings: ThreadSimplificationSettings,
         #[serde(default)]
         compaction_config: CompactionConfig,
@@ -273,7 +274,7 @@ impl AgentSession {
         let prompt_definition = thread.prompt_definition();
 
         // --- Compaction check ---
-        let (thread_id, prompt_definition) = match self.try_compact(thread_id, &prompt_definition) {
+        let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
             Some(result) => result,
             None => (thread_id, prompt_definition),
         };
@@ -419,17 +420,15 @@ impl AgentSession {
     /// Attempt pruning compaction for the given thread. Returns the new
     /// thread id and prompt definition if compaction was applied, or `None`
     /// if no compaction was needed.
-    fn try_compact(
+    fn try_prune(
         &mut self,
         current_thread_id: SessionThreadId,
         current_prompt_def: &PromptDefinition,
     ) -> Option<(SessionThreadId, PromptDefinition)> {
         let time_since = self.time_since_last_assistant_response();
-        let events: Vec<&AgentSessionEvent> = self.events.iter_all().collect();
-        let event_refs: Vec<AgentSessionEvent> = events.into_iter().cloned().collect();
 
-        let result = compaction::maybe_compact(
-            &event_refs,
+        let result = compaction::maybe_prune(
+            self.events.iter_all(),
             &self.compaction_config,
             self.id,
             current_thread_id,
@@ -576,7 +575,6 @@ pub struct NewAgentSession {
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
     pub(super) model_settings: ModelSettings,
-    pub(super) thread_simplification_settings: ThreadSimplificationSettings,
     #[builder(default)]
     pub(super) compaction_config: CompactionConfig,
     pub(super) system_blocks: Vec<SystemBlock>,
@@ -599,7 +597,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
                 id: self.id,
                 agent_id: self.agent_id,
                 model_settings: self.model_settings,
-                thread_simplification_settings: self.thread_simplification_settings,
+                thread_simplification_settings: ThreadSimplificationSettings::default(),
                 compaction_config: self.compaction_config,
                 system_blocks: self.system_blocks,
                 tool_defs: self.tool_defs,
@@ -621,9 +619,6 @@ mod tests {
             .model_settings(ModelSettings {
                 model: "test-model".into(),
                 max_tokens: 1024,
-            })
-            .thread_simplification_settings(ThreadSimplificationSettings {
-                simplify_after_idle_seconds: None,
             })
             .system_blocks(vec![])
             .tool_defs(vec![])
@@ -1015,9 +1010,6 @@ mod tests {
                 model: "test-model".into(),
                 max_tokens: 1024,
             })
-            .thread_simplification_settings(ThreadSimplificationSettings {
-                simplify_after_idle_seconds: None,
-            })
             .compaction_config(CompactionConfig {
                 enabled: true,
                 token_threshold_fraction: 0.0, // always over threshold
@@ -1143,37 +1135,95 @@ mod tests {
         hydrate_threads(&mut session);
         let original_thread = session.current_main_thread.unwrap();
 
-        // Drive 3 tool-use turns with large results.
-        // Each cycle: user input → prompt → assistant tool_use → tool results → prompt → assistant stop
+        // Drive tool-use turns with large results. Compaction triggers once
+        // there are ≥2 tool results on the current thread (keep_recent=1).
+        // We check EVERY next_prompt call (including inside the tool-use flow).
         let large_content = "x".repeat(500);
-        for i in 0..3 {
-            // User message to start the turn
+        let mut compacted_prompt = None;
+
+        let check_prompt = |p: &Prompt, cp: &mut Option<Prompt>| {
+            if p.compaction.is_some() && cp.is_none() {
+                *cp = Some(p.clone());
+            }
+        };
+
+        for i in 0..5 {
+            // User input → prompt (may trigger compaction)
             session
                 .add_user_input(TargetThread::Main, user_source(), format!("Turn {i}"))
                 .unwrap();
-            let _ = session.next_prompt(TargetThread::Main).unwrap();
+            let prompt = session.next_prompt(TargetThread::Main).unwrap();
             hydrate_threads(&mut session);
-            drive_tool_turn(&mut session, &large_content);
+            check_prompt(&prompt, &mut compacted_prompt);
+
+            // Assistant tool use
+            let thread_id = session.current_main_thread.unwrap();
+            let tool_id = format!("tool_{i}");
+            session
+                .assistant_response_received(
+                    thread_id,
+                    vec![
+                        AssistantBlock::Text {
+                            text: "Let me check.".into(),
+                        },
+                        AssistantBlock::ToolUse {
+                            id: tool_id.clone(),
+                            name: "get_weather".into(),
+                            input: serde_json::json!({"city": "NYC"}),
+                        },
+                    ],
+                    StopReason::ToolUse,
+                    None,
+                    dummy_metadata(),
+                )
+                .unwrap();
+
+            // Tool results
+            session
+                .add_tool_results(
+                    thread_id,
+                    vec![ToolResultInput {
+                        tool_use_id: tool_id,
+                        content: large_content.clone(),
+                        is_error: false,
+                    }],
+                )
+                .unwrap();
+
+            // Prompt for tool results turn (may trigger compaction)
+            let prompt = session.next_prompt(TargetThread::Main).unwrap();
+            hydrate_threads(&mut session);
+            check_prompt(&prompt, &mut compacted_prompt);
+
+            // Final assistant response
+            let thread_id = session.current_main_thread.unwrap();
+            session
+                .assistant_response_received(
+                    thread_id,
+                    vec![AssistantBlock::Text {
+                        text: "Done.".into(),
+                    }],
+                    StopReason::Stop,
+                    None,
+                    dummy_metadata(),
+                )
+                .unwrap();
         }
 
-        // Now add another user message and get next prompt — should trigger compaction
-        session
-            .add_user_input(TargetThread::Main, user_source(), "What next?".into())
-            .unwrap();
-        let prompt = session.next_prompt(TargetThread::Main).unwrap();
+        // Compaction must have fired at least once
+        let prompt = compacted_prompt.expect("compaction should have fired during tool turns");
 
         // Should have switched to a new thread
         let new_thread = session.current_main_thread.unwrap();
         assert_ne!(new_thread, original_thread);
 
         // Prompt should have compaction metadata
-        assert!(prompt.compaction.is_some());
         let meta = prompt.compaction.unwrap();
         assert!(meta.tool_results_masked > 0);
-        // follows_from should reference the thread we compacted from (not the new one)
+        // follows_from should not reference the final thread
         assert_ne!(meta.follows_from, new_thread);
 
-        // Prompt should still have the conversation (user messages, assistant, tool results)
+        // Prompt should still have the conversation
         assert!(!prompt.messages.is_empty());
     }
 
