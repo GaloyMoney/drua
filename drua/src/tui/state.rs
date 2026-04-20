@@ -88,6 +88,9 @@ pub struct ScreenState {
     pub chat_view: ChatViewState,
     pub chat_input: String,
     pub input_cursor: usize,
+    /// The agent whose history is currently loaded in the chat view.
+    /// When this differs from `selected_agent_id()`, the event loop fetches fresh history.
+    pub loaded_agent_id: Option<String>,
 
     // Create workspace modal
     pub mode: Mode,
@@ -117,6 +120,7 @@ impl ScreenState {
             chat_view: ChatViewState::default(),
             chat_input: String::new(),
             input_cursor: 0,
+            loaded_agent_id: None,
 
             mode: Mode::default(),
             input_name: String::new(),
@@ -314,6 +318,7 @@ impl ScreenState {
             .and_then(|ws| ws.lead.as_ref())
             .map(|l| l.id.clone());
         self.agent_cursor = 0;
+        self.loaded_agent_id = None;
         self.chat_view.assistant.clear();
         self.input_clear();
         self.chat_view.reset_scroll();

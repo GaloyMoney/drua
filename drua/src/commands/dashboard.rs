@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
+use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{AgentItem, SandboxInfo, ScreenState, WorkspaceItem};
 use crate::tui::{handlers, ui};
 
@@ -131,6 +132,107 @@ struct CreatedWorkspace {
 }
 
 // ---------------------------------------------------------------------------
+// Chat history (GQL)
+// ---------------------------------------------------------------------------
+
+const CHAT_HISTORY_QUERY: &str = r#"
+    query ChatHistory($agentId: AgentId!) {
+        agent(id: $agentId) {
+            session {
+                chatHistory(last: 50) {
+                    sequence
+                    role
+                    content {
+                        __typename
+                        ... on TextContent { text }
+                        ... on ToolUseContent { name }
+                        ... on ThinkingContent { text }
+                        ... on ToolResultContent { toolUseId content isError }
+                        ... on SandboxNotificationContent { sandboxName operation }
+                    }
+                }
+            }
+        }
+    }
+"#;
+
+#[derive(Debug, Deserialize)]
+struct ChatHistoryResponse {
+    agent: Option<ChatHistoryAgent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatHistoryAgent {
+    session: ChatHistorySession,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatHistorySession {
+    chat_history: Vec<ChatHistoryMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatHistoryMessage {
+    role: String,
+    content: Vec<ChatHistoryContentBlock>,
+    #[allow(dead_code)]
+    sequence: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "__typename")]
+enum ChatHistoryContentBlock {
+    TextContent {
+        text: String,
+    },
+    ToolUseContent {
+        name: String,
+    },
+    ThinkingContent {
+        text: String,
+    },
+    ToolResultContent {
+        #[serde(rename = "toolUseId")]
+        #[allow(dead_code)]
+        tool_use_id: String,
+        content: String,
+        #[serde(rename = "isError")]
+        is_error: bool,
+    },
+    SandboxNotificationContent {
+        #[serde(rename = "sandboxName")]
+        sandbox_name: String,
+        #[allow(dead_code)]
+        operation: String,
+    },
+}
+
+impl ChatHistoryContentBlock {
+    fn into_content_block(self) -> ContentBlock {
+        match self {
+            Self::TextContent { text } => ContentBlock::Text(text),
+            Self::ToolUseContent { name } => ContentBlock::ToolUse(name),
+            Self::ThinkingContent { text } => ContentBlock::Thinking(text),
+            Self::ToolResultContent {
+                content, is_error, ..
+            } => {
+                let label = if is_error {
+                    format!("[error] {content}")
+                } else {
+                    content
+                };
+                ContentBlock::ToolResult(label)
+            }
+            Self::SandboxNotificationContent {
+                sandbox_name,
+                operation,
+            } => ContentBlock::Text(format!("[sandbox: {sandbox_name} — {operation}]")),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Chat streaming
 // ---------------------------------------------------------------------------
 
@@ -140,6 +242,8 @@ enum ChatStreamEvent {
     ToolResult(String),
     Error(String),
     Done,
+    /// Pre-fetched chat history for an agent (agent_id, messages).
+    HistoryLoaded(String, Vec<ChatMessage>),
 }
 
 fn spawn_chat_stream(
@@ -341,6 +445,57 @@ async fn fetch_user_name(client: &GraphqlClient) -> Result<String> {
         .unwrap_or_else(|| "unknown".to_string()))
 }
 
+async fn fetch_chat_history(client: &GraphqlClient, agent_id: &str) -> Result<Vec<ChatMessage>> {
+    let resp: ChatHistoryResponse = client
+        .query(
+            CHAT_HISTORY_QUERY,
+            serde_json::json!({ "agentId": agent_id }),
+        )
+        .await?;
+
+    let messages = resp
+        .agent
+        .map(|a| a.session.chat_history)
+        .unwrap_or_default();
+
+    Ok(messages
+        .into_iter()
+        .map(|m| {
+            let role = match m.role.as_str() {
+                "USER" => ChatRole::User,
+                _ => ChatRole::Assistant,
+            };
+            let blocks = m
+                .content
+                .into_iter()
+                .map(ChatHistoryContentBlock::into_content_block)
+                .collect();
+            ChatMessage { role, blocks }
+        })
+        .collect())
+}
+
+fn spawn_chat_history_fetch(
+    base_url: String,
+    token: String,
+    agent_id: String,
+    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        match fetch_chat_history(&client, &agent_id).await {
+            Ok(messages) => {
+                let _ = tx.send(ChatStreamEvent::HistoryLoaded(agent_id, messages));
+            }
+            Err(e) => {
+                let _ = tx.send(ChatStreamEvent::Error(format!(
+                    "Failed to load history: {e}"
+                )));
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch stream events → AssistantChat
 // ---------------------------------------------------------------------------
@@ -364,6 +519,13 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
         }
         ChatStreamEvent::Done => {
             state.chat_view.assistant.finish_streaming();
+        }
+        ChatStreamEvent::HistoryLoaded(agent_id, messages) => {
+            // Only apply if the agent is still the one we're looking at
+            if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
+                state.chat_view.assistant.load_history(messages);
+                state.chat_view.reset_scroll();
+            }
         }
     }
 }
@@ -494,6 +656,23 @@ async fn run_event_loop(
                 }
             }
             _ = tokio::time::sleep(timeout) => {}
+        }
+
+        // ── Reactive history load ────────────────────────────────────
+        // When the selected agent changes (and we're not streaming), fetch history.
+        let current_agent = state.selected_agent_id();
+        if current_agent != state.loaded_agent_id && !state.chat_view.assistant.streaming {
+            state.loaded_agent_id = current_agent.clone();
+            state.chat_view.assistant.clear();
+            state.chat_view.reset_scroll();
+            if let Some(agent_id) = current_agent {
+                spawn_chat_history_fetch(
+                    config.server_url.clone(),
+                    config.auth_token.clone(),
+                    agent_id,
+                    stream_tx.clone(),
+                );
+            }
         }
     }
     Ok(())

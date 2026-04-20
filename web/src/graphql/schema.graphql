@@ -6,6 +6,10 @@ type Agent {
 	id: AgentId!
 	name: String!
 	role: AgentRole!
+	"""
+	The agent's conversation session.
+	"""
+	session: AgentSession!
 	workspaceId: WorkspaceId!
 }
 
@@ -14,6 +18,34 @@ scalar AgentId
 enum AgentRole {
 	AGENT
 	WORKSPACE_LEAD
+}
+
+type AgentSession {
+	"""
+	Flat chat history: recent user messages and assistant responses.
+	Returns the last `last` messages in chronological order.
+	"""
+	chatHistory(last: Int! = 20): [ChatMessage!]!
+	"""
+	All threads in this session.
+	"""
+	threads: [SessionThread!]!
+}
+
+union ChatContentBlock = TextContent | ToolUseContent | ThinkingContent | ToolResultContent | SandboxNotificationContent
+
+type ChatMessage {
+	content: [ChatContentBlock!]!
+	role: ChatMessageRole!
+	"""
+	Ordinal position in the full message history (0-based).
+	"""
+	sequence: Int!
+}
+
+enum ChatMessageRole {
+	ASSISTANT
+	USER
 }
 
 type Me {
@@ -78,10 +110,82 @@ enum SandboxAttachmentMode {
 
 scalar SandboxId
 
+type SandboxNotificationContent {
+	operation: SandboxNotificationOperation!
+	sandboxName: String!
+}
+
+enum SandboxNotificationOperation {
+	ATTACH
+	DETACH
+}
+
+type SessionThread {
+	id: SessionThreadId!
+	"""
+	Whether this is the currently active thread.
+	"""
+	isCurrent: Boolean!
+	"""
+	Resolved messages for this thread (as the LLM sees them).
+	Each entry carries its own block indexes for shared-node detection.
+	"""
+	messages: [ThreadMessageEntry!]!
+	"""
+	Whose turn it is next on this thread.
+	"""
+	nextTurn: ThreadTurn!
+	"""
+	Why this thread was created.
+	"""
+	startReason: ThreadStartReason!
+}
+
+scalar SessionThreadId
+
+type TextContent {
+	text: String!
+}
+
+type ThinkingContent {
+	text: String!
+}
+
+type ThreadMessageEntry {
+	"""
+	Global block indexes referenced by this message turn.
+	Compare across threads to identify shared content nodes.
+	"""
+	blockIndexes: [Int!]!
+	content: [ChatContentBlock!]!
+	role: ChatMessageRole!
+}
+
+enum ThreadStartReason {
+	INITIAL_THREAD
+	TOOL_DEFS_UPDATED
+}
+
+enum ThreadTurn {
+	ASSISTANT
+	TOOL_USE
+	USER
+}
+
 """
 An ISO 8601 UTC timestamp (e.g., 2024-01-15T09:30:00Z). Always in UTC.
 """
 scalar Timestamp
+
+type ToolResultContent {
+	content: String!
+	isError: Boolean!
+	toolUseId: String!
+}
+
+type ToolUseContent {
+	name: String!
+}
 
 scalar UUID
 

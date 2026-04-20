@@ -23,6 +23,10 @@ impl MessageBlockIndex {
     pub(super) fn new(idx: usize) -> Self {
         Self(idx)
     }
+
+    pub(super) fn index(&self) -> usize {
+        self.0
+    }
 }
 
 // ============================================================================

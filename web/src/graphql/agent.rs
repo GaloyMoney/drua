@@ -39,6 +39,13 @@ impl Agent {
             mode: SandboxAttachmentMode::from(mode),
         }))
     }
+
+    /// The agent's conversation session.
+    async fn session(&self) -> super::session::AgentSession {
+        super::session::AgentSession {
+            agent_id: self.entity.id,
+        }
+    }
 }
 
 impl From<DomainAgent> for Agent {

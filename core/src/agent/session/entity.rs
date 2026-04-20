@@ -7,8 +7,8 @@ use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
 
 use super::{
-    compaction, error::AgentSessionError, message::*, metadata::*, settings::*, thread::*, view::*,
-    AgentSessionId,
+    compaction, error::AgentSessionError, history, message::*, metadata::*, settings::*, thread::*,
+    view::*, AgentSessionId,
 };
 
 // ============================================================================
@@ -478,6 +478,7 @@ impl AgentSession {
         let new_thread = NewSessionThread::builder()
             .id(thread_id)
             .session_id(self.id)
+            .start_reason(ThreadStartReason::InitialThread)
             .model(prompt_definition.model.clone())
             .max_tokens(prompt_definition.max_tokens)
             .system_view(prompt_definition.system_view().clone())
@@ -532,6 +533,34 @@ impl AgentSession {
             }
         }
         materialized
+    }
+
+    // ─── History query methods ──────────────────────────────────────────────
+
+    pub fn chat_history(&self, last_n: usize) -> Vec<history::ChatHistoryMessage> {
+        history::build_chat_history(self.events.iter_all(), last_n)
+    }
+
+    pub fn thread_infos(&self) -> Vec<history::SessionThreadInfo> {
+        history::build_thread_infos(
+            self.threads.iter_persisted(),
+            self.events.iter_all(),
+            self.current_main_thread,
+        )
+    }
+
+    pub fn thread_messages(
+        &self,
+        thread_id: SessionThreadId,
+    ) -> Result<Vec<history::ThreadMessage>, AgentSessionError> {
+        let thread = self
+            .threads
+            .get_persisted(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        Ok(history::build_thread_messages(
+            thread.prompt_definition(),
+            &self.events,
+        ))
     }
 }
 
@@ -1266,5 +1295,224 @@ mod tests {
             !compaction_events.is_empty(),
             "expected CompactionApplied event"
         );
+    }
+
+    // ─── Chat history tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn chat_history_returns_user_and_assistant_messages() {
+        use super::history::{ChatHistoryBlock, ChatHistoryRole};
+
+        let mut session = new_session();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "Hi there!".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "How are you?".into())
+            .unwrap();
+
+        let history = session.chat_history(10);
+        assert_eq!(history.len(), 3);
+        assert!(matches!(history[0].role, ChatHistoryRole::User));
+        assert!(matches!(history[1].role, ChatHistoryRole::Assistant));
+        assert!(matches!(history[2].role, ChatHistoryRole::User));
+
+        // Verify content
+        assert!(
+            matches!(&history[0].blocks[0], ChatHistoryBlock::Text { text } if text == "Hello")
+        );
+        assert!(
+            matches!(&history[1].blocks[0], ChatHistoryBlock::Text { text } if text == "Hi there!")
+        );
+        assert!(
+            matches!(&history[2].blocks[0], ChatHistoryBlock::Text { text } if text == "How are you?")
+        );
+    }
+
+    #[test]
+    fn chat_history_last_n_limits_results() {
+        use super::history::{ChatHistoryBlock, ChatHistoryRole};
+
+        let mut session = new_session();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "First".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "Response 1".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Second".into())
+            .unwrap();
+
+        // All 3 messages
+        let history = session.chat_history(10);
+        assert_eq!(history.len(), 3);
+
+        // Only last 2
+        let history = session.chat_history(2);
+        assert_eq!(history.len(), 2);
+        assert!(matches!(history[0].role, ChatHistoryRole::Assistant));
+        assert!(matches!(history[1].role, ChatHistoryRole::User));
+        assert!(
+            matches!(&history[1].blocks[0], ChatHistoryBlock::Text { text } if text == "Second")
+        );
+    }
+
+    #[test]
+    fn chat_history_includes_tool_use_blocks() {
+        use super::history::{ChatHistoryBlock, ChatHistoryRole};
+
+        let mut session = new_session();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Use a tool".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![
+                    AssistantBlock::Text {
+                        text: "Let me check.".into(),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "tool_1".into(),
+                        name: "get_weather".into(),
+                        input: serde_json::json!({"city": "NYC"}),
+                    },
+                ],
+                StopReason::ToolUse,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        let history = session.chat_history(10);
+        assert_eq!(history.len(), 2);
+
+        // Assistant message should have both text and tool_use blocks
+        let assistant = &history[1];
+        assert!(matches!(assistant.role, ChatHistoryRole::Assistant));
+        assert_eq!(assistant.blocks.len(), 2);
+        assert!(
+            matches!(&assistant.blocks[0], ChatHistoryBlock::Text { text } if text == "Let me check.")
+        );
+        assert!(
+            matches!(&assistant.blocks[1], ChatHistoryBlock::ToolUse { name } if name == "get_weather")
+        );
+    }
+
+    // ─── Thread graph tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn thread_infos_returns_empty_when_no_thread() {
+        let session = new_session();
+        let infos = session.thread_infos();
+        assert!(infos.is_empty());
+    }
+
+    #[test]
+    fn thread_infos_returns_current_thread_after_prompt() {
+        use super::history::{ThreadStartReasonKind, ThreadTurnState};
+
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+
+        hydrate_threads(&mut session);
+
+        let infos = session.thread_infos();
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].is_current);
+        assert_eq!(infos[0].next_turn, ThreadTurnState::Assistant);
+        assert_eq!(infos[0].start_reason, ThreadStartReasonKind::InitialThread);
+    }
+
+    #[test]
+    fn thread_messages_resolves_conversation() {
+        use super::history::ChatHistoryRole;
+
+        let mut session = new_session();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "Hi there!".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "How are you?".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+
+        let messages = session.thread_messages(thread_id).unwrap();
+
+        // Should have 3 messages: user, assistant, user
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0].role, ChatHistoryRole::User));
+        assert!(matches!(messages[1].role, ChatHistoryRole::Assistant));
+        assert!(matches!(messages[2].role, ChatHistoryRole::User));
+
+        // Each message should carry its own block indexes
+        assert!(!messages[0].block_indexes.is_empty());
+        // First user message index should be 0
+        assert_eq!(messages[0].block_indexes[0], 0);
+    }
+
+    #[test]
+    fn thread_messages_returns_error_for_unknown_thread() {
+        let session = new_session();
+        let fake_id = SessionThreadId::new();
+        let result = session.thread_messages(fake_id);
+        assert!(matches!(result, Err(AgentSessionError::ThreadNotFound)));
     }
 }

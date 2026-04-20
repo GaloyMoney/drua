@@ -8,6 +8,9 @@ pub use drua_core::primitives::{
 };
 
 #[allow(unused_imports)]
+pub use drua_core::agent::session::SessionThreadId;
+
+#[allow(unused_imports)]
 pub use drua_core::auth::AuthSubject;
 
 pub use es_entity::graphql::UUID;

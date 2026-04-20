@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use super::entity::ThreadStartReason;
 use super::view::*;
 use super::AgentSessionId;
 
@@ -23,6 +24,7 @@ pub enum SessionThreadEvent {
     Initialized {
         id: SessionThreadId,
         session_id: AgentSessionId,
+        start_reason: ThreadStartReason,
         model: String,
         max_tokens: u32,
         system_view: SystemView,
@@ -58,6 +60,7 @@ pub enum SessionThreadEvent {
 pub struct SessionThread {
     pub id: SessionThreadId,
     pub session_id: AgentSessionId,
+    pub start_reason: ThreadStartReason,
     #[builder(default = "NextTurn::Assistant")]
     turn: NextTurn,
     events: EntityEvents<SessionThreadEvent>,
@@ -181,16 +184,29 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
 
         for event in events.iter_all() {
             match event {
-                SessionThreadEvent::Initialized { id, session_id, .. } => {
-                    builder = builder.id(*id).session_id(*session_id);
+                SessionThreadEvent::Initialized {
+                    id,
+                    session_id,
+                    start_reason,
+                    ..
+                } => {
+                    builder = builder
+                        .id(*id)
+                        .session_id(*session_id)
+                        .start_reason(*start_reason);
                 }
                 SessionThreadEvent::InitializedFromCompaction {
                     id,
                     session_id,
                     messages,
+                    follows_from,
                     ..
                 } => {
-                    builder = builder.id(*id).session_id(*session_id);
+                    builder = builder.id(*id).session_id(*session_id).start_reason(
+                        ThreadStartReason::Compaction {
+                            from_thread: *follows_from,
+                        },
+                    );
                     // Determine turn from last message in compacted history
                     let turn = match messages.last() {
                         Some(MessageView::User(_)) => NextTurn::Assistant,
@@ -223,6 +239,7 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
 pub struct NewSessionThread {
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
+    pub(super) start_reason: ThreadStartReason,
     pub(super) model: String,
     pub(super) max_tokens: u32,
     pub(super) system_view: SystemView,
@@ -246,6 +263,7 @@ impl NewSessionThread {
         NewSessionThreadBuilder {
             id: SessionThreadId::new(),
             session_id: None,
+            start_reason: None,
             model: None,
             max_tokens: None,
             system_view: None,
@@ -268,6 +286,9 @@ impl NewSessionThread {
         Self {
             id,
             session_id,
+            start_reason: ThreadStartReason::Compaction {
+                from_thread: follows_from,
+            },
             model,
             max_tokens,
             system_view,
@@ -284,6 +305,7 @@ impl NewSessionThread {
 pub struct NewSessionThreadBuilder {
     id: SessionThreadId,
     session_id: Option<AgentSessionId>,
+    start_reason: Option<ThreadStartReason>,
     model: Option<String>,
     max_tokens: Option<u32>,
     system_view: Option<SystemView>,
@@ -299,6 +321,11 @@ impl NewSessionThreadBuilder {
 
     pub fn session_id(mut self, session_id: AgentSessionId) -> Self {
         self.session_id = Some(session_id);
+        self
+    }
+
+    pub fn start_reason(mut self, start_reason: ThreadStartReason) -> Self {
+        self.start_reason = Some(start_reason);
         self
     }
 
@@ -333,6 +360,9 @@ impl NewSessionThreadBuilder {
             session_id: self.session_id.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("session_id"),
             ))?,
+            start_reason: self.start_reason.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("start_reason"),
+            ))?,
             model: self.model.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("model"),
             ))?,
@@ -366,6 +396,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::Initialized {
                 id: self.id,
                 session_id: self.session_id,
+                start_reason: self.start_reason,
                 model: self.model,
                 max_tokens: self.max_tokens,
                 system_view: self.system_view,
