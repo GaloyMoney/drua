@@ -439,4 +439,65 @@ mod tests {
         assert!(!cleared.contains(&MessageBlockIndex::new(2)));
         assert_eq!(cleared.len(), 1);
     }
+
+    fn large_content() -> String {
+        "x".repeat(500)
+    }
+
+    #[test]
+    fn masking_skips_already_masked_tool_results() {
+        let thread_id = SessionThreadId::new();
+
+        // Three tool results on this thread, keep_recent=1 → oldest 2 eligible for masking.
+        // A prior ToolResultsMasked already covers index 0 → only index 1 should be masked.
+        let events = [
+            // Tool result at block index 0
+            AgentSessionEvent::ToolResultsAdded {
+                thread_id,
+                results: vec![ToolResultInput {
+                    tool_use_id: "t1".into(),
+                    content: large_content(),
+                    is_error: false,
+                }],
+            },
+            // Tool result at block index 1
+            AgentSessionEvent::ToolResultsAdded {
+                thread_id,
+                results: vec![ToolResultInput {
+                    tool_use_id: "t2".into(),
+                    content: large_content(),
+                    is_error: false,
+                }],
+            },
+            // Prior compaction already masked index 0
+            AgentSessionEvent::ToolResultsMasked {
+                results: vec![MaskedToolResult {
+                    original_index: MessageBlockIndex::new(0),
+                    replacement: ToolResultInput {
+                        tool_use_id: "t1".into(),
+                        content: "[Tool output cleared — re-invoke tool if needed]".into(),
+                        is_error: false,
+                    },
+                }],
+            },
+            // Tool result at block index 3 (after the masked block at index 2)
+            AgentSessionEvent::ToolResultsAdded {
+                thread_id,
+                results: vec![ToolResultInput {
+                    tool_use_id: "t3".into(),
+                    content: large_content(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(1));
+
+        // Only index 1 should be masked (index 0 already masked, index 3 is kept as recent)
+        assert_eq!(plan.masked_tool_results.len(), 1);
+        assert_eq!(
+            plan.masked_tool_results[0].original_index,
+            MessageBlockIndex::new(1)
+        );
+    }
 }
