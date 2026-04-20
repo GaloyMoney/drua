@@ -1,8 +1,9 @@
-//! Sandbox management tools: workspace-scoped and admin-scoped wrappers for
-//! creating, listing, and inspecting sandboxes.
+//! Sandbox management tools: workspace-scoped wrappers for creating, listing,
+//! and inspecting sandboxes.
 //!
 //! Workspace-scoped tools require the `WorkspaceAdmin` scope on the
-//! caller's workspace.  Admin-scoped tools require the `Admin` scope.
+//! caller's workspace.  Admin-scoped tools live in
+//! [`super::super::searchable::admin`].
 
 use std::sync::{Arc, LazyLock};
 
@@ -10,7 +11,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::auth::AuthSubject;
-use crate::primitives::{SandboxId, WorkspaceId};
+use crate::primitives::SandboxId;
 use crate::sandbox::{Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
@@ -78,22 +79,6 @@ impl CreateSandboxParams {
 
         Ok((self.name, specs, mode))
     }
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct AdminCreateSandboxParams {
-    /// Workspace to create the sandbox in.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
-    #[serde(flatten)]
-    inner: CreateSandboxParams,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct AdminListSandboxesParams {
-    /// Workspace to list sandboxes for.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -170,61 +155,6 @@ impl TopLevelTool for WorkspaceCreateSandbox {
 }
 
 // ---------------------------------------------------------------------------
-// create_sandbox (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminCreateSandbox {
-    sandboxes: Arc<Sandboxes>,
-}
-
-impl AdminCreateSandbox {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
-    }
-}
-
-static ADMIN_CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<AdminCreateSandboxParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminCreateSandbox {
-    fn name(&self) -> &str {
-        "admin_create_sandbox"
-    }
-
-    fn description(&self) -> &str {
-        "Create a new sandbox in a specified workspace (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ADMIN_CREATE_SANDBOX_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AdminCreateSandboxParams = parse_params(arguments)?;
-        let (name, specs, mode) = params.inner.into_sandbox_args()?;
-
-        let sandbox = self
-            .sandboxes
-            .create(subject, params.workspace_id, name, specs, mode)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            format_sandbox(&sandbox),
-        )]))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // workspace_list_sandboxes
 // ---------------------------------------------------------------------------
 
@@ -274,60 +204,6 @@ impl TopLevelTool for WorkspaceListSandboxes {
         let sandboxes = self
             .sandboxes
             .list_for_workspace(subject, workspace_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            format_sandboxes(&sandboxes),
-        )]))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// list_sandboxes (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminListSandboxes {
-    sandboxes: Arc<Sandboxes>,
-}
-
-impl AdminListSandboxes {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
-    }
-}
-
-static ADMIN_LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<AdminListSandboxesParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminListSandboxes {
-    fn name(&self) -> &str {
-        "admin_list_sandboxes"
-    }
-
-    fn description(&self) -> &str {
-        "List all sandboxes in a workspace (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ADMIN_LIST_SANDBOXES_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AdminListSandboxesParams = parse_params(arguments)?;
-
-        let sandboxes = self
-            .sandboxes
-            .list_for_workspace(subject, params.workspace_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -389,57 +265,6 @@ impl TopLevelTool for WorkspaceGetSandbox {
         if sandbox.workspace_id != workspace_id {
             return Err(ToolSetsError::Unauthorized);
         }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            format_sandbox(&sandbox),
-        )]))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// get_sandbox (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminGetSandbox {
-    sandboxes: Arc<Sandboxes>,
-}
-
-impl AdminGetSandbox {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
-    }
-}
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminGetSandbox {
-    fn name(&self) -> &str {
-        "admin_get_sandbox"
-    }
-
-    fn description(&self) -> &str {
-        "Get sandbox details by ID (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &WS_GET_SANDBOX_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: GetSandboxParams = parse_params(arguments)?;
-
-        let sandbox = self
-            .sandboxes
-            .find_by_id(subject, params.sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
         Ok(CallToolResult::success(vec![Content::text(
             format_sandbox(&sandbox),

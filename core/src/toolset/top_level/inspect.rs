@@ -2,7 +2,7 @@
 //!
 //! `workspace_inspect_sandbox` lets a workspace reader run read-only tools
 //! (grep, glob, read, ls) against any sandbox within their workspace.
-//! `inspect_sandbox` is the admin variant with no workspace constraint.
+//! The admin variant lives in [`super::super::searchable::admin`].
 
 use std::sync::{Arc, LazyLock};
 
@@ -100,53 +100,6 @@ impl TopLevelTool for WorkspaceInspectSandbox {
         if sandbox.workspace_id != workspace_id {
             return Err(ToolSetsError::Unauthorized);
         }
-
-        execute_inspect(subject, &self.sandboxes, params).await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// inspect_sandbox (admin)
-// ---------------------------------------------------------------------------
-
-pub struct AdminInspectSandbox {
-    sandboxes: Arc<Sandboxes>,
-}
-
-impl AdminInspectSandbox {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
-    }
-}
-
-static ADMIN_INSPECT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<InspectParams>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for AdminInspectSandbox {
-    fn name(&self) -> &str {
-        "admin_inspect_sandbox"
-    }
-
-    fn description(&self) -> &str {
-        "Run a read-only tool (grep, glob, read, ls) against any sandbox (admin)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &ADMIN_INSPECT_SCHEMA
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_admin()
-    }
-
-    async fn call(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: InspectParams = parse_params(arguments)?;
-        Audit::record_sandbox_id(params.sandbox_id);
 
         execute_inspect(subject, &self.sandboxes, params).await
     }
