@@ -31,6 +31,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             model: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: 1024,
             reset_time_delta_seconds: None,
+            compaction: Default::default(),
         },
     );
     let config = AgentsConfig { builtin_roles };
@@ -170,6 +171,7 @@ async fn send_message_dispatches_registered_tool_call() {
             model: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: 1024,
             reset_time_delta_seconds: None,
+            compaction: Default::default(),
         },
     );
     let config = AgentsConfig { builtin_roles };

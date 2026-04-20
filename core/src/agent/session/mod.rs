@@ -42,12 +42,14 @@ impl Sessions {
         op: &mut es_entity::DbOp<'_>,
         agent_id: AgentId,
         model_settings: ModelSettings,
+        compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     ) -> Result<AgentSession, AgentSessionError> {
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
             .model_settings(model_settings)
+            .compaction_config(compaction_config)
             .system_blocks(system_blocks)
             .tool_defs(tool_defs)
             .build()

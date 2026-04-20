@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::error::AgentError;
+use super::session::CompactionConfig;
 use super::AgentRole;
 
 /// Every `AgentRole` variant that must be present in
@@ -57,6 +58,9 @@ pub struct RoleConfig {
     /// current thread. `None` disables the auto-reset.
     #[serde(default)]
     pub reset_time_delta_seconds: Option<ResetTimeDeltaSeconds>,
+    /// Context window compaction settings. Defaults to disabled.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -258,6 +258,7 @@ impl Agents {
                     model: role_config.model,
                     max_tokens: role_config.max_tokens,
                 },
+                role_config.compaction,
                 system_blocks,
                 tool_defs,
             )
