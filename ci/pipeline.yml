@@ -1,6 +1,6 @@
 #@ load("@ytt:data", "data")
 #@ load("fragments.lib.yml",
-#@   "nix_flake_cachix_image_config",
+#@   "nix_flake_image_config",
 #@ )
 
 groups:
@@ -25,21 +25,19 @@ jobs:
   - task: nix-flake-check
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
             cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix flake check
+            nix flake check
 
 - name: test-integration
   serial: true
@@ -50,22 +48,19 @@ jobs:
     privileged: true
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
             cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run .#integration-tests
+            nix run .#integration-tests
 
 - name: test-bats
   serial: true
@@ -77,21 +72,19 @@ jobs:
     attempts: 2
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
             cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix run .#bats
+            nix run .#bats
 
 - name: build-edge-image
   serial: true
@@ -102,23 +95,21 @@ jobs:
   - task: build-image
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
       outputs:
       - name: image
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
             cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#docker-image
+            nix build .#docker-image
             gunzip -c result > ../image/image.tar
   - put: edge-image
     params:
@@ -145,7 +136,7 @@ jobs:
   - task: prepare-deployment
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: deploy-config
         path: repo
@@ -210,24 +201,21 @@ jobs:
   - task: train-and-export
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
       outputs:
       - name: model
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
-            cachix use $CACHIX_CACHE_NAME
-
             cd repo
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix run ./ci#train-classifier -- "$(pwd)/../model"
+            nix run ./ci#train-classifier -- "$(pwd)/../model"
   - put: code-assistant-model
     params:
       file: model/*.tar.gz
@@ -249,7 +237,7 @@ jobs:
   - task: build-index
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
       - name: cala-repo
@@ -260,17 +248,14 @@ jobs:
       outputs:
       - name: index
       - name: embedder
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
-            cachix use $CACHIX_CACHE_NAME
-
             mkdir -p /tmp/repos
             ln -s "$(pwd)/cala-repo" /tmp/repos/cala
             ln -s "$(pwd)/lana-repo" /tmp/repos/lana-bank
@@ -279,8 +264,7 @@ jobs:
             ln -s "$(pwd)/repo" /tmp/repos/galoy-agents
 
             cd repo
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#build-code-assistant-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../embedder" "$(pwd)/../code-assistant-model"
+            nix run ./ci#build-code-assistant-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../embedder" "$(pwd)/../code-assistant-model"
   - put: code-assistant-index
     params:
       file: index/*.tar.gz
@@ -290,39 +274,34 @@ jobs:
   - task: commit-index-hash
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo
       - name: index
       - name: embedder
       outputs:
       - name: repo-updated
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
-            cachix use $CACHIX_CACHE_NAME
-
             INDEX_HASH=$(basename "$(ls index/*.tar.gz)" .tar.gz)
             EMBEDDER_HASH=$(basename "$(ls embedder/*.tar.gz)" .tar.gz)
 
             cp -a repo/. repo-updated/
             cd repo-updated
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#commit-hash -- "$(pwd)" \
-                charts/galoy-agents/values.yaml \
-                "galoyAgents.codeAssistant.indexHash" \
-                "$INDEX_HASH"
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run ./ci#commit-hash -- "$(pwd)" \
-                charts/galoy-agents/values.yaml \
-                "galoyAgents.codeAssistant.embedderHash" \
-                "$EMBEDDER_HASH"
+            nix run ./ci#commit-hash -- "$(pwd)" \
+              charts/galoy-agents/values.yaml \
+              "galoyAgents.codeAssistant.indexHash" \
+              "$INDEX_HASH"
+            nix run ./ci#commit-hash -- "$(pwd)" \
+              charts/galoy-agents/values.yaml \
+              "galoyAgents.codeAssistant.embedderHash" \
+              "$EMBEDDER_HASH"
   - put: repo-chart-values
     params:
       repository: repo-updated
@@ -336,23 +315,20 @@ jobs:
   - task: sandbox-integration-test
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo-sandbox
         path: repo
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
             cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- \
-              nix run .#sandbox-bats
+            nix run .#sandbox-bats
 
 - name: build-sandbox-image
   serial: true
@@ -363,24 +339,22 @@ jobs:
   - task: build-image
     config:
       platform: linux
-      image_resource: #@ nix_flake_cachix_image_config()
+      image_resource: #@ nix_flake_image_config()
       inputs:
       - name: repo-sandbox
         path: repo
       outputs:
       - name: image
-      params:
-        CACHIX_AUTH_TOKEN: #@ data.values.cachix_auth_token
-        CACHIX_CACHE_NAME: #@ data.values.cachix_cache_name
+      caches:
+      - path: /nix-cache
       run:
-        path: sh
+        path: repo/ci/tasks/with-nix-cache.sh
         args:
+          - sh
           - -exc
           - |
-            set -euo pipefail
             cd repo
-            cachix use $CACHIX_CACHE_NAME
-            cachix watch-exec $CACHIX_CACHE_NAME -- nix build .#sandbox-image
+            nix build .#sandbox-image
             gunzip -c result > ../image/image.tar
   - put: sandbox-edge-image
     params:
@@ -403,12 +377,6 @@ resource_types:
     repository: frodenas/gcs-resource
 
 resources:
-#@ repo_source = {
-#@   "uri": data.values.git_uri,
-#@   "branch": data.values.git_branch,
-#@   "private_key": data.values.github_private_key,
-#@ }
-
 - name: repo
   type: git
   source:
