@@ -89,6 +89,10 @@ type PageInfo {
 
 type Query {
 	"""
+	Look up a single agent by ID.
+	"""
+	agent(id: AgentId!): Agent
+	"""
 	The currently authenticated user, if any.
 	"""
 	me: Me
@@ -162,6 +166,7 @@ type ThreadMessageEntry {
 }
 
 enum ThreadStartReason {
+	COMPACTION
 	INITIAL_THREAD
 	TOOL_DEFS_UPDATED
 }

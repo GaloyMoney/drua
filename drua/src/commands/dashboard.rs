@@ -182,6 +182,7 @@ struct ChatHistoryMessage {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "__typename")]
+#[allow(clippy::enum_variant_names)]
 enum ChatHistoryContentBlock {
     TextContent {
         text: String,
