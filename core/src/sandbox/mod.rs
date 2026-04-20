@@ -83,15 +83,17 @@ impl Sandboxes {
         })
     }
 
-    #[instrument(name = "domain.sandbox.create", skip(self, _sub))]
+    #[instrument(name = "domain.sandbox.create", skip(self, sub))]
     pub async fn create(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
+        let workspace_id = workspace_id.into();
+        sub.can(AuthVerb::Create, AuthResource::Sandbox(workspace_id, None))?;
         let mut op = self.repo.begin_op().await?;
         let sandbox = self
             .create_in_op(&mut op, workspace_id, name, specs, mode)
@@ -317,13 +319,18 @@ impl Sandboxes {
         Ok(())
     }
 
-    #[instrument(name = "domain.sandbox.find_by_id", skip(self, _sub))]
+    #[instrument(name = "domain.sandbox.find_by_id", skip(self, sub))]
     pub async fn find_by_id(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
-        Ok(self.repo.find_by_id(id.into()).await?)
+        let sandbox = self.repo.find_by_id(id.into()).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+        )?;
+        Ok(sandbox)
     }
 
     /// Like [`Self::find_by_id`] but returns `Ok(None)` instead of an
@@ -345,14 +352,18 @@ impl Sandboxes {
     /// the entity isn't in [`SandboxState::Ready`] (the only state where
     /// a `base_url` is guaranteed). Used by tools that act inside the
     /// sandbox (e.g. the `bash` top-level tool).
-    #[instrument(name = "domain.sandbox.instance_client_for", skip(self, _sub))]
+    #[instrument(name = "domain.sandbox.instance_client_for", skip(self, sub))]
     pub async fn instance_client_for(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<InstanceClient, SandboxError> {
         let id = id.into();
         let sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Use,
+            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+        )?;
         if sandbox.state != SandboxState::Ready {
             return Err(SandboxError::NotReady {
                 state: sandbox.state.to_string(),
@@ -364,14 +375,15 @@ impl Sandboxes {
         })
     }
 
-    #[instrument(name = "domain.sandbox.list_for_workspace", skip(self, _sub))]
+    #[instrument(name = "domain.sandbox.list_for_workspace", skip(self, sub))]
     pub async fn list_for_workspace(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Vec<Sandbox>, SandboxError> {
         const PAGE_SIZE: usize = 100;
         let workspace_id = workspace_id.into();
+        sub.can(AuthVerb::Read, AuthResource::Sandbox(workspace_id, None))?;
         let mut all = Vec::new();
         let mut query = PaginatedQueryArgs {
             first: PAGE_SIZE,
@@ -398,16 +410,20 @@ impl Sandboxes {
     /// workspace dir), then `/initialize` is called again. The server's
     /// `/initialize` is idempotent — it overwrites the GitHub token and
     /// skips re-cloning when the repo is already on disk.
-    #[instrument(name = "domain.sandbox.restart", skip(self, _sub))]
+    #[instrument(name = "domain.sandbox.restart", skip(self, sub))]
     pub async fn restart(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
+        let mut sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+        )?;
         Audit::record_sandbox_id(id);
         let mut op = self.repo.begin_op().await?;
-        let mut sandbox = self.repo.find_by_id(id).await?;
         if sandbox.provisioning().did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
@@ -467,12 +483,18 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    #[instrument(name = "domain.sandbox.suspend", skip(self, _sub))]
+    #[instrument(name = "domain.sandbox.suspend", skip(self, sub))]
     pub async fn suspend(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
+        let id = id.into();
+        let sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+        )?;
         let mut op = self.repo.begin_op().await?;
         let sandbox = self.suspend_in_op(&mut op, id).await?;
         op.commit().await?;

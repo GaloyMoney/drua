@@ -3,7 +3,7 @@
 //! translates `{path, ignore}` into `{command: "view", path}` and
 //! forwards to the same `/execute` handler.
 //!
-//! Read-only: executable with either `SandboxUseAll` or `SandboxUseReadOnly`.
+//! Read-only: executable with either `SandboxUse` or `SandboxRead`.
 
 use std::sync::{Arc, LazyLock};
 

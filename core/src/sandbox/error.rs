@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use sandbox::AdminError;
 
+use crate::auth::error::AuthorizationError;
 use crate::primitives::{AgentId, WorkspaceId};
 
 use super::repo::{SandboxCreateError, SandboxFindError, SandboxModifyError, SandboxQueryError};
@@ -31,4 +32,6 @@ pub enum SandboxError {
     WriteSlotTaken { current_writer: AgentId },
     #[error("SandboxError - sandbox is in {state} state and has no live instance (must be Ready)")]
     NotReady { state: String },
+    #[error("SandboxError - Authorization: {0}")]
+    Authorization(#[from] AuthorizationError),
 }

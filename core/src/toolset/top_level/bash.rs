@@ -7,7 +7,7 @@
 //! Visibility / authz:
 //! - Visible only to [`AuthSubject::Agent`] / [`AuthSubject::AgentOnBehalfOfUser`]
 //!   — users / exported-agent tokens / anonymous never see it.
-//! - Executable only when the subject carries a [`AuthScope::SandboxUseAll`]
+//! - Executable only when the subject carries a [`AuthScope::SandboxUse`]
 //!   (granted by attaching as Write). Read-only attachment isn't enough —
 //!   bash can mutate sandbox state. Visible-but-unauthorized when an agent
 //!   has no write attachment yet, so the model can ask to attach and try
@@ -56,14 +56,14 @@ static BASH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-/// First [`SandboxId`] from a `SandboxUseAll` scope on the subject — i.e.
+/// First [`SandboxId`] from a `SandboxUse` scope on the subject — i.e.
 /// the sandbox the agent is currently attached to as a writer. We expect
 /// at most one such scope per agent today (the entity enforces a single
 /// active attachment); first one wins regardless. Read-only attachments
 /// don't qualify because `bash` can mutate state.
 fn sandbox_use_id(subject: &AuthSubject) -> Option<SandboxId> {
     subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUseAll(id) => Some(*id),
+        AuthScope::SandboxUse(id) => Some(*id),
         _ => None,
     })
 }

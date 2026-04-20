@@ -1,7 +1,7 @@
 //! `Glob` — file pattern matching inside the agent's attached sandbox.
 //! Returns matching file paths sorted by modification time (most recent first).
 //!
-//! Read-only: executable with either `SandboxUseAll` or `SandboxUseReadOnly`.
+//! Read-only: executable with either `SandboxUse` or `SandboxRead`.
 //! Server-side handler uses `rg --files -g <pattern>`.
 
 use std::sync::{Arc, LazyLock};

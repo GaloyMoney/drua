@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::auth::error::AuthorizationError;
 use crate::encryption::EncryptionError;
 
 use super::repo::{
@@ -19,4 +20,6 @@ pub enum WorkspaceSecretError {
     Query(#[from] WorkspaceSecretQueryError),
     #[error("WorkspaceSecretError - Encryption: {0}")]
     Encryption(#[from] EncryptionError),
+    #[error("WorkspaceSecretError - Authorization: {0}")]
+    Authorization(#[from] AuthorizationError),
 }

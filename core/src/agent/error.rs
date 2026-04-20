@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::auth::error::AuthorizationError;
 use crate::primitives::{SandboxId, WorkspaceId};
 use crate::sandbox::error::SandboxError;
 use crate::skill::SkillError;
@@ -29,6 +30,8 @@ pub enum AgentError {
     PromptRequestChannelClosed,
     #[error("AgentError - role not configured: {0:?}")]
     RoleNotConfigured(super::entity::AgentRole),
+    #[error("AgentError - Authorization: {0}")]
+    Authorization(#[from] AuthorizationError),
     #[error("AgentError - unauthorized")]
     Unauthorized,
     #[error(

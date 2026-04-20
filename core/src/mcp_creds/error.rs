@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::auth::error::AuthorizationError;
+
 use super::repo::{
     McpCredsCreateError, McpCredsFindError, McpCredsModifyError, McpCredsQueryError,
 };
@@ -18,6 +20,6 @@ pub enum McpCredsError {
     Query(#[from] McpCredsQueryError),
     #[error("McpCredsError - AlreadyRevoked")]
     AlreadyRevoked,
-    #[error("McpCredsError - AuthorizationError")]
-    AuthorizationError,
+    #[error("McpCredsError - Authorization: {0}")]
+    Authorization(#[from] AuthorizationError),
 }

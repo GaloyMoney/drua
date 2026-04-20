@@ -29,7 +29,11 @@ impl Skills {
     }
 
     #[instrument(name = "skill.create", skip_all)]
-    pub async fn create(&self, _sub: &AuthSubject, new: NewSkill) -> Result<Skill, SkillError> {
+    pub async fn create(&self, sub: &AuthSubject, new: NewSkill) -> Result<Skill, SkillError> {
+        sub.can(
+            AuthVerb::Create,
+            AuthResource::Skill(new.workspace_id, None),
+        )?;
         let skill = self.repo.create(new).await?;
         Ok(skill)
     }
@@ -45,8 +49,13 @@ impl Skills {
     }
 
     #[instrument(name = "skill.find_by_id", skip_all)]
-    pub async fn find_by_id(&self, _sub: &AuthSubject, id: SkillId) -> Result<Skill, SkillError> {
-        Ok(self.repo.find_by_id(id).await?)
+    pub async fn find_by_id(&self, sub: &AuthSubject, id: SkillId) -> Result<Skill, SkillError> {
+        let skill = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Skill(skill.workspace_id, Some(skill.id)),
+        )?;
+        Ok(skill)
     }
 
     /// Resolve a skill by name and return its body, falling back to the
@@ -93,9 +102,10 @@ impl Skills {
     #[instrument(name = "skill.list_by_workspace_id", skip_all)]
     pub async fn list_by_workspace_id(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Skill>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
@@ -112,14 +122,22 @@ impl Skills {
     }
 
     #[instrument(name = "skill.update", skip_all)]
-    pub async fn update(&self, _sub: &AuthSubject, skill: &mut Skill) -> Result<(), SkillError> {
+    pub async fn update(&self, sub: &AuthSubject, skill: &mut Skill) -> Result<(), SkillError> {
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Skill(skill.workspace_id, Some(skill.id)),
+        )?;
         self.repo.update(skill).await?;
         Ok(())
     }
 
     #[instrument(name = "skill.delete", skip_all)]
-    pub async fn delete(&self, _sub: &AuthSubject, id: SkillId) -> Result<(), SkillError> {
+    pub async fn delete(&self, sub: &AuthSubject, id: SkillId) -> Result<(), SkillError> {
         let skill = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Skill(skill.workspace_id, Some(skill.id)),
+        )?;
         self.repo.delete(skill).await?;
         Ok(())
     }

@@ -10,7 +10,6 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
-use crate::auth::AuthSubject;
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -24,15 +23,16 @@ impl McpCredentials {
         Self { repo }
     }
 
-    #[instrument(name = "domain.mcp_creds.create_for_user", skip(self, _sub))]
+    #[instrument(name = "domain.mcp_creds.create_for_user", skip(self, sub))]
     pub async fn create_for_user(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         user_id: UserId,
         name: impl Into<String> + std::fmt::Debug,
         token_hash: impl Into<String> + std::fmt::Debug,
         scopes: Vec<AuthScope>,
     ) -> Result<McpCreds, McpCredsError> {
+        sub.can(AuthVerb::Create, AuthResource::McpCreds(None))?;
         let new_creds = NewMcpCreds::builder()
             .owner(McpCredsOwner::User { user_id })
             .name(name)
@@ -68,20 +68,26 @@ impl McpCredentials {
         Ok(creds)
     }
 
-    #[instrument(name = "domain.mcp_creds.revoke", skip(self, _sub))]
+    #[instrument(name = "domain.mcp_creds.revoke", skip(self, sub))]
     pub async fn revoke(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         user_id: UserId,
         id: impl Into<McpCredsId> + std::fmt::Debug,
     ) -> Result<McpCreds, McpCredsError> {
         let id = id.into();
         let mut creds = self.repo.find_by_id(id).await?;
+        sub.can(AuthVerb::Delete, AuthResource::McpCreds(Some(creds.id)))?;
 
         let is_owner =
             matches!(&creds.owner, McpCredsOwner::User { user_id: uid } if *uid == user_id);
         if !is_owner {
-            return Err(McpCredsError::AuthorizationError);
+            return Err(McpCredsError::Authorization(
+                crate::auth::error::AuthorizationError::Forbidden {
+                    verb: AuthVerb::Delete,
+                    resource: AuthResource::McpCreds(Some(creds.id)),
+                },
+            ));
         }
 
         if creds.revoke().did_execute() {
@@ -107,10 +113,10 @@ impl McpCredentials {
         Ok(creds)
     }
 
-    #[instrument(name = "domain.mcp_creds.list_for_user", skip(self, _sub))]
+    #[instrument(name = "domain.mcp_creds.list_for_user", skip(self, sub))]
     pub async fn list_for_user(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         user_id: UserId,
         query: es_entity::PaginatedQueryArgs<repo::mcp_creds_cursor::McpCredsByCreatedAtCursor>,
         direction: es_entity::ListDirection,
@@ -118,6 +124,7 @@ impl McpCredentials {
         es_entity::PaginatedQueryRet<McpCreds, repo::mcp_creds_cursor::McpCredsByCreatedAtCursor>,
         McpCredsError,
     > {
+        sub.can(AuthVerb::Read, AuthResource::McpCreds(None))?;
         let owner_id = McpCredsOwner::User { user_id }.id();
         Ok(self
             .repo
@@ -125,12 +132,13 @@ impl McpCredentials {
             .await?)
     }
 
-    #[instrument(name = "domain.mcp_creds.list_all_for_user", skip(self, _sub))]
+    #[instrument(name = "domain.mcp_creds.list_all_for_user", skip(self, sub))]
     pub async fn list_all_for_user(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         user_id: UserId,
     ) -> Result<Vec<McpCreds>, McpCredsError> {
+        sub.can(AuthVerb::Read, AuthResource::McpCreds(None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,

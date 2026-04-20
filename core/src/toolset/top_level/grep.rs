@@ -1,7 +1,7 @@
 //! `Grep` — content search across files inside the agent's attached sandbox.
 //! Wire-compatible with Claude Code's `Grep` tool and ripgrep-style flags.
 //!
-//! Read-only: executable with either `SandboxUseAll` or `SandboxUseReadOnly`.
+//! Read-only: executable with either `SandboxUse` or `SandboxRead`.
 //! Server-side handler shells out to `rg`.
 
 use std::sync::{Arc, LazyLock};
