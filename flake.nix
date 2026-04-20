@@ -168,7 +168,10 @@
           cargo-nextest nextest run \
             --archive-file ${integration-test-archive}/test-archive.tar.zst \
             --workspace-remap "$REPO_ROOT" \
-            --test-threads 1
+            --test-threads 1 \
+            --failure-output immediate-final \
+            --no-fail-fast \
+            2>&1
         '';
 
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
