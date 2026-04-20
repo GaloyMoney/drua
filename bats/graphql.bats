@@ -54,13 +54,13 @@ teardown_file() {
   echo "workspace id: $ws_id"
 
   # Query single workspace with lead agent
-  run graphql_query "{ workspace(id: \"$ws_id\") { id name description lead { id name role } } }"
+  run graphql_query "{ workspace(id: \"$ws_id\") { id name description lead { id name role } } }" "$AGENT_TOKEN"
   echo "$output"
   [[ "$output" == *'"name":"test-ws"'* ]]
   [[ "$output" == *'"role":"WORKSPACE_LEAD"'* ]]
 
   # List workspaces (cursor-based)
-  run graphql_query "{ workspaces(first: 10) { edges { node { id name } } pageInfo { hasNextPage } } }"
+  run graphql_query "{ workspaces(first: 10) { edges { node { id name } } pageInfo { hasNextPage } } }" "$AGENT_TOKEN"
   echo "$output"
   [[ "$output" == *'"name":"test-ws"'* ]]
   [[ "$output" == *'"hasNextPage"'* ]]
@@ -77,13 +77,15 @@ teardown_file() {
   [[ "$output" == *'"id"'* ]]
 
   # After deletion, workspace should not appear in list
-  run graphql_query "{ workspaces(first: 100) { edges { node { id } } } }"
+  run graphql_query "{ workspaces(first: 100) { edges { node { id } } } }" "$AGENT_TOKEN"
   echo "$output"
   [[ "$output" != *"$ws_id"* ]]
 }
 
 @test "graphql: workspace query returns null for unknown id" {
-  run graphql_query '{ workspace(id: "00000000-0000-0000-0000-000000000000") { id } }'
+  create_test_agent
+
+  run graphql_query '{ workspace(id: "00000000-0000-0000-0000-000000000000") { id } }' "$AGENT_TOKEN"
   echo "$output"
   [[ "$output" == *'"workspace":null'* ]]
 }
