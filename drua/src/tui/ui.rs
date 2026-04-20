@@ -291,27 +291,40 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
 }
 
 fn draw_chat_input(frame: &mut Frame, state: &ScreenState, area: Rect) {
-    let border_color = if state.focus == Focus::Chat {
-        Color::Yellow
+    let focused = state.focus == Focus::Chat;
+    let border_color = if focused { Color::Yellow } else { Color::Cyan };
+
+    let prefix = match (state.selected_workspace(), state.selected_agent()) {
+        (Some(ws), Some(agent)) => format!("[{}: {}] > ", ws.name, agent.name),
+        (Some(ws), None) => format!("[{}] > ", ws.name),
+        _ => "> ".to_string(),
+    };
+    let prefix_len = prefix.len() as u16;
+
+    let visible_width = area.width.saturating_sub(2);
+    let cursor_pos = prefix_len + state.input_cursor as u16;
+    let scroll = if cursor_pos >= visible_width {
+        cursor_pos - visible_width + 1
     } else {
-        Color::Cyan
+        0
     };
 
-    let display = if state.focus == Focus::Chat {
-        let (before, after) = state.chat_input.split_at(state.input_cursor);
-        format!("{before}▎{after}")
-    } else {
-        state.chat_input.clone()
-    };
-
-    let paragraph = Paragraph::new(display).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Input ")
-            .border_style(Style::default().fg(border_color)),
-    );
+    let display = format!("{prefix}{}", state.chat_input);
+    let paragraph = Paragraph::new(display)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .scroll((0, scroll));
 
     frame.render_widget(paragraph, area);
+
+    if focused {
+        let x = area.x + 1 + cursor_pos - scroll;
+        let y = area.y + 1;
+        frame.set_cursor_position((x, y));
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
