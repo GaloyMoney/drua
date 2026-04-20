@@ -25,6 +25,8 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                 state.select_lead_and_focus_chat();
                 return Action::None;
             }
+            // Ctrl+R — refresh workspaces
+            KeyCode::Char('r') => return Action::Refresh,
             // Ctrl+H / Ctrl+L — focus left / right
             KeyCode::Char('h') => {
                 state.focus_left();
@@ -68,7 +70,6 @@ fn handle_sidebar_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.enter_create_mode();
             Action::None
         }
-        KeyCode::Char('r') => Action::Refresh,
         KeyCode::Tab => {
             state.toggle_focus();
             Action::None
