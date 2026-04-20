@@ -44,7 +44,7 @@ pub fn walk_repo(
         }
     }
 
-    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files.sort_by_key(|a| a.path.clone());
     Ok(files)
 }
 

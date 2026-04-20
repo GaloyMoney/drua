@@ -117,7 +117,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     // Print mismatches sorted by frequency.
     if !mismatches.is_empty() {
         let mut mismatch_list: Vec<_> = mismatches.into_iter().collect();
-        mismatch_list.sort_by(|a, b| b.1.cmp(&a.1));
+        mismatch_list.sort_by_key(|x| std::cmp::Reverse(x.1));
 
         println!("\nMismatches:");
         for ((predicted, human), count) in &mismatch_list {

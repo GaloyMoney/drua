@@ -822,7 +822,7 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
         }
     }
 
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by_key(|a| a.name.clone());
     skills
 }
 

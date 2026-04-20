@@ -221,7 +221,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     // Print ML confusion matrix (mismatches only).
     if !ml_confusion.is_empty() {
         let mut mismatch_list: Vec<_> = ml_confusion.into_iter().collect();
-        mismatch_list.sort_by(|a, b| b.1.cmp(&a.1));
+        mismatch_list.sort_by_key(|x| std::cmp::Reverse(x.1));
 
         println!("\nML Mismatches:");
         for ((predicted, human), count) in &mismatch_list {

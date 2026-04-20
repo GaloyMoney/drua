@@ -97,7 +97,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     if !source_counts.is_empty() {
         println!("\nLabel source:");
         let mut sorted_sources: Vec<_> = source_counts.into_iter().collect();
-        sorted_sources.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_sources.sort_by_key(|x| std::cmp::Reverse(x.1));
         for (source, count) in &sorted_sources {
             println!("  {source:<15} {count}");
         }
@@ -105,21 +105,21 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
 
     println!("\nPrimary label counts:");
     let mut sorted_labels: Vec<_> = label_counts.into_iter().collect();
-    sorted_labels.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_labels.sort_by_key(|x| std::cmp::Reverse(x.1));
     for (label, count) in &sorted_labels {
         println!("  {label:<25} {count}");
     }
 
     println!("\nLayer counts:");
     let mut sorted_layers: Vec<_> = layer_counts.into_iter().collect();
-    sorted_layers.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_layers.sort_by_key(|x| std::cmp::Reverse(x.1));
     for (layer, count) in &sorted_layers {
         println!("  {layer:<25} {count}");
     }
 
     println!("\nUses counts:");
     let mut sorted_uses: Vec<_> = uses_counts.into_iter().collect();
-    sorted_uses.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_uses.sort_by_key(|x| std::cmp::Reverse(x.1));
     for (u, count) in &sorted_uses {
         println!("  {u:<25} {count}");
     }
