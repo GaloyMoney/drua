@@ -193,9 +193,9 @@ impl ScreenState {
 
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
-            Focus::Sidebar => Focus::Agents,
-            Focus::Agents => Focus::Chat,
-            Focus::Chat => Focus::Sidebar,
+            Focus::Sidebar => Focus::Chat,
+            Focus::Chat => Focus::Agents,
+            Focus::Agents => Focus::Sidebar,
         };
     }
 

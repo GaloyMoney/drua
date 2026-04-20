@@ -22,14 +22,14 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(24),
-            Constraint::Length(22),
             Constraint::Min(1),
+            Constraint::Length(22),
         ])
         .split(main_area);
 
     draw_workspace_list(frame, state, panels[0]);
-    draw_agents_list(frame, state, panels[1]);
-    draw_chat_pane(frame, state, panels[2]);
+    draw_chat_pane(frame, state, panels[1]);
+    draw_agents_list(frame, state, panels[2]);
     draw_status_bar(frame, state, status_area);
 
     if state.mode == Mode::CreateWorkspace {
