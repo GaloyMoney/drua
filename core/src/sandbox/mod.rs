@@ -94,6 +94,8 @@ impl Sandboxes {
     ) -> Result<Sandbox, SandboxError> {
         let workspace_id = workspace_id.into();
         sub.can(AuthVerb::Create, AuthResource::Sandbox(workspace_id, None))?;
+        Audit::record_action_if_unset("sandbox.create");
+        Audit::record_workspace_id(workspace_id);
         let mut op = self.repo.begin_op().await?;
         let sandbox = self
             .create_in_op(&mut op, workspace_id, name, specs, mode)
@@ -330,6 +332,9 @@ impl Sandboxes {
             AuthVerb::Read,
             AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
         )?;
+        Audit::record_action_if_unset("sandbox.find_by_id");
+        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_sandbox_id(sandbox.id);
         Ok(sandbox)
     }
 
@@ -364,6 +369,9 @@ impl Sandboxes {
             AuthVerb::Use,
             AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
         )?;
+        Audit::record_action_if_unset("sandbox.instance_client_for");
+        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_sandbox_id(sandbox.id);
         if sandbox.state != SandboxState::Ready {
             return Err(SandboxError::NotReady {
                 state: sandbox.state.to_string(),
@@ -384,6 +392,8 @@ impl Sandboxes {
         const PAGE_SIZE: usize = 100;
         let workspace_id = workspace_id.into();
         sub.can(AuthVerb::Read, AuthResource::Sandbox(workspace_id, None))?;
+        Audit::record_action_if_unset("sandbox.list_for_workspace");
+        Audit::record_workspace_id(workspace_id);
         let mut all = Vec::new();
         let mut query = PaginatedQueryArgs {
             first: PAGE_SIZE,
@@ -422,6 +432,8 @@ impl Sandboxes {
             AuthVerb::Update,
             AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
         )?;
+        Audit::record_action_if_unset("sandbox.restart");
+        Audit::record_workspace_id(sandbox.workspace_id);
         Audit::record_sandbox_id(id);
         let mut op = self.repo.begin_op().await?;
         if sandbox.provisioning().did_execute() {
@@ -452,6 +464,8 @@ impl Sandboxes {
         mode: SandboxAgentMode,
     ) -> Result<Sandbox, SandboxError> {
         Audit::record_sandbox_id(sandbox_id);
+        Audit::record_workspace_id(workspace_id);
+        Audit::record_agent_id(agent_id);
         let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
         if sandbox
             .attach_agent(agent_id, workspace_id, mode)?
@@ -476,6 +490,7 @@ impl Sandboxes {
         agent_id: AgentId,
     ) -> Result<Sandbox, SandboxError> {
         Audit::record_sandbox_id(sandbox_id);
+        Audit::record_agent_id(agent_id);
         let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
         if sandbox.detach_agent(agent_id).did_execute() {
             self.repo.update_in_op(op, &mut sandbox).await?;
@@ -495,6 +510,8 @@ impl Sandboxes {
             AuthVerb::Update,
             AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
         )?;
+        Audit::record_action_if_unset("sandbox.suspend");
+        Audit::record_workspace_id(sandbox.workspace_id);
         let mut op = self.repo.begin_op().await?;
         let sandbox = self.suspend_in_op(&mut op, id).await?;
         op.commit().await?;

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO audit_entries\n                (acting_user_id, acting_agent_id, on_behalf_of_user_id,\n                 resource_ids, interaction_type, action, metadata, outcome, error,\n                 duration_ms, tokens_returned)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\n            RETURNING\n                id AS \"id: AuditEntryId\",\n                acting_user_id AS \"acting_user_id: UserId\",\n                acting_agent_id AS \"acting_agent_id: AgentId\",\n                on_behalf_of_user_id AS \"on_behalf_of_user_id: UserId\",\n                resource_ids AS \"resource_ids: serde_json::Value\",\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                error,\n                duration_ms,\n                tokens_returned,\n                recorded_at",
+  "query": "SELECT\n                id AS \"id: AuditEntryId\",\n                acting_user_id AS \"acting_user_id: UserId\",\n                acting_agent_id AS \"acting_agent_id: AgentId\",\n                on_behalf_of_user_id AS \"on_behalf_of_user_id: UserId\",\n                resource_ids AS \"resource_ids: serde_json::Value\",\n                entrypoint,\n                interaction_type,\n                action,\n                metadata AS \"metadata: serde_json::Value\",\n                outcome,\n                error,\n                duration_ms,\n                tokens_returned,\n                recorded_at\n            FROM audit_entries\n            ORDER BY id DESC\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -30,57 +30,52 @@
       },
       {
         "ordinal": 5,
+        "name": "entrypoint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
         "name": "interaction_type",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "action",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "metadata: serde_json::Value",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "outcome",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "error",
         "type_info": "Bool"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "duration_ms",
         "type_info": "Int8"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "tokens_returned",
         "type_info": "Int8"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "recorded_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Uuid",
-        "Uuid",
-        "Jsonb",
-        "Varchar",
-        "Varchar",
-        "Jsonb",
-        "Varchar",
-        "Bool",
-        "Int8",
         "Int8"
       ]
     },
@@ -90,6 +85,7 @@
       true,
       true,
       false,
+      true,
       false,
       false,
       false,
@@ -100,5 +96,5 @@
       false
     ]
   },
-  "hash": "08d7693b3e355a2d6bf3c423e5c7d4c1393374334fb8bd5d081f7d13bc362c1b"
+  "hash": "4ba2321e2aeee9b6ce689c6dad78fc72b453261b6649dc2b2b1a86ca146d4577"
 }

@@ -14,6 +14,7 @@ pub use error::*;
 use repo::*;
 
 use crate::agent::Agents;
+use crate::audit::Audit;
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -36,6 +37,7 @@ impl Workspaces {
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
         sub.can(AuthVerb::Create, AuthResource::Workspace(None))?;
+        Audit::record_action_if_unset("workspace.create");
         let name = name.into();
         let lead_agent_id = AgentId::new();
         let new_workspace = build_new_workspace(lead_agent_id, &name, description);
@@ -43,6 +45,9 @@ impl Workspaces {
 
         let mut op = self.repo.begin_op().await?;
         let workspace = self.repo.create_in_op(&mut op, new_workspace).await?;
+
+        Audit::record_workspace_id(workspace_id);
+        Audit::record_agent_id(lead_agent_id);
 
         self.agents
             .create_workspace_lead_in_op(&mut op, lead_agent_id, workspace_id, "lead", &name)
@@ -67,6 +72,8 @@ impl Workspaces {
     ) -> Result<Workspace, WorkspaceError> {
         let id = id.into();
         sub.can(AuthVerb::Read, AuthResource::Workspace(Some(id)))?;
+        Audit::record_action_if_unset("workspace.find_by_id");
+        Audit::record_workspace_id(id);
         Ok(self.repo.find_by_id(id).await?)
     }
 
@@ -78,12 +85,14 @@ impl Workspaces {
         direction: ListDirection,
     ) -> Result<PaginatedQueryRet<Workspace, WorkspaceByCreatedAtCursor>, WorkspaceError> {
         sub.can(AuthVerb::Read, AuthResource::Workspace(None))?;
+        Audit::record_action_if_unset("workspace.list");
         Ok(self.repo.list_by_created_at(query, direction).await?)
     }
 
     #[instrument(name = "domain.workspace.list_all", skip(self, sub))]
     pub async fn list_all(&self, sub: &AuthSubject) -> Result<Vec<Workspace>, WorkspaceError> {
         sub.can(AuthVerb::Read, AuthResource::Workspace(None))?;
+        Audit::record_action_if_unset("workspace.list_all");
         Ok(self.repo.list_all().await?)
     }
 
@@ -97,6 +106,8 @@ impl Workspaces {
     ) -> Result<Workspace, WorkspaceError> {
         let id = id.into();
         sub.can(AuthVerb::Update, AuthResource::Workspace(Some(id)))?;
+        Audit::record_action_if_unset("workspace.update");
+        Audit::record_workspace_id(id);
         let mut workspace = self.repo.find_by_id(id).await?;
         workspace.update(name, description);
         self.repo.update(&mut workspace).await?;
@@ -111,6 +122,8 @@ impl Workspaces {
     ) -> Result<Workspace, WorkspaceError> {
         let id = id.into();
         sub.can(AuthVerb::Delete, AuthResource::Workspace(Some(id)))?;
+        Audit::record_action_if_unset("workspace.delete");
+        Audit::record_workspace_id(id);
         let mut op = self.repo.begin_op().await?;
         let workspace = self.delete_in_op(&mut op, sub, id).await?;
         op.commit().await?;

@@ -76,10 +76,35 @@ impl Audit {
         Self::update_context(|ctx| ctx.interaction_type = Some(itype));
     }
 
+    /// Record how the request arrived (e.g. `"api: POST /workspaces"`,
+    /// `"mcp: bash"`, `"graphql: CreateWorkspace"`). Called once per
+    /// request at the boundary layer.
+    pub fn record_entrypoint(entrypoint: impl Into<String>) {
+        let entrypoint = entrypoint.into();
+        Self::update_context(|ctx| ctx.entrypoint = Some(entrypoint));
+    }
+
     /// Record the action label (e.g. `"POST /workspaces"`).
     pub fn record_action(action: impl Into<String>) {
         let action = action.into();
         Self::update_context(|ctx| ctx.action = Some(action));
+    }
+
+    /// Set the action only if no inner handler has recorded one yet.
+    /// Used by domain services so boundary layers don't overwrite a
+    /// more specific action set by the domain.
+    pub fn record_action_if_unset(action: impl Into<String>) {
+        let action = action.into();
+        Self::update_context(|ctx| {
+            if ctx.action.is_none() {
+                ctx.action = Some(action);
+            }
+        });
+    }
+
+    /// Record the agent that scopes this interaction.
+    pub fn record_agent_id(agent_id: AgentId) {
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "agent_id", agent_id));
     }
 
     /// Derive and record the outcome from an HTTP status code.
@@ -177,6 +202,7 @@ impl Audit {
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
                 resource_ids AS "resource_ids: serde_json::Value",
+                entrypoint,
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
@@ -210,6 +236,7 @@ impl Audit {
         let acting_agent_id = query.acting_agent_id.map(uuid::Uuid::from);
         let exclude_agent_id = query.exclude_agent_id.map(uuid::Uuid::from);
         let sandbox_id = query.sandbox_id.map(|id| uuid::Uuid::from(id).to_string());
+        let entrypoint = query.entrypoint.as_deref();
         let action = query.action.as_deref();
         let outcome = query.outcome.as_deref();
         let error = query.error;
@@ -223,6 +250,7 @@ impl Audit {
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
                 resource_ids AS "resource_ids: serde_json::Value",
+                entrypoint,
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
@@ -237,16 +265,18 @@ impl Audit {
               AND ($3::uuid IS NULL OR acting_agent_id = $3)
               AND ($4::uuid IS NULL OR acting_agent_id IS NULL OR acting_agent_id != $4)
               AND ($5::text IS NULL OR resource_ids->>'sandbox_id' = $5)
-              AND ($6::text IS NULL OR action ILIKE $6)
-              AND ($7::text IS NULL OR outcome ILIKE $7)
-              AND ($8::bool IS NULL OR error = $8)
+              AND ($6::text IS NULL OR entrypoint ILIKE $6)
+              AND ($7::text IS NULL OR action ILIKE $7)
+              AND ($8::text IS NULL OR outcome ILIKE $8)
+              AND ($9::bool IS NULL OR error = $9)
             ORDER BY id DESC
-            LIMIT $9"#,
+            LIMIT $10"#,
             workspace_id.as_deref(),
             acting_user_id,
             acting_agent_id,
             exclude_agent_id,
             sandbox_id.as_deref(),
+            entrypoint,
             action,
             outcome,
             error,
@@ -262,6 +292,7 @@ impl Audit {
         let acting_agent_id = ctx.acting_agent_id.map(uuid::Uuid::from);
         let on_behalf_of = ctx.on_behalf_of_user_id.map(uuid::Uuid::from);
         let resource_ids = serde_json::Value::Object(ctx.resource_ids.clone());
+        let entrypoint = ctx.entrypoint.clone();
         let itype = ctx
             .interaction_type
             .as_ref()
@@ -279,15 +310,16 @@ impl Audit {
             AuditEntry,
             r#"INSERT INTO audit_entries
                 (acting_user_id, acting_agent_id, on_behalf_of_user_id,
-                 resource_ids, interaction_type, action, metadata, outcome, error,
-                 duration_ms, tokens_returned)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 resource_ids, entrypoint, interaction_type, action, metadata,
+                 outcome, error, duration_ms, tokens_returned)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING
                 id AS "id: AuditEntryId",
                 acting_user_id AS "acting_user_id: UserId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
                 resource_ids AS "resource_ids: serde_json::Value",
+                entrypoint,
                 interaction_type,
                 action,
                 metadata AS "metadata: serde_json::Value",
@@ -300,6 +332,7 @@ impl Audit {
             acting_agent_id,
             on_behalf_of,
             resource_ids,
+            entrypoint,
             itype,
             action,
             metadata,

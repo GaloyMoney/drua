@@ -67,6 +67,9 @@ pub struct AuditContextData {
     /// (e.g. `"workspace_id"`, `"sandbox_id"`).
     #[serde(default)]
     pub resource_ids: serde_json::Map<String, serde_json::Value>,
+    /// How the request arrived (e.g. `"api: POST /workspaces"`,
+    /// `"mcp: bash"`, `"graphql: CreateWorkspace"`).
+    pub entrypoint: Option<String>,
     pub interaction_type: Option<InteractionType>,
     pub action: Option<String>,
     pub outcome: Option<InteractionOutcome>,
@@ -91,6 +94,8 @@ pub struct AuditLogQuery {
     pub exclude_agent_id: Option<AgentId>,
     /// Only entries for this sandbox.
     pub sandbox_id: Option<SandboxId>,
+    /// Substring match on the `entrypoint` column.
+    pub entrypoint: Option<String>,
     /// Substring match on the `action` column.
     pub action: Option<String>,
     /// Substring match on the `outcome` column (e.g. "success", "error").
@@ -111,6 +116,10 @@ pub struct AuditEntry {
     /// All resource IDs involved in this interaction as a flat JSON object
     /// (e.g. `{"workspace_id": "…", "sandbox_id": "…"}`).
     pub resource_ids: serde_json::Value,
+    /// How the request arrived (e.g. `"api: POST /workspaces"`,
+    /// `"mcp: bash"`, `"graphql: CreateWorkspace"`). `None` for
+    /// entries recorded before this column was introduced.
+    pub entrypoint: Option<String>,
     pub interaction_type: String,
     pub action: String,
     pub metadata: serde_json::Value,

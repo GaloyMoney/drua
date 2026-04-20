@@ -212,7 +212,8 @@ impl ToolSets {
 
         async move {
             Audit::record_subject(subject);
-            Audit::record_action(name);
+            Audit::record_entrypoint(format!("mcp: {}", name));
+            Audit::record_interaction_type(crate::audit::primitives::InteractionType::McpCall);
             let args_value = arguments
                 .as_ref()
                 .map(|a| serde_json::Value::Object(a.clone()));

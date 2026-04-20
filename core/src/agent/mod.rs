@@ -96,7 +96,10 @@ impl Agents {
         workspace_name: &str,
     ) -> Result<Agent, AgentError> {
         sub.can(AuthVerb::Create, AuthResource::Agent(workspace_id, None))?;
+        Audit::record_action_if_unset("agent.create_workspace_lead");
+        Audit::record_workspace_id(workspace_id);
         let id = AgentId::new();
+        Audit::record_agent_id(id);
         let mut op = self.repo.begin_op().await?;
         let agent = self
             .create_in_op(
@@ -124,8 +127,11 @@ impl Agents {
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
         sub.can(AuthVerb::Create, AuthResource::Agent(workspace_id, None))?;
+        Audit::record_action_if_unset("agent.create_agent");
+        Audit::record_workspace_id(workspace_id);
         let workspace_name = self.resolve_workspace_name(workspace_id).await?;
         let id = AgentId::new();
+        Audit::record_agent_id(id);
         let mut op = self.repo.begin_op().await?;
         let agent = self
             .create_in_op(
@@ -296,6 +302,9 @@ impl Agents {
             AuthVerb::Read,
             AuthResource::Agent(agent.workspace_id, Some(agent.id)),
         )?;
+        Audit::record_action_if_unset("agent.find_by_id");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent.id);
         Ok(agent)
     }
 
@@ -306,6 +315,8 @@ impl Agents {
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Agent>, AgentError> {
         sub.can(AuthVerb::Read, AuthResource::Agent(workspace_id, None))?;
+        Audit::record_action_if_unset("agent.list_for_workspace");
+        Audit::record_workspace_id(workspace_id);
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
@@ -358,6 +369,9 @@ impl Agents {
             AuthVerb::Update,
             AuthResource::Agent(workspace_id, Some(agent.id)),
         )?;
+        Audit::record_action_if_unset("agent.attach_sandbox");
+        Audit::record_workspace_id(workspace_id);
+        Audit::record_agent_id(agent_id);
 
         let mut op = self.repo.begin_op().await?;
 
@@ -407,6 +421,9 @@ impl Agents {
             AuthVerb::Update,
             AuthResource::Agent(agent.workspace_id, Some(agent.id)),
         )?;
+        Audit::record_action_if_unset("agent.detach_sandbox");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
 
         let mut op = self.repo.begin_op().await?;
 
@@ -456,7 +473,9 @@ impl Agents {
             _ => return Err(AgentError::Unauthorized),
         }
 
+        Audit::record_action_if_unset("agent.send_message");
         Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(id);
 
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);

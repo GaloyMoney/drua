@@ -11,6 +11,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
 use serde::Deserialize;
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::sandbox::Sandboxes;
 
@@ -78,6 +79,7 @@ impl TopLevelTool for Read {
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
+        Audit::record_sandbox_id(sandbox_id);
         let params: ReadParams = parse_params(arguments)?;
 
         // Translate offset/limit into the text editor's view_range [start, end]

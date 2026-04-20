@@ -19,6 +19,7 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
@@ -141,6 +142,7 @@ impl TopLevelTool for TextEditor {
                 .readable_sandbox_id()
                 .ok_or(ToolSetsError::Unauthorized)?
         };
+        Audit::record_sandbox_id(sandbox_id);
 
         let client = self
             .sandboxes

@@ -10,6 +10,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
 use serde::Deserialize;
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::SandboxId;
 use crate::sandbox::Sandboxes;
@@ -89,6 +90,7 @@ impl TopLevelTool for WorkspaceInspectSandbox {
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: InspectParams = parse_params(arguments)?;
+        Audit::record_sandbox_id(params.sandbox_id);
 
         let sandbox = self
             .sandboxes
@@ -144,6 +146,7 @@ impl TopLevelTool for AdminInspectSandbox {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: InspectParams = parse_params(arguments)?;
+        Audit::record_sandbox_id(params.sandbox_id);
 
         execute_inspect(subject, &self.sandboxes, params).await
     }

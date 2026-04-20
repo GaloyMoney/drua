@@ -63,7 +63,7 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
 
     async {
         Audit::record_interaction_type(InteractionType::ApiCall);
-        Audit::record_action(format!("{} {}", method, path));
+        Audit::record_entrypoint(format!("api: {} {}", method, path));
         Audit::record_metadata(serde_json::json!({ "method": method.as_str(), "path": path }));
         if let Some(ref auth) = auth {
             Audit::record_subject(auth);
