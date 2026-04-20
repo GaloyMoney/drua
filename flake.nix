@@ -171,7 +171,7 @@
             --test-threads 1 \
             --failure-output immediate-final \
             --no-fail-fast \
-            2>&1
+            --color never 2>&1 | cat
         '';
 
         bats-runner = pkgs.writeShellScriptBin "bats-runner" ''
