@@ -53,6 +53,10 @@ pub enum AgentSessionEvent {
         target: TargetThread,
         sandbox_name: String,
         operation: SandboxOperation,
+        /// Pre-computed notification text. Persisted so the chat history
+        /// remains accurate even if the template changes in a future version.
+        #[serde(default)]
+        text: String,
     },
     ThreadStarted {
         thread_id: SessionThreadId,
@@ -152,11 +156,13 @@ impl AgentSession {
         operation: SandboxOperation,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
         let target = TargetThread::Main;
+        let text = sandbox_notification_text(&sandbox_name, &operation);
         self.events
             .push(AgentSessionEvent::SandboxNotificationAdded {
                 target,
                 sandbox_name,
                 operation,
+                text,
             });
         self.user_message_response(target)
     }

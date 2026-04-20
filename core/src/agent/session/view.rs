@@ -273,12 +273,17 @@ impl PromptDefinition {
                 AgentSessionEvent::SandboxNotificationAdded {
                     sandbox_name,
                     operation,
+                    text,
                     ..
                 } => {
-                    all_blocks.push(BlockContent::UserText(sandbox_notification_text(
-                        sandbox_name,
-                        operation,
-                    )));
+                    // Use pre-computed text from the event when available (new events).
+                    // Fall back to reconstruction for old persisted events where text is empty.
+                    let notification = if text.is_empty() {
+                        sandbox_notification_text(sandbox_name, operation)
+                    } else {
+                        text.clone()
+                    };
+                    all_blocks.push(BlockContent::UserText(notification));
                 }
                 AgentSessionEvent::AssistantResponseReceived { content, .. } => {
                     for block in content {
