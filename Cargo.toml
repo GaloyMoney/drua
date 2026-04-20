@@ -118,6 +118,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"
+libc = "0.2"
 
 # Telegram bot
 teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }

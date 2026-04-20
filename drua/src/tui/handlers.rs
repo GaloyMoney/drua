@@ -6,6 +6,7 @@ use super::state::{Focus, Mode, ScreenState};
 pub enum Action {
     None,
     Quit,
+    Suspend,
     Refresh,
     CreateWorkspace { name: String, description: String },
     SendChat { agent_id: String, prompt: String },
@@ -15,12 +16,10 @@ pub enum Action {
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    if ctrl && key.code == KeyCode::Char('c') {
-        return Action::Quit;
-    }
-
     if ctrl {
         match key.code {
+            KeyCode::Char('c') => return Action::Quit,
+            KeyCode::Char('z') => return Action::Suspend,
             // Ctrl+O — jump to lead agent chat (global, like command-center)
             KeyCode::Char('o') => {
                 state.select_lead_and_focus_chat();

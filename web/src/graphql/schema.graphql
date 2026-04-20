@@ -70,7 +70,7 @@ scalar UUID
 
 type Workspace {
 	"""
-	All agents in this workspace.
+	All agents in this workspace (lead agent first).
 	"""
 	agents: [Agent!]!
 	createdAt: Timestamp!

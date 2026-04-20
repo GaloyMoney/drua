@@ -436,6 +436,15 @@ async fn run_event_loop(
                     if key.kind == KeyEventKind::Press {
                         match handlers::handle_key(state, key) {
                             handlers::Action::Quit => state.should_quit = true,
+                            handlers::Action::Suspend => {
+                                disable_raw_mode()?;
+                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                                terminal.show_cursor()?;
+                                unsafe { libc::raise(libc::SIGTSTP); }
+                                enable_raw_mode()?;
+                                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                                terminal.clear()?;
+                            }
                             handlers::Action::Refresh => {
                                 if let Ok(workspaces) = fetch_workspaces(client).await {
                                     state.replace_workspaces(workspaces);
