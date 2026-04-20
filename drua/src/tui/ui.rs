@@ -318,7 +318,7 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
                         ))
                     })
                     .collect::<Vec<_>>(),
-                ContentBlock::ToolUse(_) => vec![],
+                _ => vec![],
             })
             .collect(),
         ChatRole::Assistant => {
@@ -337,6 +337,26 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
                         lines.push(Line::from(Span::styled(
                             format!("[{name}]"),
                             Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                    ContentBlock::Thinking(text) => {
+                        // Show a truncated preview of thinking content
+                        let preview = if text.len() > 80 {
+                            format!("💭 {}…", &text[..80])
+                        } else {
+                            format!("💭 {text}")
+                        };
+                        lines.push(Line::from(Span::styled(
+                            preview,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                    ContentBlock::ToolResult(summary) => {
+                        lines.push(Line::from(Span::styled(
+                            format!("  ↳ {summary}"),
+                            Style::default().fg(Color::DarkGray),
                         )));
                     }
                 }
@@ -358,7 +378,7 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
                         ))
                     })
                     .collect::<Vec<_>>(),
-                ContentBlock::ToolUse(_) => vec![],
+                _ => vec![],
             })
             .collect(),
     }

@@ -2,6 +2,8 @@
 pub enum ContentBlock {
     Text(String),
     ToolUse(String),
+    Thinking(String),
+    ToolResult(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,12 @@ impl AssistantChat {
 
     /// Mark the current stream as complete.
     pub fn finish_streaming(&mut self) {
+        self.streaming = false;
+    }
+
+    /// Replace the conversation with pre-fetched history messages.
+    pub fn load_history(&mut self, messages: Vec<ChatMessage>) {
+        self.messages = messages;
         self.streaming = false;
     }
 

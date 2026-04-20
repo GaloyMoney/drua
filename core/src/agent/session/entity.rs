@@ -141,33 +141,6 @@ impl AgentSession {
         self.current_main_thread
     }
 
-    /// Returns a flat list of chat messages (user inputs and assistant
-    /// responses) extracted from the session event stream, limited to the
-    /// last `last_n` messages in chronological order.
-    pub fn chat_history(&self, last_n: usize) -> Vec<ChatHistoryMessage> {
-        history::build_chat_history(self.events.iter_all(), last_n)
-    }
-
-    /// Returns metadata about all threads in this session.
-    pub fn thread_infos(&self) -> Vec<SessionThreadInfo> {
-        history::build_thread_infos(self.threads.iter_persisted(), self.current_main_thread)
-    }
-
-    /// Returns the resolved messages and block indexes for a specific thread.
-    pub fn thread_messages(
-        &self,
-        thread_id: SessionThreadId,
-    ) -> Result<Vec<ThreadMessage>, AgentSessionError> {
-        let thread = self
-            .threads
-            .get_persisted(&thread_id)
-            .ok_or(AgentSessionError::ThreadNotFound)?;
-        Ok(history::build_thread_messages(
-            thread.prompt_definition(),
-            &self.events,
-        ))
-    }
-
     pub fn add_user_input(
         &mut self,
         target: TargetThread,
@@ -672,9 +645,6 @@ mod tests {
     use crate::primitives::UserId;
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
-    use super::history::{
-        ChatHistoryBlock, ChatHistoryRole, ThreadStartReasonKind, ThreadTurnState,
-    };
     use super::*;
 
     fn new_session() -> AgentSession {

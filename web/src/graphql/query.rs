@@ -3,6 +3,7 @@ use async_graphql::{
     Context, Object, SimpleObject,
 };
 
+use super::agent::Agent;
 use super::primitives::*;
 use super::workspace::Workspace;
 
@@ -38,6 +39,20 @@ impl Query {
                 }))
             }
             None => Ok(None),
+        }
+    }
+
+    /// Look up a single agent by ID.
+    async fn agent(
+        &self,
+        ctx: &Context<'_>,
+        id: AgentId,
+    ) -> async_graphql::Result<Option<Agent>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        match app.agents().find_by_id(sub, id).await {
+            Ok(agent) => Ok(Some(Agent::from(agent))),
+            Err(drua_core::agent::AgentError::Find(_)) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
