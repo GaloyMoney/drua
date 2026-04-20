@@ -262,10 +262,8 @@ impl DeltaSynthesizer {
                             block_type: ContentBlockType::Text,
                         });
                     }
-                    // Text block is always index 0 (or the first block index).
-                    let text_idx = if self.text_block_started { 0 } else { 0 };
                     deltas.push(StreamDelta::TextDelta {
-                        index: text_idx,
+                        index: 0,
                         text: text.clone(),
                     });
                 }
