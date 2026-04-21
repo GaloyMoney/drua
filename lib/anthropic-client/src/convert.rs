@@ -11,7 +11,7 @@ use llm::prompt::{
 };
 use llm::{PromptResponse, StopReason, Usage};
 
-use llm::stream::{ContentBlockType, StreamDelta};
+use llm::stream::StreamDelta;
 
 use crate::stream::{AccumulatedBlock, AccumulatedResponse, AccumulatedStopReason};
 use crate::types::{
@@ -228,84 +228,121 @@ fn convert_accumulated_block(block: AccumulatedBlock) -> AssistantBlock {
 }
 
 // ============================================================================
-// SSE JSON → StreamDelta
+// SSE JSON → StreamDelta (stateful converter)
 // ============================================================================
 
-/// Parse a raw SSE data payload (Anthropic JSON) into a provider-agnostic
-/// [`StreamDelta`]. Returns `Ok(None)` for events that have no meaningful
-/// delta (e.g. `Ping`).
-pub(crate) fn sse_data_to_delta(data: &str) -> Result<Option<StreamDelta>, String> {
-    let event: AnthropicStreamEvent =
-        serde_json::from_str(data).map_err(|e| format!("JSON parse: {e}"))?;
-    Ok(match event {
-        AnthropicStreamEvent::MessageStart { message } => {
-            let input_tokens = message.usage.map(|u| u.input as u32).unwrap_or(0);
-            Some(StreamDelta::MessageStart { input_tokens })
-        }
-        AnthropicStreamEvent::ContentBlockStart {
-            index,
-            content_block,
-        } => {
-            let block_type = match content_block {
-                AnthropicContentBlock::Text => ContentBlockType::Text,
-                AnthropicContentBlock::ToolUse { id, name } => ContentBlockType::ToolUse {
-                    id: id.unwrap_or_default(),
-                    name: name.unwrap_or_default(),
-                },
-                AnthropicContentBlock::Thinking => ContentBlockType::Thinking,
-            };
-            Some(StreamDelta::ContentBlockStart {
-                index: index as usize,
-                block_type,
-            })
-        }
-        AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
-            let idx = index as usize;
-            match delta {
-                AnthropicDelta::TextDelta { text } => text.map(|t| StreamDelta::TextDelta {
-                    index: idx,
-                    text: t,
-                }),
-                AnthropicDelta::ThinkingDelta { thinking } => {
-                    thinking.map(|t| StreamDelta::ThinkingDelta {
-                        index: idx,
-                        text: t,
-                    })
+/// Tracks Anthropic content-block indices so that index-only deltas
+/// (e.g. `InputJsonDelta`) can be mapped to the tool call ID that was
+/// announced in the preceding `ContentBlockStart`.
+pub(crate) struct AnthropicDeltaConverter {
+    blocks: Vec<BlockInfo>,
+}
+
+enum BlockInfo {
+    Text,
+    Thinking,
+    ToolUse { id: String },
+}
+
+impl AnthropicDeltaConverter {
+    pub fn new() -> Self {
+        Self { blocks: Vec::new() }
+    }
+
+    /// Process a raw SSE data payload and return zero or more provider-agnostic
+    /// [`StreamDelta`]s. Returns an empty vec for events with no meaningful
+    /// delta (e.g. `Ping`, `ContentBlockStop`, `MessageStop`).
+    pub fn process_event(&mut self, data: &str) -> Result<Vec<StreamDelta>, String> {
+        let event: AnthropicStreamEvent =
+            serde_json::from_str(data).map_err(|e| format!("JSON parse: {e}"))?;
+
+        Ok(match event {
+            AnthropicStreamEvent::MessageStart { message } => {
+                let input_tokens = message.usage.map(|u| u.input as u32).unwrap_or(0);
+                vec![StreamDelta::Usage {
+                    input_tokens,
+                    output_tokens: 0,
+                }]
+            }
+            AnthropicStreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                let idx = index as usize;
+                // Grow the blocks vec to accommodate this index.
+                while self.blocks.len() <= idx {
+                    self.blocks.push(BlockInfo::Text);
                 }
-                AnthropicDelta::InputJsonDelta { partial_json } => {
-                    partial_json.map(|j| StreamDelta::InputJsonDelta {
-                        index: idx,
-                        partial_json: j,
-                    })
-                }
-                AnthropicDelta::SignatureDelta { signature } => {
-                    signature.map(|s| StreamDelta::SignatureDelta {
-                        index: idx,
-                        signature: s,
-                    })
+                match content_block {
+                    AnthropicContentBlock::Text => {
+                        self.blocks[idx] = BlockInfo::Text;
+                        vec![]
+                    }
+                    AnthropicContentBlock::Thinking => {
+                        self.blocks[idx] = BlockInfo::Thinking;
+                        vec![]
+                    }
+                    AnthropicContentBlock::ToolUse { id, name } => {
+                        let id = id.unwrap_or_default();
+                        let name = name.unwrap_or_default();
+                        self.blocks[idx] = BlockInfo::ToolUse { id: id.clone() };
+                        vec![StreamDelta::ToolCallStart { id, name }]
+                    }
                 }
             }
-        }
-        AnthropicStreamEvent::ContentBlockStop { index } => Some(StreamDelta::ContentBlockStop {
-            index: index as usize,
-        }),
-        AnthropicStreamEvent::MessageDelta { delta, usage } => {
-            let stop_reason = delta.stop_reason.map(|sr| match sr {
-                AnthropicStopReason::EndTurn => StopReason::EndTurn,
-                AnthropicStopReason::MaxTokens => StopReason::MaxTokens,
-                AnthropicStopReason::ToolUse => StopReason::ToolUse,
-                AnthropicStopReason::StopSequence => StopReason::StopSequence,
-            });
-            let output_tokens = usage.map(|u| u.output_tokens as u32).unwrap_or(0);
-            Some(StreamDelta::MessageDelta {
-                stop_reason,
-                output_tokens,
-            })
-        }
-        AnthropicStreamEvent::MessageStop => Some(StreamDelta::MessageStop),
-        AnthropicStreamEvent::Error { error } => Some(StreamDelta::Error {
-            message: error.message,
-        }),
-        AnthropicStreamEvent::Ping => None,
-    })
+            AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+                let idx = index as usize;
+                match delta {
+                    AnthropicDelta::TextDelta { text } => text
+                        .map(|t| vec![StreamDelta::TextDelta { text: t }])
+                        .unwrap_or_default(),
+                    AnthropicDelta::ThinkingDelta { thinking } => thinking
+                        .map(|t| vec![StreamDelta::ThinkingDelta { text: t }])
+                        .unwrap_or_default(),
+                    AnthropicDelta::InputJsonDelta { partial_json } => {
+                        partial_json
+                            .map(|j| {
+                                let id = match self.blocks.get(idx) {
+                                    Some(BlockInfo::ToolUse { id }) => id.clone(),
+                                    _ => String::new(),
+                                };
+                                vec![StreamDelta::ToolCallDelta {
+                                    id,
+                                    partial_json: j,
+                                }]
+                            })
+                            .unwrap_or_default()
+                    }
+                    AnthropicDelta::SignatureDelta { signature } => signature
+                        .map(|s| vec![StreamDelta::ThinkingSignature { signature: s }])
+                        .unwrap_or_default(),
+                }
+            }
+            AnthropicStreamEvent::ContentBlockStop { .. } => vec![],
+            AnthropicStreamEvent::MessageDelta { delta, usage } => {
+                let mut deltas = Vec::new();
+                if let Some(u) = usage {
+                    deltas.push(StreamDelta::Usage {
+                        input_tokens: 0,
+                        output_tokens: u.output_tokens as u32,
+                    });
+                }
+                let stop_reason = delta.stop_reason.map(|sr| match sr {
+                    AnthropicStopReason::EndTurn => StopReason::EndTurn,
+                    AnthropicStopReason::MaxTokens => StopReason::MaxTokens,
+                    AnthropicStopReason::ToolUse => StopReason::ToolUse,
+                    AnthropicStopReason::StopSequence => StopReason::StopSequence,
+                });
+                deltas.push(StreamDelta::Done { stop_reason });
+                deltas
+            }
+            AnthropicStreamEvent::MessageStop => vec![],
+            AnthropicStreamEvent::Error { error } => {
+                vec![StreamDelta::Error {
+                    message: error.message,
+                }]
+            }
+            AnthropicStreamEvent::Ping => vec![],
+        })
+    }
 }

@@ -19,7 +19,7 @@ use llm::{Prompt, PromptError, PromptResponse};
 
 use llm::stream::StreamDelta;
 
-use crate::convert::{accumulated_to_response, prompt_to_request, sse_data_to_delta};
+use crate::convert::{accumulated_to_response, prompt_to_request, AnthropicDeltaConverter};
 use crate::sse::{parse_sse_stream, SseError};
 use crate::stream::StreamAccumulator;
 
@@ -168,15 +168,21 @@ impl AnthropicClient {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamDelta, AnthropicError>>(128);
         tokio::spawn(async move {
             let tx_ref = &tx;
+            let mut converter = AnthropicDeltaConverter::new();
+            let converter_ref = &mut converter;
             let _ = parse_sse_stream(byte_stream, |event| {
                 if event.event == "ping" {
                     return Ok(());
                 }
-                match sse_data_to_delta(&event.data) {
-                    Ok(Some(delta)) => tx_ref
-                        .try_send(Ok(delta))
-                        .map_err(|e| SseError::Processing(e.to_string())),
-                    Ok(None) => Ok(()),
+                match converter_ref.process_event(&event.data) {
+                    Ok(deltas) => {
+                        for delta in deltas {
+                            tx_ref
+                                .try_send(Ok(delta))
+                                .map_err(|e| SseError::Processing(e.to_string()))?;
+                        }
+                        Ok(())
+                    }
                     Err(e) => {
                         let _ = tx_ref.try_send(Err(AnthropicError::Stream(e.clone())));
                         Err(SseError::Processing(e))

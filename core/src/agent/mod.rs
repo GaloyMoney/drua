@@ -777,19 +777,18 @@ async fn consume_stream(
 }
 
 fn delta_to_chat_event(delta: &llm::stream::StreamDelta) -> Option<ChatOutputEvent> {
-    use llm::stream::{ContentBlockType, StreamDelta};
+    use llm::stream::StreamDelta;
     match delta {
-        StreamDelta::TextDelta { text, .. } => {
+        StreamDelta::TextDelta { text } => {
             Some(ChatOutputEvent::TextDelta { text: text.clone() })
         }
-        StreamDelta::ThinkingDelta { text, .. } => {
+        StreamDelta::ThinkingDelta { text } => {
             Some(ChatOutputEvent::ThinkingDelta { text: text.clone() })
         }
-        StreamDelta::ContentBlockStart {
-            block_type: ContentBlockType::ToolUse { name, .. },
-            ..
-        } => Some(ChatOutputEvent::ToolCallStart { name: name.clone() }),
-        StreamDelta::InputJsonDelta { partial_json, .. } => {
+        StreamDelta::ToolCallStart { name, .. } => {
+            Some(ChatOutputEvent::ToolCallStart { name: name.clone() })
+        }
+        StreamDelta::ToolCallDelta { partial_json, .. } => {
             Some(ChatOutputEvent::ToolCallInputDelta {
                 partial_json: partial_json.clone(),
             })
