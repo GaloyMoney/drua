@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
@@ -6,6 +6,47 @@ use crate::auth::AuthSubject;
 use crate::code_assistant::{CodeAssistant, SearchCodeParams};
 
 use super::super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn parse_params<T: serde::de::DeserializeOwned>(
+    arguments: Option<JsonObject>,
+) -> Result<T, ToolSetsError> {
+    let value = serde_json::Value::Object(arguments.unwrap_or_default());
+    serde_json::from_value(value).map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))
+}
+
+fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.inline_subschemas = true;
+        s.meta_schema = None;
+    });
+    let generator = settings.into_generator();
+    let schema = generator.into_root_schema_for::<T>();
+    let mut value = serde_json::to_value(schema).expect("schema serialization");
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("title");
+        obj.remove("definitions");
+        obj.insert(
+            "additionalProperties".into(),
+            serde_json::Value::Bool(false),
+        );
+    }
+    value
+}
+
+// ---------------------------------------------------------------------------
+// Schema
+// ---------------------------------------------------------------------------
+
+static SEARCH_CODE_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<SearchCodeParams>);
+
+// ---------------------------------------------------------------------------
+// Toolset
+// ---------------------------------------------------------------------------
 
 pub struct CodeAssistantToolSet {
     service: Arc<CodeAssistant>,
@@ -31,33 +72,7 @@ impl CodeAssistantToolSet {
                 .into(),
         );
         tool.input_schema = Arc::new(
-            serde_json::from_value(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query. Pass a code snippet (e.g. the pattern you are about to write) for best results — code-as-query gives much better similarity matches than natural language"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 5)"
-                    },
-                    "repo": {
-                        "type": "string",
-                        "description": "Filter results to a specific repository name"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Filter results to a specific language (e.g. 'rust', 'bats', 'bash')"
-                    },
-                    "label": {
-                        "type": "string",
-                        "description": "Filter results to a specific primary label. Values: entity, entity_command, entity_query, entity_hydration, entity_event, published_event, new_entity, service_method, service, repository, error, authorization, value_object, domain_primitives, api, job, event_handler, type_conversion, test, config, none (unlabeled chunks)"
-                    }
-                },
-                "required": ["query"]
-            }))
-            .unwrap_or_default(),
+            serde_json::from_value((*SEARCH_CODE_SCHEMA).clone()).unwrap_or_default(),
         );
 
         let tools = vec![ToolSetEntry {
@@ -96,10 +111,7 @@ impl SearchableToolSet for CodeAssistantToolSet {
     ) -> Result<CallToolResult, ToolSetsError> {
         match tool_name {
             "search_code" => {
-                let params: SearchCodeParams = serde_json::from_value(serde_json::Value::Object(
-                    arguments.unwrap_or_default(),
-                ))
-                .map_err(|e| ToolSetsError::MissingArgument(e.to_string()))?;
+                let params: SearchCodeParams = parse_params(arguments)?;
                 let text = self
                     .service
                     .search(params)

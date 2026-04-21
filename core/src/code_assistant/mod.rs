@@ -19,17 +19,17 @@ use std::time::Instant;
 use logs::CodeAssistantLogs;
 
 /// Parameters for a code search query.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchCodeParams {
-    /// The search query — use a code snippet for best results, not natural language
+    /// The search query. Pass a code snippet for best results — code-as-query gives much better similarity matches than natural language.
     pub query: String,
-    /// Maximum number of results to return (default: 5)
+    /// Maximum number of results to return (default: 5).
     pub limit: Option<u64>,
-    /// Filter results to a specific repository
+    /// Filter results to a specific repository name.
     pub repo: Option<String>,
-    /// Filter results to a specific language (e.g. 'rust', 'bats', 'bash')
+    /// Filter results to a specific language (e.g. 'rust', 'bats', 'bash').
     pub language: Option<String>,
-    /// Filter results to a specific primary label
+    /// Filter results to a specific primary label. Values: entity, entity_command, entity_query, entity_hydration, entity_event, published_event, new_entity, service_method, service, repository, error, authorization, value_object, domain_primitives, api, job, event_handler, type_conversion, test, config, none.
     pub label: Option<String>,
 }
 
