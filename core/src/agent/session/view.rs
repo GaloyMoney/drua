@@ -18,7 +18,7 @@ pub struct ToolDefinitionIndex(usize);
 
 /// A unified index that increments across all message block types
 /// (user messages, assistant blocks, and tool results).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MessageBlockIndex(usize);
 
 impl MessageBlockIndex {

@@ -10,7 +10,7 @@ use es_entity::EntityEvents;
 use crate::agent::config::ModelDefaults;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
-use super::message::{CompactionMetadata, TargetThread};
+use super::message::{CompactionMetadata, SandboxOperation, TargetThread};
 use super::settings::CompactionConfig;
 use super::thread::{NewSessionThread, SessionThreadId};
 use super::view::*;
@@ -255,6 +255,9 @@ fn time_since_last_response_on_thread(
 /// Build an orphan result: a brand-new thread with only the pending user
 /// messages (no conversation carry-over). Used when idle time exceeds the
 /// configured reset threshold.
+///
+/// If a sandbox is currently attached, its notification is preserved as the
+/// first message so the agent knows about its sandbox environment.
 fn build_orphan_result<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     session_id: super::AgentSessionId,
@@ -269,8 +272,20 @@ fn build_orphan_result<'a>(
 
     // Only carry forward user messages that arrived after the last PromptSent
     // for this thread — not the entire conversation history.
-    let pending = pending_user_message_indexes(events, current_thread_id, is_main_thread);
-    let user_messages = UserMessagesView { indexes: pending };
+    let pending = pending_user_message_indexes(events.clone(), current_thread_id, is_main_thread);
+
+    // If a sandbox is currently attached, prepend its notification so the
+    // orphan thread's LLM knows about the sandbox mount.
+    let sandbox_idx = last_active_sandbox_attach_index(events);
+    let mut all_indexes = Vec::new();
+    if let Some(idx) = sandbox_idx {
+        all_indexes.push(idx);
+    }
+    all_indexes.extend(pending);
+
+    let user_messages = UserMessagesView {
+        indexes: all_indexes,
+    };
 
     let prompt_definition = PromptDefinition {
         model: model_defaults.model.clone(),
@@ -354,6 +369,57 @@ fn pending_user_message_indexes<'a>(
     }
     pending.reverse();
     pending
+}
+
+/// Find the block index of the last sandbox attach notification that is still
+/// active (not followed by a detach for the same sandbox). Returns `None` if
+/// no sandbox is currently attached.
+fn last_active_sandbox_attach_index<'a>(
+    events: impl Iterator<Item = &'a AgentSessionEvent> + Clone,
+) -> Option<MessageBlockIndex> {
+    // Forward scan: track attach/detach state per sandbox name and assign
+    // block indexes.
+    let mut block_counter = 0usize;
+    // sandbox_name → block index of last Attach
+    let mut attached: HashMap<String, MessageBlockIndex> = HashMap::new();
+
+    for event in events {
+        match event {
+            AgentSessionEvent::SandboxNotificationAdded {
+                sandbox_name,
+                operation,
+                ..
+            } => {
+                let idx = MessageBlockIndex::new(block_counter);
+                block_counter += 1;
+                match operation {
+                    SandboxOperation::Attach { .. } => {
+                        attached.insert(sandbox_name.clone(), idx);
+                    }
+                    SandboxOperation::Detach => {
+                        attached.remove(sandbox_name);
+                    }
+                }
+            }
+            AgentSessionEvent::UserInputAdded { .. } => {
+                block_counter += 1;
+            }
+            AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                block_counter += content.len();
+            }
+            AgentSessionEvent::ToolResultsAdded { results, .. } => {
+                block_counter += results.len();
+            }
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                block_counter += results.len();
+            }
+            _ => {}
+        }
+    }
+
+    // Return the most recently attached sandbox's block index.
+    // (Typically there is at most one active sandbox.)
+    attached.into_values().max()
 }
 
 /// Count the total number of content blocks in the event stream.
