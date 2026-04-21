@@ -14,6 +14,40 @@ enum GridDisplayItem {
     Row(usize),
 }
 
+/// Assign each thread row to a section. Section 0 = Init + its Comps.
+/// Each ORPHAN starts a new section; subsequent Comps belong to that section.
+fn compute_sections(threads: &[super::super::state::ThreadInfo]) -> Vec<usize> {
+    let mut sections = Vec::with_capacity(threads.len());
+    let mut current_section = 0usize;
+    for (i, thread) in threads.iter().enumerate() {
+        if thread.start_reason == "ORPHAN" && i > 0 {
+            current_section += 1;
+        }
+        sections.push(current_section);
+    }
+    sections
+}
+
+/// For each section, compute the sorted list of non-empty column indices
+/// used by any thread in that section.
+fn section_active_columns(
+    grid: &[Vec<CellKind>],
+    sections: &[usize],
+    num_sections: usize,
+) -> Vec<Vec<usize>> {
+    use std::collections::BTreeSet;
+    let mut active: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); num_sections];
+    for (row_idx, row) in grid.iter().enumerate() {
+        let sec = sections[row_idx];
+        for (col, cell) in row.iter().enumerate() {
+            if !matches!(cell, CellKind::Empty) {
+                active[sec].insert(col);
+            }
+        }
+    }
+    active.into_iter().map(|s| s.into_iter().collect()).collect()
+}
+
 pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
     let border_color = if state.focus == Focus::Threads {
         Color::Yellow
@@ -62,22 +96,25 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
     grid.update_visible_cols(visible_cols);
     grid.ensure_cursor_visible();
 
-    // Vertical scrolling (account for separator lines before orphan rows)
+    // Horizontal scrolling for section 0 (globally aligned)
     let start_col = grid.scroll_col;
     let end_col = (grid.scroll_col + visible_cols).min(grid.positions.len());
 
-    // Build a display list: separator lines + thread rows
+    // Compute sections and their active columns
+    let sections = compute_sections(&grid.threads);
+    let num_sections = sections.last().copied().unwrap_or(0) + 1;
+    let section_cols = section_active_columns(&grid.grid, &sections, num_sections);
+
+    // Build display list: separator before each new section (except section 0)
     let mut display_items: Vec<GridDisplayItem> = Vec::new();
     for row_idx in 0..grid.threads.len() {
-        let is_orphan = grid.threads[row_idx].start_reason == "ORPHAN";
-        let prev_not_orphan = row_idx > 0 && grid.threads[row_idx - 1].start_reason != "ORPHAN";
-        if is_orphan && prev_not_orphan {
+        if row_idx > 0 && sections[row_idx] != sections[row_idx - 1] {
             display_items.push(GridDisplayItem::Separator);
         }
         display_items.push(GridDisplayItem::Row(row_idx));
     }
 
-    // Find which display item the cursor row maps to, for vertical scrolling
+    // Vertical scrolling: find cursor in display list
     let cursor_display_idx = display_items
         .iter()
         .position(|item| matches!(item, GridDisplayItem::Row(r) if *r == grid.cursor_row))
@@ -98,7 +135,6 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
 
         match item {
             GridDisplayItem::Separator => {
-                // Draw a dashed separator to indicate orphaned section
                 let sep_char = "─ ";
                 let label_pad = " ".repeat(label_width);
                 let sep_content: String = std::iter::repeat(sep_char)
@@ -114,6 +150,7 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
             GridDisplayItem::Row(row_idx) => {
                 let row_idx = *row_idx;
                 let thread = &grid.threads[row_idx];
+                let section = sections[row_idx];
 
                 // Thread label
                 let reason = match thread.start_reason.as_str() {
@@ -146,55 +183,24 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                     label_style,
                 );
 
-                // Compute non-empty columns for this row (full row, not just visible)
                 let row_cells = &grid.grid[row_idx];
-                let non_empty: Vec<usize> = row_cells
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| !matches!(c, CellKind::Empty))
-                    .map(|(i, _)| i)
-                    .collect();
-                let first_ne = non_empty.first().copied();
-                let last_ne = non_empty.last().copied();
-
-                // Orphan rows render only their non-empty cells, tightly packed.
-                let is_orphan = thread.start_reason == "ORPHAN";
-
                 let mut spans = vec![label_span];
 
-                if is_orphan {
-                    // Pack non-empty cells tightly — no positional gaps.
-                    let ne_count = non_empty.len();
-                    for (i, &col) in non_empty.iter().enumerate() {
-                        let cell = row_cells[col];
-                        let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
-                        let has_rightward = i + 1 < ne_count;
+                if section == 0 {
+                    // Section 0: globally aligned with horizontal scrolling.
+                    let non_empty: Vec<usize> = row_cells
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| !matches!(c, CellKind::Empty))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let first_ne = non_empty.first().copied();
+                    let last_ne = non_empty.last().copied();
 
-                        let conn_str = if has_rightward { "───" } else { "   " };
-                        let conn_style = Style::default().fg(Color::DarkGray);
-
-                        let (sym, sym_color, bold) = cell_symbol(cell);
-                        let sym_style = if is_cursor {
-                            Style::default().fg(Color::Black).bg(Color::Yellow)
-                        } else {
-                            let s = Style::default().fg(sym_color);
-                            if bold {
-                                s.add_modifier(Modifier::BOLD)
-                            } else {
-                                s
-                            }
-                        };
-
-                        spans.push(Span::styled(String::from(sym), sym_style));
-                        spans.push(Span::styled(conn_str, conn_style));
-                    }
-                } else {
-                    // Normal rows: positionally aligned with horizontal scrolling.
                     for col in start_col..end_col {
                         let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
                         let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
 
-                        // Is this empty cell between two non-empty cells? (connector)
                         let is_between = matches!(cell, CellKind::Empty)
                             && matches!((first_ne, last_ne), (Some(f), Some(l)) if f < col && col < l);
                         let has_rightward = !matches!(cell, CellKind::Empty)
@@ -216,22 +222,49 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                                     spans.push(Span::styled("    ", conn_style));
                                 }
                                 _ => {
-                                    let (sym, sym_color, bold) = cell_symbol(cell);
-                                    let sym_style = if is_cursor {
-                                        Style::default().fg(Color::Black).bg(Color::Yellow)
-                                    } else {
-                                        let s = Style::default().fg(sym_color);
-                                        if bold {
-                                            s.add_modifier(Modifier::BOLD)
-                                        } else {
-                                            s
-                                        }
-                                    };
-
-                                    spans.push(Span::styled(String::from(sym), sym_style));
-                                    spans.push(Span::styled(conn_str, conn_style));
+                                    render_cell_span(&mut spans, cell, is_cursor, conn_str);
                                 }
                             }
+                        }
+                    }
+                } else {
+                    // Orphan section: render using the section's active columns, packed.
+                    let active = &section_cols[section];
+                    let ne_count = active.len();
+                    for (i, &col) in active.iter().enumerate() {
+                        let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
+                        let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+                        let has_rightward = i + 1 < ne_count;
+
+                        if matches!(cell, CellKind::Empty) {
+                            // This column is active in the section but empty for this row.
+                            // Show a connector if between non-empty cells on this row,
+                            // otherwise blank.
+                            let row_non_empty: Vec<usize> = active
+                                .iter()
+                                .filter(|&&c| {
+                                    row_cells
+                                        .get(c)
+                                        .map(|k| !matches!(k, CellKind::Empty))
+                                        .unwrap_or(false)
+                                })
+                                .copied()
+                                .collect();
+                            let first_rne = row_non_empty.first().copied();
+                            let last_rne = row_non_empty.last().copied();
+                            let between = matches!(
+                                (first_rne, last_rne),
+                                (Some(f), Some(l)) if f < col && col < l
+                            );
+                            let conn_style = Style::default().fg(Color::DarkGray);
+                            if between {
+                                spans.push(Span::styled("────", conn_style));
+                            } else {
+                                spans.push(Span::styled("    ", conn_style));
+                            }
+                        } else {
+                            let conn_str = if has_rightward { "───" } else { "   " };
+                            render_cell_span(&mut spans, cell, is_cursor, conn_str);
                         }
                     }
                 }
@@ -242,6 +275,24 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
             }
         }
     }
+}
+
+/// Render a non-empty cell symbol + connector into the span list.
+fn render_cell_span(spans: &mut Vec<Span<'static>>, cell: CellKind, is_cursor: bool, conn_str: &str) {
+    let (sym, sym_color, bold) = cell_symbol(cell);
+    let sym_style = if is_cursor {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    } else {
+        let s = Style::default().fg(sym_color);
+        if bold {
+            s.add_modifier(Modifier::BOLD)
+        } else {
+            s
+        }
+    };
+    let conn_style = Style::default().fg(Color::DarkGray);
+    spans.push(Span::styled(String::from(sym), sym_style));
+    spans.push(Span::styled(conn_str.to_string(), conn_style));
 }
 
 pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
