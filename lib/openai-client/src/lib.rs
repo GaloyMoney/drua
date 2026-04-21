@@ -5,8 +5,8 @@
 //! them to the unified `StreamDelta` format that the prompt executor and agent
 //! loop expect.
 
-mod codex;
 mod convert;
+mod responses;
 mod sse;
 mod types;
 
@@ -21,7 +21,7 @@ use llm::{Prompt, PromptError, PromptResponse};
 use crate::convert::{prompt_to_request, DeltaSynthesizer};
 use crate::sse::{parse_sse_stream, SseError};
 
-pub use codex::OpenAiCodexClient;
+pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient};
 
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 

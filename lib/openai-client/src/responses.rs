@@ -15,60 +15,90 @@ use tracing::instrument;
 use crate::sse::{parse_sse_stream, SseError};
 use crate::OpenAiError;
 
-const DEFAULT_CODEX_API_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const DEFAULT_RESPONSES_API_URL: &str = "https://api.openai.com/v1/responses";
+const DEFAULT_SUBSCRIPTION_API_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 const DEFAULT_REASONING_EFFORT: &str = "low";
 const DEFAULT_TEXT_VERBOSITY: &str = "medium";
-const OPENAI_CODEX_ACCESS_TOKEN_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN";
+const OPENAI_RESPONSES_SUBSCRIPTION_TOKEN_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpenAiResponsesAuth {
+    ApiKey { api_key: String },
+    Subscription,
+}
 
 #[derive(Clone)]
-pub struct OpenAiCodexClient {
+pub struct OpenAiResponsesClient {
     http: reqwest::Client,
+    auth: OpenAiResponsesAuth,
     api_url: String,
 }
 
-impl OpenAiCodexClient {
-    pub fn new() -> Self {
+impl OpenAiResponsesClient {
+    pub fn new(auth: OpenAiResponsesAuth) -> Self {
+        let api_url = match &auth {
+            OpenAiResponsesAuth::ApiKey { .. } => DEFAULT_RESPONSES_API_URL.to_string(),
+            OpenAiResponsesAuth::Subscription => DEFAULT_SUBSCRIPTION_API_URL.to_string(),
+        };
+
         Self {
             http: reqwest::Client::new(),
-            api_url: DEFAULT_CODEX_API_URL.to_string(),
+            auth,
+            api_url,
         }
     }
 
-    #[instrument(name = "openai_codex_client.send_prompt_streaming", skip_all)]
+    pub fn with_api_key(api_key: impl Into<String>) -> Self {
+        Self::new(OpenAiResponsesAuth::ApiKey {
+            api_key: api_key.into(),
+        })
+    }
+
+    pub fn with_subscription() -> Self {
+        Self::new(OpenAiResponsesAuth::Subscription)
+    }
+
+    #[instrument(name = "openai_responses_client.send_prompt_streaming", skip_all)]
     async fn send_prompt_streaming_internal(
         &self,
         prompt: &Prompt,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiError>>, OpenAiError> {
-        let access_token = resolve_codex_access_token().ok_or(OpenAiError::Api {
-            status: 401,
-            message: format!(
-                "OpenAI Codex credentials not found. Run `codex login` or set {}.",
-                OPENAI_CODEX_ACCESS_TOKEN_ENV
-            ),
-        })?;
-        let account_id = extract_chatgpt_account_id(&access_token).ok_or(OpenAiError::Api {
-            status: 401,
-            message:
-                "OpenAI Codex credential is invalid or expired (missing chatgpt_account_id claim)"
-                    .to_string(),
-        })?;
-
-        let request_body = prompt_to_codex_request(prompt);
-
-        let resp = self
+        let request_body = prompt_to_responses_request(prompt);
+        let mut request = self
             .http
             .post(&self.api_url)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .header("chatgpt-account-id", account_id)
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("originator", "drua")
-            .header("User-Agent", "drua")
             .header("accept", "text/event-stream")
-            .header("content-type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+
+        match &self.auth {
+            OpenAiResponsesAuth::ApiKey { api_key } => {
+                request = request.header("Authorization", format!("Bearer {api_key}"));
+            }
+            OpenAiResponsesAuth::Subscription => {
+                let access_token = resolve_subscription_access_token().ok_or(OpenAiError::Api {
+                    status: 401,
+                    message: format!(
+                        "OpenAI subscription credentials not found. Run `codex login` or set {}.",
+                        OPENAI_RESPONSES_SUBSCRIPTION_TOKEN_ENV
+                    ),
+                })?;
+                let account_id =
+                    extract_chatgpt_account_id(&access_token).ok_or(OpenAiError::Api {
+                        status: 401,
+                        message: "OpenAI subscription credential is invalid or expired (missing chatgpt_account_id claim)".to_string(),
+                    })?;
+                request = request
+                    .header("Authorization", format!("Bearer {access_token}"))
+                    .header("chatgpt-account-id", account_id)
+                    .header("OpenAI-Beta", "responses=experimental")
+                    .header("originator", "drua")
+                    .header("User-Agent", "drua");
+            }
+        }
+
+        let resp = request.json(&request_body).send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -84,7 +114,7 @@ impl OpenAiCodexClient {
 
         tokio::spawn(async move {
             let tx_ref = &tx;
-            let mut synthesizer = CodexDeltaSynthesizer::new();
+            let mut synthesizer = ResponsesDeltaSynthesizer::new();
             let synth_ref = &mut synthesizer;
 
             let parse_result = parse_sse_stream(byte_stream, |event| {
@@ -122,16 +152,16 @@ impl OpenAiCodexClient {
     }
 }
 
-impl Default for OpenAiCodexClient {
+impl Default for OpenAiResponsesClient {
     fn default() -> Self {
-        Self::new()
+        Self::with_subscription()
     }
 }
 
 #[async_trait]
-impl LlmProvider for OpenAiCodexClient {
+impl LlmProvider for OpenAiResponsesClient {
     fn name(&self) -> &str {
-        "openai-codex"
+        "openai-responses"
     }
 
     async fn send_prompt_streaming(
@@ -158,30 +188,30 @@ impl LlmProvider for OpenAiCodexClient {
 }
 
 #[derive(Debug, Serialize)]
-struct CodexRequest {
+struct ResponsesRequest {
     model: String,
-    input: Vec<CodexInputItem>,
+    input: Vec<ResponsesInputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<CodexTool>>,
+    tools: Option<Vec<ResponsesTool>>,
     tool_choice: Value,
     parallel_tool_calls: bool,
     stream: bool,
     store: bool,
-    text: CodexTextConfig,
+    text: ResponsesTextConfig,
     include: Vec<&'static str>,
-    reasoning: CodexReasoningConfig,
+    reasoning: ResponsesReasoningConfig,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum CodexInputItem {
+enum ResponsesInputItem {
     Message {
         role: String,
-        content: Vec<CodexMessageContent>,
+        content: Vec<ResponsesMessageContent>,
     },
     FunctionCall {
         call_id: String,
@@ -196,13 +226,13 @@ enum CodexInputItem {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum CodexMessageContent {
+enum ResponsesMessageContent {
     InputText { text: String },
     OutputText { text: String },
 }
 
 #[derive(Debug, Serialize)]
-struct CodexTool {
+struct ResponsesTool {
     #[serde(rename = "type")]
     kind: &'static str,
     name: String,
@@ -212,17 +242,17 @@ struct CodexTool {
 }
 
 #[derive(Debug, Serialize)]
-struct CodexTextConfig {
+struct ResponsesTextConfig {
     verbosity: &'static str,
 }
 
 #[derive(Debug, Serialize)]
-struct CodexReasoningConfig {
+struct ResponsesReasoningConfig {
     effort: &'static str,
     summary: &'static str,
 }
 
-fn prompt_to_codex_request(prompt: &Prompt) -> CodexRequest {
+fn prompt_to_responses_request(prompt: &Prompt) -> ResponsesRequest {
     let mut input = Vec::new();
 
     for message in &prompt.messages {
@@ -244,7 +274,7 @@ fn prompt_to_codex_request(prompt: &Prompt) -> CodexRequest {
         .collect::<Vec<_>>()
         .join("\n");
 
-    CodexRequest {
+    ResponsesRequest {
         model: prompt.model.clone(),
         input,
         instructions: (!instructions.is_empty()).then_some(instructions),
@@ -254,18 +284,18 @@ fn prompt_to_codex_request(prompt: &Prompt) -> CodexRequest {
         parallel_tool_calls: true,
         stream: true,
         store: false,
-        text: CodexTextConfig {
+        text: ResponsesTextConfig {
             verbosity: DEFAULT_TEXT_VERBOSITY,
         },
         include: vec!["reasoning.encrypted_content"],
-        reasoning: CodexReasoningConfig {
+        reasoning: ResponsesReasoningConfig {
             effort: DEFAULT_REASONING_EFFORT,
             summary: "auto",
         },
     }
 }
 
-fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
+fn convert_message(message: &Message, out: &mut Vec<ResponsesInputItem>) {
     match message {
         Message::User { content } => {
             let mut text_parts = Vec::new();
@@ -280,9 +310,9 @@ fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
                         ..
                     } => {
                         if !text_parts.is_empty() {
-                            out.push(CodexInputItem::Message {
+                            out.push(ResponsesInputItem::Message {
                                 role: "user".to_string(),
-                                content: vec![CodexMessageContent::InputText {
+                                content: vec![ResponsesMessageContent::InputText {
                                     text: text_parts.join("\n"),
                                 }],
                             });
@@ -302,7 +332,7 @@ fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
                             output
                         };
 
-                        out.push(CodexInputItem::FunctionCallOutput {
+                        out.push(ResponsesInputItem::FunctionCallOutput {
                             call_id: tool_use_id.clone(),
                             output,
                         });
@@ -311,9 +341,9 @@ fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
             }
 
             if !text_parts.is_empty() {
-                out.push(CodexInputItem::Message {
+                out.push(ResponsesInputItem::Message {
                     role: "user".to_string(),
-                    content: vec![CodexMessageContent::InputText {
+                    content: vec![ResponsesMessageContent::InputText {
                         text: text_parts.join("\n"),
                     }],
                 });
@@ -329,7 +359,7 @@ fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
                     AssistantBlock::ToolUse {
                         id, name, input, ..
                     } => {
-                        tool_calls.push(CodexInputItem::FunctionCall {
+                        tool_calls.push(ResponsesInputItem::FunctionCall {
                             call_id: id.clone(),
                             name: name.clone(),
                             arguments: serde_json::to_string(input).unwrap_or_default(),
@@ -340,9 +370,9 @@ fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
             }
 
             if !text_parts.is_empty() {
-                out.push(CodexInputItem::Message {
+                out.push(ResponsesInputItem::Message {
                     role: "assistant".to_string(),
-                    content: vec![CodexMessageContent::OutputText {
+                    content: vec![ResponsesMessageContent::OutputText {
                         text: text_parts.join("\n"),
                     }],
                 });
@@ -353,8 +383,8 @@ fn convert_message(message: &Message, out: &mut Vec<CodexInputItem>) {
     }
 }
 
-fn convert_tool(tool: &Tool) -> CodexTool {
-    CodexTool {
+fn convert_tool(tool: &Tool) -> ResponsesTool {
+    ResponsesTool {
         kind: "function",
         name: tool.name.clone(),
         description: tool.description.clone(),
@@ -375,7 +405,7 @@ fn convert_tool_choice(choice: Option<&ToolChoice>) -> Value {
 }
 
 #[derive(Default)]
-struct CodexDeltaSynthesizer {
+struct ResponsesDeltaSynthesizer {
     text: String,
     thinking: String,
     tool_calls: HashMap<String, ToolCallState>,
@@ -393,7 +423,7 @@ struct ToolCallState {
     started: bool,
 }
 
-impl CodexDeltaSynthesizer {
+impl ResponsesDeltaSynthesizer {
     fn new() -> Self {
         Self::default()
     }
@@ -403,28 +433,30 @@ impl CodexDeltaSynthesizer {
             return self.drain_terminal();
         }
 
-        let event: CodexResponseEvent =
+        let event: ResponsesResponseEvent =
             serde_json::from_str(data).map_err(|e| format!("JSON parse: {e}"))?;
 
         match event {
-            CodexResponseEvent::OutputTextDelta { delta, .. } => Ok(self.append_text_delta(&delta)),
-            CodexResponseEvent::OutputTextDone { text, .. } => Ok(self.reconcile_text(&text)),
-            CodexResponseEvent::ReasoningTextDelta { delta, .. }
-            | CodexResponseEvent::ReasoningSummaryTextDelta { delta, .. } => {
+            ResponsesResponseEvent::OutputTextDelta { delta, .. } => {
+                Ok(self.append_text_delta(&delta))
+            }
+            ResponsesResponseEvent::OutputTextDone { text, .. } => Ok(self.reconcile_text(&text)),
+            ResponsesResponseEvent::ReasoningTextDelta { delta, .. }
+            | ResponsesResponseEvent::ReasoningSummaryTextDelta { delta, .. } => {
                 Ok(self.append_thinking_delta(&delta))
             }
-            CodexResponseEvent::ReasoningTextDone { text, .. }
-            | CodexResponseEvent::ReasoningSummaryTextDone { text, .. } => {
+            ResponsesResponseEvent::ReasoningTextDone { text, .. }
+            | ResponsesResponseEvent::ReasoningSummaryTextDone { text, .. } => {
                 Ok(self.reconcile_thinking(&text))
             }
-            CodexResponseEvent::OutputItemAdded { item }
-            | CodexResponseEvent::OutputItemDone { item } => self.process_output_item(item),
-            CodexResponseEvent::FunctionCallArgumentsDelta { item_id, delta } => {
+            ResponsesResponseEvent::OutputItemAdded { item }
+            | ResponsesResponseEvent::OutputItemDone { item } => self.process_output_item(item),
+            ResponsesResponseEvent::FunctionCallArgumentsDelta { item_id, delta } => {
                 Ok(self.append_tool_args(&item_id, &delta))
             }
-            CodexResponseEvent::ResponseCompleted { response }
-            | CodexResponseEvent::ResponseDone { response }
-            | CodexResponseEvent::ResponseIncomplete { response } => {
+            ResponsesResponseEvent::ResponseCompleted { response }
+            | ResponsesResponseEvent::ResponseDone { response }
+            | ResponsesResponseEvent::ResponseIncomplete { response } => {
                 self.pending_usage = response
                     .usage
                     .as_ref()
@@ -432,9 +464,9 @@ impl CodexDeltaSynthesizer {
                 self.pending_incomplete_reason = response.incomplete_reason();
                 Ok(Vec::new())
             }
-            CodexResponseEvent::ResponseFailed { response } => Err(response.error_message()),
-            CodexResponseEvent::Error { error } => Err(error.message),
-            CodexResponseEvent::Other => Ok(Vec::new()),
+            ResponsesResponseEvent::ResponseFailed { response } => Err(response.error_message()),
+            ResponsesResponseEvent::Error { error } => Err(error.message),
+            ResponsesResponseEvent::Other => Ok(Vec::new()),
         }
     }
 
@@ -488,7 +520,10 @@ impl CodexDeltaSynthesizer {
         Vec::new()
     }
 
-    fn process_output_item(&mut self, item: CodexOutputItem) -> Result<Vec<StreamDelta>, String> {
+    fn process_output_item(
+        &mut self,
+        item: ResponsesOutputItem,
+    ) -> Result<Vec<StreamDelta>, String> {
         if item.kind != "function_call" {
             return Ok(Vec::new());
         }
@@ -602,7 +637,7 @@ impl CodexDeltaSynthesizer {
         }
 
         let Some((input_tokens, output_tokens)) = self.pending_usage else {
-            return Err("OpenAI Codex stream ended without terminal response".to_string());
+            return Err("OpenAI Responses stream ended without terminal response".to_string());
         };
 
         self.terminal_emitted = true;
@@ -640,7 +675,7 @@ impl CodexDeltaSynthesizer {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-enum CodexResponseEvent {
+enum ResponsesResponseEvent {
     #[serde(rename = "response.output_text.delta")]
     OutputTextDelta {
         #[serde(default)]
@@ -660,9 +695,9 @@ enum CodexResponseEvent {
         content_index: u32,
     },
     #[serde(rename = "response.output_item.added")]
-    OutputItemAdded { item: CodexOutputItem },
+    OutputItemAdded { item: ResponsesOutputItem },
     #[serde(rename = "response.output_item.done")]
-    OutputItemDone { item: CodexOutputItem },
+    OutputItemDone { item: ResponsesOutputItem },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {
         item_id: String,
@@ -706,21 +741,21 @@ enum CodexResponseEvent {
         summary_index: u32,
     },
     #[serde(rename = "response.completed")]
-    ResponseCompleted { response: CodexDonePayload },
+    ResponseCompleted { response: ResponsesDonePayload },
     #[serde(rename = "response.done")]
-    ResponseDone { response: CodexDonePayload },
+    ResponseDone { response: ResponsesDonePayload },
     #[serde(rename = "response.incomplete")]
-    ResponseIncomplete { response: CodexDonePayload },
+    ResponseIncomplete { response: ResponsesDonePayload },
     #[serde(rename = "response.failed")]
-    ResponseFailed { response: CodexFailedPayload },
+    ResponseFailed { response: ResponsesFailedPayload },
     #[serde(rename = "error")]
-    Error { error: CodexErrorPayload },
+    Error { error: ResponsesErrorPayload },
     #[serde(other)]
     Other,
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexOutputItem {
+struct ResponsesOutputItem {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
@@ -734,14 +769,14 @@ struct CodexOutputItem {
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexDonePayload {
+struct ResponsesDonePayload {
     #[serde(default)]
-    incomplete_details: Option<CodexIncompleteDetails>,
+    incomplete_details: Option<ResponsesIncompleteDetails>,
     #[serde(default)]
-    usage: Option<CodexUsage>,
+    usage: Option<ResponsesUsage>,
 }
 
-impl CodexDonePayload {
+impl ResponsesDonePayload {
     fn incomplete_reason(&self) -> Option<String> {
         self.incomplete_details
             .as_ref()
@@ -750,13 +785,13 @@ impl CodexDonePayload {
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexIncompleteDetails {
+struct ResponsesIncompleteDetails {
     #[serde(default)]
     reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexUsage {
+struct ResponsesUsage {
     #[serde(default)]
     input_tokens: u32,
     #[serde(default)]
@@ -764,35 +799,35 @@ struct CodexUsage {
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexFailedPayload {
+struct ResponsesFailedPayload {
     #[serde(default)]
-    error: Option<CodexErrorPayload>,
+    error: Option<ResponsesErrorPayload>,
 }
 
-impl CodexFailedPayload {
+impl ResponsesFailedPayload {
     fn error_message(&self) -> String {
         self.error
             .as_ref()
             .map(|error| error.message.clone())
-            .unwrap_or_else(|| "OpenAI Codex request failed".to_string())
+            .unwrap_or_else(|| "OpenAI Responses request failed".to_string())
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexErrorPayload {
+struct ResponsesErrorPayload {
     #[serde(default)]
     message: String,
 }
 
-fn resolve_codex_access_token() -> Option<String> {
-    std::env::var(OPENAI_CODEX_ACCESS_TOKEN_ENV)
+fn resolve_subscription_access_token() -> Option<String> {
+    std::env::var(OPENAI_RESPONSES_SUBSCRIPTION_TOKEN_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(read_cached_codex_access_token)
+        .or_else(read_cached_subscription_access_token)
 }
 
-fn read_cached_codex_access_token() -> Option<String> {
+fn read_cached_subscription_access_token() -> Option<String> {
     let home = dirs::home_dir()?;
     let candidates = [
         home.join(".codex").join("auth.json"),
@@ -802,7 +837,7 @@ fn read_cached_codex_access_token() -> Option<String> {
     for path in candidates {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(value) = serde_json::from_str::<Value>(&content) {
-                if let Some(token) = codex_access_token_from_value(&value) {
+                if let Some(token) = subscription_access_token_from_value(&value) {
                     return Some(token);
                 }
             }
@@ -812,7 +847,7 @@ fn read_cached_codex_access_token() -> Option<String> {
     None
 }
 
-fn codex_access_token_from_value(value: &Value) -> Option<String> {
+fn subscription_access_token_from_value(value: &Value) -> Option<String> {
     let candidates = [
         value
             .get("tokens")
@@ -886,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_codex_access_token_from_cached_auth() {
+    fn extracts_subscription_access_token_from_cached_auth() {
         let value = serde_json::json!({
             "tokens": {
                 "access_token": "eyJhbGciOiJub25lIn0.payload.sig"
@@ -894,7 +929,7 @@ mod tests {
         });
 
         assert_eq!(
-            codex_access_token_from_value(&value).as_deref(),
+            subscription_access_token_from_value(&value).as_deref(),
             Some("eyJhbGciOiJub25lIn0.payload.sig")
         );
     }
@@ -907,12 +942,12 @@ mod tests {
             }
         });
 
-        assert!(codex_access_token_from_value(&value).is_none());
+        assert!(subscription_access_token_from_value(&value).is_none());
     }
 
     #[test]
     fn terminal_done_waits_for_late_tool_calls() {
-        let mut synth = CodexDeltaSynthesizer::new();
+        let mut synth = ResponsesDeltaSynthesizer::new();
 
         assert!(synth
             .process_event(r#"{"type":"response.function_call_arguments.delta","item_id":"fc_5","delta":"{\"text\":\"late tool\"}"}"#)
