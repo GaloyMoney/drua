@@ -9,6 +9,10 @@ oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
 providers:
+  # OpenAI provider names are not aliases:
+  # - openai           -> Chat Completions API, uses OPENAI_API_KEY
+  # - openai-responses -> Responses API, uses OPENAI_API_KEY
+  # - openai-codex     -> Responses API over ChatGPT subscription auth
   - name: anthropic
     models:
       - name: claude-haiku-4-5-20251001

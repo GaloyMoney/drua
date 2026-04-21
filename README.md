@@ -12,7 +12,7 @@ direnv allow          # loads the nix devShell + .env
 
 # 2. Copy and fill in secrets
 cp .env.example .env
-$EDITOR .env          # at minimum set ANTHROPIC_API_KEY
+$EDITOR .env          # at minimum set the key/token for the provider you use
 
 # 3. Start everything (Postgres, migrations, server with dev login)
 make start            # full reset + server on :4200
@@ -53,6 +53,8 @@ A complete `.env.example` is provided at the repo root.
 | `PG_CON` | No | `postgres://user:password@localhost:5432/drua` | PostgreSQL connection URL. The Makefile provides this default, which matches the bundled compose stack. |
 | `GITHUB_CLIENT_SECRET` | No | `dev-secret` | GitHub OAuth App client secret (only needed when `oauth.login: github`). |
 | `ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for the agent LLM runtime. Server starts without it but agent prompts will fail. |
+| `OPENAI_API_KEY` | No | `""` | OpenAI Platform API key used by `openai` (Chat Completions API) and `openai-responses` (Responses API). |
+| `OPENAI_CODEX_ACCESS_TOKEN` | No | `""` | Optional override for `openai-codex`. If unset, Drua reads the cached Codex/ChatGPT login from `~/.codex/auth.json`. |
 | `DRUA_CONFIG` | No | `drua.yml` | Path to the YAML config file. |
 | `GITHUB_ALLOWED_TEAMS` | No | `""` (all users) | Comma-separated GitHub teams allowed to log in (`org/team-slug`). |
 | `CONCOURSE_USERNAME` | No | — | Concourse CI basic-auth username (when concourse toolset is enabled). |
@@ -99,6 +101,45 @@ the included `drua.yml` for a complete local-dev example. Key sections:
 | `toolsets.code_assistant` | Path to the code-assistant SQLite DB |
 | `sandbox.backend` | `local` (child process) or `k8s` (namespace + template) |
 | `github_app` | GitHub App client ID and installation ID (private key via env) |
+
+### OpenAI Providers
+
+Drua exposes two OpenAI API protocols, and they are not aliases:
+
+| Provider name | API | Auth | Notes |
+|---|---|---|---|
+| `openai` | Chat Completions API | `OPENAI_API_KEY` | Uses `https://api.openai.com/v1/chat/completions`. |
+| `openai-responses` | Responses API | `OPENAI_API_KEY` | Uses `https://api.openai.com/v1/responses`. |
+| `openai-codex` | Responses API | ChatGPT subscription login | Uses the same Responses protocol as `openai-responses`, but against the ChatGPT/Codex subscription endpoint with credentials from `OPENAI_CODEX_ACCESS_TOKEN` or `~/.codex/auth.json`. |
+
+`openai` and `openai-responses` are different OpenAI APIs with different wire
+formats, streaming events, and tool-calling shapes. Choose the provider name
+that matches the API you want to talk to; switching between them is not just a
+billing or model change.
+
+Example config:
+
+```yaml
+providers:
+  - name: openai
+    models:
+      - name: gpt-4.1-mini
+        max_tokens_per_response: 4096
+        context_window_tokens: 200000
+
+  - name: openai-responses
+    models:
+      - name: gpt-5.4-mini
+        max_tokens_per_response: 4096
+        context_window_tokens: 200000
+
+  # Same Responses API client, but authenticated with a ChatGPT subscription.
+  - name: openai-codex
+    models:
+      - name: gpt-5.4-mini
+        max_tokens_per_response: 4096
+        context_window_tokens: 200000
+```
 
 ## Project Layout
 
