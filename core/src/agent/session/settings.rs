@@ -25,6 +25,7 @@ impl From<u32> for ResetTimeDeltaSeconds {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CompactionConfig {
     /// Enable the compaction system.
     pub enabled: bool,
