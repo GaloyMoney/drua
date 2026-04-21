@@ -478,6 +478,31 @@ impl ScreenState {
             if let Some(col) = g.next_non_empty_right() {
                 g.cursor_col = col;
                 g.ensure_cursor_visible();
+            } else {
+                // At end of line — try jumping to next row that has content to the right
+                for next_row in (g.cursor_row + 1)..g.threads.len() {
+                    let has_content_right = g.grid.get(next_row).map_or(false, |row| {
+                        row.iter()
+                            .skip(g.cursor_col + 1)
+                            .any(|c| !matches!(c, CellKind::Empty))
+                    });
+                    if has_content_right {
+                        let was_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                        g.cursor_row = next_row;
+                        let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                        if was_orphan != is_orphan {
+                            if let Some(col) = g.first_non_empty() {
+                                g.cursor_col = col;
+                            }
+                        } else if let Some(col) = g.next_non_empty_right() {
+                            g.cursor_col = col;
+                        } else {
+                            g.snap_to_nearest_non_empty();
+                        }
+                        g.ensure_cursor_visible();
+                        return;
+                    }
+                }
             }
         }
     }
@@ -487,6 +512,14 @@ impl ScreenState {
             if let Some(col) = g.next_non_empty_left() {
                 g.cursor_col = col;
                 g.ensure_cursor_visible();
+            } else {
+                // At start of line — wrap to the end of the same row
+                if let Some(col) = g.last_non_empty() {
+                    if col != g.cursor_col {
+                        g.cursor_col = col;
+                        g.ensure_cursor_visible();
+                    }
+                }
             }
         }
     }
@@ -494,8 +527,17 @@ impl ScreenState {
     pub fn grid_move_down(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             if !g.threads.is_empty() && g.cursor_row < g.threads.len() - 1 {
+                let was_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
                 g.cursor_row += 1;
-                g.snap_to_nearest_non_empty();
+                let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                if was_orphan != is_orphan {
+                    // Crossing orphan boundary — jump to first content
+                    if let Some(col) = g.first_non_empty() {
+                        g.cursor_col = col;
+                    }
+                } else {
+                    g.snap_to_nearest_non_empty();
+                }
                 g.ensure_cursor_visible();
             }
         }
@@ -504,8 +546,17 @@ impl ScreenState {
     pub fn grid_move_up(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             if g.cursor_row > 0 {
+                let was_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
                 g.cursor_row -= 1;
-                g.snap_to_nearest_non_empty();
+                let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                if was_orphan != is_orphan {
+                    // Crossing orphan boundary — jump to first content
+                    if let Some(col) = g.first_non_empty() {
+                        g.cursor_col = col;
+                    }
+                } else {
+                    g.snap_to_nearest_non_empty();
+                }
                 g.ensure_cursor_visible();
             }
         }

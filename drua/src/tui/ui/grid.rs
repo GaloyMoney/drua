@@ -283,18 +283,21 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
 
     let mut lines: Vec<Line> = Vec::new();
 
-    for (thread_idx, thread) in grid.threads.iter().enumerate() {
-        let cell = grid
-            .grid
-            .get(thread_idx)
-            .and_then(|row| row.get(grid.cursor_col))
-            .copied()
-            .unwrap_or(CellKind::Empty);
+    // Show detail for the cursor's current row only.
+    let cell = grid
+        .grid
+        .get(grid.cursor_row)
+        .and_then(|row| row.get(grid.cursor_col))
+        .copied()
+        .unwrap_or(CellKind::Empty);
 
-        if matches!(cell, CellKind::Empty) {
-            continue;
-        }
-
+    if matches!(cell, CellKind::Empty) {
+        lines.push(Line::from(Span::styled(
+            " No content at this position",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let thread = &grid.threads[grid.cursor_row];
         let reason = match thread.start_reason.as_str() {
             "INITIAL_THREAD" => "Init",
             "TOOL_DEFS_UPDATED" => "TDef",
@@ -302,45 +305,29 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
             "ORPHAN" => "Orph",
             other => other,
         };
-        let thread_label = format!("{}. {}", thread_idx + 1, reason);
-        let is_selected_row = thread_idx == grid.cursor_row;
-
-        let header_style = if is_selected_row {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        };
 
         let cell_label = match cell {
-            CellKind::Unique(c) => format!(" [{c}]"),
-            CellKind::Shared => " [·]".to_string(),
-            CellKind::Summary(_) => " [*]".to_string(),
-            CellKind::Condensed => " [≈]".to_string(),
+            CellKind::Unique(c) => format!("[{c}]"),
+            CellKind::Shared => "[·]".to_string(),
+            CellKind::Summary(_) => "[*]".to_string(),
+            CellKind::Condensed => "[≈]".to_string(),
             CellKind::Empty => unreachable!(),
         };
 
         lines.push(Line::from(vec![
-            Span::styled(format!(" {thread_label}"), header_style),
+            Span::styled(
+                format!(" {}. {} ", grid.cursor_row + 1, reason),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(cell_label, Style::default().fg(Color::DarkGray)),
         ]));
 
-        if let Some(detail) = grid.details.get(&(thread_idx, grid.cursor_col)) {
+        if let Some(detail) = grid.details.get(&(grid.cursor_row, grid.cursor_col)) {
             let content_lines = format_block_detail(&detail.content, detail.role);
             lines.extend(content_lines);
         }
-
-        lines.push(Line::from("")); // spacer
-    }
-
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " No content at this position",
-            Style::default().fg(Color::DarkGray),
-        )));
     }
 
     let paragraph = Paragraph::new(lines)
