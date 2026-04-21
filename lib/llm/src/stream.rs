@@ -5,80 +5,73 @@
 //! feeds them into a [`StreamAccumulator`] that builds the final
 //! [`PromptResponse`] once the stream completes.
 
+use std::collections::HashMap;
+
 use crate::prompt::AssistantBlock;
 use crate::{PromptResponse, StopReason, Usage};
 
 /// Provider-agnostic streaming delta. Forwarded to UI and fed to accumulator.
+///
+/// Providers emit only the events that map naturally to their wire format —
+/// no lifecycle framing (start/stop) is required. The [`StreamAccumulator`]
+/// infers block boundaries from the content deltas.
 #[derive(Debug, Clone)]
 pub enum StreamDelta {
-    MessageStart {
+    /// A chunk of assistant text content.
+    TextDelta { text: String },
+    /// A chunk of thinking / reasoning content.
+    ThinkingDelta { text: String },
+    /// Start of a new tool call. Must precede any [`ToolCallDelta`] for
+    /// the same `id`.
+    ToolCallStart { id: String, name: String },
+    /// A chunk of JSON arguments for a tool call identified by `id`.
+    ToolCallDelta { id: String, partial_json: String },
+    /// Signature for the current thinking block.
+    ThinkingSignature { signature: String },
+    /// Token usage statistics. Accumulated additively — providers may emit
+    /// this more than once (e.g. input tokens early, output tokens late).
+    Usage {
         input_tokens: u32,
-    },
-    ContentBlockStart {
-        index: usize,
-        block_type: ContentBlockType,
-    },
-    TextDelta {
-        index: usize,
-        text: String,
-    },
-    ThinkingDelta {
-        index: usize,
-        text: String,
-    },
-    InputJsonDelta {
-        index: usize,
-        partial_json: String,
-    },
-    SignatureDelta {
-        index: usize,
-        signature: String,
-    },
-    ContentBlockStop {
-        index: usize,
-    },
-    MessageDelta {
-        stop_reason: Option<StopReason>,
         output_tokens: u32,
     },
-    MessageStop,
-    Error {
-        message: String,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum ContentBlockType {
-    Text,
-    ToolUse { id: String, name: String },
-    Thinking,
+    /// The stream is complete.
+    Done { stop_reason: Option<StopReason> },
+    /// An error occurred mid-stream.
+    Error { message: String },
 }
 
 /// Accumulates [`StreamDelta`] events into a complete [`PromptResponse`].
+///
+/// Block boundaries are inferred from the deltas themselves — no explicit
+/// start/stop events are required from providers.
 pub struct StreamAccumulator {
-    blocks: Vec<BlockBuilder>,
+    thinking: Option<ThinkingBuilder>,
+    text: Option<String>,
+    tool_calls: Vec<ToolCallBuilder>,
+    tool_call_index: HashMap<String, usize>,
     usage: Usage,
     stop_reason: Option<StopReason>,
     done: bool,
 }
 
-enum BlockBuilder {
-    Text(String),
-    Thinking {
-        text: String,
-        signature: Option<String>,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
+struct ThinkingBuilder {
+    text: String,
+    signature: Option<String>,
+}
+
+struct ToolCallBuilder {
+    id: String,
+    name: String,
+    json_buf: String,
 }
 
 impl StreamAccumulator {
     pub fn new() -> Self {
         Self {
-            blocks: Vec::new(),
+            thinking: None,
+            text: None,
+            tool_calls: Vec::new(),
+            tool_call_index: HashMap::new(),
             usage: Usage::default(),
             stop_reason: None,
             done: false,
@@ -90,67 +83,46 @@ impl StreamAccumulator {
     /// separately.
     pub fn process(&mut self, delta: &StreamDelta) {
         match delta {
-            StreamDelta::MessageStart { input_tokens } => {
-                self.usage.input_tokens = *input_tokens;
+            StreamDelta::TextDelta { text } => {
+                self.text.get_or_insert_with(String::new).push_str(text);
             }
-            StreamDelta::ContentBlockStart { block_type, .. } => match block_type {
-                ContentBlockType::Text => self.blocks.push(BlockBuilder::Text(String::new())),
-                ContentBlockType::ToolUse { id, name } => {
-                    self.blocks.push(BlockBuilder::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        json_buf: String::new(),
-                    });
-                }
-                ContentBlockType::Thinking => {
-                    self.blocks.push(BlockBuilder::Thinking {
+            StreamDelta::ThinkingDelta { text } => {
+                self.thinking
+                    .get_or_insert_with(|| ThinkingBuilder {
                         text: String::new(),
                         signature: None,
-                    });
-                }
-            },
-            StreamDelta::TextDelta { index, text } => {
-                if let Some(BlockBuilder::Text(ref mut t)) = self.blocks.get_mut(*index) {
-                    t.push_str(text);
+                    })
+                    .text
+                    .push_str(text);
+            }
+            StreamDelta::ToolCallStart { id, name } => {
+                let idx = self.tool_calls.len();
+                self.tool_calls.push(ToolCallBuilder {
+                    id: id.clone(),
+                    name: name.clone(),
+                    json_buf: String::new(),
+                });
+                self.tool_call_index.insert(id.clone(), idx);
+            }
+            StreamDelta::ToolCallDelta { id, partial_json } => {
+                if let Some(&idx) = self.tool_call_index.get(id) {
+                    self.tool_calls[idx].json_buf.push_str(partial_json);
                 }
             }
-            StreamDelta::ThinkingDelta { index, text } => {
-                if let Some(BlockBuilder::Thinking {
-                    text: ref mut t, ..
-                }) = self.blocks.get_mut(*index)
-                {
-                    t.push_str(text);
+            StreamDelta::ThinkingSignature { signature } => {
+                if let Some(ref mut t) = self.thinking {
+                    t.signature = Some(signature.clone());
                 }
             }
-            StreamDelta::InputJsonDelta {
-                index,
-                partial_json,
-            } => {
-                if let Some(BlockBuilder::ToolUse {
-                    ref mut json_buf, ..
-                }) = self.blocks.get_mut(*index)
-                {
-                    json_buf.push_str(partial_json);
-                }
-            }
-            StreamDelta::SignatureDelta { index, signature } => {
-                if let Some(BlockBuilder::Thinking {
-                    signature: ref mut s,
-                    ..
-                }) = self.blocks.get_mut(*index)
-                {
-                    *s = Some(signature.clone());
-                }
-            }
-            StreamDelta::ContentBlockStop { .. } => { /* blocks finalized in finish() */ }
-            StreamDelta::MessageDelta {
-                stop_reason,
+            StreamDelta::Usage {
+                input_tokens,
                 output_tokens,
             } => {
-                self.stop_reason = *stop_reason;
-                self.usage.output_tokens = *output_tokens;
+                self.usage.input_tokens += *input_tokens;
+                self.usage.output_tokens += *output_tokens;
             }
-            StreamDelta::MessageStop => {
+            StreamDelta::Done { stop_reason } => {
+                self.stop_reason = *stop_reason;
                 self.done = true;
             }
             StreamDelta::Error { .. } => {
@@ -163,29 +135,34 @@ impl StreamAccumulator {
         self.done
     }
 
+    /// Produce the final response. Blocks are ordered: thinking, text, tool calls.
     pub fn finish(self) -> PromptResponse {
-        let content = self
-            .blocks
-            .into_iter()
-            .map(|b| match b {
-                BlockBuilder::Text(text) => AssistantBlock::Text {
-                    text,
-                    cache_control: None,
-                },
-                BlockBuilder::Thinking { text, signature } => {
-                    AssistantBlock::Thinking { text, signature }
-                }
-                BlockBuilder::ToolUse { id, name, json_buf } => {
-                    let input = serde_json::from_str(&json_buf).unwrap_or(serde_json::Value::Null);
-                    AssistantBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        cache_control: None,
-                    }
-                }
-            })
-            .collect();
+        let mut content = Vec::new();
+
+        if let Some(t) = self.thinking {
+            content.push(AssistantBlock::Thinking {
+                text: t.text,
+                signature: t.signature,
+            });
+        }
+
+        if let Some(text) = self.text {
+            content.push(AssistantBlock::Text {
+                text,
+                cache_control: None,
+            });
+        }
+
+        for tc in self.tool_calls {
+            let input = serde_json::from_str(&tc.json_buf).unwrap_or(serde_json::Value::Null);
+            content.push(AssistantBlock::ToolUse {
+                id: tc.id,
+                name: tc.name,
+                input,
+                cache_control: None,
+            });
+        }
+
         PromptResponse {
             content,
             usage: self.usage,
@@ -207,25 +184,23 @@ mod tests {
     #[test]
     fn accumulates_text_only() {
         let mut acc = StreamAccumulator::new();
-        acc.process(&StreamDelta::MessageStart { input_tokens: 10 });
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 0,
-            block_type: ContentBlockType::Text,
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 10,
+            output_tokens: 0,
         });
         acc.process(&StreamDelta::TextDelta {
-            index: 0,
             text: "Hello".to_string(),
         });
         acc.process(&StreamDelta::TextDelta {
-            index: 0,
             text: " world".to_string(),
         });
-        acc.process(&StreamDelta::ContentBlockStop { index: 0 });
-        acc.process(&StreamDelta::MessageDelta {
-            stop_reason: Some(StopReason::EndTurn),
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 0,
             output_tokens: 5,
         });
-        acc.process(&StreamDelta::MessageStop);
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::EndTurn),
+        });
 
         assert!(acc.is_done());
         let resp = acc.finish();
@@ -242,28 +217,25 @@ mod tests {
     #[test]
     fn accumulates_tool_use() {
         let mut acc = StreamAccumulator::new();
-        acc.process(&StreamDelta::MessageStart { input_tokens: 0 });
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 0,
-            block_type: ContentBlockType::ToolUse {
-                id: "tu_1".to_string(),
-                name: "get_weather".to_string(),
-            },
+        acc.process(&StreamDelta::ToolCallStart {
+            id: "tu_1".to_string(),
+            name: "get_weather".to_string(),
         });
-        acc.process(&StreamDelta::InputJsonDelta {
-            index: 0,
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "tu_1".to_string(),
             partial_json: r#"{"loc"#.to_string(),
         });
-        acc.process(&StreamDelta::InputJsonDelta {
-            index: 0,
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "tu_1".to_string(),
             partial_json: r#"ation":"NYC"}"#.to_string(),
         });
-        acc.process(&StreamDelta::ContentBlockStop { index: 0 });
-        acc.process(&StreamDelta::MessageDelta {
-            stop_reason: Some(StopReason::ToolUse),
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 0,
             output_tokens: 20,
         });
-        acc.process(&StreamDelta::MessageStop);
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::ToolUse),
+        });
 
         let resp = acc.finish();
         assert_eq!(resp.content.len(), 1);
@@ -283,29 +255,18 @@ mod tests {
     #[test]
     fn accumulates_thinking() {
         let mut acc = StreamAccumulator::new();
-        acc.process(&StreamDelta::MessageStart { input_tokens: 5 });
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 0,
-            block_type: ContentBlockType::Thinking,
-        });
         acc.process(&StreamDelta::ThinkingDelta {
-            index: 0,
             text: "Let me think".to_string(),
         });
         acc.process(&StreamDelta::ThinkingDelta {
-            index: 0,
             text: " about this.".to_string(),
         });
-        acc.process(&StreamDelta::SignatureDelta {
-            index: 0,
+        acc.process(&StreamDelta::ThinkingSignature {
             signature: "sig123".to_string(),
         });
-        acc.process(&StreamDelta::ContentBlockStop { index: 0 });
-        acc.process(&StreamDelta::MessageDelta {
+        acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
-            output_tokens: 8,
         });
-        acc.process(&StreamDelta::MessageStop);
 
         let resp = acc.finish();
         assert_eq!(resp.content.len(), 1);
@@ -321,48 +282,38 @@ mod tests {
     #[test]
     fn accumulates_mixed_multi_block() {
         let mut acc = StreamAccumulator::new();
-        acc.process(&StreamDelta::MessageStart { input_tokens: 15 });
-        // Block 0: Thinking
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 0,
-            block_type: ContentBlockType::Thinking,
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 15,
+            output_tokens: 0,
         });
+        // Thinking
         acc.process(&StreamDelta::ThinkingDelta {
-            index: 0,
             text: "hmm".to_string(),
         });
-        acc.process(&StreamDelta::ContentBlockStop { index: 0 });
-        // Block 1: Text
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 1,
-            block_type: ContentBlockType::Text,
-        });
+        // Text
         acc.process(&StreamDelta::TextDelta {
-            index: 1,
             text: "Hello".to_string(),
         });
-        acc.process(&StreamDelta::ContentBlockStop { index: 1 });
-        // Block 2: Tool use
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 2,
-            block_type: ContentBlockType::ToolUse {
-                id: "tu_2".to_string(),
-                name: "calc".to_string(),
-            },
+        // Tool use
+        acc.process(&StreamDelta::ToolCallStart {
+            id: "tu_2".to_string(),
+            name: "calc".to_string(),
         });
-        acc.process(&StreamDelta::InputJsonDelta {
-            index: 2,
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "tu_2".to_string(),
             partial_json: r#"{"x":1}"#.to_string(),
         });
-        acc.process(&StreamDelta::ContentBlockStop { index: 2 });
-        acc.process(&StreamDelta::MessageDelta {
-            stop_reason: Some(StopReason::ToolUse),
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 0,
             output_tokens: 30,
         });
-        acc.process(&StreamDelta::MessageStop);
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::ToolUse),
+        });
 
         let resp = acc.finish();
         assert_eq!(resp.content.len(), 3);
+        // Order: thinking, text, tool calls
         assert!(matches!(&resp.content[0], AssistantBlock::Thinking { .. }));
         assert!(matches!(&resp.content[1], AssistantBlock::Text { .. }));
         assert!(matches!(&resp.content[2], AssistantBlock::ToolUse { .. }));
@@ -371,13 +322,7 @@ mod tests {
     #[test]
     fn error_mid_stream_marks_done() {
         let mut acc = StreamAccumulator::new();
-        acc.process(&StreamDelta::MessageStart { input_tokens: 5 });
-        acc.process(&StreamDelta::ContentBlockStart {
-            index: 0,
-            block_type: ContentBlockType::Text,
-        });
         acc.process(&StreamDelta::TextDelta {
-            index: 0,
             text: "partial".to_string(),
         });
         acc.process(&StreamDelta::Error {
@@ -391,5 +336,85 @@ mod tests {
             AssistantBlock::Text { text, .. } => assert_eq!(text, "partial"),
             _ => panic!("expected text block"),
         }
+    }
+
+    #[test]
+    fn interleaved_tool_calls() {
+        let mut acc = StreamAccumulator::new();
+        acc.process(&StreamDelta::ToolCallStart {
+            id: "call_a".to_string(),
+            name: "search".to_string(),
+        });
+        acc.process(&StreamDelta::ToolCallStart {
+            id: "call_b".to_string(),
+            name: "fetch".to_string(),
+        });
+        // Interleaved deltas
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "call_a".to_string(),
+            partial_json: r#"{"q":"#.to_string(),
+        });
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "call_b".to_string(),
+            partial_json: r#"{"url":"#.to_string(),
+        });
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "call_a".to_string(),
+            partial_json: r#""rust"}"#.to_string(),
+        });
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "call_b".to_string(),
+            partial_json: r#""https://example.com"}"#.to_string(),
+        });
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::ToolUse),
+        });
+
+        let resp = acc.finish();
+        assert_eq!(resp.content.len(), 2);
+        match &resp.content[0] {
+            AssistantBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                assert_eq!(id, "call_a");
+                assert_eq!(name, "search");
+                assert_eq!(input, &serde_json::json!({"q": "rust"}));
+            }
+            _ => panic!("expected tool use block"),
+        }
+        match &resp.content[1] {
+            AssistantBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                assert_eq!(id, "call_b");
+                assert_eq!(name, "fetch");
+                assert_eq!(input, &serde_json::json!({"url": "https://example.com"}));
+            }
+            _ => panic!("expected tool use block"),
+        }
+    }
+
+    #[test]
+    fn additive_usage_accumulation() {
+        let mut acc = StreamAccumulator::new();
+        // Anthropic pattern: input tokens early, output tokens late
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 100,
+            output_tokens: 0,
+        });
+        acc.process(&StreamDelta::TextDelta {
+            text: "hi".to_string(),
+        });
+        acc.process(&StreamDelta::Usage {
+            input_tokens: 0,
+            output_tokens: 50,
+        });
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::EndTurn),
+        });
+
+        let resp = acc.finish();
+        assert_eq!(resp.usage.input_tokens, 100);
+        assert_eq!(resp.usage.output_tokens, 50);
     }
 }

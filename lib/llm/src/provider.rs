@@ -21,17 +21,16 @@ pub trait LlmProvider: Send + Sync {
 
     /// Send a prompt and receive streaming deltas via channel.
     ///
-    /// The returned receiver yields `StreamDelta` events that conform to the
-    /// contract expected by [`crate::stream::StreamAccumulator`]:
+    /// Events may arrive in any order, but the typical sequence is:
     ///
-    /// 1. `MessageStart` (with input token count)
-    /// 2. One or more content block sequences:
-    ///    `ContentBlockStart` → deltas → `ContentBlockStop`
-    /// 3. `MessageDelta` (with stop reason and output token count)
-    /// 4. `MessageStop`
+    /// 1. Content deltas (`TextDelta`, `ThinkingDelta`, `ToolCallStart` /
+    ///    `ToolCallDelta`)
+    /// 2. `Usage` (token counts — may arrive before, during, or after content;
+    ///    accumulated additively)
+    /// 3. `Done` (with stop reason)
     ///
-    /// Providers that don't natively emit this framing (e.g. OpenAI) must
-    /// synthesize the missing events.
+    /// Providers need not synthesize lifecycle events — only emit the
+    /// content and metadata events that map naturally to their wire format.
     async fn send_prompt_streaming(
         &self,
         prompt: &Prompt,

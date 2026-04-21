@@ -8,7 +8,7 @@
 use llm::prompt::{
     AssistantBlock, Message, SystemBlock, Tool, ToolChoice, ToolResultBlock, UserBlock,
 };
-use llm::stream::{ContentBlockType, StreamDelta};
+use llm::stream::StreamDelta;
 use llm::StopReason;
 
 use crate::types::{
@@ -195,38 +195,27 @@ fn convert_tool_choice(choice: &ToolChoice) -> OpenAiToolChoice {
 // Streaming chunk → StreamDelta(s)
 // ============================================================================
 
-/// State tracker for synthesizing ContentBlockStart/Stop events that the
-/// StreamAccumulator expects but OpenAI doesn't natively emit.
+/// Converts OpenAI streaming chunks into provider-agnostic [`StreamDelta`]s.
+///
+/// Only tracks tool call IDs so that subsequent argument deltas can reference
+/// the correct tool call.
 pub(crate) struct DeltaSynthesizer {
-    /// Whether we've emitted a ContentBlockStart for the text block.
-    text_block_started: bool,
-    /// Maps tool_call index to the content block index we assigned.
-    /// Tracks which tool call indices we've already emitted ContentBlockStart for.
-    tool_block_indices: Vec<Option<usize>>,
-    /// Next content block index to assign.
-    next_block_index: usize,
-    /// Total open blocks (for emitting ContentBlockStop on finish).
-    open_blocks: usize,
-    /// Input tokens (captured from usage chunk).
-    input_tokens: u32,
+    /// Maps OpenAI tool_call index to the tool call ID.
+    tool_ids: Vec<Option<String>>,
 }
 
 impl DeltaSynthesizer {
     pub fn new() -> Self {
         Self {
-            text_block_started: false,
-            tool_block_indices: Vec::new(),
-            next_block_index: 0,
-            open_blocks: 0,
-            input_tokens: 0,
+            tool_ids: Vec::new(),
         }
     }
 
     /// Process a raw SSE data payload (OpenAI JSON) and emit provider-agnostic
-    /// `StreamDelta`s. Returns `Ok(None)` for the `[DONE]` sentinel.
+    /// `StreamDelta`s.
     pub fn process_chunk(&mut self, data: &str) -> Result<Vec<StreamDelta>, String> {
         if data.trim() == "[DONE]" {
-            return Ok(vec![StreamDelta::MessageStop]);
+            return Ok(vec![]);
         }
 
         let chunk: OpenAiStreamChunk =
@@ -234,13 +223,12 @@ impl DeltaSynthesizer {
 
         let mut deltas = Vec::new();
 
-        // Capture usage if present (OpenAI sends it in a separate chunk when
+        // Usage chunk (OpenAI sends it in a separate chunk when
         // stream_options.include_usage is true).
         if let Some(usage) = &chunk.usage {
-            self.input_tokens = usage.prompt_tokens;
-            // Emit MessageStart with input tokens.
-            deltas.push(StreamDelta::MessageStart {
+            deltas.push(StreamDelta::Usage {
                 input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
             });
         }
 
@@ -249,61 +237,40 @@ impl DeltaSynthesizer {
         };
 
         if let Some(delta) = &choice.delta {
-            // Handle text content.
+            // Text content.
             if let Some(text) = &delta.content {
                 if !text.is_empty() {
-                    if !self.text_block_started {
-                        self.text_block_started = true;
-                        let idx = self.next_block_index;
-                        self.next_block_index += 1;
-                        self.open_blocks += 1;
-                        deltas.push(StreamDelta::ContentBlockStart {
-                            index: idx,
-                            block_type: ContentBlockType::Text,
-                        });
-                    }
-                    deltas.push(StreamDelta::TextDelta {
-                        index: 0,
-                        text: text.clone(),
-                    });
+                    deltas.push(StreamDelta::TextDelta { text: text.clone() });
                 }
             }
 
-            // Handle tool calls.
+            // Tool calls.
             if let Some(tool_calls) = &delta.tool_calls {
                 for tc in tool_calls {
-                    // Ensure our tracking vec is large enough.
-                    while self.tool_block_indices.len() <= tc.index {
-                        self.tool_block_indices.push(None);
+                    // Grow tracking vec.
+                    while self.tool_ids.len() <= tc.index {
+                        self.tool_ids.push(None);
                     }
 
-                    // First chunk for this tool call — emit ContentBlockStart.
-                    if self.tool_block_indices[tc.index].is_none() {
-                        let block_idx = self.next_block_index;
-                        self.next_block_index += 1;
-                        self.open_blocks += 1;
-                        self.tool_block_indices[tc.index] = Some(block_idx);
-
+                    // First chunk for this tool call — emit ToolCallStart.
+                    if self.tool_ids[tc.index].is_none() {
                         let id = tc.id.clone().unwrap_or_default();
                         let name = tc
                             .function
                             .as_ref()
                             .and_then(|f| f.name.clone())
                             .unwrap_or_default();
-
-                        deltas.push(StreamDelta::ContentBlockStart {
-                            index: block_idx,
-                            block_type: ContentBlockType::ToolUse { id, name },
-                        });
+                        self.tool_ids[tc.index] = Some(id.clone());
+                        deltas.push(StreamDelta::ToolCallStart { id, name });
                     }
 
                     // Argument deltas.
                     if let Some(func) = &tc.function {
                         if let Some(args) = &func.arguments {
                             if !args.is_empty() {
-                                let block_idx = self.tool_block_indices[tc.index].unwrap();
-                                deltas.push(StreamDelta::InputJsonDelta {
-                                    index: block_idx,
+                                let id = self.tool_ids[tc.index].clone().unwrap_or_default();
+                                deltas.push(StreamDelta::ToolCallDelta {
+                                    id,
                                     partial_json: args.clone(),
                                 });
                             }
@@ -313,33 +280,15 @@ impl DeltaSynthesizer {
             }
         }
 
-        // Handle finish_reason.
+        // Handle finish_reason — emit Done.
         if let Some(reason) = &choice.finish_reason {
-            // Close all open blocks.
-            for idx in 0..self.next_block_index {
-                deltas.push(StreamDelta::ContentBlockStop { index: idx });
-            }
-
             let stop_reason = match reason.as_str() {
                 "stop" => Some(StopReason::EndTurn),
                 "length" => Some(StopReason::MaxTokens),
                 "tool_calls" => Some(StopReason::ToolUse),
                 _ => None,
             };
-
-            // Output tokens come from the usage chunk. If we haven't seen it
-            // yet (it may arrive after this chunk), use 0 — it will be
-            // populated when the usage chunk arrives.
-            let output_tokens = chunk
-                .usage
-                .as_ref()
-                .map(|u| u.completion_tokens)
-                .unwrap_or(0);
-
-            deltas.push(StreamDelta::MessageDelta {
-                stop_reason,
-                output_tokens,
-            });
+            deltas.push(StreamDelta::Done { stop_reason });
         }
 
         Ok(deltas)
@@ -483,54 +432,43 @@ mod tests {
     fn synthesizer_text_stream() {
         let mut synth = DeltaSynthesizer::new();
 
-        // First text chunk — should synthesize ContentBlockStart.
+        // First text chunk.
         let deltas = synth
             .process_chunk(r#"{"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#)
             .unwrap();
-        assert_eq!(deltas.len(), 2); // ContentBlockStart + TextDelta
-        assert!(matches!(
-            &deltas[0],
-            StreamDelta::ContentBlockStart {
-                index: 0,
-                block_type: ContentBlockType::Text
-            }
-        ));
-        assert!(matches!(&deltas[1], StreamDelta::TextDelta { index: 0, text } if text == "Hello"));
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(&deltas[0], StreamDelta::TextDelta { text } if text == "Hello"));
 
-        // Second text chunk — no ContentBlockStart.
+        // Second text chunk.
         let deltas = synth
             .process_chunk(r#"{"choices":[{"delta":{"content":" world"},"finish_reason":null}]}"#)
             .unwrap();
         assert_eq!(deltas.len(), 1);
-        assert!(
-            matches!(&deltas[0], StreamDelta::TextDelta { index: 0, text } if text == " world")
-        );
+        assert!(matches!(&deltas[0], StreamDelta::TextDelta { text } if text == " world"));
 
-        // Finish.
+        // Finish with usage.
         let deltas = synth
             .process_chunk(
                 r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
             )
             .unwrap();
-        // MessageStart (from usage) + ContentBlockStop + MessageDelta
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, StreamDelta::MessageStart { input_tokens: 10 })));
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, StreamDelta::ContentBlockStop { index: 0 })));
         assert!(deltas.iter().any(|d| matches!(
             d,
-            StreamDelta::MessageDelta {
+            StreamDelta::Usage {
+                input_tokens: 10,
+                output_tokens: 5
+            }
+        )));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Done {
                 stop_reason: Some(StopReason::EndTurn),
-                ..
             }
         )));
 
-        // DONE sentinel.
+        // DONE sentinel — no deltas.
         let deltas = synth.process_chunk("[DONE]").unwrap();
-        assert_eq!(deltas.len(), 1);
-        assert!(matches!(deltas[0], StreamDelta::MessageStop));
+        assert!(deltas.is_empty());
     }
 
     #[test]
@@ -545,10 +483,8 @@ mod tests {
             .unwrap();
         assert!(deltas.iter().any(|d| matches!(
             d,
-            StreamDelta::ContentBlockStart {
-                index: 0,
-                block_type: ContentBlockType::ToolUse { .. }
-            }
+            StreamDelta::ToolCallStart { id, name }
+            if id == "call_abc" && name == "get_weather"
         )));
 
         // Tool call arguments.
@@ -560,10 +496,8 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert!(matches!(
             &deltas[0],
-            StreamDelta::InputJsonDelta {
-                index: 0,
-                partial_json
-            } if partial_json == r#"{"location":"#
+            StreamDelta::ToolCallDelta { id, partial_json }
+            if id == "call_abc" && partial_json == r#"{"location":"#
         ));
 
         // Finish with tool_calls reason.
@@ -574,10 +508,42 @@ mod tests {
             .unwrap();
         assert!(deltas.iter().any(|d| matches!(
             d,
-            StreamDelta::MessageDelta {
+            StreamDelta::Done {
                 stop_reason: Some(StopReason::ToolUse),
-                ..
             }
         )));
+    }
+
+    #[test]
+    fn synthesizer_interleaved_tool_calls() {
+        let mut synth = DeltaSynthesizer::new();
+
+        // Two tool calls start in the same chunk.
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":""}},{"index":1,"id":"call_2","function":{"name":"fetch","arguments":""}}]},"finish_reason":null}]}"#,
+            )
+            .unwrap();
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::ToolCallStart { id, .. } if id == "call_1")));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::ToolCallStart { id, .. } if id == "call_2")));
+
+        // Interleaved argument deltas.
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"rust\"}"}}]},"finish_reason":null}]}"#,
+            )
+            .unwrap();
+        assert!(matches!(&deltas[0], StreamDelta::ToolCallDelta { id, .. } if id == "call_1"));
+
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"url\":\"https://example.com\"}"}}]},"finish_reason":null}]}"#,
+            )
+            .unwrap();
+        assert!(matches!(&deltas[0], StreamDelta::ToolCallDelta { id, .. } if id == "call_2"));
     }
 }
