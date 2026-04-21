@@ -157,77 +157,80 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                 let first_ne = non_empty.first().copied();
                 let last_ne = non_empty.last().copied();
 
-                // Orphan rows start from their first content column (left-aligned)
+                // Orphan rows render only their non-empty cells, tightly packed.
                 let is_orphan = thread.start_reason == "ORPHAN";
-                let row_start = if is_orphan {
-                    first_ne.unwrap_or(start_col)
-                } else {
-                    start_col
-                };
-                let row_end = if is_orphan {
-                    (row_start + visible_cols).min(grid.positions.len())
-                } else {
-                    end_col
-                };
 
                 let mut spans = vec![label_span];
 
-                for col in row_start..row_end {
-                    let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
-                    let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+                if is_orphan {
+                    // Pack non-empty cells tightly — no positional gaps.
+                    let ne_count = non_empty.len();
+                    for (i, &col) in non_empty.iter().enumerate() {
+                        let cell = row_cells[col];
+                        let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+                        let has_rightward = i + 1 < ne_count;
 
-                    // Is this empty cell between two non-empty cells? (connector)
-                    let is_between = matches!(cell, CellKind::Empty)
-                        && matches!((first_ne, last_ne), (Some(f), Some(l)) if f < col && col < l);
-                    let has_rightward = !matches!(cell, CellKind::Empty)
-                        && last_ne.map(|l| col < l).unwrap_or(false);
+                        let conn_str = if has_rightward { "───" } else { "   " };
+                        let conn_style = Style::default().fg(Color::DarkGray);
 
-                    let conn_str = if has_rightward || is_between {
-                        "───"
-                    } else {
-                        "   "
-                    };
-                    let conn_style = Style::default().fg(Color::DarkGray);
-
-                    if is_between {
-                        spans.push(Span::styled("─", conn_style));
-                        spans.push(Span::styled(conn_str, conn_style));
-                    } else {
-                        match cell {
-                            CellKind::Empty => {
-                                spans.push(Span::styled("    ", conn_style));
+                        let (sym, sym_color, bold) = cell_symbol(cell);
+                        let sym_style = if is_cursor {
+                            Style::default().fg(Color::Black).bg(Color::Yellow)
+                        } else {
+                            let s = Style::default().fg(sym_color);
+                            if bold {
+                                s.add_modifier(Modifier::BOLD)
+                            } else {
+                                s
                             }
-                            _ => {
-                                let (sym, sym_color, bold) = match cell {
-                                    CellKind::Unique(c) | CellKind::Summary(c) => {
-                                        let color = match c {
-                                            'U' => Color::Cyan,
-                                            'A' => Color::White,
-                                            'T' => Color::Yellow,
-                                            'R' => Color::Gray,
-                                            _ => Color::White,
-                                        };
-                                        let bold = matches!(cell, CellKind::Summary(_));
-                                        (c, color, bold)
-                                    }
-                                    CellKind::Shared => ('·', Color::DarkGray, false),
-                                    CellKind::Condensed => ('≈', Color::DarkGray, false),
-                                    CellKind::Empty => unreachable!(),
-                                };
+                        };
 
-                                let sym_style = if is_cursor {
-                                    Style::default().fg(Color::Black).bg(Color::Yellow)
-                                } else {
-                                    let s = Style::default().fg(sym_color);
-                                    if bold {
-                                        s.add_modifier(Modifier::BOLD)
+                        spans.push(Span::styled(String::from(sym), sym_style));
+                        spans.push(Span::styled(conn_str, conn_style));
+                    }
+                } else {
+                    // Normal rows: positionally aligned with horizontal scrolling.
+                    for col in start_col..end_col {
+                        let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
+                        let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+
+                        // Is this empty cell between two non-empty cells? (connector)
+                        let is_between = matches!(cell, CellKind::Empty)
+                            && matches!((first_ne, last_ne), (Some(f), Some(l)) if f < col && col < l);
+                        let has_rightward = !matches!(cell, CellKind::Empty)
+                            && last_ne.map(|l| col < l).unwrap_or(false);
+
+                        let conn_str = if has_rightward || is_between {
+                            "───"
+                        } else {
+                            "   "
+                        };
+                        let conn_style = Style::default().fg(Color::DarkGray);
+
+                        if is_between {
+                            spans.push(Span::styled("─", conn_style));
+                            spans.push(Span::styled(conn_str, conn_style));
+                        } else {
+                            match cell {
+                                CellKind::Empty => {
+                                    spans.push(Span::styled("    ", conn_style));
+                                }
+                                _ => {
+                                    let (sym, sym_color, bold) = cell_symbol(cell);
+                                    let sym_style = if is_cursor {
+                                        Style::default().fg(Color::Black).bg(Color::Yellow)
                                     } else {
-                                        s
-                                    }
-                                };
+                                        let s = Style::default().fg(sym_color);
+                                        if bold {
+                                            s.add_modifier(Modifier::BOLD)
+                                        } else {
+                                            s
+                                        }
+                                    };
 
-                                spans.push(Span::styled(String::from(sym), sym_style));
-                                spans.push(Span::styled(conn_str, conn_style));
+                                    spans.push(Span::styled(String::from(sym), sym_style));
+                                    spans.push(Span::styled(conn_str, conn_style));
+                                }
                             }
                         }
                     }
@@ -411,6 +414,27 @@ fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'stat
                 Style::default().fg(Color::DarkGray),
             ))]
         }
+    }
+}
+
+/// Map a non-empty CellKind to (symbol, color, bold).
+fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
+    match cell {
+        CellKind::Unique(c) | CellKind::Summary(c) => {
+            let color = match c {
+                'U' => Color::Cyan,
+                'A' => Color::White,
+                'T' => Color::Yellow,
+                'R' => Color::Gray,
+                'S' => Color::Green,
+                _ => Color::White,
+            };
+            let bold = matches!(cell, CellKind::Summary(_));
+            (c, color, bold)
+        }
+        CellKind::Shared => ('·', Color::DarkGray, false),
+        CellKind::Condensed => ('≈', Color::DarkGray, false),
+        CellKind::Empty => (' ', Color::DarkGray, false),
     }
 }
 

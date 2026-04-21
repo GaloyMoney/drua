@@ -668,8 +668,16 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                     None => continue,
                 };
 
+                let is_sandbox = matches!(
+                    content_block,
+                    ChatHistoryContentBlock::SandboxNotificationContent { .. }
+                );
                 let content = content_block.into_content_block();
-                let type_char = content_type_char(&content, role);
+                let type_char = if is_sandbox {
+                    'S'
+                } else {
+                    content_type_char(&content, role)
+                };
                 let is_owner = owner.get(&bi) == Some(&thread_idx);
 
                 let cell = if is_owner {
