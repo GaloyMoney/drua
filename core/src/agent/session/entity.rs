@@ -1,10 +1,10 @@
-use std::time::Duration;
-
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
+
+use crate::agent::config::ModelDefaults;
 
 use super::{
     compaction, error::AgentSessionError, history, message::*, metadata::*, settings::*, thread::*,
@@ -21,6 +21,7 @@ pub enum ThreadStartReason {
     InitialThread,
     ToolDefsUpdated,
     Compaction { from_thread: SessionThreadId },
+    Orphan { from_thread: SessionThreadId },
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -30,10 +31,7 @@ pub enum AgentSessionEvent {
     Initialized {
         id: AgentSessionId,
         agent_id: AgentId,
-        model_settings: ModelSettings,
-        #[serde(default)]
-        thread_simplification_settings: ThreadSimplificationSettings,
-        #[serde(default)]
+        model_defaults: ModelDefaults,
         compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
@@ -108,6 +106,9 @@ pub struct AgentSession {
 
     #[builder(default)]
     current_main_thread: Option<SessionThreadId>,
+
+    #[builder(default)]
+    model_defaults: ModelDefaults,
 
     #[builder(default)]
     compaction_config: CompactionConfig,
@@ -429,17 +430,15 @@ impl AgentSession {
         current_thread_id: SessionThreadId,
         current_prompt_def: &PromptDefinition,
     ) -> Option<(SessionThreadId, PromptDefinition)> {
-        let time_since = self.time_since_last_assistant_response();
-
         let is_main_thread = self.current_main_thread == Some(current_thread_id);
         let result = compaction::maybe_prune(
-            self.events.iter_all(),
+            &self.events,
             &self.compaction_config,
+            &self.model_defaults,
             self.id,
             current_thread_id,
             is_main_thread,
             current_prompt_def,
-            time_since,
         )?;
 
         // Apply compaction: push events and add new thread
@@ -452,26 +451,6 @@ impl AgentSession {
         Some((result.new_thread_id, result.prompt_definition))
     }
 
-    /// Compute duration since the last assistant response was persisted.
-    /// Falls back to Duration::ZERO when no assistant response has been persisted yet.
-    fn time_since_last_assistant_response(&self) -> Duration {
-        let last_ts = self
-            .events
-            .iter_persisted()
-            .rev()
-            .find_map(|pe| match &pe.event {
-                AgentSessionEvent::AssistantResponseReceived { .. } => Some(pe.recorded_at),
-                _ => None,
-            });
-        match last_ts {
-            Some(ts) => {
-                let elapsed = chrono::Utc::now() - ts;
-                elapsed.to_std().unwrap_or(Duration::ZERO)
-            }
-            None => Duration::ZERO,
-        }
-    }
-
     fn create_initial_thread(&mut self) -> PromptDefinition {
         let prompt_definition = self.materialize().initial_prompt_definition();
         let thread_id = SessionThreadId::new();
@@ -479,8 +458,7 @@ impl AgentSession {
             .id(thread_id)
             .session_id(self.id)
             .start_reason(ThreadStartReason::InitialThread)
-            .model(prompt_definition.model.clone())
-            .max_tokens_per_response(prompt_definition.max_tokens_per_response)
+            .model_defaults(self.model_defaults.clone())
             .system_view(prompt_definition.system_view().clone())
             .tool_definitions_view(prompt_definition.tool_definitions_view().clone())
             .initial_user_messages(prompt_definition.user_messages_view())
@@ -496,19 +474,15 @@ impl AgentSession {
     }
 
     fn materialize(&self) -> MaterializedSession<'_> {
-        let mut materialized = MaterializedSession::init("", 0);
+        let mut materialized = MaterializedSession::init(&self.model_defaults);
         for event in self.events.iter_all() {
             match event {
                 AgentSessionEvent::Initialized {
-                    model_settings,
                     system_blocks,
                     tool_defs,
                     ..
                 } => {
-                    materialized = MaterializedSession::init(
-                        &model_settings.model,
-                        model_settings.max_tokens_per_response,
-                    );
+                    materialized = MaterializedSession::init(&self.model_defaults);
                     materialized.push_system_blocks(system_blocks.iter());
                     materialized.push_tool_defs(tool_defs.iter());
                 }
@@ -577,12 +551,14 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::Initialized {
                     id,
                     agent_id,
+                    model_defaults,
                     compaction_config,
                     ..
                 } => {
                     builder = builder
                         .id(*id)
                         .agent_id(*agent_id)
+                        .model_defaults(model_defaults.clone())
                         .compaction_config(compaction_config.clone());
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
@@ -609,7 +585,7 @@ pub struct NewAgentSession {
     #[builder(setter(into))]
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
-    pub(super) model_settings: ModelSettings,
+    pub(super) model_defaults: ModelDefaults,
     #[builder(default)]
     pub(super) compaction_config: CompactionConfig,
     pub(super) system_blocks: Vec<SystemBlock>,
@@ -631,8 +607,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
             [AgentSessionEvent::Initialized {
                 id: self.id,
                 agent_id: self.agent_id,
-                model_settings: self.model_settings,
-                thread_simplification_settings: ThreadSimplificationSettings::default(),
+                model_defaults: self.model_defaults,
                 compaction_config: self.compaction_config,
                 system_blocks: self.system_blocks,
                 tool_defs: self.tool_defs,
@@ -651,9 +626,14 @@ mod tests {
     fn new_session() -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
-            .model_settings(ModelSettings {
+            .model_defaults(ModelDefaults {
                 model: "test-model".into(),
                 max_tokens_per_response: 1024,
+                context_window_tokens: 200_000,
+            })
+            .compaction_config(CompactionConfig {
+                enabled: false,
+                ..Default::default()
             })
             .system_blocks(vec![])
             .tool_defs(vec![])
@@ -1041,16 +1021,17 @@ mod tests {
     fn new_session_with_compaction(keep_recent: usize) -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
-            .model_settings(ModelSettings {
+            .model_defaults(ModelDefaults {
                 model: "test-model".into(),
                 max_tokens_per_response: 1024,
+                context_window_tokens: 100,
             })
             .compaction_config(CompactionConfig {
                 enabled: true,
                 token_threshold_fraction: 0.0, // always over threshold
-                context_window_tokens: 100,
                 keep_recent_tool_results: keep_recent,
                 cache_ttl_seconds: 0, // cache always cold
+                reset_time_delta_seconds: None,
             })
             .system_blocks(vec![SystemBlock::Text {
                 text: "You are helpful.".into(),

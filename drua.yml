@@ -18,10 +18,12 @@ agents:
   builtin_roles:
     workspace_lead:
       model: claude-haiku-4-5-20251001
-      reset_time_delta_seconds: 600
+      compaction:
+        reset_time_delta_seconds: 600
     agent:
       model: claude-haiku-4-5-20251001
-      reset_time_delta_seconds: 600
+      compaction:
+        reset_time_delta_seconds: 600
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.

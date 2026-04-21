@@ -82,6 +82,7 @@ pub enum ThreadStartReasonKind {
     InitialThread,
     ToolDefsUpdated,
     Compaction,
+    Orphan,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +199,7 @@ pub(super) fn build_thread_infos<'a>(
                     ThreadStartReason::InitialThread => ThreadStartReasonKind::InitialThread,
                     ThreadStartReason::ToolDefsUpdated => ThreadStartReasonKind::ToolDefsUpdated,
                     ThreadStartReason::Compaction { .. } => ThreadStartReasonKind::Compaction,
+                    ThreadStartReason::Orphan { .. } => ThreadStartReasonKind::Orphan,
                 })
                 .unwrap_or(ThreadStartReasonKind::InitialThread);
             SessionThreadInfo {

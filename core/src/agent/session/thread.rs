@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use crate::agent::config::ModelDefaults;
+
 use super::entity::ThreadStartReason;
 use super::view::*;
 use super::AgentSessionId;
@@ -25,9 +27,7 @@ pub enum SessionThreadEvent {
         id: SessionThreadId,
         session_id: AgentSessionId,
         start_reason: ThreadStartReason,
-        model: String,
-        #[serde(alias = "max_tokens")]
-        max_tokens_per_response: u32,
+        model_defaults: ModelDefaults,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         initial_user_messages: UserMessagesView,
@@ -35,9 +35,7 @@ pub enum SessionThreadEvent {
     InitializedFromCompaction {
         id: SessionThreadId,
         session_id: AgentSessionId,
-        model: String,
-        #[serde(alias = "max_tokens")]
-        max_tokens_per_response: u32,
+        model_defaults: ModelDefaults,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -117,29 +115,27 @@ impl SessionThread {
         for event in self.events.iter_all() {
             match event {
                 SessionThreadEvent::Initialized {
-                    model: m,
-                    max_tokens_per_response: mt,
+                    model_defaults,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     initial_user_messages,
                     ..
                 } => {
-                    model = m.clone();
-                    max_tokens_per_response = *mt;
+                    model = model_defaults.model.clone();
+                    max_tokens_per_response = model_defaults.max_tokens_per_response;
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.push(MessageView::User(initial_user_messages.clone()));
                 }
                 SessionThreadEvent::InitializedFromCompaction {
-                    model: m,
-                    max_tokens_per_response: mt,
+                    model_defaults,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
                 } => {
-                    model = m.clone();
-                    max_tokens_per_response = *mt;
+                    model = model_defaults.model.clone();
+                    max_tokens_per_response = model_defaults.max_tokens_per_response;
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.extend(init_messages.iter().cloned());
@@ -242,8 +238,7 @@ pub struct NewSessionThread {
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
     pub(super) start_reason: ThreadStartReason,
-    pub(super) model: String,
-    pub(super) max_tokens_per_response: u32,
+    pub(super) model_defaults: ModelDefaults,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     init: ThreadInitData,
@@ -266,20 +261,17 @@ impl NewSessionThread {
             id: SessionThreadId::new(),
             session_id: None,
             start_reason: None,
-            model: None,
-            max_tokens_per_response: None,
+            model_defaults: None,
             system_view: None,
             tool_definitions_view: None,
             initial_user_messages: None,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn compacted(
         id: SessionThreadId,
         session_id: AgentSessionId,
-        model: String,
-        max_tokens_per_response: u32,
+        model_defaults: ModelDefaults,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -291,13 +283,36 @@ impl NewSessionThread {
             start_reason: ThreadStartReason::Compaction {
                 from_thread: follows_from,
             },
-            model,
-            max_tokens_per_response,
+            model_defaults,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Compacted {
                 messages,
                 follows_from,
+            },
+        }
+    }
+
+    /// Create a fresh thread from an orphan action. Carries only the pending
+    /// user messages — no conversation history.
+    pub fn orphaned(
+        id: SessionThreadId,
+        session_id: AgentSessionId,
+        from_thread: SessionThreadId,
+        model_defaults: ModelDefaults,
+        system_view: super::view::SystemView,
+        tool_definitions_view: super::view::ToolDefinitionsView,
+        pending_user_messages: super::view::UserMessagesView,
+    ) -> Self {
+        Self {
+            id,
+            session_id,
+            start_reason: ThreadStartReason::Orphan { from_thread },
+            model_defaults,
+            system_view,
+            tool_definitions_view,
+            init: ThreadInitData::Initial {
+                initial_user_messages: pending_user_messages,
             },
         }
     }
@@ -308,8 +323,7 @@ pub struct NewSessionThreadBuilder {
     id: SessionThreadId,
     session_id: Option<AgentSessionId>,
     start_reason: Option<ThreadStartReason>,
-    model: Option<String>,
-    max_tokens_per_response: Option<u32>,
+    model_defaults: Option<ModelDefaults>,
     system_view: Option<SystemView>,
     tool_definitions_view: Option<ToolDefinitionsView>,
     initial_user_messages: Option<UserMessagesView>,
@@ -331,13 +345,8 @@ impl NewSessionThreadBuilder {
         self
     }
 
-    pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    pub fn max_tokens_per_response(mut self, max_tokens_per_response: u32) -> Self {
-        self.max_tokens_per_response = Some(max_tokens_per_response);
+    pub fn model_defaults(mut self, model_defaults: ModelDefaults) -> Self {
+        self.model_defaults = Some(model_defaults);
         self
     }
 
@@ -365,14 +374,9 @@ impl NewSessionThreadBuilder {
             start_reason: self.start_reason.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("start_reason"),
             ))?,
-            model: self.model.ok_or(EntityHydrationError::from(
-                derive_builder::UninitializedFieldError::from("model"),
+            model_defaults: self.model_defaults.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("model_defaults"),
             ))?,
-            max_tokens_per_response: self.max_tokens_per_response.ok_or(
-                EntityHydrationError::from(derive_builder::UninitializedFieldError::from(
-                    "max_tokens_per_response",
-                )),
-            )?,
             system_view: self.system_view.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("system_view"),
             ))?,
@@ -401,8 +405,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 id: self.id,
                 session_id: self.session_id,
                 start_reason: self.start_reason,
-                model: self.model,
-                max_tokens_per_response: self.max_tokens_per_response,
+                model_defaults: self.model_defaults,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 initial_user_messages,
@@ -413,8 +416,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::InitializedFromCompaction {
                 id: self.id,
                 session_id: self.session_id,
-                model: self.model,
-                max_tokens_per_response: self.max_tokens_per_response,
+                model_defaults: self.model_defaults,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 messages,

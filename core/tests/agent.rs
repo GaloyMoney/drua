@@ -30,13 +30,14 @@ async fn send_message_round_trip_via_prompt_channel() {
         AgentRole::WorkspaceLead,
         RoleConfig {
             model: model_name.clone(),
-            reset_time_delta_seconds: None,
+            compaction: Default::default(),
         },
     );
     let mut models = HashMap::new();
     models.insert(
-        model_name,
+        model_name.clone(),
         ModelDefaults {
+            model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
         },
@@ -180,13 +181,14 @@ async fn send_message_dispatches_registered_tool_call() {
         AgentRole::WorkspaceLead,
         RoleConfig {
             model: model_name.clone(),
-            reset_time_delta_seconds: None,
+            compaction: Default::default(),
         },
     );
     let mut models = HashMap::new();
     models.insert(
-        model_name,
+        model_name.clone(),
         ModelDefaults {
+            model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
         },

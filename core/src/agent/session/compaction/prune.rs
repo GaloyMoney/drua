@@ -374,9 +374,9 @@ mod tests {
         CompactionConfig {
             enabled: true,
             token_threshold_fraction: 0.6,
-            context_window_tokens: 200_000,
             keep_recent_tool_results: keep_recent,
             cache_ttl_seconds: 300,
+            reset_time_delta_seconds: None,
         }
     }
 

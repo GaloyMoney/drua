@@ -35,8 +35,11 @@ data:
       builtin_roles:
         workspace_lead:
           model: {{ .Values.galoyAgents.config.agents.workspaceLead.model | quote }}
-          {{- with .Values.galoyAgents.config.agents.workspaceLead.resetTimeDeltaSeconds }}
-          reset_time_delta_seconds: {{ . }}
+          {{- with .Values.galoyAgents.config.agents.workspaceLead.compaction }}
+          compaction:
+            {{- with .resetTimeDeltaSeconds }}
+            reset_time_delta_seconds: {{ . }}
+            {{- end }}
           {{- end }}
           system:
             - type: text
@@ -45,8 +48,11 @@ data:
         {{- with .Values.galoyAgents.config.agents.agent }}
         agent:
           model: {{ .model | quote }}
-          {{- with .resetTimeDeltaSeconds }}
-          reset_time_delta_seconds: {{ . }}
+          {{- with .compaction }}
+          compaction:
+            {{- with .resetTimeDeltaSeconds }}
+            reset_time_delta_seconds: {{ . }}
+            {{- end }}
           {{- end }}
           system:
             - type: text

@@ -11,6 +11,7 @@ mod view;
 
 use tracing::instrument;
 
+use crate::agent::config::ModelDefaults;
 use crate::primitives::{AgentId, UserMessageSource};
 pub use entity::*;
 use error::AgentSessionError;
@@ -43,14 +44,14 @@ impl Sessions {
         &self,
         op: &mut es_entity::DbOp<'_>,
         agent_id: AgentId,
-        model_settings: ModelSettings,
+        model_defaults: ModelDefaults,
         compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     ) -> Result<AgentSession, AgentSessionError> {
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
-            .model_settings(model_settings)
+            .model_defaults(model_defaults)
             .compaction_config(compaction_config)
             .system_blocks(system_blocks)
             .tool_defs(tool_defs)

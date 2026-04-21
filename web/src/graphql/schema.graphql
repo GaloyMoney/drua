@@ -168,6 +168,7 @@ type ThreadMessageEntry {
 enum ThreadStartReason {
 	COMPACTION
 	INITIAL_THREAD
+	ORPHAN
 	TOOL_DEFS_UPDATED
 }
 

@@ -200,6 +200,7 @@ impl Config {
                 config.agents.models.insert(
                     model.name.clone(),
                     ModelDefaults {
+                        model: model.name.clone(),
                         max_tokens_per_response: model.max_tokens_per_response,
                         context_window_tokens: model.context_window_tokens,
                     },

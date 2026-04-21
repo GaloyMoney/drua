@@ -5,6 +5,10 @@ pub(super) mod trigger;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use es_entity::EntityEvents;
+
+use crate::agent::config::ModelDefaults;
+
 use super::entity::{AgentSessionEvent, ThreadStartReason};
 use super::message::{CompactionMetadata, TargetThread};
 use super::settings::CompactionConfig;
@@ -68,31 +72,48 @@ pub(super) struct CompactionResult {
 /// This function is pure: it reads the event stream and config, builds a
 /// pruning plan, and returns the events + new thread that the caller must
 /// apply to the session entity.
-pub(super) fn maybe_prune<'a>(
-    events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
+#[allow(clippy::too_many_arguments)]
+pub(super) fn maybe_prune(
+    events: &EntityEvents<AgentSessionEvent>,
     config: &CompactionConfig,
+    model_defaults: &ModelDefaults,
     session_id: super::AgentSessionId,
     current_thread_id: SessionThreadId,
     is_main_thread: bool,
     current_prompt_definition: &PromptDefinition,
-    time_since_last_turn: Duration,
 ) -> Option<CompactionResult> {
-    let last_usage = estimation::last_usage(events.clone(), current_thread_id);
+    let last_usage = estimation::last_usage(events.iter_all(), current_thread_id);
     let estimated_tokens = estimation::estimate_context_tokens(
-        events.clone(),
+        events.iter_all(),
         current_thread_id,
         is_main_thread,
         last_usage,
     );
 
-    let action = config.determine_action(estimated_tokens, time_since_last_turn);
+    let time_since_last_turn = time_since_last_response_on_thread(events, current_thread_id);
+
+    let action = config.determine_action(
+        estimated_tokens,
+        model_defaults.context_window_tokens,
+        time_since_last_turn,
+    );
 
     match action {
         CompactionAction::None => return None,
+        CompactionAction::Orphan => {
+            return build_orphan_result(
+                events.iter_all(),
+                session_id,
+                current_thread_id,
+                is_main_thread,
+                model_defaults,
+                current_prompt_definition,
+            );
+        }
         CompactionAction::PruneOpportunistic | CompactionAction::PruneThenSummarize => {}
     }
 
-    let plan = build_pruning_plan(events, current_thread_id, is_main_thread, config);
+    let plan = build_pruning_plan(events.iter_all(), current_thread_id, is_main_thread, config);
     if plan.is_empty() {
         return None;
     }
@@ -112,13 +133,11 @@ pub(super) fn maybe_prune<'a>(
 
     let system_view = current_prompt_definition.system_view().clone();
     let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
-    let model = current_prompt_definition.model.clone();
-    let max_tokens_per_response = current_prompt_definition.max_tokens_per_response;
 
     // Build the PromptDefinition for the compacted thread
     let prompt_definition = PromptDefinition {
-        model: model.clone(),
-        max_tokens_per_response,
+        model: model_defaults.model.clone(),
+        max_tokens_per_response: model_defaults.max_tokens_per_response,
         system_view: system_view.clone(),
         tool_definitions_view: tool_definitions_view.clone(),
         messages: transformed_messages.clone(),
@@ -129,8 +148,7 @@ pub(super) fn maybe_prune<'a>(
     let new_thread = NewSessionThread::compacted(
         new_thread_id,
         session_id,
-        model,
-        max_tokens_per_response,
+        model_defaults.clone(),
         system_view,
         tool_definitions_view,
         transformed_messages,
@@ -178,6 +196,136 @@ pub(super) fn maybe_prune<'a>(
         new_thread_id,
         prompt_definition,
     })
+}
+
+/// Compute duration since the last assistant response on a specific thread.
+/// Falls back to Duration::ZERO when no assistant response has been persisted yet.
+fn time_since_last_response_on_thread(
+    events: &EntityEvents<AgentSessionEvent>,
+    thread_id: SessionThreadId,
+) -> Duration {
+    let last_ts = events
+        .iter_persisted()
+        .rev()
+        .find_map(|pe| match &pe.event {
+            AgentSessionEvent::AssistantResponseReceived { thread_id: tid, .. }
+                if *tid == thread_id =>
+            {
+                Some(pe.recorded_at)
+            }
+            _ => None,
+        });
+    match last_ts {
+        Some(ts) => {
+            let elapsed = chrono::Utc::now() - ts;
+            elapsed.to_std().unwrap_or(Duration::ZERO)
+        }
+        None => Duration::ZERO,
+    }
+}
+
+/// Build an orphan result: a brand-new thread with only the pending user
+/// messages (no conversation carry-over). Used when idle time exceeds the
+/// configured reset threshold.
+fn build_orphan_result<'a>(
+    events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
+    session_id: super::AgentSessionId,
+    current_thread_id: SessionThreadId,
+    is_main_thread: bool,
+    model_defaults: &ModelDefaults,
+    current_prompt_definition: &PromptDefinition,
+) -> Option<CompactionResult> {
+    let new_thread_id = SessionThreadId::new();
+    let system_view = current_prompt_definition.system_view().clone();
+    let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
+
+    // Only carry forward user messages that arrived after the last PromptSent
+    // for this thread — not the entire conversation history.
+    let pending = pending_user_message_indexes(events, current_thread_id, is_main_thread);
+    let user_messages = UserMessagesView { indexes: pending };
+
+    let prompt_definition = PromptDefinition {
+        model: model_defaults.model.clone(),
+        max_tokens_per_response: model_defaults.max_tokens_per_response,
+        system_view: system_view.clone(),
+        tool_definitions_view: tool_definitions_view.clone(),
+        messages: vec![MessageView::User(user_messages.clone())],
+        compaction: None,
+    };
+
+    let session_events = vec![AgentSessionEvent::ThreadStarted {
+        thread_id: new_thread_id,
+        start_reason: ThreadStartReason::Orphan {
+            from_thread: current_thread_id,
+        },
+    }];
+
+    Some(CompactionResult {
+        events: session_events,
+        new_thread: NewSessionThread::orphaned(
+            new_thread_id,
+            session_id,
+            current_thread_id,
+            model_defaults.clone(),
+            system_view,
+            tool_definitions_view,
+            user_messages,
+        ),
+        new_thread_id,
+        prompt_definition,
+    })
+}
+
+/// Collect block indexes for user messages that arrived after the last
+/// `PromptSent` for the given thread. These are the "pending" inputs that
+/// should carry over to an orphan thread.
+fn pending_user_message_indexes<'a>(
+    events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
+    thread_id: SessionThreadId,
+    is_main_thread: bool,
+) -> Vec<MessageBlockIndex> {
+    // First pass: count total blocks across all events
+    let total_blocks = events.clone().fold(0usize, |acc, e| match e {
+        AgentSessionEvent::UserInputAdded { .. }
+        | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
+        AgentSessionEvent::AssistantResponseReceived { content, .. } => acc + content.len(),
+        AgentSessionEvent::ToolResultsAdded { results, .. } => acc + results.len(),
+        AgentSessionEvent::ToolResultsMasked { results, .. } => acc + results.len(),
+        _ => acc,
+    });
+
+    // Second pass: scan backwards, collecting indexes until we hit the last
+    // PromptSent for this thread.
+    let mut block_counter = total_blocks;
+    let mut pending = Vec::new();
+    for event in events.rev() {
+        match event {
+            AgentSessionEvent::PromptSent { thread_id: tid, .. } if *tid == thread_id => break,
+            AgentSessionEvent::UserInputAdded { target, .. }
+            | AgentSessionEvent::SandboxNotificationAdded { target, .. } => {
+                block_counter -= 1;
+                let targets_this = match target {
+                    TargetThread::Main => is_main_thread,
+                    TargetThread::Id(id) => *id == thread_id,
+                };
+                if targets_this {
+                    pending.push(MessageBlockIndex::new(block_counter));
+                }
+            }
+            AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                block_counter -= content.len();
+            }
+            AgentSessionEvent::ToolResultsAdded { results, .. } => {
+                block_counter -= results.len();
+            }
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                block_counter -= results.len();
+            }
+            _ => {}
+        }
+    }
+    pending.reverse();
+    pending
 }
 
 /// Transform message views by applying the pruning plan:

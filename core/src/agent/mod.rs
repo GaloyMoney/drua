@@ -44,7 +44,7 @@ use crate::primitives::{
     WorkspaceId,
 };
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
-pub use config::{AgentsConfig, ModelDefaults, ResetTimeDeltaSeconds, RoleConfig};
+pub use config::{AgentsConfig, ModelDefaults, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
 use repo::AgentRepo;
@@ -256,18 +256,17 @@ impl Agents {
             &agent.workspace_name,
         );
 
+        let session_model_defaults = ModelDefaults {
+            model: role_config.model,
+            ..model_defaults.clone()
+        };
+
         self.sessions
             .create_in_op(
                 op,
                 agent.id,
-                session::ModelSettings {
-                    model: role_config.model,
-                    max_tokens_per_response: model_defaults.max_tokens_per_response,
-                },
-                session::CompactionConfig {
-                    context_window_tokens: model_defaults.context_window_tokens,
-                    ..Default::default()
-                },
+                session_model_defaults,
+                role_config.compaction.clone(),
                 system_blocks,
                 tool_defs,
             )
