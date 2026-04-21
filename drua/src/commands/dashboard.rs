@@ -186,6 +186,7 @@ struct ChatHistoryMessage {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "__typename")]
+#[allow(clippy::enum_variant_names)]
 enum ChatHistoryContentBlock {
     TextContent {
         text: String,
@@ -629,7 +630,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 _ => ChatRole::Assistant,
             };
 
-            for (content_block, bi) in msg.content.into_iter().zip(msg.block_indexes.into_iter()) {
+            for (content_block, bi) in msg.content.into_iter().zip(msg.block_indexes) {
                 let pos_idx = match pos_map.get(&bi) {
                     Some(&idx) => idx,
                     None => continue,

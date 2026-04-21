@@ -317,7 +317,7 @@ fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
             if len == 0 || available_width == 0 {
                 1
             } else {
-                ((len + available_width - 1) / available_width).max(1) as u16
+                len.div_ceil(available_width).max(1) as u16
             }
         })
         .sum();
@@ -456,11 +456,7 @@ fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
     let label_width: usize = 12;
     let cell_width: usize = 4;
     let grid_px = inner.width as usize - label_width.min(inner.width as usize);
-    let visible_cols = if cell_width > 0 {
-        grid_px / cell_width
-    } else {
-        0
-    };
+    let visible_cols = grid_px.checked_div(cell_width).unwrap_or(0);
 
     grid.update_visible_cols(visible_cols);
     grid.ensure_cursor_visible();
