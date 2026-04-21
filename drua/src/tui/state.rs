@@ -1,4 +1,6 @@
-use super::chat::AssistantChat;
+use std::collections::HashMap;
+
+use super::chat::{AssistantChat, ChatRole, ContentBlock};
 
 #[allow(dead_code)]
 pub struct WorkspaceItem {
@@ -36,6 +38,7 @@ pub enum Focus {
     Sidebar,
     Agents,
     Chat,
+    Threads,
 }
 
 /// Scroll and viewport state for the chat message area.
@@ -67,6 +70,73 @@ impl ChatViewState {
     }
 }
 
+// ── Thread explorer types (positionally-aligned grid) ─────────────────
+
+#[allow(dead_code)]
+pub struct ThreadInfo {
+    pub id: String,
+    pub is_current: bool,
+    pub next_turn: String,
+    pub start_reason: String,
+    pub message_count: usize,
+}
+
+/// Classification of a cell in the thread × position grid.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    /// Unique content block owned by this thread. Char = type: U/A/T/R.
+    Unique(char),
+    /// Shared reference — another thread already has this block.
+    Shared,
+    /// Summary block (unique content in a COMPACTION thread).
+    Summary(char),
+    /// Empty — this thread doesn't reference this position.
+    Empty,
+}
+
+/// Content detail for a single block at a (thread, position).
+pub struct BlockDetail {
+    pub role: ChatRole,
+    pub content: ContentBlock,
+}
+
+/// Positionally-aligned thread grid state.
+pub struct ThreadGridState {
+    /// Thread metadata.
+    pub threads: Vec<ThreadInfo>,
+    /// All unique block-index positions (sorted) across all threads.
+    pub positions: Vec<i32>,
+    /// Grid cells: `grid[thread_idx][position_idx]`.
+    pub grid: Vec<Vec<CellKind>>,
+    /// Content at each `(thread_idx, position_idx)` — only for non-empty cells.
+    pub details: HashMap<(usize, usize), BlockDetail>,
+    /// Cursor column (position index).
+    pub cursor_col: usize,
+    /// Cursor row (thread index).
+    pub cursor_row: usize,
+    /// Horizontal scroll offset (in columns).
+    pub scroll_col: usize,
+    /// Number of visible columns (updated from render path).
+    pub visible_cols: usize,
+}
+
+impl ThreadGridState {
+    pub fn ensure_cursor_visible(&mut self) {
+        if self.visible_cols == 0 {
+            return;
+        }
+        if self.cursor_col < self.scroll_col {
+            self.scroll_col = self.cursor_col;
+        } else if self.cursor_col >= self.scroll_col + self.visible_cols {
+            self.scroll_col = self.cursor_col.saturating_sub(self.visible_cols) + 1;
+        }
+    }
+
+    pub fn update_visible_cols(&mut self, cols: usize) {
+        self.visible_cols = cols;
+    }
+}
+
 /// Top-level TUI state — replaces the old flat `App` struct.
 pub struct ScreenState {
     // Workspace browsing
@@ -91,6 +161,9 @@ pub struct ScreenState {
     /// The agent whose history is currently loaded in the chat view.
     /// When this differs from `selected_agent_id()`, the event loop fetches fresh history.
     pub loaded_agent_id: Option<String>,
+
+    // Thread explorer (positionally-aligned grid)
+    pub thread_view: Option<ThreadGridState>,
 
     // Create workspace modal
     pub mode: Mode,
@@ -121,6 +194,8 @@ impl ScreenState {
             chat_input: String::new(),
             input_cursor: 0,
             loaded_agent_id: None,
+
+            thread_view: None,
 
             mode: Mode::default(),
             input_name: String::new(),
@@ -215,6 +290,7 @@ impl ScreenState {
             Focus::Sidebar => Focus::Chat,
             Focus::Chat => Focus::Agents,
             Focus::Agents => Focus::Sidebar,
+            Focus::Threads => Focus::Sidebar,
         };
     }
 
@@ -223,6 +299,7 @@ impl ScreenState {
             Focus::Sidebar => Focus::Agents,
             Focus::Chat => Focus::Sidebar,
             Focus::Agents => Focus::Chat,
+            Focus::Threads => Focus::Sidebar,
         };
     }
 
@@ -231,6 +308,7 @@ impl ScreenState {
             Focus::Sidebar => Focus::Chat,
             Focus::Chat => Focus::Agents,
             Focus::Agents => Focus::Sidebar,
+            Focus::Threads => Focus::Agents,
         };
     }
 
@@ -312,6 +390,85 @@ impl ScreenState {
         self.input_cursor = 0;
     }
 
+    // ── Thread grid navigation ────────────────────────────────────
+
+    pub fn grid_move_right(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            if !g.positions.is_empty() && g.cursor_col < g.positions.len() - 1 {
+                g.cursor_col += 1;
+                g.ensure_cursor_visible();
+            }
+        }
+    }
+
+    pub fn grid_move_left(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            if g.cursor_col > 0 {
+                g.cursor_col -= 1;
+                g.ensure_cursor_visible();
+            }
+        }
+    }
+
+    pub fn grid_move_down(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            if !g.threads.is_empty() && g.cursor_row < g.threads.len() - 1 {
+                g.cursor_row += 1;
+            }
+        }
+    }
+
+    pub fn grid_move_up(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            if g.cursor_row > 0 {
+                g.cursor_row -= 1;
+            }
+        }
+    }
+
+    pub fn grid_jump_start(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            g.cursor_col = 0;
+            g.scroll_col = 0;
+        }
+    }
+
+    pub fn grid_jump_end(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            if !g.positions.is_empty() {
+                g.cursor_col = g.positions.len() - 1;
+                g.ensure_cursor_visible();
+            }
+        }
+    }
+
+    /// Jump to the next unique/summary cell on the current row (wraps).
+    pub fn grid_tab_next(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            let row = g.cursor_row;
+            if row >= g.grid.len() {
+                return;
+            }
+            let cols = g.grid[row].len();
+            // Search forward
+            for col in (g.cursor_col + 1)..cols {
+                if matches!(g.grid[row][col], CellKind::Unique(_) | CellKind::Summary(_)) {
+                    g.cursor_col = col;
+                    g.ensure_cursor_visible();
+                    return;
+                }
+            }
+            // Wrap around
+            for col in 0..g.cursor_col {
+                if matches!(g.grid[row][col], CellKind::Unique(_) | CellKind::Summary(_)) {
+                    g.cursor_col = col;
+                    g.ensure_cursor_visible();
+                    return;
+                }
+            }
+        }
+    }
+
     fn sync_lead_and_clear_chat(&mut self) {
         self.selected_lead_id = self
             .selected_workspace()
@@ -319,6 +476,7 @@ impl ScreenState {
             .map(|l| l.id.clone());
         self.agent_cursor = 0;
         self.loaded_agent_id = None;
+        self.thread_view = None;
         self.chat_view.assistant.clear();
         self.input_clear();
         self.chat_view.reset_scroll();

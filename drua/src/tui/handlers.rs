@@ -10,6 +10,7 @@ pub enum Action {
     Refresh,
     CreateWorkspace { name: String, description: String },
     SendChat { agent_id: String, prompt: String },
+    ToggleThreads,
 }
 
 /// Top-level key dispatcher — routes to mode/focus-specific handlers.
@@ -36,6 +37,8 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                 state.focus_right();
                 return Action::None;
             }
+            // Ctrl+T — toggle thread explorer
+            KeyCode::Char('t') => return Action::ToggleThreads,
             _ => {}
         }
     }
@@ -45,6 +48,7 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Focus::Sidebar => handle_sidebar_key(state, key),
             Focus::Agents => handle_agents_key(state, key),
             Focus::Chat => handle_chat_key(state, key),
+            Focus::Threads => handle_threads_key(state, key),
         },
         Mode::CreateWorkspace => handle_create_key(state, key),
     }
@@ -139,6 +143,48 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             handle_input_editing(state, &key);
             Action::None
         }
+    }
+}
+
+fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        // ←→ navigate positions (columns)
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.grid_move_left();
+            Action::None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            state.grid_move_right();
+            Action::None
+        }
+        // ↑↓ navigate threads (rows)
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.grid_move_up();
+            Action::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.grid_move_down();
+            Action::None
+        }
+        // g/G — jump to start/end of positions
+        KeyCode::Char('g') => {
+            state.grid_jump_start();
+            Action::None
+        }
+        KeyCode::Char('G') => {
+            state.grid_jump_end();
+            Action::None
+        }
+        // Tab — jump to next unique/summary cell
+        KeyCode::Tab => {
+            state.grid_tab_next();
+            Action::None
+        }
+        KeyCode::Esc => {
+            state.focus = Focus::Sidebar;
+            Action::None
+        }
+        _ => Action::None,
     }
 }
 
