@@ -8,7 +8,7 @@ use tracing::instrument;
 use anthropic_client::AnthropicClient;
 use llm::provider::LlmProvider;
 use llm::{Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
-use openai_client::OpenAiClient;
+use openai_client::{OpenAiClient, OpenAiCodexClient};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptExecutorConfig {
@@ -29,6 +29,7 @@ pub struct ModelConfig {
 pub enum Provider {
     Anthropic { api_key: String },
     OpenAi { api_key: String },
+    OpenAiCodex,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +89,12 @@ impl PromptExecutorConfig {
                             "OpenAI credential loaded"
                         );
                     }
+                }
+                Provider::OpenAiCodex => {
+                    tracing::info!(
+                        model = %model.name,
+                        "OpenAI Codex credential will be resolved from OPENAI_CODEX_ACCESS_TOKEN or ~/.codex/auth.json at request time",
+                    );
                 }
             }
         }
@@ -246,6 +253,7 @@ impl ResolvedModel {
         let client: Arc<dyn LlmProvider> = match config.provider {
             Provider::Anthropic { api_key } => Arc::new(AnthropicClient::new(api_key)),
             Provider::OpenAi { api_key } => Arc::new(OpenAiClient::new(api_key)),
+            Provider::OpenAiCodex => Arc::new(OpenAiCodexClient::new()),
         };
         Self {
             name: config.name,

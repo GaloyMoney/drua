@@ -64,6 +64,7 @@ impl Config {
                 "openai" => Provider::OpenAi {
                     api_key: self.openai_api_key.clone(),
                 },
+                "openai-codex" => Provider::OpenAiCodex,
                 _ => Provider::Anthropic {
                     api_key: self.anthropic_api_key.clone(),
                 },

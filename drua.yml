@@ -9,19 +9,19 @@ oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
 providers:
-  - name: anthropic
+  - name: openai-codex
     models:
-      - name: claude-haiku-4-5-20251001
+      - name: gpt-5.4-mini
         max_tokens_per_response: 4096
         context_window_tokens: 200000
 agents:
   builtin_roles:
     workspace_lead:
-      model: claude-haiku-4-5-20251001
+      model: gpt-5.4-mini
       compaction:
         reset_time_delta_seconds: 18000
     agent:
-      model: claude-haiku-4-5-20251001
+      model: gpt-5.4-mini
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.
