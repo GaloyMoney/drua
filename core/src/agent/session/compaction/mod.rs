@@ -113,7 +113,13 @@ pub(super) fn maybe_prune(
         CompactionAction::PruneOpportunistic | CompactionAction::PruneThenSummarize => {}
     }
 
-    let plan = build_pruning_plan(events.iter_all(), current_thread_id, is_main_thread, config);
+    let plan = build_pruning_plan(
+        events.iter_all(),
+        current_thread_id,
+        is_main_thread,
+        config,
+        current_prompt_definition,
+    );
     if plan.is_empty() {
         return None;
     }

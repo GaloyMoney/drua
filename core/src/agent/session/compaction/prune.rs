@@ -4,7 +4,7 @@ use super::super::entity::{AgentSessionEvent, MaskedToolResult};
 use super::super::message::{AssistantBlock, SandboxOperation, ToolResultInput};
 use super::super::settings::CompactionConfig;
 use super::super::thread::SessionThreadId;
-use super::super::view::MessageBlockIndex;
+use super::super::view::{MessageBlockIndex, MessageView, PromptDefinition};
 use super::{estimation, event_belongs_to_thread};
 
 const MASK_PLACEHOLDER: &str = "[Tool output cleared — re-invoke tool if needed]";
@@ -31,20 +31,37 @@ impl PruningPlan {
 }
 
 /// Build a complete pruning plan by combining all three pruning operations.
+///
+/// `prompt_definition` is the current thread's prompt so we can determine
+/// which tool results are actually visible (compacted threads inherit tool
+/// results from ancestor threads whose events carry the old thread_id).
 pub fn build_pruning_plan<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent> + Clone,
     thread_id: SessionThreadId,
     is_main_thread: bool,
     config: &CompactionConfig,
+    prompt_definition: &PromptDefinition,
 ) -> PruningPlan {
     let sandbox_tracker = SandboxTracker::from_events(events.clone(), thread_id, is_main_thread);
 
+    // Extract the set of tool result block indexes that are actually
+    // referenced in the current thread's views. This covers inherited
+    // tool results from ancestor threads (whose events carry old thread IDs).
+    let visible_tool_results: HashSet<MessageBlockIndex> = prompt_definition
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            MessageView::ToolResults(v) => Some(v.indexes.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
     let (masked, mask_tokens) = plan_tool_result_masking(
         events.clone(),
-        thread_id,
-        is_main_thread,
         config.keep_recent_tool_results,
         &sandbox_tracker,
+        &visible_tool_results,
     );
     let (cleared, think_tokens) = plan_thinking_clearing(events.clone(), thread_id, is_main_thread);
     let (stripped, sandbox_tokens) = plan_sandbox_stripping(events, thread_id, is_main_thread);
@@ -64,16 +81,18 @@ pub fn build_pruning_plan<'a>(
 /// Identify tool results to mask. Keeps the `keep_recent` most recent intact,
 /// masks the rest with a placeholder that preserves the tool name and sandbox
 /// context.
+///
+/// Uses `visible_tool_results` (block indexes from the thread's prompt
+/// definition) instead of event-level thread ownership — compacted threads
+/// inherit tool results from ancestor threads whose events carry old IDs.
 fn plan_tool_result_masking<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
-    thread_id: SessionThreadId,
-    is_main_thread: bool,
     keep_recent: usize,
     sandbox_tracker: &SandboxTracker,
+    visible_tool_results: &HashSet<MessageBlockIndex>,
 ) -> (Vec<MaskedToolResult>, u64) {
-    // Collect all tool results with their unified block indexes and event positions.
-    // block_idx increments for ALL events (global), but we only collect results
-    // from events belonging to the current thread.
+    // Collect all tool results whose block indexes appear in the thread's
+    // prompt definition (covers inherited results from ancestor threads).
     let mut all_results: Vec<(MessageBlockIndex, usize, &ToolResultInput)> = Vec::new();
     let mut already_masked: HashSet<MessageBlockIndex> = HashSet::new();
     let mut block_idx = 0usize;
@@ -88,10 +107,10 @@ fn plan_tool_result_masking<'a>(
                 block_idx += content.len();
             }
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
-                let belongs = event_belongs_to_thread(event, thread_id, is_main_thread);
                 for result in results {
-                    if belongs {
-                        all_results.push((MessageBlockIndex::new(block_idx), event_idx, result));
+                    let idx = MessageBlockIndex::new(block_idx);
+                    if visible_tool_results.contains(&idx) {
+                        all_results.push((idx, event_idx, result));
                     }
                     block_idx += 1;
                 }
@@ -354,6 +373,9 @@ mod tests {
     use crate::agent::session::message::*;
     use crate::agent::session::metadata::*;
     use crate::agent::session::settings::*;
+    use crate::agent::session::view::{
+        SystemView, ToolDefinitionsView, ToolResultsView, UserMessagesView,
+    };
 
     fn dummy_metadata() -> AssistantResponseMetadata {
         AssistantResponseMetadata {
@@ -380,6 +402,25 @@ mod tests {
         }
     }
 
+    /// Build a minimal PromptDefinition with ToolResults views for the given indexes.
+    fn prompt_with_tool_results(indexes: &[usize]) -> PromptDefinition {
+        let messages = if indexes.is_empty() {
+            vec![]
+        } else {
+            vec![MessageView::ToolResults(ToolResultsView {
+                indexes: indexes.iter().map(|&i| MessageBlockIndex::new(i)).collect(),
+            })]
+        };
+        PromptDefinition {
+            model: String::new(),
+            max_tokens_per_response: 0,
+            system_view: SystemView { indexes: vec![] },
+            tool_definitions_view: ToolDefinitionsView { indexes: vec![] },
+            messages,
+            compaction: None,
+        }
+    }
+
     #[test]
     fn empty_plan_when_few_tool_results() {
         let thread_id = SessionThreadId::new();
@@ -392,7 +433,8 @@ mod tests {
                 is_error: false,
             }],
         }];
-        let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(10));
+        let prompt = prompt_with_tool_results(&[0]);
+        let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(10), &prompt);
         assert!(plan.is_empty());
     }
 
@@ -491,7 +533,10 @@ mod tests {
             },
         ];
 
-        let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(1));
+        // After prior compaction, the thread's views reference replacement index 2
+        // (for original 0) plus originals 1 and 3.
+        let prompt = prompt_with_tool_results(&[2, 1, 3]);
+        let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(1), &prompt);
 
         // Only index 1 should be masked (index 0 already masked, index 3 is kept as recent)
         assert_eq!(plan.masked_tool_results.len(), 1);
