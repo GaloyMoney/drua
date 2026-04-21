@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use drua_core::agent::AgentsConfig;
+use drua_core::agent::{AgentsConfig, ModelDefaults};
 use drua_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
@@ -19,6 +19,8 @@ pub struct Config {
     #[serde(default)]
     pub db: DbConfig,
     #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub toolsets: ToolSetsConfig,
@@ -28,33 +30,55 @@ pub struct Config {
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(skip)]
     pub anthropic_api_key: String,
+    #[serde(skip)]
+    pub openai_api_key: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub name: String,
+    #[serde(default)]
+    pub models: Vec<ProviderModelConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderModelConfig {
+    pub name: String,
+    pub max_tokens_per_response: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window_tokens: u64,
+}
+
+fn default_context_window() -> u64 {
+    200_000
 }
 
 impl Config {
-    /// Build a `PromptExecutorConfig` registering every model that the
-    /// configured `agents.builtin_roles` reference, all bound to Anthropic
-    /// using the API key provided via env.
+    /// Build a `PromptExecutorConfig` from the top-level `providers`
+    /// section, binding each model to its provider's API key.
     pub fn prompt_executor_config(&self) -> PromptExecutorConfig {
-        let mut models: Vec<String> = self
-            .agents
-            .builtin_roles
-            .values()
-            .map(|r| r.model.clone())
-            .collect();
-        models.sort();
-        models.dedup();
-        PromptExecutorConfig {
-            models: models
-                .into_iter()
-                .map(|name| ModelConfig {
-                    name,
-                    provider: Provider::Anthropic {
-                        api_key: self.anthropic_api_key.clone(),
-                    },
+        let mut models = Vec::new();
+
+        for provider_cfg in &self.providers {
+            let provider = match provider_cfg.name.as_str() {
+                "openai" => Provider::OpenAi {
+                    api_key: self.openai_api_key.clone(),
+                },
+                _ => Provider::Anthropic {
+                    api_key: self.anthropic_api_key.clone(),
+                },
+            };
+
+            for model in &provider_cfg.models {
+                models.push(ModelConfig {
+                    name: model.name.clone(),
+                    provider: provider.clone(),
                     default_max_tokens: None,
-                })
-                .collect(),
+                });
+            }
         }
+
+        PromptExecutorConfig { models }
     }
 }
 
@@ -140,6 +164,7 @@ pub struct EnvSecrets {
     pub github_client_secret: String,
     pub github_allowed_teams: Vec<String>,
     pub anthropic_api_key: String,
+    pub openai_api_key: String,
 }
 
 impl Config {
@@ -169,12 +194,27 @@ impl Config {
         let mut config: Config = serde_yaml::from_value(yaml_value)
             .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
 
+        // Populate agents.models from the top-level providers section.
+        for provider_cfg in &config.providers {
+            for model in &provider_cfg.models {
+                config.agents.models.insert(
+                    model.name.clone(),
+                    ModelDefaults {
+                        model: model.name.clone(),
+                        max_tokens_per_response: model.max_tokens_per_response,
+                        context_window_tokens: model.context_window_tokens,
+                    },
+                );
+            }
+        }
+
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_secret = secrets.github_client_secret;
         // Trim to catch stray whitespace / trailing newline that often
         // sneaks in when the key was piped from `echo` or a broken
         // `.env`; both render the key invalid upstream for opaque reasons.
         config.anthropic_api_key = secrets.anthropic_api_key.trim().to_string();
+        config.openai_api_key = secrets.openai_api_key.trim().to_string();
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }

@@ -32,6 +32,14 @@ galoyAgents:
       githubClientId: ""
       githubRedirectUri: ""
       githubAllowedTeams: []
+    ## LLM providers and their models. Each model declares token limits
+    ## used for compaction and prompt sizing.
+    providers:
+      - name: anthropic
+        models:
+          - name: claude-haiku-4-5-20251001
+            maxTokensPerResponse: 4096
+            contextWindowTokens: 200000
     ## Per-role defaults applied when an agent with that role is created.
     ## Both `workspaceLead` and `agent` are REQUIRED — the binary refuses
     ## to start if either `agents.builtin_roles.workspace_lead` or
@@ -39,19 +47,18 @@ galoyAgents:
     agents:
       workspaceLead:
         model: "claude-haiku-4-5-20251001"
-        maxTokens: 4096
-        ## When a user message arrives more than this many seconds after
-        ## the previous user message in the current thread, the session
-        ## starts a fresh thread. `null` disables the auto-reset.
-        resetTimeDeltaSeconds: 600
+        compaction:
+          ## When a user message arrives more than this many seconds after
+          ## the previous assistant response, start a fresh thread.
+          resetTimeDeltaSeconds: 600
         systemPrompt: |
           You are the lead agent of your workspace. You investigate / coordinate
           and delegate. You answer questions, and use the available tools to help the
           user accomplish their goals. Be concise and action-oriented.
       agent:
         model: "claude-haiku-4-5-20251001"
-        maxTokens: 4096
-        resetTimeDeltaSeconds: 600
+        compaction:
+          resetTimeDeltaSeconds: 600
         systemPrompt: |
           You are an agent operating inside a Galoy Agents workspace.
           You work on the tasks assigned to you and, when attached to

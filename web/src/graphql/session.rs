@@ -24,6 +24,7 @@ pub enum ThreadStartReason {
     InitialThread,
     ToolDefsUpdated,
     Compaction,
+    Orphan,
 }
 
 // ─── Content blocks (union) ────────────────────────────────────────���─────────
@@ -225,6 +226,7 @@ impl SessionThread {
                     ThreadStartReason::ToolDefsUpdated
                 }
                 history::ThreadStartReasonKind::Compaction => ThreadStartReason::Compaction,
+                history::ThreadStartReasonKind::Orphan => ThreadStartReason::Orphan,
             },
             agent_id,
         }

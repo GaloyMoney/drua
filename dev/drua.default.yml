@@ -9,8 +9,10 @@ oauth:
   github_client_id: ''
   github_allowed_teams: []
 db: {}
+providers: []
 agents:
   builtin_roles: {}
+  models: {}
 toolsets:
   mcp_upstreams: []
   concourse:

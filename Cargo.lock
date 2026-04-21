@@ -110,6 +110,7 @@ dependencies = [
 name = "anthropic-client"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures",
  "llm",
  "reqwest 0.12.28",
@@ -1373,6 +1374,7 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "llm",
+ "openai-client",
  "opentelemetry",
  "opentelemetry-http",
  "pgvector",
@@ -2817,6 +2819,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 name = "llm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "sha2",
@@ -3189,6 +3192,21 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "openai-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "llm",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "openssl-probe"

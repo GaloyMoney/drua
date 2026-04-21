@@ -19,13 +19,27 @@ data:
         - {{ . | quote }}
       {{- end }}
     {{- end }}
+    {{- with .Values.galoyAgents.config.providers }}
+    providers:
+    {{- range . }}
+      - name: {{ .name | quote }}
+        models:
+        {{- range .models }}
+          - name: {{ .name | quote }}
+            max_tokens_per_response: {{ .maxTokensPerResponse }}
+            context_window_tokens: {{ .contextWindowTokens }}
+        {{- end }}
+    {{- end }}
+    {{- end }}
     agents:
       builtin_roles:
         workspace_lead:
           model: {{ .Values.galoyAgents.config.agents.workspaceLead.model | quote }}
-          max_tokens: {{ .Values.galoyAgents.config.agents.workspaceLead.maxTokens }}
-          {{- with .Values.galoyAgents.config.agents.workspaceLead.resetTimeDeltaSeconds }}
-          reset_time_delta_seconds: {{ . }}
+          {{- with .Values.galoyAgents.config.agents.workspaceLead.compaction }}
+          compaction:
+            {{- with .resetTimeDeltaSeconds }}
+            reset_time_delta_seconds: {{ . }}
+            {{- end }}
           {{- end }}
           system:
             - type: text
@@ -34,9 +48,11 @@ data:
         {{- with .Values.galoyAgents.config.agents.agent }}
         agent:
           model: {{ .model | quote }}
-          max_tokens: {{ .maxTokens }}
-          {{- with .resetTimeDeltaSeconds }}
-          reset_time_delta_seconds: {{ . }}
+          {{- with .compaction }}
+          compaction:
+            {{- with .resetTimeDeltaSeconds }}
+            reset_time_delta_seconds: {{ . }}
+            {{- end }}
           {{- end }}
           system:
             - type: text

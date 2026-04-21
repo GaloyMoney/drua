@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::EntityEvents;
 
+use crate::agent::config::ModelDefaults;
+
 use super::{entity::AgentSessionEvent, error::AgentSessionError, message::*};
 
 // ============================================================================
@@ -64,8 +66,7 @@ pub struct ToolResultsView {
 
 #[derive(Debug)]
 pub(super) struct MaterializedSession<'a> {
-    model: &'a str,
-    max_tokens: u32,
+    model_defaults: &'a ModelDefaults,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
     tool_defs: Vec<&'a ToolDefinition>,
@@ -77,10 +78,9 @@ pub(super) struct MaterializedSession<'a> {
 }
 
 impl<'a> MaterializedSession<'a> {
-    pub fn init(model: &'a str, max_tokens: u32) -> Self {
+    pub fn init(model_defaults: &'a ModelDefaults) -> Self {
         Self {
-            model,
-            max_tokens,
+            model_defaults,
             system_blocks: Vec::new(),
             system_breakpoints: Vec::new(),
             tool_defs: Vec::new(),
@@ -183,8 +183,8 @@ impl<'a> MaterializedSession<'a> {
         let tool_definitions_view = self.tools_since_last_breakpoint();
         let initial_user_messages = self.all_user_messages();
         PromptDefinition {
-            model: self.model.to_string(),
-            max_tokens: self.max_tokens,
+            model: self.model_defaults.model.clone(),
+            max_tokens_per_response: self.model_defaults.max_tokens_per_response,
             system_view,
             tool_definitions_view,
             messages: vec![MessageView::User(initial_user_messages)],
@@ -218,7 +218,7 @@ pub enum MessageView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptDefinition {
     pub(super) model: String,
-    pub(super) max_tokens: u32,
+    pub(super) max_tokens_per_response: u32,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     pub(super) messages: Vec<MessageView>,
@@ -382,7 +382,7 @@ impl PromptDefinition {
         Ok(Prompt {
             target_thread,
             model: self.model,
-            max_tokens: self.max_tokens,
+            max_tokens_per_response: self.max_tokens_per_response,
             system,
             tools,
             messages: merged,
@@ -409,6 +409,14 @@ mod tests {
         }
     }
 
+    fn test_model_defaults() -> ModelDefaults {
+        ModelDefaults {
+            model: "test-model".into(),
+            max_tokens_per_response: 8192,
+            context_window_tokens: 200_000,
+        }
+    }
+
     #[test]
     fn tool_defs_breakpoint_returns_latest_batch() {
         let tool_a = tool_def("tool_a");
@@ -416,7 +424,8 @@ mod tests {
         let tool_c = tool_def("tool_c");
         let tool_d = tool_def("tool_d");
 
-        let mut m = MaterializedSession::init("test-model", 8192);
+        let defaults = test_model_defaults();
+        let mut m = MaterializedSession::init(&defaults);
         m.push_tool_defs([&tool_a, &tool_b].into_iter());
         m.push_tool_defs([&tool_c, &tool_d].into_iter());
 
@@ -430,7 +439,8 @@ mod tests {
         let block_b = system_block("Be concise.");
         let block_c = system_block("Use examples.");
 
-        let mut m = MaterializedSession::init("test-model", 8192);
+        let defaults = test_model_defaults();
+        let mut m = MaterializedSession::init(&defaults);
         m.push_system_blocks([&block_a].into_iter());
         m.push_system_blocks([&block_b, &block_c].into_iter());
 
