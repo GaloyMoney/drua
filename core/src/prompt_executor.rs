@@ -8,7 +8,9 @@ use tracing::instrument;
 use anthropic_client::AnthropicClient;
 use llm::provider::LlmProvider;
 use llm::{Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
-use openai_client::OpenAiClient;
+use openai_client::{
+    OpenAiClient, OpenAiResponsesAuth as ClientOpenAiResponsesAuth, OpenAiResponsesClient,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptExecutorConfig {
@@ -29,6 +31,14 @@ pub struct ModelConfig {
 pub enum Provider {
     Anthropic { api_key: String },
     OpenAi { api_key: String },
+    OpenAiResponses { auth: OpenAiResponsesAuth },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpenAiResponsesAuth {
+    ApiKey { api_key: String },
+    Subscription,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,6 +99,37 @@ impl PromptExecutorConfig {
                         );
                     }
                 }
+                Provider::OpenAiResponses { auth } => match auth {
+                    OpenAiResponsesAuth::ApiKey { api_key } if api_key.is_empty() => {
+                        tracing::warn!(
+                            model = %model.name,
+                            "OpenAI Responses credential is empty — agent prompts will fail until OPENAI_API_KEY is set",
+                        );
+                    }
+                    OpenAiResponsesAuth::ApiKey { api_key } => {
+                        let preview = masked_preview(api_key);
+                        if !api_key.starts_with("sk-") {
+                            tracing::warn!(
+                                model = %model.name,
+                                key_preview = %preview,
+                                key_len = api_key.len(),
+                                "OpenAI Responses credential does not start with `sk-` — this will most likely 401 at the Responses API",
+                            );
+                        } else {
+                            tracing::info!(
+                                model = %model.name,
+                                key_preview = %preview,
+                                "OpenAI Responses credential loaded"
+                            );
+                        }
+                    }
+                    OpenAiResponsesAuth::Subscription => {
+                        tracing::info!(
+                            model = %model.name,
+                            "OpenAI subscription credential will be resolved from OPENAI_CODEX_ACCESS_TOKEN or ~/.codex/auth.json at request time",
+                        );
+                    }
+                },
             }
         }
         Ok(())
@@ -246,6 +287,14 @@ impl ResolvedModel {
         let client: Arc<dyn LlmProvider> = match config.provider {
             Provider::Anthropic { api_key } => Arc::new(AnthropicClient::new(api_key)),
             Provider::OpenAi { api_key } => Arc::new(OpenAiClient::new(api_key)),
+            Provider::OpenAiResponses { auth } => {
+                Arc::new(OpenAiResponsesClient::new(match auth {
+                    OpenAiResponsesAuth::ApiKey { api_key } => {
+                        ClientOpenAiResponsesAuth::ApiKey { api_key }
+                    }
+                    OpenAiResponsesAuth::Subscription => ClientOpenAiResponsesAuth::Subscription,
+                }))
+            }
         };
         Self {
             name: config.name,

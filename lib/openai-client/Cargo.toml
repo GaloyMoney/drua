@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+base64 = { workspace = true }
+dirs = { workspace = true }
 futures = { workspace = true }
 llm = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }

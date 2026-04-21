@@ -4,7 +4,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use drua_core::agent::{AgentsConfig, ModelDefaults};
-use drua_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
+use drua_core::prompt_executor::{
+    ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
+};
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
 use drua_web::auth::config::{AuthConfig, LoginMethod};
@@ -63,6 +65,14 @@ impl Config {
             let provider = match provider_cfg.name.as_str() {
                 "openai" => Provider::OpenAi {
                     api_key: self.openai_api_key.clone(),
+                },
+                "openai-responses" => Provider::OpenAiResponses {
+                    auth: OpenAiResponsesAuth::ApiKey {
+                        api_key: self.openai_api_key.clone(),
+                    },
+                },
+                "openai-codex" => Provider::OpenAiResponses {
+                    auth: OpenAiResponsesAuth::Subscription,
                 },
                 _ => Provider::Anthropic {
                     api_key: self.anthropic_api_key.clone(),
