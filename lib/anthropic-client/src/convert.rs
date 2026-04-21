@@ -299,20 +299,18 @@ impl AnthropicDeltaConverter {
                     AnthropicDelta::ThinkingDelta { thinking } => thinking
                         .map(|t| vec![StreamDelta::ThinkingDelta { text: t }])
                         .unwrap_or_default(),
-                    AnthropicDelta::InputJsonDelta { partial_json } => {
-                        partial_json
-                            .map(|j| {
-                                let id = match self.blocks.get(idx) {
-                                    Some(BlockInfo::ToolUse { id }) => id.clone(),
-                                    _ => String::new(),
-                                };
-                                vec![StreamDelta::ToolCallDelta {
-                                    id,
-                                    partial_json: j,
-                                }]
-                            })
-                            .unwrap_or_default()
-                    }
+                    AnthropicDelta::InputJsonDelta { partial_json } => partial_json
+                        .map(|j| {
+                            let id = match self.blocks.get(idx) {
+                                Some(BlockInfo::ToolUse { id }) => id.clone(),
+                                _ => String::new(),
+                            };
+                            vec![StreamDelta::ToolCallDelta {
+                                id,
+                                partial_json: j,
+                            }]
+                        })
+                        .unwrap_or_default(),
                     AnthropicDelta::SignatureDelta { signature } => signature
                         .map(|s| vec![StreamDelta::ThinkingSignature { signature: s }])
                         .unwrap_or_default(),

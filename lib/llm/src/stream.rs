@@ -30,7 +30,10 @@ pub enum StreamDelta {
     ThinkingSignature { signature: String },
     /// Token usage statistics. Accumulated additively — providers may emit
     /// this more than once (e.g. input tokens early, output tokens late).
-    Usage { input_tokens: u32, output_tokens: u32 },
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     /// The stream is complete.
     Done { stop_reason: Option<StopReason> },
     /// An error occurred mid-stream.

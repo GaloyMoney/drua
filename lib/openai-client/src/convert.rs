@@ -452,9 +452,13 @@ mod tests {
                 r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
             )
             .unwrap();
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, StreamDelta::Usage { input_tokens: 10, output_tokens: 5 })));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Usage {
+                input_tokens: 10,
+                output_tokens: 5
+            }
+        )));
         assert!(deltas.iter().any(|d| matches!(
             d,
             StreamDelta::Done {
@@ -520,8 +524,12 @@ mod tests {
                 r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":""}},{"index":1,"id":"call_2","function":{"name":"fetch","arguments":""}}]},"finish_reason":null}]}"#,
             )
             .unwrap();
-        assert!(deltas.iter().any(|d| matches!(d, StreamDelta::ToolCallStart { id, .. } if id == "call_1")));
-        assert!(deltas.iter().any(|d| matches!(d, StreamDelta::ToolCallStart { id, .. } if id == "call_2")));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::ToolCallStart { id, .. } if id == "call_1")));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::ToolCallStart { id, .. } if id == "call_2")));
 
         // Interleaved argument deltas.
         let deltas = synth
