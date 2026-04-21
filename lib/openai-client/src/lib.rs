@@ -21,23 +21,23 @@ use llm::{Prompt, PromptError, PromptResponse};
 use crate::convert::{prompt_to_request, DeltaSynthesizer};
 use crate::sse::{parse_sse_stream, SseError};
 
-pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient};
+pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient, OpenAiResponsesError};
 
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 
 #[derive(Debug, Error)]
-pub enum OpenAiError {
-    #[error("OpenAiError - HTTP: {0}")]
+pub enum OpenAiChatCompletionsError {
+    #[error("OpenAiChatCompletionsError - HTTP: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("OpenAiError - API: status={status}, message={message}")]
+    #[error("OpenAiChatCompletionsError - API: status={status}, message={message}")]
     Api { status: u16, message: String },
-    #[error("OpenAiError - SSE: {0}")]
+    #[error("OpenAiChatCompletionsError - SSE: {0}")]
     Sse(String),
-    #[error("OpenAiError - Stream: {0}")]
+    #[error("OpenAiChatCompletionsError - Stream: {0}")]
     Stream(String),
 }
 
-impl From<SseError> for OpenAiError {
+impl From<SseError> for OpenAiChatCompletionsError {
     fn from(e: SseError) -> Self {
         match e {
             SseError::Http(e) => Self::Http(e),
@@ -68,7 +68,10 @@ impl OpenAiClient {
     /// Issue a streaming Chat Completions request and return the
     /// fully-accumulated assistant reply.
     #[instrument(name = "openai_client.send_prompt", skip_all)]
-    pub async fn send_prompt(&self, prompt: &Prompt) -> Result<PromptResponse, OpenAiError> {
+    pub async fn send_prompt(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<PromptResponse, OpenAiChatCompletionsError> {
         let rx = self.send_prompt_streaming_internal(prompt).await?;
         let mut rx = rx;
 
@@ -76,7 +79,7 @@ impl OpenAiClient {
         while let Some(result) = rx.recv().await {
             match result {
                 Ok(delta) => accumulator.process(&delta),
-                Err(e) => return Err(OpenAiError::Stream(e.to_string())),
+                Err(e) => return Err(OpenAiChatCompletionsError::Stream(e.to_string())),
             }
         }
         Ok(accumulator.finish())
@@ -88,7 +91,10 @@ impl OpenAiClient {
     async fn send_prompt_streaming_internal(
         &self,
         prompt: &Prompt,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiError>>, OpenAiError> {
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiChatCompletionsError>>,
+        OpenAiChatCompletionsError,
+    > {
         let request_body = prompt_to_request(prompt);
 
         let resp = self
@@ -103,14 +109,15 @@ impl OpenAiClient {
         let status = resp.status();
         if !status.is_success() {
             let message = resp.text().await.unwrap_or_default();
-            return Err(OpenAiError::Api {
+            return Err(OpenAiChatCompletionsError::Api {
                 status: status.as_u16(),
                 message,
             });
         }
 
         let byte_stream = resp.bytes_stream();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamDelta, OpenAiError>>(128);
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<Result<StreamDelta, OpenAiChatCompletionsError>>(128);
 
         tokio::spawn(async move {
             let tx_ref = &tx;
@@ -128,7 +135,7 @@ impl OpenAiClient {
                         Ok(())
                     }
                     Err(e) => {
-                        let _ = tx_ref.try_send(Err(OpenAiError::Stream(e.clone())));
+                        let _ = tx_ref.try_send(Err(OpenAiChatCompletionsError::Stream(e.clone())));
                         Err(SseError::Processing(e))
                     }
                 }
@@ -155,7 +162,7 @@ impl LlmProvider for OpenAiClient {
             .await
             .map_err(|e| PromptError::Provider(e.to_string()))?;
 
-        // Re-map the error type from OpenAiError to PromptError.
+        // Re-map the error type from OpenAiChatCompletionsError to PromptError.
         let (tx, out_rx) = tokio::sync::mpsc::channel(128);
         tokio::spawn(async move {
             let mut rx = rx;

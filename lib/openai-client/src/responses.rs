@@ -10,10 +10,10 @@ use llm::stream::StreamDelta;
 use llm::{Prompt, PromptError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 use tracing::instrument;
 
 use crate::sse::{parse_sse_stream, SseError};
-use crate::OpenAiError;
 
 const DEFAULT_RESPONSES_API_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_SUBSCRIPTION_API_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -27,6 +27,27 @@ const OPENAI_RESPONSES_SUBSCRIPTION_TOKEN_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN
 pub enum OpenAiResponsesAuth {
     ApiKey { api_key: String },
     Subscription,
+}
+
+#[derive(Debug, Error)]
+pub enum OpenAiResponsesError {
+    #[error("OpenAiResponsesError - HTTP: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("OpenAiResponsesError - API: status={status}, message={message}")]
+    Api { status: u16, message: String },
+    #[error("OpenAiResponsesError - SSE: {0}")]
+    Sse(String),
+    #[error("OpenAiResponsesError - Stream: {0}")]
+    Stream(String),
+}
+
+impl From<SseError> for OpenAiResponsesError {
+    fn from(e: SseError) -> Self {
+        match e {
+            SseError::Http(e) => Self::Http(e),
+            SseError::Processing(msg) => Self::Sse(msg),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -64,8 +85,11 @@ impl OpenAiResponsesClient {
     async fn send_prompt_streaming_internal(
         &self,
         prompt: &Prompt,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiError>>, OpenAiError> {
-        let request_body = prompt_to_responses_request(prompt);
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiResponsesError>>,
+        OpenAiResponsesError,
+    > {
+        let request_body = prompt_to_responses_request(prompt, &self.auth);
         let mut request = self
             .http
             .post(&self.api_url)
@@ -77,18 +101,21 @@ impl OpenAiResponsesClient {
                 request = request.header("Authorization", format!("Bearer {api_key}"));
             }
             OpenAiResponsesAuth::Subscription => {
-                let access_token = resolve_subscription_access_token().ok_or(OpenAiError::Api {
-                    status: 401,
-                    message: format!(
+                let access_token =
+                    resolve_subscription_access_token().ok_or(OpenAiResponsesError::Api {
+                        status: 401,
+                        message: format!(
                         "OpenAI subscription credentials not found. Run `codex login` or set {}.",
                         OPENAI_RESPONSES_SUBSCRIPTION_TOKEN_ENV
                     ),
-                })?;
-                let account_id =
-                    extract_chatgpt_account_id(&access_token).ok_or(OpenAiError::Api {
-                        status: 401,
-                        message: "OpenAI subscription credential is invalid or expired (missing chatgpt_account_id claim)".to_string(),
                     })?;
+                let account_id =
+                    extract_chatgpt_account_id(&access_token).ok_or(
+                        OpenAiResponsesError::Api {
+                            status: 401,
+                            message: "OpenAI subscription credential is invalid or expired (missing chatgpt_account_id claim)".to_string(),
+                        },
+                    )?;
                 request = request
                     .header("Authorization", format!("Bearer {access_token}"))
                     .header("chatgpt-account-id", account_id)
@@ -103,14 +130,14 @@ impl OpenAiResponsesClient {
         let status = resp.status();
         if !status.is_success() {
             let message = resp.text().await.unwrap_or_default();
-            return Err(OpenAiError::Api {
+            return Err(OpenAiResponsesError::Api {
                 status: status.as_u16(),
                 message,
             });
         }
 
         let byte_stream = resp.bytes_stream();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamDelta, OpenAiError>>(128);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamDelta, OpenAiResponsesError>>(128);
 
         tokio::spawn(async move {
             let tx_ref = &tx;
@@ -128,7 +155,7 @@ impl OpenAiResponsesClient {
                         Ok(())
                     }
                     Err(e) => {
-                        let _ = tx_ref.try_send(Err(OpenAiError::Stream(e.clone())));
+                        let _ = tx_ref.try_send(Err(OpenAiResponsesError::Stream(e.clone())));
                         Err(SseError::Processing(e))
                     }
                 }
@@ -144,7 +171,7 @@ impl OpenAiResponsesClient {
             }
 
             if let Err(e) = parse_result {
-                let _ = tx_ref.try_send(Err(OpenAiError::from(e)));
+                let _ = tx_ref.try_send(Err(OpenAiResponsesError::from(e)));
             }
         });
 
@@ -252,7 +279,7 @@ struct ResponsesReasoningConfig {
     summary: &'static str,
 }
 
-fn prompt_to_responses_request(prompt: &Prompt) -> ResponsesRequest {
+fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> ResponsesRequest {
     let mut input = Vec::new();
 
     for message in &prompt.messages {
@@ -278,7 +305,12 @@ fn prompt_to_responses_request(prompt: &Prompt) -> ResponsesRequest {
         model: prompt.model.clone(),
         input,
         instructions: (!instructions.is_empty()).then_some(instructions),
-        max_output_tokens: prompt.max_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS)),
+        max_output_tokens: match auth {
+            OpenAiResponsesAuth::ApiKey { .. } => {
+                prompt.max_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS))
+            }
+            OpenAiResponsesAuth::Subscription => None,
+        },
         tools,
         tool_choice: convert_tool_choice(prompt.tool_choice.as_ref()),
         parallel_tool_calls: true,
@@ -896,6 +928,23 @@ fn extract_chatgpt_account_id(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm::prompt::{Message, UserBlock};
+
+    fn sample_prompt() -> Prompt {
+        Prompt {
+            model: "gpt-5.4-mini".to_string(),
+            messages: vec![Message::User {
+                content: vec![UserBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            system: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(1234),
+        }
+    }
 
     fn build_test_jwt(account_id: &str) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -973,5 +1022,30 @@ mod tests {
                 stop_reason: Some(llm::StopReason::ToolUse)
             }
         )));
+    }
+
+    #[test]
+    fn api_key_requests_include_max_output_tokens() {
+        let request = prompt_to_responses_request(
+            &sample_prompt(),
+            &OpenAiResponsesAuth::ApiKey {
+                api_key: "sk-test".to_string(),
+            },
+        );
+
+        let value = serde_json::to_value(request).expect("request serializes");
+        assert_eq!(value["max_output_tokens"], serde_json::json!(1234));
+    }
+
+    #[test]
+    fn subscription_requests_omit_max_output_tokens() {
+        let request =
+            prompt_to_responses_request(&sample_prompt(), &OpenAiResponsesAuth::Subscription);
+
+        let value = serde_json::to_value(request).expect("request serializes");
+        assert!(
+            value.get("max_output_tokens").is_none(),
+            "subscription endpoint should not receive max_output_tokens"
+        );
     }
 }
