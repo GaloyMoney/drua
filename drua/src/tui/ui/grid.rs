@@ -327,10 +327,7 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         ]));
 
         if let Some(detail) = grid.details.get(&(grid.cursor_row, grid.cursor_col)) {
-            let content_lines = format_block_detail(&detail.content, detail.role);
-            lines.extend(content_lines);
-
-            // Show usage summary for assistant blocks (non-intrusive, dim).
+            // Show usage summary before content so it's always visible.
             if let Some(ref usage) = detail.usage {
                 let model_short = usage
                     .model
@@ -356,9 +353,12 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
                         cache_str,
                         cost_str,
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Gray),
                 )));
             }
+
+            let content_lines = format_block_detail(&detail.content, detail.role);
+            lines.extend(content_lines);
         }
     }
 
