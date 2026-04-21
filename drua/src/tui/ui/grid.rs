@@ -198,30 +198,32 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                                 spans.push(Span::styled("    ", conn_style));
                             }
                             _ => {
-                                let (sym, sym_color) = match cell {
+                                let (sym, sym_color, bold) = match cell {
                                     CellKind::Unique(c) | CellKind::Summary(c) => {
-                                        let color = if matches!(cell, CellKind::Summary(_)) {
-                                            Color::Magenta
-                                        } else {
-                                            match c {
-                                                'U' => Color::Cyan,
-                                                'A' => Color::White,
-                                                'T' => Color::Yellow,
-                                                'R' => Color::Gray,
-                                                _ => Color::White,
-                                            }
+                                        let color = match c {
+                                            'U' => Color::Cyan,
+                                            'A' => Color::White,
+                                            'T' => Color::Yellow,
+                                            'R' => Color::Gray,
+                                            _ => Color::White,
                                         };
-                                        (c, color)
+                                        let bold = matches!(cell, CellKind::Summary(_));
+                                        (c, color, bold)
                                     }
-                                    CellKind::Shared => ('·', Color::DarkGray),
-                                    CellKind::Condensed => ('≈', Color::Yellow),
+                                    CellKind::Shared => ('·', Color::DarkGray, false),
+                                    CellKind::Condensed => ('≈', Color::DarkGray, false),
                                     CellKind::Empty => unreachable!(),
                                 };
 
                                 let sym_style = if is_cursor {
                                     Style::default().fg(Color::Black).bg(Color::Yellow)
                                 } else {
-                                    Style::default().fg(sym_color)
+                                    let s = Style::default().fg(sym_color);
+                                    if bold {
+                                        s.add_modifier(Modifier::BOLD)
+                                    } else {
+                                        s
+                                    }
                                 };
 
                                 spans.push(Span::styled(String::from(sym), sym_style));
