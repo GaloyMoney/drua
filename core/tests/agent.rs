@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use drua_core::agent::{AgentRole, Agents, AgentsConfig, RoleConfig};
+use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::primitives::{AuthSubject, ChatOutputEvent, UserId, WorkspaceId};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
@@ -24,17 +24,27 @@ async fn send_message_round_trip_via_prompt_channel() {
 
     let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
 
+    let model_name = "claude-haiku-4-5-20251001".to_string();
     let mut builtin_roles = HashMap::new();
     builtin_roles.insert(
         AgentRole::WorkspaceLead,
         RoleConfig {
-            provider: "anthropic".to_string(),
-            model: "claude-haiku-4-5-20251001".to_string(),
-            max_tokens: 1024,
+            model: model_name.clone(),
             reset_time_delta_seconds: None,
         },
     );
-    let config = AgentsConfig { builtin_roles };
+    let mut models = HashMap::new();
+    models.insert(
+        model_name,
+        ModelDefaults {
+            max_tokens: 1024,
+            context_window_tokens: 200_000,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+    };
 
     let toolsets = Arc::new(
         ToolSets::init(ToolSetsConfig::default())
@@ -164,17 +174,27 @@ async fn send_message_dispatches_registered_tool_call() {
 
     let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
 
+    let model_name = "claude-haiku-4-5-20251001".to_string();
     let mut builtin_roles = HashMap::new();
     builtin_roles.insert(
         AgentRole::WorkspaceLead,
         RoleConfig {
-            provider: "anthropic".to_string(),
-            model: "claude-haiku-4-5-20251001".to_string(),
-            max_tokens: 1024,
+            model: model_name.clone(),
             reset_time_delta_seconds: None,
         },
     );
-    let config = AgentsConfig { builtin_roles };
+    let mut models = HashMap::new();
+    models.insert(
+        model_name,
+        ModelDefaults {
+            max_tokens: 1024,
+            context_window_tokens: 200_000,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+    };
 
     // Build ToolSets, register the test tool, then share via Arc.
     let toolsets = ToolSets::init(ToolSetsConfig::default())

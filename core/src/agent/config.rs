@@ -47,18 +47,10 @@ impl From<u32> for ResetTimeDeltaSeconds {
     }
 }
 
-fn default_provider() -> String {
-    "anthropic".to_string()
-}
-
 /// Per-role defaults applied when an agent with that role is created.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleConfig {
-    /// LLM provider: `"anthropic"` or `"openai"`.
-    #[serde(default = "default_provider")]
-    pub provider: String,
     pub model: String,
-    pub max_tokens: u32,
     /// If set, a new thread is started when a user message arrives more
     /// than this many seconds after the previous user message in the
     /// current thread. `None` disables the auto-reset.
@@ -66,20 +58,35 @@ pub struct RoleConfig {
     pub reset_time_delta_seconds: Option<ResetTimeDeltaSeconds>,
 }
 
+/// Defaults for a model, populated from the top-level `providers` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDefaults {
+    pub max_tokens: u32,
+    pub context_window_tokens: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
     #[serde(default)]
     pub builtin_roles: HashMap<AgentRole, RoleConfig>,
+    /// Populated by the CLI from the `providers:` YAML section.
+    #[serde(default)]
+    pub models: HashMap<String, ModelDefaults>,
 }
 
 impl AgentsConfig {
-    /// Verify that every built-in `AgentRole` has a `RoleConfig`. Called
-    /// from `App::init` so a misconfigured deployment fails loudly at
-    /// startup rather than on the first agent-create.
+    /// Verify that every built-in `AgentRole` has a `RoleConfig` and that
+    /// every referenced model name exists in `self.models`. Called from
+    /// `App::init` so a misconfigured deployment fails loudly at startup.
     pub fn validate(&self) -> Result<(), AgentError> {
         for role in REQUIRED_ROLES {
             if !self.builtin_roles.contains_key(role) {
                 return Err(AgentError::RoleNotConfigured(*role));
+            }
+        }
+        for role_config in self.builtin_roles.values() {
+            if !self.models.contains_key(&role_config.model) {
+                return Err(AgentError::ModelNotConfigured(role_config.model.clone()));
             }
         }
         Ok(())

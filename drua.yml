@@ -8,17 +8,19 @@ oauth:
   github_client_id: "Ov23li9ZTNnKjiTRwDcb"
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
+providers:
+  - name: anthropic
+    models:
+      - name: claude-haiku-4-5-20251001
+        max_tokens: 4096
+        context_window_tokens: 200000
 agents:
   builtin_roles:
     workspace_lead:
-      provider: anthropic
       model: claude-haiku-4-5-20251001
-      max_tokens: 4096
       reset_time_delta_seconds: 600
     agent:
-      provider: anthropic
       model: claude-haiku-4-5-20251001
-      max_tokens: 4096
       reset_time_delta_seconds: 600
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.

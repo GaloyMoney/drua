@@ -30,6 +30,8 @@ pub enum AgentError {
     PromptRequestChannelClosed,
     #[error("AgentError - role not configured: {0:?}")]
     RoleNotConfigured(super::entity::AgentRole),
+    #[error("AgentError - model not configured: {0}")]
+    ModelNotConfigured(String),
     #[error("AgentError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
     #[error("AgentError - unauthorized")]

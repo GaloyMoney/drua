@@ -44,7 +44,7 @@ use crate::primitives::{
     WorkspaceId,
 };
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
-pub use config::{AgentsConfig, ResetTimeDeltaSeconds, RoleConfig};
+pub use config::{AgentsConfig, ModelDefaults, ResetTimeDeltaSeconds, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
 use repo::AgentRepo;
@@ -220,6 +220,12 @@ impl Agents {
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
+        let model_defaults = self
+            .config
+            .models
+            .get(&role_config.model)
+            .ok_or_else(|| AgentError::ModelNotConfigured(role_config.model.clone()))?;
+
         let authz_scopes = default_authz_scopes(agent_role, workspace_id);
 
         let new_agent = NewAgent::builder()
@@ -256,7 +262,11 @@ impl Agents {
                 agent.id,
                 session::ModelSettings {
                     model: role_config.model,
-                    max_tokens: role_config.max_tokens,
+                    max_tokens: model_defaults.max_tokens,
+                },
+                session::CompactionConfig {
+                    context_window_tokens: model_defaults.context_window_tokens,
+                    ..Default::default()
                 },
                 system_blocks,
                 tool_defs,

@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use drua_core::agent::AgentsConfig;
+use drua_core::agent::{AgentsConfig, ModelDefaults};
 use drua_core::prompt_executor::{ModelConfig, PromptExecutorConfig, Provider};
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
@@ -19,6 +19,8 @@ pub struct Config {
     #[serde(default)]
     pub db: DbConfig,
     #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub toolsets: ToolSetsConfig,
@@ -32,29 +34,45 @@ pub struct Config {
     pub openai_api_key: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub name: String,
+    #[serde(default)]
+    pub models: Vec<ProviderModelConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderModelConfig {
+    pub name: String,
+    pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window_tokens: u64,
+}
+
+fn default_context_window() -> u64 {
+    200_000
+}
+
 impl Config {
-    /// Build a `PromptExecutorConfig` registering every model that the
-    /// configured `agents.builtin_roles` reference, each bound to the
-    /// provider specified in its role config.
+    /// Build a `PromptExecutorConfig` from the top-level `providers`
+    /// section, binding each model to its provider's API key.
     pub fn prompt_executor_config(&self) -> PromptExecutorConfig {
-        // Collect unique (provider, model) pairs.
-        let mut seen = std::collections::HashSet::new();
         let mut models = Vec::new();
 
-        for role in self.agents.builtin_roles.values() {
-            let key = (role.provider.clone(), role.model.clone());
-            if seen.insert(key) {
-                let provider = match role.provider.as_str() {
-                    "openai" => Provider::OpenAi {
-                        api_key: self.openai_api_key.clone(),
-                    },
-                    _ => Provider::Anthropic {
-                        api_key: self.anthropic_api_key.clone(),
-                    },
-                };
+        for provider_cfg in &self.providers {
+            let provider = match provider_cfg.name.as_str() {
+                "openai" => Provider::OpenAi {
+                    api_key: self.openai_api_key.clone(),
+                },
+                _ => Provider::Anthropic {
+                    api_key: self.anthropic_api_key.clone(),
+                },
+            };
+
+            for model in &provider_cfg.models {
                 models.push(ModelConfig {
-                    name: role.model.clone(),
-                    provider,
+                    name: model.name.clone(),
+                    provider: provider.clone(),
                     default_max_tokens: None,
                 });
             }
@@ -175,6 +193,19 @@ impl Config {
 
         let mut config: Config = serde_yaml::from_value(yaml_value)
             .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
+
+        // Populate agents.models from the top-level providers section.
+        for provider_cfg in &config.providers {
+            for model in &provider_cfg.models {
+                config.agents.models.insert(
+                    model.name.clone(),
+                    ModelDefaults {
+                        max_tokens: model.max_tokens,
+                        context_window_tokens: model.context_window_tokens,
+                    },
+                );
+            }
+        }
 
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_secret = secrets.github_client_secret;
