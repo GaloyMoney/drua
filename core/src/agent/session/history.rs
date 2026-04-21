@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
 use super::message::{AssistantBlock, SandboxOperation, ToolResultInput};
+use super::metadata::AssistantResponseMetadata;
 use super::thread::{SessionThread as SessionThreadEntity, SessionThreadId};
 use super::view::{MessageView, PromptDefinition};
 
@@ -93,6 +94,17 @@ pub struct SessionThreadInfo {
     pub start_reason: ThreadStartReasonKind,
 }
 
+/// Token usage summary for an assistant response turn.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadMessageUsage {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
+    pub total_cost: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadMessage {
     pub role: ChatHistoryRole,
@@ -100,6 +112,8 @@ pub struct ThreadMessage {
     /// Global MessageBlockIndex values for this message turn.
     /// Compare across threads to identify shared content nodes.
     pub block_indexes: Vec<usize>,
+    /// Usage metadata (only present for assistant messages).
+    pub usage: Option<ThreadMessageUsage>,
 }
 
 // ─── Builder functions (delegated from AgentSession) ─────────────────────────
@@ -245,6 +259,9 @@ pub(super) fn build_thread_messages(
     // Used to report original positions in the GQL block_indexes output.
     let mut reverse_remap: std::collections::HashMap<usize, usize> =
         std::collections::HashMap::new();
+    // Map: first block index of each assistant response → metadata.
+    let mut assistant_metadata: std::collections::HashMap<usize, AssistantResponseMetadata> =
+        std::collections::HashMap::new();
 
     for event in events.iter_all() {
         match event {
@@ -254,10 +271,14 @@ pub(super) fn build_thread_messages(
             AgentSessionEvent::SandboxNotificationAdded { text, .. } => {
                 all_blocks.push(BlockContent::UserText(text.clone()));
             }
-            AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+            AgentSessionEvent::AssistantResponseReceived {
+                content, metadata, ..
+            } => {
+                let first_idx = all_blocks.len();
                 for block in content {
                     all_blocks.push(BlockContent::AssistantBlock(block.clone()));
                 }
+                assistant_metadata.insert(first_idx, metadata.clone());
             }
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
                 for result in results {
@@ -279,7 +300,9 @@ pub(super) fn build_thread_messages(
     prompt_def
         .messages
         .iter()
-        .map(|msg_view| resolve_message_view(msg_view, &all_blocks, &reverse_remap))
+        .map(|msg_view| {
+            resolve_message_view(msg_view, &all_blocks, &reverse_remap, &assistant_metadata)
+        })
         .collect()
 }
 
@@ -295,6 +318,7 @@ fn resolve_message_view(
     view: &MessageView,
     all_blocks: &[BlockContent],
     reverse_remap: &std::collections::HashMap<usize, usize>,
+    assistant_metadata: &std::collections::HashMap<usize, AssistantResponseMetadata>,
 ) -> ThreadMessage {
     match view {
         MessageView::User(v) => {
@@ -310,6 +334,7 @@ fn resolve_message_view(
                 role: ChatHistoryRole::User,
                 blocks,
                 block_indexes,
+                usage: None,
             }
         }
         MessageView::Assistant(v) => {
@@ -323,10 +348,22 @@ fn resolve_message_view(
                     _ => panic!("Assistant view index does not point to AssistantBlock"),
                 })
                 .collect();
+            // Look up metadata by the first block index in this assistant turn.
+            let usage = block_indexes.first().and_then(|&first_idx| {
+                assistant_metadata.get(&first_idx).map(|meta| ThreadMessageUsage {
+                    model: meta.model.clone(),
+                    input_tokens: meta.usage.input,
+                    output_tokens: meta.usage.output,
+                    cache_read_tokens: meta.usage.cache_read,
+                    total_tokens: meta.usage.total_tokens,
+                    total_cost: meta.cost.total,
+                })
+            });
             ThreadMessage {
                 role: ChatHistoryRole::Assistant,
                 blocks,
                 block_indexes,
+                usage,
             }
         }
         MessageView::ToolResults(v) => {
@@ -357,6 +394,7 @@ fn resolve_message_view(
                 role: ChatHistoryRole::User,
                 blocks,
                 block_indexes,
+                usage: None,
             }
         }
     }

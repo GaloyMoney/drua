@@ -18,7 +18,7 @@ use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
     AgentItem, BlockDetail, CellKind, Focus, SandboxInfo, ScreenState, ThreadGridState, ThreadInfo,
-    WorkspaceItem,
+    UsageDetail, WorkspaceItem,
 };
 use crate::tui::{handlers, ui};
 
@@ -261,6 +261,14 @@ const THREADS_QUERY: &str = r#"
                             ... on ToolResultContent { toolUseId content isError }
                             ... on SandboxNotificationContent { sandboxName operation }
                         }
+                        usage {
+                            model
+                            inputTokens
+                            outputTokens
+                            cacheReadTokens
+                            totalTokens
+                            totalCost
+                        }
                     }
                 }
             }
@@ -299,6 +307,18 @@ struct ThreadMessageNode {
     role: String,
     block_indexes: Vec<i32>,
     content: Vec<ChatHistoryContentBlock>,
+    usage: Option<ThreadMessageUsageNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadMessageUsageNode {
+    model: String,
+    input_tokens: i32,
+    output_tokens: i32,
+    cache_read_tokens: i32,
+    total_tokens: i32,
+    total_cost: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +652,16 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 _ => ChatRole::Assistant,
             };
 
+            // Convert usage once per message — shared by all blocks in this turn.
+            let msg_usage = msg.usage.map(|u| UsageDetail {
+                model: u.model,
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read_tokens: u.cache_read_tokens,
+                total_tokens: u.total_tokens,
+                total_cost: u.total_cost,
+            });
+
             for (content_block, bi) in msg.content.into_iter().zip(msg.block_indexes) {
                 let pos_idx = match pos_map.get(&bi) {
                     Some(&idx) => idx,
@@ -658,7 +688,14 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 };
 
                 grid[thread_idx][pos_idx] = cell;
-                details.insert((thread_idx, pos_idx), BlockDetail { role, content });
+                details.insert(
+                    (thread_idx, pos_idx),
+                    BlockDetail {
+                        role,
+                        content,
+                        usage: msg_usage.clone(),
+                    },
+                );
             }
         }
     }

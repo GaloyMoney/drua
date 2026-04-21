@@ -329,6 +329,36 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         if let Some(detail) = grid.details.get(&(grid.cursor_row, grid.cursor_col)) {
             let content_lines = format_block_detail(&detail.content, detail.role);
             lines.extend(content_lines);
+
+            // Show usage summary for assistant blocks (non-intrusive, dim).
+            if let Some(ref usage) = detail.usage {
+                let model_short = usage
+                    .model
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&usage.model);
+                let cost_str = if usage.total_cost > 0.0 {
+                    format!(" ${:.4}", usage.total_cost)
+                } else {
+                    String::new()
+                };
+                let cache_str = if usage.cache_read_tokens > 0 {
+                    format!(" cache:{}", format_tokens(usage.cache_read_tokens))
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "   {} in:{} out:{}{}{}",
+                        model_short,
+                        format_tokens(usage.input_tokens),
+                        format_tokens(usage.output_tokens),
+                        cache_str,
+                        cost_str,
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
     }
 
@@ -381,5 +411,16 @@ fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'stat
                 Style::default().fg(Color::DarkGray),
             ))]
         }
+    }
+}
+
+/// Format a token count for compact display (e.g. 1234 → "1.2k").
+fn format_tokens(count: i32) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}k", count as f64 / 1_000.0)
+    } else {
+        format!("{count}")
     }
 }

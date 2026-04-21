@@ -96,10 +96,24 @@ pub enum CellKind {
     Empty,
 }
 
+/// Token usage summary for an assistant response.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct UsageDetail {
+    pub model: String,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub cache_read_tokens: i32,
+    pub total_tokens: i32,
+    pub total_cost: f64,
+}
+
 /// Content detail for a single block at a (thread, position).
 pub struct BlockDetail {
     pub role: ChatRole,
     pub content: ContentBlock,
+    /// Usage metadata — present for blocks from an assistant response.
+    pub usage: Option<UsageDetail>,
 }
 
 /// Positionally-aligned thread grid state.

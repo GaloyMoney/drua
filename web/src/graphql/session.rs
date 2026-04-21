@@ -121,6 +121,19 @@ pub struct ThreadMessageEntry {
     /// Global block indexes referenced by this message turn.
     /// Compare across threads to identify shared content nodes.
     pub block_indexes: Vec<i32>,
+    /// Token usage metadata (only present for assistant messages).
+    pub usage: Option<ThreadMessageUsage>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct ThreadMessageUsage {
+    pub model: String,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub cache_read_tokens: i32,
+    pub total_tokens: i32,
+    /// Total cost in USD.
+    pub total_cost: f64,
 }
 
 // ─── AgentSession ��─────────────────────────────��────────────────────────��────
@@ -242,6 +255,14 @@ impl From<history::ThreadMessage> for ThreadMessageEntry {
             },
             content: m.blocks.into_iter().map(ChatContentBlock::from).collect(),
             block_indexes: m.block_indexes.into_iter().map(|i| i as i32).collect(),
+            usage: m.usage.map(|u| ThreadMessageUsage {
+                model: u.model,
+                input_tokens: u.input_tokens as i32,
+                output_tokens: u.output_tokens as i32,
+                cache_read_tokens: u.cache_read_tokens as i32,
+                total_tokens: u.total_tokens as i32,
+                total_cost: u.total_cost,
+            }),
         }
     }
 }
