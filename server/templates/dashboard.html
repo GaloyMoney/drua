@@ -18,6 +18,11 @@
       <input type="checkbox" name="admin" value="true">
       Admin scope (grants access to workspace &amp; agent management tools)
     </label>
+    <label>
+      Tunnel deployment ID (optional)
+      <input type="text" name="tunnel_deployment_id" placeholder="galoy-staging">
+      <small>Fill in to mint a token scoped to a single tunnel connector registration. Leave empty for a regular user token.</small>
+    </label>
     <button type="submit">Create Credentials</button>
   </form>
   <div id="creds-result"></div>

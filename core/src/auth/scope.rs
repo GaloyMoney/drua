@@ -29,6 +29,11 @@ pub enum AuthScope {
     /// Read-only access — the agent may invoke sandbox tools that
     /// don't modify state. Granted on a `Read` attach.
     SandboxRead(SandboxId),
+    /// Authorizes the holder to register a tunnel connector for a specific
+    /// `deployment_id`. The `/tunnel/ws` handler matches this scope against
+    /// the `deployment_id` in the connector's Register frame; a token scoped
+    /// to `Tunnel("galoy-staging")` cannot register as `galoy-production`.
+    Tunnel(String),
     /// An externally-defined scope string. Grants access only to
     /// [`AuthResource::External`] resources whose name matches.
     External(String),
@@ -65,6 +70,11 @@ impl AuthScope {
                     )
             }
 
+            // Tunnel scopes don't grant AuthVerb/AuthResource access — they
+            // gate a side door (the `/tunnel/ws` handler) and are checked
+            // there by name, not through `permits`.
+            AuthScope::Tunnel(_) => false,
+
             // External scopes match External resources by name.
             AuthScope::External(name) => {
                 matches!(resource, AuthResource::External(res_name) if res_name == name)
@@ -84,6 +94,7 @@ impl fmt::Display for AuthScope {
             AuthScope::WorkspaceAdmin(id) => write!(f, "ws:{id}:admin"),
             AuthScope::SandboxUse(id) => write!(f, "sandbox:{id}:use"),
             AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
+            AuthScope::Tunnel(id) => write!(f, "tunnel:{id}"),
             AuthScope::External(s) => f.write_str(s),
         }
     }
@@ -125,6 +136,17 @@ impl FromStr for AuthScope {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::SandboxRead(SandboxId::from(uuid)));
                 }
+            }
+        }
+
+        // Parse "tunnel:{deployment_id}". An empty deployment_id must NOT
+        // silently become `Tunnel("")` — that would match any connector
+        // registration via the `==` check in `can_register_tunnel`.
+        // Fall through to External so malformed tokens never satisfy a
+        // `Tunnel(X)` gate.
+        if let Some(deployment_id) = s.strip_prefix("tunnel:") {
+            if !deployment_id.is_empty() {
+                return Ok(AuthScope::Tunnel(deployment_id.to_owned()));
             }
         }
 
@@ -190,6 +212,7 @@ mod tests {
             AuthScope::WorkspaceAdmin(ws_id),
             AuthScope::SandboxUse(sb_id),
             AuthScope::SandboxRead(sb_id),
+            AuthScope::Tunnel("galoy-staging".to_owned()),
             AuthScope::External("custom:thing".to_owned()),
         ];
 
@@ -277,6 +300,24 @@ mod tests {
         assert_eq!(scope, AuthScope::External("read".to_owned()));
     }
 
+    #[test]
+    fn tunnel_round_trip() {
+        let scope = AuthScope::Tunnel("galoy-staging".to_owned());
+        assert_eq!(scope.to_string(), "tunnel:galoy-staging");
+        let parsed: AuthScope = "tunnel:galoy-staging".parse().unwrap();
+        assert_eq!(parsed, scope);
+    }
+
+    /// `tunnel:` with no id must not silently become a Tunnel scope —
+    /// guards against a malformed token accidentally matching any
+    /// deployment. It falls through to External, which never matches a
+    /// `Tunnel(X)` check.
+    #[test]
+    fn tunnel_empty_deployment_id_falls_back_to_external() {
+        let scope: AuthScope = "tunnel:".parse().unwrap();
+        assert_eq!(scope, AuthScope::External("tunnel:".to_owned()));
+    }
+
     /// Eq-based comparison works across all variants.
     #[test]
     fn eq_all_variants() {
@@ -310,6 +351,10 @@ mod tests {
             (
                 AuthScope::WorkspaceAdmin(ws_id),
                 r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin""#,
+            ),
+            (
+                AuthScope::Tunnel("galoy-staging".to_owned()),
+                r#""tunnel:galoy-staging""#,
             ),
             (AuthScope::External("custom".to_owned()), r#""custom""#),
         ];
