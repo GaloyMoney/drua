@@ -2,7 +2,7 @@ pub(super) mod estimation;
 pub(super) mod prune;
 pub(super) mod trigger;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use es_entity::EntityEvents;
@@ -120,8 +120,30 @@ pub(super) fn maybe_prune(
 
     let new_thread_id = SessionThreadId::new();
 
-    // Transform the current thread's message views to apply the pruning plan
-    let transformed_messages = transform_message_views(&current_prompt_definition.messages, &plan);
+    // Compute the current total block count so we know where masked
+    // replacement blocks will land in the global content list.
+    let current_block_count = count_blocks(events.iter_all());
+
+    // Build original→replacement index mapping for masked tool results.
+    // The ToolResultsMasked event is emitted first (before CompactionApplied),
+    // so its blocks start at `current_block_count`.
+    let mask_remap: HashMap<MessageBlockIndex, MessageBlockIndex> = plan
+        .masked_tool_results
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            (
+                m.original_index,
+                MessageBlockIndex::new(current_block_count + i),
+            )
+        })
+        .collect();
+
+    // Transform the current thread's message views to apply the pruning plan.
+    // This remaps masked tool result indexes so that `into_prompt()` resolves
+    // to the masked replacement content.
+    let transformed_messages =
+        transform_message_views(&current_prompt_definition.messages, &plan, &mask_remap);
 
     let compaction_metadata = CompactionMetadata {
         follows_from: current_thread_id,
@@ -328,14 +350,27 @@ fn pending_user_message_indexes<'a>(
     pending
 }
 
+/// Count the total number of content blocks in the event stream.
+fn count_blocks<'a>(events: impl Iterator<Item = &'a AgentSessionEvent>) -> usize {
+    events.fold(0usize, |acc, e| match e {
+        AgentSessionEvent::UserInputAdded { .. }
+        | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
+        AgentSessionEvent::AssistantResponseReceived { content, .. } => acc + content.len(),
+        AgentSessionEvent::ToolResultsAdded { results, .. } => acc + results.len(),
+        AgentSessionEvent::ToolResultsMasked { results, .. } => acc + results.len(),
+        _ => acc,
+    })
+}
+
 /// Transform message views by applying the pruning plan:
 /// - Filter out stripped user messages from User views
 /// - Filter out cleared thinking blocks from Assistant views
-///
-/// Tool result masking does NOT need view transformation here — the masked
-/// tool results are persisted via CompactionApplied and get new natural
-/// indexes when into_prompt() walks the event stream.
-fn transform_message_views(messages: &[MessageView], plan: &PruningPlan) -> Vec<MessageView> {
+/// - Remap masked tool result indexes to their replacement indexes
+fn transform_message_views(
+    messages: &[MessageView],
+    plan: &PruningPlan,
+    mask_remap: &HashMap<MessageBlockIndex, MessageBlockIndex>,
+) -> Vec<MessageView> {
     let stripped: HashSet<&MessageBlockIndex> = plan.stripped_user_messages.iter().collect();
     let cleared: HashSet<&MessageBlockIndex> = plan.cleared_thinking.iter().collect();
 
@@ -367,10 +402,16 @@ fn transform_message_views(messages: &[MessageView], plan: &PruningPlan) -> Vec<
                     }));
                 }
             }
-            MessageView::ToolResults(_) => {
-                // Tool results views pass through unchanged — masking is handled
-                // by the CompactionApplied event giving replacements new indexes
-                result.push(msg.clone());
+            MessageView::ToolResults(tool_results_view) => {
+                // Remap masked tool result indexes to their replacement indexes.
+                let remapped: Vec<MessageBlockIndex> = tool_results_view
+                    .indexes
+                    .iter()
+                    .map(|idx| mask_remap.get(idx).copied().unwrap_or(*idx))
+                    .collect();
+                result.push(MessageView::ToolResults(ToolResultsView {
+                    indexes: remapped,
+                }));
             }
         }
     }
@@ -402,7 +443,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = transform_message_views(&messages, &plan);
+        let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert_eq!(result.len(), 2);
         match &result[0] {
             MessageView::User(v) => assert_eq!(v.indexes.len(), 2),
@@ -427,7 +468,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = transform_message_views(&messages, &plan);
+        let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert_eq!(result.len(), 1);
         match &result[0] {
             MessageView::Assistant(v) => {
@@ -455,7 +496,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = transform_message_views(&messages, &plan);
+        let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert!(result.is_empty());
     }
+
 }

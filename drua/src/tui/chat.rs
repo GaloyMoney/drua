@@ -1,5 +1,5 @@
 /// Structured chat content: interleaved text and tool-use blocks.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ContentBlock {
     Text(String),
     ToolUse(String),

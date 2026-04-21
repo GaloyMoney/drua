@@ -611,6 +611,8 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let mut grid: Vec<Vec<CellKind>> = vec![vec![CellKind::Empty; num_positions]; num_threads];
     let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
     let mut thread_infos = Vec::new();
+    // Track owner's content per block-index for condensed detection.
+    let mut owner_content: HashMap<i32, ContentBlock> = HashMap::new();
 
     for (thread_idx, node) in thread_nodes.into_iter().enumerate() {
         let is_compaction = node.start_reason == "COMPACTION";
@@ -641,13 +643,18 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 let is_owner = owner.get(&bi) == Some(&thread_idx);
 
                 let cell = if is_owner {
+                    owner_content.insert(bi, content.clone());
                     if is_compaction {
                         CellKind::Summary(type_char)
                     } else {
                         CellKind::Unique(type_char)
                     }
                 } else {
-                    CellKind::Shared
+                    // Compare with owner's content — different means condensed/masked.
+                    match owner_content.get(&bi) {
+                        Some(owner_c) if *owner_c != content => CellKind::Condensed,
+                        _ => CellKind::Shared,
+                    }
                 };
 
                 grid[thread_idx][pos_idx] = cell;
@@ -661,8 +668,12 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let initial_col = grid
         .get(current_thread_idx)
         .and_then(|row| {
-            row.iter()
-                .position(|c| matches!(c, CellKind::Unique(_) | CellKind::Summary(_)))
+            row.iter().position(|c| {
+                matches!(
+                    c,
+                    CellKind::Unique(_) | CellKind::Summary(_) | CellKind::Condensed
+                )
+            })
         })
         .unwrap_or(0);
 
