@@ -373,9 +373,7 @@ mod tests {
     use crate::agent::session::message::*;
     use crate::agent::session::metadata::*;
     use crate::agent::session::settings::*;
-    use crate::agent::session::view::{
-        SystemView, ToolDefinitionsView, ToolResultsView,
-    };
+    use crate::agent::session::view::{SystemView, ToolDefinitionsView, ToolResultsView};
 
     fn dummy_metadata() -> AssistantResponseMetadata {
         AssistantResponseMetadata {
