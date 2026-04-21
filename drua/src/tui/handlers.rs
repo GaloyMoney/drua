@@ -103,6 +103,8 @@ fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
         }
         KeyCode::Enter => {
             let input = state.chat_input.trim().to_string();
+            // Close thread view so chat pane is visible
+            state.thread_view = None;
             if input.is_empty() {
                 // Switch to chat pane for typing
                 state.focus = Focus::Chat;
