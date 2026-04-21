@@ -163,6 +163,22 @@ type ThreadMessageEntry {
 	blockIndexes: [Int!]!
 	content: [ChatContentBlock!]!
 	role: ChatMessageRole!
+	"""
+	Token usage metadata (only present for assistant messages).
+	"""
+	usage: ThreadMessageUsage
+}
+
+type ThreadMessageUsage {
+	cacheReadTokens: Int!
+	inputTokens: Int!
+	model: String!
+	outputTokens: Int!
+	"""
+	Total cost in USD.
+	"""
+	totalCost: Float!
+	totalTokens: Int!
 }
 
 enum ThreadStartReason {
