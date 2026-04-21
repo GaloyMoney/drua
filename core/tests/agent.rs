@@ -37,7 +37,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     models.insert(
         model_name,
         ModelDefaults {
-            max_tokens: 1024,
+            max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
         },
     );
@@ -187,7 +187,7 @@ async fn send_message_dispatches_registered_tool_call() {
     models.insert(
         model_name,
         ModelDefaults {
-            max_tokens: 1024,
+            max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
         },
     );

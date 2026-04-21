@@ -7,7 +7,8 @@ use super::compaction::trigger::CompactionAction;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSettings {
     pub model: String,
-    pub max_tokens: u32,
+    #[serde(alias = "max_tokens")]
+    pub max_tokens_per_response: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

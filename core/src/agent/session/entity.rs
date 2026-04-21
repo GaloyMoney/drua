@@ -480,7 +480,7 @@ impl AgentSession {
             .session_id(self.id)
             .start_reason(ThreadStartReason::InitialThread)
             .model(prompt_definition.model.clone())
-            .max_tokens(prompt_definition.max_tokens)
+            .max_tokens_per_response(prompt_definition.max_tokens_per_response)
             .system_view(prompt_definition.system_view().clone())
             .tool_definitions_view(prompt_definition.tool_definitions_view().clone())
             .initial_user_messages(prompt_definition.user_messages_view())
@@ -505,8 +505,10 @@ impl AgentSession {
                     tool_defs,
                     ..
                 } => {
-                    materialized =
-                        MaterializedSession::init(&model_settings.model, model_settings.max_tokens);
+                    materialized = MaterializedSession::init(
+                        &model_settings.model,
+                        model_settings.max_tokens_per_response,
+                    );
                     materialized.push_system_blocks(system_blocks.iter());
                     materialized.push_tool_defs(tool_defs.iter());
                 }
@@ -651,7 +653,7 @@ mod tests {
             .agent_id(AgentId::new())
             .model_settings(ModelSettings {
                 model: "test-model".into(),
-                max_tokens: 1024,
+                max_tokens_per_response: 1024,
             })
             .system_blocks(vec![])
             .tool_defs(vec![])
@@ -1041,7 +1043,7 @@ mod tests {
             .agent_id(AgentId::new())
             .model_settings(ModelSettings {
                 model: "test-model".into(),
-                max_tokens: 1024,
+                max_tokens_per_response: 1024,
             })
             .compaction_config(CompactionConfig {
                 enabled: true,

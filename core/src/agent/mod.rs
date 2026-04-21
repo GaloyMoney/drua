@@ -262,7 +262,7 @@ impl Agents {
                 agent.id,
                 session::ModelSettings {
                     model: role_config.model,
-                    max_tokens: model_defaults.max_tokens,
+                    max_tokens_per_response: model_defaults.max_tokens_per_response,
                 },
                 session::CompactionConfig {
                     context_window_tokens: model_defaults.context_window_tokens,

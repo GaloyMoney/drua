@@ -65,7 +65,7 @@ pub struct ToolResultsView {
 #[derive(Debug)]
 pub(super) struct MaterializedSession<'a> {
     model: &'a str,
-    max_tokens: u32,
+    max_tokens_per_response: u32,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
     tool_defs: Vec<&'a ToolDefinition>,
@@ -77,10 +77,10 @@ pub(super) struct MaterializedSession<'a> {
 }
 
 impl<'a> MaterializedSession<'a> {
-    pub fn init(model: &'a str, max_tokens: u32) -> Self {
+    pub fn init(model: &'a str, max_tokens_per_response: u32) -> Self {
         Self {
             model,
-            max_tokens,
+            max_tokens_per_response,
             system_blocks: Vec::new(),
             system_breakpoints: Vec::new(),
             tool_defs: Vec::new(),
@@ -184,7 +184,7 @@ impl<'a> MaterializedSession<'a> {
         let initial_user_messages = self.all_user_messages();
         PromptDefinition {
             model: self.model.to_string(),
-            max_tokens: self.max_tokens,
+            max_tokens_per_response: self.max_tokens_per_response,
             system_view,
             tool_definitions_view,
             messages: vec![MessageView::User(initial_user_messages)],
@@ -218,7 +218,7 @@ pub enum MessageView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptDefinition {
     pub(super) model: String,
-    pub(super) max_tokens: u32,
+    pub(super) max_tokens_per_response: u32,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     pub(super) messages: Vec<MessageView>,
@@ -382,7 +382,7 @@ impl PromptDefinition {
         Ok(Prompt {
             target_thread,
             model: self.model,
-            max_tokens: self.max_tokens,
+            max_tokens_per_response: self.max_tokens_per_response,
             system,
             tools,
             messages: merged,

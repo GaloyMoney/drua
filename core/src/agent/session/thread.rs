@@ -26,7 +26,8 @@ pub enum SessionThreadEvent {
         session_id: AgentSessionId,
         start_reason: ThreadStartReason,
         model: String,
-        max_tokens: u32,
+        #[serde(alias = "max_tokens")]
+        max_tokens_per_response: u32,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         initial_user_messages: UserMessagesView,
@@ -35,7 +36,8 @@ pub enum SessionThreadEvent {
         id: SessionThreadId,
         session_id: AgentSessionId,
         model: String,
-        max_tokens: u32,
+        #[serde(alias = "max_tokens")]
+        max_tokens_per_response: u32,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -107,7 +109,7 @@ impl SessionThread {
 
     pub fn prompt_definition(&self) -> PromptDefinition {
         let mut model = String::new();
-        let mut max_tokens = 0;
+        let mut max_tokens_per_response = 0;
         let mut system_view = SystemView { indexes: vec![] };
         let mut tool_definitions_view = ToolDefinitionsView { indexes: vec![] };
         let mut messages = Vec::new();
@@ -116,28 +118,28 @@ impl SessionThread {
             match event {
                 SessionThreadEvent::Initialized {
                     model: m,
-                    max_tokens: mt,
+                    max_tokens_per_response: mt,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     initial_user_messages,
                     ..
                 } => {
                     model = m.clone();
-                    max_tokens = *mt;
+                    max_tokens_per_response = *mt;
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.push(MessageView::User(initial_user_messages.clone()));
                 }
                 SessionThreadEvent::InitializedFromCompaction {
                     model: m,
-                    max_tokens: mt,
+                    max_tokens_per_response: mt,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
                 } => {
                     model = m.clone();
-                    max_tokens = *mt;
+                    max_tokens_per_response = *mt;
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.extend(init_messages.iter().cloned());
@@ -167,7 +169,7 @@ impl SessionThread {
 
         PromptDefinition {
             model,
-            max_tokens,
+            max_tokens_per_response,
             system_view,
             tool_definitions_view,
             messages,
@@ -241,7 +243,7 @@ pub struct NewSessionThread {
     pub(super) session_id: AgentSessionId,
     pub(super) start_reason: ThreadStartReason,
     pub(super) model: String,
-    pub(super) max_tokens: u32,
+    pub(super) max_tokens_per_response: u32,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     init: ThreadInitData,
@@ -265,7 +267,7 @@ impl NewSessionThread {
             session_id: None,
             start_reason: None,
             model: None,
-            max_tokens: None,
+            max_tokens_per_response: None,
             system_view: None,
             tool_definitions_view: None,
             initial_user_messages: None,
@@ -277,7 +279,7 @@ impl NewSessionThread {
         id: SessionThreadId,
         session_id: AgentSessionId,
         model: String,
-        max_tokens: u32,
+        max_tokens_per_response: u32,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -290,7 +292,7 @@ impl NewSessionThread {
                 from_thread: follows_from,
             },
             model,
-            max_tokens,
+            max_tokens_per_response,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Compacted {
@@ -307,7 +309,7 @@ pub struct NewSessionThreadBuilder {
     session_id: Option<AgentSessionId>,
     start_reason: Option<ThreadStartReason>,
     model: Option<String>,
-    max_tokens: Option<u32>,
+    max_tokens_per_response: Option<u32>,
     system_view: Option<SystemView>,
     tool_definitions_view: Option<ToolDefinitionsView>,
     initial_user_messages: Option<UserMessagesView>,
@@ -334,8 +336,8 @@ impl NewSessionThreadBuilder {
         self
     }
 
-    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
-        self.max_tokens = Some(max_tokens);
+    pub fn max_tokens_per_response(mut self, max_tokens_per_response: u32) -> Self {
+        self.max_tokens_per_response = Some(max_tokens_per_response);
         self
     }
 
@@ -366,9 +368,11 @@ impl NewSessionThreadBuilder {
             model: self.model.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("model"),
             ))?,
-            max_tokens: self.max_tokens.ok_or(EntityHydrationError::from(
-                derive_builder::UninitializedFieldError::from("max_tokens"),
-            ))?,
+            max_tokens_per_response: self.max_tokens_per_response.ok_or(
+                EntityHydrationError::from(derive_builder::UninitializedFieldError::from(
+                    "max_tokens_per_response",
+                )),
+            )?,
             system_view: self.system_view.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("system_view"),
             ))?,
@@ -398,7 +402,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 session_id: self.session_id,
                 start_reason: self.start_reason,
                 model: self.model,
-                max_tokens: self.max_tokens,
+                max_tokens_per_response: self.max_tokens_per_response,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 initial_user_messages,
@@ -410,7 +414,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 id: self.id,
                 session_id: self.session_id,
                 model: self.model,
-                max_tokens: self.max_tokens,
+                max_tokens_per_response: self.max_tokens_per_response,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 messages,

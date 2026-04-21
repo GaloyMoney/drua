@@ -61,7 +61,7 @@ pub struct RoleConfig {
 /// Defaults for a model, populated from the top-level `providers` config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDefaults {
-    pub max_tokens: u32,
+    pub max_tokens_per_response: u32,
     pub context_window_tokens: u64,
 }
 

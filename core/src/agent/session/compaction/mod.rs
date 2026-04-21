@@ -113,12 +113,12 @@ pub(super) fn maybe_prune<'a>(
     let system_view = current_prompt_definition.system_view().clone();
     let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
     let model = current_prompt_definition.model.clone();
-    let max_tokens = current_prompt_definition.max_tokens;
+    let max_tokens_per_response = current_prompt_definition.max_tokens_per_response;
 
     // Build the PromptDefinition for the compacted thread
     let prompt_definition = PromptDefinition {
         model: model.clone(),
-        max_tokens,
+        max_tokens_per_response,
         system_view: system_view.clone(),
         tool_definitions_view: tool_definitions_view.clone(),
         messages: transformed_messages.clone(),
@@ -130,7 +130,7 @@ pub(super) fn maybe_prune<'a>(
         new_thread_id,
         session_id,
         model,
-        max_tokens,
+        max_tokens_per_response,
         system_view,
         tool_definitions_view,
         transformed_messages,

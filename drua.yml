@@ -12,7 +12,7 @@ providers:
   - name: anthropic
     models:
       - name: claude-haiku-4-5-20251001
-        max_tokens: 4096
+        max_tokens_per_response: 4096
         context_window_tokens: 200000
 agents:
   builtin_roles:

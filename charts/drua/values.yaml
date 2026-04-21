@@ -38,7 +38,7 @@ galoyAgents:
       - name: anthropic
         models:
           - name: claude-haiku-4-5-20251001
-            maxTokens: 4096
+            maxTokensPerResponse: 4096
             contextWindowTokens: 200000
     ## Per-role defaults applied when an agent with that role is created.
     ## Both `workspaceLead` and `agent` are REQUIRED — the binary refuses

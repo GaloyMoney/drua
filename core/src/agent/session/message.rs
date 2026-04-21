@@ -23,7 +23,7 @@ pub struct CompactionMetadata {
 pub struct Prompt {
     pub target_thread: TargetThread,
     pub model: String,
-    pub max_tokens: u32,
+    pub max_tokens_per_response: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system: Vec<SystemBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -121,7 +121,7 @@ impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
         llm::Prompt {
             model: p.model,
-            max_tokens: Some(p.max_tokens),
+            max_tokens: Some(p.max_tokens_per_response),
             system: p
                 .system
                 .into_iter()

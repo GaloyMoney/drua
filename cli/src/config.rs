@@ -44,7 +44,7 @@ pub struct ProviderConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderModelConfig {
     pub name: String,
-    pub max_tokens: u32,
+    pub max_tokens_per_response: u32,
     #[serde(default = "default_context_window")]
     pub context_window_tokens: u64,
 }
@@ -200,7 +200,7 @@ impl Config {
                 config.agents.models.insert(
                     model.name.clone(),
                     ModelDefaults {
-                        max_tokens: model.max_tokens,
+                        max_tokens_per_response: model.max_tokens_per_response,
                         context_window_tokens: model.context_window_tokens,
                     },
                 );
