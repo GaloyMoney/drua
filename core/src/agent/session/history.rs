@@ -268,8 +268,15 @@ pub(super) fn build_thread_messages(
             AgentSessionEvent::UserInputAdded { text, .. } => {
                 all_blocks.push(BlockContent::UserText(text.clone()));
             }
-            AgentSessionEvent::SandboxNotificationAdded { text, .. } => {
-                all_blocks.push(BlockContent::UserText(text.clone()));
+            AgentSessionEvent::SandboxNotificationAdded {
+                sandbox_name,
+                operation,
+                ..
+            } => {
+                all_blocks.push(BlockContent::SandboxNotification {
+                    sandbox_name: sandbox_name.clone(),
+                    operation: operation.clone(),
+                });
             }
             AgentSessionEvent::AssistantResponseReceived {
                 content, metadata, ..
@@ -310,6 +317,10 @@ pub(super) fn build_thread_messages(
 
 enum BlockContent {
     UserText(String),
+    SandboxNotification {
+        sandbox_name: String,
+        operation: SandboxOperation,
+    },
     AssistantBlock(AssistantBlock),
     ToolResult(ToolResultInput),
 }
@@ -327,7 +338,22 @@ fn resolve_message_view(
                 .iter()
                 .map(|&idx| match &all_blocks[idx] {
                     BlockContent::UserText(text) => ChatHistoryBlock::Text { text: text.clone() },
-                    _ => panic!("User view index does not point to UserText"),
+                    BlockContent::SandboxNotification {
+                        sandbox_name,
+                        operation,
+                    } => ChatHistoryBlock::SandboxNotification {
+                        sandbox_name: sandbox_name.clone(),
+                        operation: match operation {
+                            SandboxOperation::Attach { mode, mount_path } => {
+                                SandboxNotificationOp::Attach {
+                                    mode: mode.clone(),
+                                    mount_path: mount_path.clone(),
+                                }
+                            }
+                            SandboxOperation::Detach => SandboxNotificationOp::Detach,
+                        },
+                    },
+                    _ => panic!("User view index does not point to UserText or SandboxNotification"),
                 })
                 .collect();
             ThreadMessage {
