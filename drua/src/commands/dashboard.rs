@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::time::Duration;
 
@@ -15,7 +16,10 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
-use crate::tui::state::{AgentItem, SandboxInfo, ScreenState, WorkspaceItem};
+use crate::tui::state::{
+    AgentItem, BlockDetail, CellKind, Focus, SandboxInfo, ScreenState, ThreadGridState, ThreadInfo,
+    WorkspaceItem,
+};
 use crate::tui::{handlers, ui};
 
 // ---------------------------------------------------------------------------
@@ -233,6 +237,70 @@ impl ChatHistoryContentBlock {
 }
 
 // ---------------------------------------------------------------------------
+// Threads (GQL)
+// ---------------------------------------------------------------------------
+
+const THREADS_QUERY: &str = r#"
+    query Threads($agentId: AgentId!) {
+        agent(id: $agentId) {
+            session {
+                threads {
+                    id
+                    isCurrent
+                    nextTurn
+                    startReason
+                    messages {
+                        role
+                        blockIndexes
+                        content {
+                            __typename
+                            ... on TextContent { text }
+                            ... on ToolUseContent { name }
+                            ... on ThinkingContent { text }
+                            ... on ToolResultContent { toolUseId content isError }
+                            ... on SandboxNotificationContent { sandboxName operation }
+                        }
+                    }
+                }
+            }
+        }
+    }
+"#;
+
+#[derive(Debug, Deserialize)]
+struct ThreadsResponse {
+    agent: Option<ThreadsAgent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadsAgent {
+    session: ThreadsSession,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadsSession {
+    threads: Vec<ThreadNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadNode {
+    id: String,
+    is_current: bool,
+    next_turn: String,
+    start_reason: String,
+    messages: Vec<ThreadMessageNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadMessageNode {
+    role: String,
+    block_indexes: Vec<i32>,
+    content: Vec<ChatHistoryContentBlock>,
+}
+
+// ---------------------------------------------------------------------------
 // Chat streaming
 // ---------------------------------------------------------------------------
 
@@ -244,6 +312,8 @@ enum ChatStreamEvent {
     Done,
     /// Pre-fetched chat history for an agent (agent_id, messages).
     HistoryLoaded(String, Vec<ChatMessage>),
+    /// Thread grid data loaded for an agent (agent_id, grid_state).
+    ThreadsLoaded(String, ThreadGridState),
 }
 
 fn spawn_chat_stream(
@@ -496,6 +566,156 @@ fn spawn_chat_history_fetch(
     });
 }
 
+async fn fetch_threads(client: &GraphqlClient, agent_id: &str) -> Result<ThreadGridState> {
+    let resp: ThreadsResponse = client
+        .query(THREADS_QUERY, serde_json::json!({ "agentId": agent_id }))
+        .await?;
+
+    let thread_nodes = resp
+        .agent
+        .map(|a| a.session.threads)
+        .unwrap_or_default();
+
+    Ok(build_thread_grid(thread_nodes))
+}
+
+/// Build a positionally-aligned grid from raw thread data.
+///
+/// Columns = unique block indexes (sorted). Rows = threads.
+/// First thread to reference a block index "owns" it (Unique).
+/// Subsequent threads referencing the same index get Shared.
+/// Unique blocks in COMPACTION threads are marked Summary.
+fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
+    // 1. Collect all unique block indexes and determine ownership.
+    let mut all_positions = BTreeSet::new();
+    let mut owner: HashMap<i32, usize> = HashMap::new();
+
+    for (thread_idx, node) in thread_nodes.iter().enumerate() {
+        for msg in &node.messages {
+            for &bi in &msg.block_indexes {
+                all_positions.insert(bi);
+                owner.entry(bi).or_insert(thread_idx);
+            }
+        }
+    }
+
+    let positions: Vec<i32> = all_positions.into_iter().collect();
+    let pos_map: HashMap<i32, usize> = positions
+        .iter()
+        .enumerate()
+        .map(|(i, &pos)| (pos, i))
+        .collect();
+
+    let num_positions = positions.len();
+    let num_threads = thread_nodes.len();
+
+    // 2. Build grid and details (consuming thread_nodes).
+    let mut grid: Vec<Vec<CellKind>> = vec![vec![CellKind::Empty; num_positions]; num_threads];
+    let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
+    let mut thread_infos = Vec::new();
+
+    for (thread_idx, node) in thread_nodes.into_iter().enumerate() {
+        let is_compaction = node.start_reason == "COMPACTION";
+        let msg_count = node.messages.len();
+
+        thread_infos.push(ThreadInfo {
+            id: node.id,
+            is_current: node.is_current,
+            next_turn: node.next_turn,
+            start_reason: node.start_reason,
+            message_count: msg_count,
+        });
+
+        for msg in node.messages {
+            let role = match msg.role.as_str() {
+                "USER" => ChatRole::User,
+                _ => ChatRole::Assistant,
+            };
+
+            for (content_block, bi) in msg.content.into_iter().zip(msg.block_indexes.into_iter()) {
+                let pos_idx = match pos_map.get(&bi) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
+
+                let content = content_block.into_content_block();
+                let type_char = content_type_char(&content, role);
+                let is_owner = owner.get(&bi) == Some(&thread_idx);
+
+                let cell = if is_owner {
+                    if is_compaction {
+                        CellKind::Summary(type_char)
+                    } else {
+                        CellKind::Unique(type_char)
+                    }
+                } else {
+                    CellKind::Shared
+                };
+
+                grid[thread_idx][pos_idx] = cell;
+                details.insert((thread_idx, pos_idx), BlockDetail { role, content });
+            }
+        }
+    }
+
+    // Initial cursor: current thread, first unique/summary block.
+    let current_thread_idx = thread_infos
+        .iter()
+        .position(|t| t.is_current)
+        .unwrap_or(0);
+    let initial_col = grid
+        .get(current_thread_idx)
+        .and_then(|row| {
+            row.iter()
+                .position(|c| matches!(c, CellKind::Unique(_) | CellKind::Summary(_)))
+        })
+        .unwrap_or(0);
+
+    ThreadGridState {
+        threads: thread_infos,
+        positions,
+        grid,
+        details,
+        cursor_col: initial_col,
+        cursor_row: current_thread_idx,
+        scroll_col: 0,
+        visible_cols: 0,
+    }
+}
+
+fn content_type_char(content: &ContentBlock, role: ChatRole) -> char {
+    match content {
+        ContentBlock::Text(_) => match role {
+            ChatRole::User => 'U',
+            ChatRole::Assistant | ChatRole::System => 'A',
+        },
+        ContentBlock::ToolUse(_) => 'T',
+        ContentBlock::Thinking(_) => 'A', // assistant reasoning
+        ContentBlock::ToolResult(_) => 'R',
+    }
+}
+
+fn spawn_threads_fetch(
+    base_url: String,
+    token: String,
+    agent_id: String,
+    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        match fetch_threads(&client, &agent_id).await {
+            Ok(grid) => {
+                let _ = tx.send(ChatStreamEvent::ThreadsLoaded(agent_id, grid));
+            }
+            Err(e) => {
+                let _ = tx.send(ChatStreamEvent::Error(format!(
+                    "Failed to load threads: {e}"
+                )));
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch stream events → AssistantChat
 // ---------------------------------------------------------------------------
@@ -525,6 +745,13 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
             if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
                 state.chat_view.assistant.load_history(messages);
                 state.chat_view.reset_scroll();
+            }
+        }
+        ChatStreamEvent::ThreadsLoaded(agent_id, grid) => {
+            if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
+                state.status_message = None;
+                state.thread_view = Some(grid);
+                state.focus = Focus::Threads;
             }
         }
     }
@@ -644,6 +871,23 @@ async fn run_event_loop(
                                     prompt,
                                     stream_tx.clone(),
                                 );
+                            }
+                            handlers::Action::ToggleThreads => {
+                                if state.thread_view.is_some() {
+                                    // Close thread view → reload flat history
+                                    state.thread_view = None;
+                                    state.focus = Focus::Chat;
+                                    state.loaded_agent_id = None; // triggers reactive reload below
+                                } else if let Some(agent_id) = state.selected_agent_id() {
+                                    // Open thread view → fetch threads
+                                    state.status_message = Some("Loading threads…".to_string());
+                                    spawn_threads_fetch(
+                                        config.server_url.clone(),
+                                        config.auth_token.clone(),
+                                        agent_id,
+                                        stream_tx.clone(),
+                                    );
+                                }
                             }
                             handlers::Action::None => {}
                         }

@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::chat::{ChatMessage, ChatRole, ContentBlock};
-use super::state::{Focus, Mode, ScreenState};
+use super::state::{CellKind, Focus, Mode, ScreenState};
 
 pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
     let chunks = Layout::default()
@@ -226,22 +226,33 @@ fn draw_agent_details(frame: &mut Frame, state: &ScreenState, area: Rect) {
 }
 
 fn draw_chat_pane(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
-    let chat_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
-        .split(area);
+    if state.thread_view.is_some() {
+        // Thread grid mode: grid (top 50%) + position detail (bottom 50%).
+        // Replaces the entire center panel — no chat input.
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
 
-    let messages_area = chat_layout[0];
-    let input_area = chat_layout[1];
+        draw_thread_grid(frame, state, layout[0]);
+        draw_position_detail(frame, state, layout[1]);
+    } else {
+        // Normal mode: messages + input
+        let chat_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .split(area);
 
-    // Record viewport height so scroll_up/scroll_down can do half-page jumps.
-    // Subtract 2 for the border lines.
-    state
-        .chat_view
-        .update_viewport_height(messages_area.height.saturating_sub(2));
+        let messages_area = chat_layout[0];
+        let input_area = chat_layout[1];
 
-    draw_chat_messages(frame, state, messages_area);
-    draw_chat_input(frame, state, input_area);
+        state
+            .chat_view
+            .update_viewport_height(messages_area.height.saturating_sub(2));
+
+        draw_chat_messages(frame, state, messages_area);
+        draw_chat_input(frame, state, input_area);
+    }
 }
 
 fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
@@ -295,10 +306,28 @@ fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
         )));
     }
 
+    // Auto-scroll: chat_scroll is "lines from bottom".
+    // 0 = pinned to bottom, >0 = scrolled up into history.
+    let viewport = area.height.saturating_sub(2);
+    let available_width = area.width.saturating_sub(2) as usize;
+    let wrapped_lines: u16 = lines
+        .iter()
+        .map(|line| {
+            let len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if len == 0 || available_width == 0 {
+                1
+            } else {
+                ((len + available_width - 1) / available_width).max(1) as u16
+            }
+        })
+        .sum();
+    let max_scroll = wrapped_lines.saturating_sub(viewport);
+    let scroll_offset = max_scroll.saturating_sub(state.chat_view.chat_scroll);
+
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((state.chat_view.chat_scroll, 0));
+        .scroll((scroll_offset, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -384,6 +413,327 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
     }
 }
 
+fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
+    let border_color = if state.focus == Focus::Threads {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let grid = match state.thread_view.as_mut() {
+        Some(g) => g,
+        None => return,
+    };
+
+    let title = format!(
+        " Thread Grid — pos {}/{} thread {}/{} ",
+        if grid.positions.is_empty() {
+            0
+        } else {
+            grid.cursor_col + 1
+        },
+        grid.positions.len(),
+        if grid.threads.is_empty() {
+            0
+        } else {
+            grid.cursor_row + 1
+        },
+        grid.threads.len(),
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 || grid.threads.is_empty() {
+        return;
+    }
+
+    let label_width: usize = 12;
+    let cell_width: usize = 4;
+    let grid_px = inner.width as usize - label_width.min(inner.width as usize);
+    let visible_cols = if cell_width > 0 {
+        grid_px / cell_width
+    } else {
+        0
+    };
+
+    grid.update_visible_cols(visible_cols);
+    grid.ensure_cursor_visible();
+
+    // Vertical scrolling
+    let max_rows = inner.height as usize;
+    let start_row = if grid.cursor_row >= max_rows {
+        grid.cursor_row - max_rows + 1
+    } else {
+        0
+    };
+    let end_row = (start_row + max_rows).min(grid.threads.len());
+
+    let start_col = grid.scroll_col;
+    let end_col = (grid.scroll_col + visible_cols).min(grid.positions.len());
+
+    for (display_row, row_idx) in (start_row..end_row).enumerate() {
+        let thread = &grid.threads[row_idx];
+        let y = inner.y + display_row as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+
+        // Thread label
+        let reason = match thread.start_reason.as_str() {
+            "INITIAL_THREAD" => "Init",
+            "TOOL_DEFS_UPDATED" => "TDef",
+            "COMPACTION" => "Comp",
+            other => {
+                if other.len() > 4 {
+                    &other[..4]
+                } else {
+                    other
+                }
+            }
+        };
+        let label = if thread.is_current {
+            format!("{:>2}.{} *", row_idx + 1, reason)
+        } else {
+            format!("{:>2}.{}", row_idx + 1, reason)
+        };
+        let label_style = if row_idx == grid.cursor_row {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let label_span = Span::styled(
+            format!("{:<width$}", label, width = label_width),
+            label_style,
+        );
+
+        // Compute non-empty columns for this row (full row, not just visible)
+        let row_cells = &grid.grid[row_idx];
+        let non_empty: Vec<usize> = row_cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !matches!(c, CellKind::Empty))
+            .map(|(i, _)| i)
+            .collect();
+        let first_ne = non_empty.first().copied();
+        let last_ne = non_empty.last().copied();
+
+        let mut spans = vec![label_span];
+
+        for col in start_col..end_col {
+            let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
+            let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+
+            // Is this empty cell between two non-empty cells? (connector pass-through)
+            let is_between = matches!(cell, CellKind::Empty)
+                && matches!((first_ne, last_ne), (Some(f), Some(l)) if f < col && col < l);
+            // Does this cell connect rightward?
+            let has_rightward =
+                !matches!(cell, CellKind::Empty) && last_ne.map(|l| col < l).unwrap_or(false);
+
+            let (text, base_color) = if is_between {
+                ("────".to_string(), Color::DarkGray)
+            } else {
+                match cell {
+                    CellKind::Empty => ("    ".to_string(), Color::DarkGray),
+                    CellKind::Unique(c) => {
+                        let conn = if has_rightward { "───" } else { "   " };
+                        let color = match c {
+                            'U' => Color::Cyan,
+                            'A' => Color::White,
+                            'T' => Color::Yellow,
+                            'R' => Color::Gray,
+                            _ => Color::White,
+                        };
+                        (format!("{c}{conn}"), color)
+                    }
+                    CellKind::Summary(_) => {
+                        let conn = if has_rightward { "───" } else { "   " };
+                        (format!("*{conn}"), Color::Magenta)
+                    }
+                    CellKind::Shared => {
+                        let conn = if has_rightward { "───" } else { "   " };
+                        (format!("·{conn}"), Color::DarkGray)
+                    }
+                }
+            };
+
+            let style = if is_cursor {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else {
+                Style::default().fg(base_color)
+            };
+
+            spans.push(Span::styled(text, style));
+        }
+
+        let line = Line::from(spans);
+        let line_area = Rect::new(inner.x, y, inner.width, 1);
+        frame.render_widget(Paragraph::new(line), line_area);
+    }
+}
+
+fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let border_color = if state.focus == Focus::Threads {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let grid = match state.thread_view.as_ref() {
+        Some(g) => g,
+        None => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Position Detail ")
+                .border_style(Style::default().fg(border_color));
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "No thread data",
+                    Style::default().fg(Color::DarkGray),
+                )))
+                .block(block),
+                area,
+            );
+            return;
+        }
+    };
+
+    let pos = grid.positions.get(grid.cursor_col);
+    let title = match pos {
+        Some(p) => format!(
+            " Position {}/{} (block #{}) ",
+            grid.cursor_col + 1,
+            grid.positions.len(),
+            p
+        ),
+        None => " Position Detail ".to_string(),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border_color));
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (thread_idx, thread) in grid.threads.iter().enumerate() {
+        let cell = grid
+            .grid
+            .get(thread_idx)
+            .and_then(|row| row.get(grid.cursor_col))
+            .copied()
+            .unwrap_or(CellKind::Empty);
+
+        if matches!(cell, CellKind::Empty) {
+            continue;
+        }
+
+        let reason = match thread.start_reason.as_str() {
+            "INITIAL_THREAD" => "Init",
+            "TOOL_DEFS_UPDATED" => "TDef",
+            "COMPACTION" => "Comp",
+            other => other,
+        };
+        let thread_label = format!("{}. {}", thread_idx + 1, reason);
+        let is_selected_row = thread_idx == grid.cursor_row;
+
+        let header_style = if is_selected_row {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        let cell_label = match cell {
+            CellKind::Unique(c) => format!(" [{c}]"),
+            CellKind::Shared => " [·]".to_string(),
+            CellKind::Summary(_) => " [*]".to_string(),
+            CellKind::Empty => unreachable!(),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {thread_label}"), header_style),
+            Span::styled(cell_label, Style::default().fg(Color::DarkGray)),
+        ]));
+
+        if let Some(detail) = grid.details.get(&(thread_idx, grid.cursor_col)) {
+            let content_lines = format_block_detail(&detail.content, detail.role);
+            lines.extend(content_lines);
+        }
+
+        lines.push(Line::from("")); // spacer
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " No content at this position",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Format a single content block for the position detail pane.
+fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'static>> {
+    let role_color = match role {
+        ChatRole::User => Color::Cyan,
+        ChatRole::Assistant => Color::White,
+        ChatRole::System => Color::DarkGray,
+    };
+
+    match content {
+        ContentBlock::Text(text) => text
+            .lines()
+            .map(|l| {
+                Line::from(Span::styled(
+                    format!("   {l}"),
+                    Style::default().fg(role_color),
+                ))
+            })
+            .collect(),
+        ContentBlock::ToolUse(name) => {
+            vec![Line::from(Span::styled(
+                format!("   [{name}]"),
+                Style::default().fg(Color::Yellow),
+            ))]
+        }
+        ContentBlock::Thinking(text) => {
+            let preview = if text.len() > 120 {
+                format!("   💭 {}…", &text[..120])
+            } else {
+                format!("   💭 {text}")
+            };
+            vec![Line::from(Span::styled(
+                preview,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ))]
+        }
+        ContentBlock::ToolResult(summary) => {
+            vec![Line::from(Span::styled(
+                format!("   ↳ {summary}"),
+                Style::default().fg(Color::DarkGray),
+            ))]
+        }
+    }
+}
+
 fn draw_chat_input(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let focused = state.focus == Focus::Chat;
     let border_color = if focused { Color::Yellow } else { Color::Cyan };
@@ -443,7 +793,8 @@ fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let keys = match state.focus {
         Focus::Sidebar => " │ ↑/↓:nav  n:new  r:refresh  Tab:agents  q:quit ",
         Focus::Agents => " │ ↑/↓:nav  Enter:chat  Tab:chat  Esc:sidebar ",
-        Focus::Chat => " │ Enter:send  Esc:sidebar  ↑/↓:scroll ",
+        Focus::Chat => " │ Enter:send  Esc:sidebar  ↑/↓:scroll  ^T:threads ",
+        Focus::Threads => " │ ←→:pos  ↑↓:thread  Tab:next  g/G:jump  ^T:close  Esc:sidebar ",
     };
     spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));
 

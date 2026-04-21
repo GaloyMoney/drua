@@ -1,4 +1,5 @@
 /// Structured chat content: interleaved text and tool-use blocks.
+#[derive(Clone)]
 pub enum ContentBlock {
     Text(String),
     ToolUse(String),
@@ -13,6 +14,7 @@ pub enum ChatRole {
     System,
 }
 
+#[derive(Clone)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub blocks: Vec<ContentBlock>,
