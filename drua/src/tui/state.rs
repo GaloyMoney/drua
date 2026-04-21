@@ -90,14 +90,30 @@ pub enum CellKind {
     Shared,
     /// Summary block (unique content in a COMPACTION thread).
     Summary(char),
+    /// Condensed — masked/simplified version of the original (e.g. masked tool result).
+    Condensed,
     /// Empty — this thread doesn't reference this position.
     Empty,
+}
+
+/// Token usage summary for an assistant response.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct UsageDetail {
+    pub model: String,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub cache_read_tokens: i32,
+    pub total_tokens: i32,
+    pub total_cost: f64,
 }
 
 /// Content detail for a single block at a (thread, position).
 pub struct BlockDetail {
     pub role: ChatRole,
     pub content: ContentBlock,
+    /// Usage metadata — present for blocks from an assistant response.
+    pub usage: Option<UsageDetail>,
 }
 
 /// Positionally-aligned thread grid state.
@@ -134,6 +150,85 @@ impl ThreadGridState {
 
     pub fn update_visible_cols(&mut self, cols: usize) {
         self.visible_cols = cols;
+    }
+
+    /// Returns true if the cell at (row, col) is non-empty.
+    fn is_non_empty(&self, row: usize, col: usize) -> bool {
+        self.grid
+            .get(row)
+            .and_then(|r| r.get(col))
+            .map(|c| !matches!(c, CellKind::Empty))
+            .unwrap_or(false)
+    }
+
+    /// Snap `cursor_col` to the nearest non-empty cell on the current row.
+    /// Prefers the current column, then searches outward in both directions.
+    /// If the entire row is empty, stays put.
+    pub fn snap_to_nearest_non_empty(&mut self) {
+        let row = self.cursor_row;
+        if row >= self.grid.len() {
+            return;
+        }
+        if self.is_non_empty(row, self.cursor_col) {
+            return;
+        }
+        let cols = self.grid[row].len();
+        // Search outward: check col-1, col+1, col-2, col+2, ...
+        for delta in 1..cols {
+            if self.cursor_col >= delta && self.is_non_empty(row, self.cursor_col - delta) {
+                self.cursor_col -= delta;
+                return;
+            }
+            let right = self.cursor_col + delta;
+            if right < cols && self.is_non_empty(row, right) {
+                self.cursor_col = right;
+                return;
+            }
+        }
+        // Entire row is empty — stay put
+    }
+
+    /// Find the next non-empty column to the right of the current position.
+    pub fn next_non_empty_right(&self) -> Option<usize> {
+        let row = self.cursor_row;
+        if row >= self.grid.len() {
+            return None;
+        }
+        let cols = self.grid[row].len();
+        ((self.cursor_col + 1)..cols).find(|&col| self.is_non_empty(row, col))
+    }
+
+    /// Find the next non-empty column to the left of the current position.
+    pub fn next_non_empty_left(&self) -> Option<usize> {
+        let row = self.cursor_row;
+        if row >= self.grid.len() {
+            return None;
+        }
+        (0..self.cursor_col)
+            .rev()
+            .find(|&col| self.is_non_empty(row, col))
+    }
+
+    /// Find the first non-empty column on the current row.
+    pub fn first_non_empty(&self) -> Option<usize> {
+        let row = self.cursor_row;
+        if row >= self.grid.len() {
+            return None;
+        }
+        self.grid[row]
+            .iter()
+            .position(|c| !matches!(c, CellKind::Empty))
+    }
+
+    /// Find the last non-empty column on the current row.
+    pub fn last_non_empty(&self) -> Option<usize> {
+        let row = self.cursor_row;
+        if row >= self.grid.len() {
+            return None;
+        }
+        self.grid[row]
+            .iter()
+            .rposition(|c| !matches!(c, CellKind::Empty))
     }
 }
 
@@ -394,18 +489,51 @@ impl ScreenState {
 
     pub fn grid_move_right(&mut self) {
         if let Some(ref mut g) = self.thread_view {
-            if !g.positions.is_empty() && g.cursor_col < g.positions.len() - 1 {
-                g.cursor_col += 1;
+            if let Some(col) = g.next_non_empty_right() {
+                g.cursor_col = col;
                 g.ensure_cursor_visible();
+            } else {
+                // At end of line — try jumping to next row that has content to the right
+                for next_row in (g.cursor_row + 1)..g.threads.len() {
+                    let has_content_right = g.grid.get(next_row).map_or(false, |row| {
+                        row.iter()
+                            .skip(g.cursor_col + 1)
+                            .any(|c| !matches!(c, CellKind::Empty))
+                    });
+                    if has_content_right {
+                        let was_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                        g.cursor_row = next_row;
+                        let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                        if was_orphan != is_orphan {
+                            if let Some(col) = g.first_non_empty() {
+                                g.cursor_col = col;
+                            }
+                        } else if let Some(col) = g.next_non_empty_right() {
+                            g.cursor_col = col;
+                        } else {
+                            g.snap_to_nearest_non_empty();
+                        }
+                        g.ensure_cursor_visible();
+                        return;
+                    }
+                }
             }
         }
     }
 
     pub fn grid_move_left(&mut self) {
         if let Some(ref mut g) = self.thread_view {
-            if g.cursor_col > 0 {
-                g.cursor_col -= 1;
+            if let Some(col) = g.next_non_empty_left() {
+                g.cursor_col = col;
                 g.ensure_cursor_visible();
+            } else {
+                // At start of line — wrap to the end of the same row
+                if let Some(col) = g.last_non_empty() {
+                    if col != g.cursor_col {
+                        g.cursor_col = col;
+                        g.ensure_cursor_visible();
+                    }
+                }
             }
         }
     }
@@ -413,7 +541,18 @@ impl ScreenState {
     pub fn grid_move_down(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             if !g.threads.is_empty() && g.cursor_row < g.threads.len() - 1 {
+                let was_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
                 g.cursor_row += 1;
+                let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                if was_orphan != is_orphan {
+                    // Crossing orphan boundary — jump to first content
+                    if let Some(col) = g.first_non_empty() {
+                        g.cursor_col = col;
+                    }
+                } else {
+                    g.snap_to_nearest_non_empty();
+                }
+                g.ensure_cursor_visible();
             }
         }
     }
@@ -421,22 +560,41 @@ impl ScreenState {
     pub fn grid_move_up(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             if g.cursor_row > 0 {
+                let was_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
                 g.cursor_row -= 1;
+                let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
+                if was_orphan != is_orphan {
+                    // Crossing orphan boundary — jump to first content
+                    if let Some(col) = g.first_non_empty() {
+                        g.cursor_col = col;
+                    }
+                } else {
+                    g.snap_to_nearest_non_empty();
+                }
+                g.ensure_cursor_visible();
+            } else {
+                // Already on top row — jump to beginning
+                if let Some(col) = g.first_non_empty() {
+                    g.cursor_col = col;
+                    g.scroll_col = 0;
+                }
             }
         }
     }
 
     pub fn grid_jump_start(&mut self) {
         if let Some(ref mut g) = self.thread_view {
-            g.cursor_col = 0;
-            g.scroll_col = 0;
+            if let Some(col) = g.first_non_empty() {
+                g.cursor_col = col;
+                g.scroll_col = 0;
+            }
         }
     }
 
     pub fn grid_jump_end(&mut self) {
         if let Some(ref mut g) = self.thread_view {
-            if !g.positions.is_empty() {
-                g.cursor_col = g.positions.len() - 1;
+            if let Some(col) = g.last_non_empty() {
+                g.cursor_col = col;
                 g.ensure_cursor_visible();
             }
         }

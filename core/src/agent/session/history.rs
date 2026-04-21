@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
 use super::message::{AssistantBlock, SandboxOperation, ToolResultInput};
+use super::metadata::AssistantResponseMetadata;
 use super::thread::{SessionThread as SessionThreadEntity, SessionThreadId};
 use super::view::{MessageView, PromptDefinition};
 
@@ -93,6 +94,17 @@ pub struct SessionThreadInfo {
     pub start_reason: ThreadStartReasonKind,
 }
 
+/// Token usage summary for an assistant response turn.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadMessageUsage {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
+    pub total_cost: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadMessage {
     pub role: ChatHistoryRole,
@@ -100,6 +112,8 @@ pub struct ThreadMessage {
     /// Global MessageBlockIndex values for this message turn.
     /// Compare across threads to identify shared content nodes.
     pub block_indexes: Vec<usize>,
+    /// Usage metadata (only present for assistant messages).
+    pub usage: Option<ThreadMessageUsage>,
 }
 
 // ─── Builder functions (delegated from AgentSession) ─────────────────────────
@@ -173,18 +187,32 @@ pub(super) fn build_thread_infos<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     current_main_thread: Option<SessionThreadId>,
 ) -> Vec<SessionThreadInfo> {
-    // Build a map of thread_id -> start_reason from session events
-    let start_reasons: std::collections::HashMap<SessionThreadId, ThreadStartReason> = events
-        .filter_map(|e| match e {
-            AgentSessionEvent::ThreadStarted {
-                thread_id,
-                start_reason,
-            } => Some((*thread_id, *start_reason)),
-            _ => None,
-        })
-        .collect();
+    // Build maps of thread_id -> (start_reason, creation_order) from session events.
+    // Event order is the definitive creation order since iter_persisted() comes from
+    // a HashMap whose iteration order is arbitrary.
+    let mut start_reasons: std::collections::HashMap<SessionThreadId, ThreadStartReason> =
+        std::collections::HashMap::new();
+    let mut creation_order: std::collections::HashMap<SessionThreadId, usize> =
+        std::collections::HashMap::new();
+    let mut order_idx = 0usize;
 
-    threads
+    for event in events {
+        if let AgentSessionEvent::ThreadStarted {
+            thread_id,
+            start_reason,
+        } = event
+        {
+            start_reasons.insert(*thread_id, *start_reason);
+            creation_order.insert(*thread_id, order_idx);
+            order_idx += 1;
+        }
+    }
+
+    let mut sorted_threads: Vec<_> = threads.collect();
+    sorted_threads.sort_by_key(|t| creation_order.get(&t.id).copied().unwrap_or(usize::MAX));
+
+    sorted_threads
+        .into_iter()
         .map(|thread| {
             let next_turn = if thread.is_user_turn() {
                 ThreadTurnState::User
@@ -215,6 +243,11 @@ pub(super) fn build_thread_infos<'a>(
 /// Resolves a thread's prompt definition into a list of messages, each carrying
 /// its own block indexes. The global block content list is built by scanning
 /// session events, then each `MessageView` is resolved independently.
+///
+/// For compacted threads whose views contain remapped replacement indexes,
+/// this function reverse-maps them back to the original block indexes in the
+/// GQL output so that both threads reference the same positions — enabling
+/// positional alignment in the thread grid.
 pub(super) fn build_thread_messages(
     prompt_def: PromptDefinition,
     events: &EntityEvents<AgentSessionEvent>,
@@ -222,19 +255,37 @@ pub(super) fn build_thread_messages(
     // Build the global block content list from session events
     // (mirrors the event scan in PromptDefinition::into_prompt).
     let mut all_blocks: Vec<BlockContent> = Vec::new();
+    // Reverse map: replacement block index → original block index.
+    // Used to report original positions in the GQL block_indexes output.
+    let mut reverse_remap: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    // Map: first block index of each assistant response → metadata.
+    let mut assistant_metadata: std::collections::HashMap<usize, AssistantResponseMetadata> =
+        std::collections::HashMap::new();
 
     for event in events.iter_all() {
         match event {
             AgentSessionEvent::UserInputAdded { text, .. } => {
                 all_blocks.push(BlockContent::UserText(text.clone()));
             }
-            AgentSessionEvent::SandboxNotificationAdded { text, .. } => {
-                all_blocks.push(BlockContent::UserText(text.clone()));
+            AgentSessionEvent::SandboxNotificationAdded {
+                sandbox_name,
+                operation,
+                ..
+            } => {
+                all_blocks.push(BlockContent::SandboxNotification {
+                    sandbox_name: sandbox_name.clone(),
+                    operation: operation.clone(),
+                });
             }
-            AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+            AgentSessionEvent::AssistantResponseReceived {
+                content, metadata, ..
+            } => {
+                let first_idx = all_blocks.len();
                 for block in content {
                     all_blocks.push(BlockContent::AssistantBlock(block.clone()));
                 }
+                assistant_metadata.insert(first_idx, metadata.clone());
             }
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
                 for result in results {
@@ -243,6 +294,8 @@ pub(super) fn build_thread_messages(
             }
             AgentSessionEvent::ToolResultsMasked { results, .. } => {
                 for masked in results {
+                    let replacement_idx = all_blocks.len();
+                    reverse_remap.insert(replacement_idx, masked.original_index.index());
                     all_blocks.push(BlockContent::ToolResult(masked.replacement.clone()));
                 }
             }
@@ -254,7 +307,9 @@ pub(super) fn build_thread_messages(
     prompt_def
         .messages
         .iter()
-        .map(|msg_view| resolve_message_view(msg_view, &all_blocks))
+        .map(|msg_view| {
+            resolve_message_view(msg_view, &all_blocks, &reverse_remap, &assistant_metadata)
+        })
         .collect()
 }
 
@@ -262,11 +317,20 @@ pub(super) fn build_thread_messages(
 
 enum BlockContent {
     UserText(String),
+    SandboxNotification {
+        sandbox_name: String,
+        operation: SandboxOperation,
+    },
     AssistantBlock(AssistantBlock),
     ToolResult(ToolResultInput),
 }
 
-fn resolve_message_view(view: &MessageView, all_blocks: &[BlockContent]) -> ThreadMessage {
+fn resolve_message_view(
+    view: &MessageView,
+    all_blocks: &[BlockContent],
+    reverse_remap: &std::collections::HashMap<usize, usize>,
+    assistant_metadata: &std::collections::HashMap<usize, AssistantResponseMetadata>,
+) -> ThreadMessage {
     match view {
         MessageView::User(v) => {
             let block_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
@@ -274,13 +338,29 @@ fn resolve_message_view(view: &MessageView, all_blocks: &[BlockContent]) -> Thre
                 .iter()
                 .map(|&idx| match &all_blocks[idx] {
                     BlockContent::UserText(text) => ChatHistoryBlock::Text { text: text.clone() },
-                    _ => panic!("User view index does not point to UserText"),
+                    BlockContent::SandboxNotification {
+                        sandbox_name,
+                        operation,
+                    } => ChatHistoryBlock::SandboxNotification {
+                        sandbox_name: sandbox_name.clone(),
+                        operation: match operation {
+                            SandboxOperation::Attach { mode, mount_path } => {
+                                SandboxNotificationOp::Attach {
+                                    mode: mode.clone(),
+                                    mount_path: mount_path.clone(),
+                                }
+                            }
+                            SandboxOperation::Detach => SandboxNotificationOp::Detach,
+                        },
+                    },
+                    _ => panic!("User view index does not point to UserText or SandboxNotification"),
                 })
                 .collect();
             ThreadMessage {
                 role: ChatHistoryRole::User,
                 blocks,
                 block_indexes,
+                usage: None,
             }
         }
         MessageView::Assistant(v) => {
@@ -294,29 +374,53 @@ fn resolve_message_view(view: &MessageView, all_blocks: &[BlockContent]) -> Thre
                     _ => panic!("Assistant view index does not point to AssistantBlock"),
                 })
                 .collect();
+            // Look up metadata by the first block index in this assistant turn.
+            let usage = block_indexes.first().and_then(|&first_idx| {
+                assistant_metadata.get(&first_idx).map(|meta| ThreadMessageUsage {
+                    model: meta.model.clone(),
+                    input_tokens: meta.usage.input,
+                    output_tokens: meta.usage.output,
+                    cache_read_tokens: meta.usage.cache_read,
+                    total_tokens: meta.usage.total_tokens,
+                    total_cost: meta.cost.total,
+                })
+            });
             ThreadMessage {
                 role: ChatHistoryRole::Assistant,
                 blocks,
                 block_indexes,
+                usage,
             }
         }
         MessageView::ToolResults(v) => {
-            let block_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
-            let blocks = block_indexes
+            // Resolve content from the actual view indexes (which may be
+            // replacement indexes for compacted threads).
+            let raw_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
+            let blocks = raw_indexes
                 .iter()
-                .map(|&idx| match &all_blocks[idx] {
-                    BlockContent::ToolResult(result) => ChatHistoryBlock::ToolResult {
+                .map(|&idx| {
+                    let result = match &all_blocks[idx] {
+                        BlockContent::ToolResult(result) => result,
+                        _ => panic!("ToolResults view index does not point to ToolResult"),
+                    };
+                    ChatHistoryBlock::ToolResult {
                         tool_use_id: result.tool_use_id.clone(),
                         content: result.content.clone(),
                         is_error: result.is_error,
-                    },
-                    _ => panic!("ToolResults view index does not point to ToolResult"),
+                    }
                 })
+                .collect();
+            // Reverse-map replacement indexes back to original positions for GQL
+            // output so both threads reference the same column in the grid.
+            let block_indexes = raw_indexes
+                .iter()
+                .map(|&idx| reverse_remap.get(&idx).copied().unwrap_or(idx))
                 .collect();
             ThreadMessage {
                 role: ChatHistoryRole::User,
                 blocks,
                 block_indexes,
+                usage: None,
             }
         }
     }

@@ -18,7 +18,7 @@ use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
     AgentItem, BlockDetail, CellKind, Focus, SandboxInfo, ScreenState, ThreadGridState, ThreadInfo,
-    WorkspaceItem,
+    UsageDetail, WorkspaceItem,
 };
 use crate::tui::{handlers, ui};
 
@@ -261,6 +261,14 @@ const THREADS_QUERY: &str = r#"
                             ... on ToolResultContent { toolUseId content isError }
                             ... on SandboxNotificationContent { sandboxName operation }
                         }
+                        usage {
+                            model
+                            inputTokens
+                            outputTokens
+                            cacheReadTokens
+                            totalTokens
+                            totalCost
+                        }
                     }
                 }
             }
@@ -299,6 +307,18 @@ struct ThreadMessageNode {
     role: String,
     block_indexes: Vec<i32>,
     content: Vec<ChatHistoryContentBlock>,
+    usage: Option<ThreadMessageUsageNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadMessageUsageNode {
+    model: String,
+    input_tokens: i32,
+    output_tokens: i32,
+    cache_read_tokens: i32,
+    total_tokens: i32,
+    total_cost: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +631,8 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let mut grid: Vec<Vec<CellKind>> = vec![vec![CellKind::Empty; num_positions]; num_threads];
     let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
     let mut thread_infos = Vec::new();
+    // Track owner's content per block-index for condensed detection.
+    let mut owner_content: HashMap<i32, ContentBlock> = HashMap::new();
 
     for (thread_idx, node) in thread_nodes.into_iter().enumerate() {
         let is_compaction = node.start_reason == "COMPACTION";
@@ -630,28 +652,58 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 _ => ChatRole::Assistant,
             };
 
+            // Convert usage once per message — shared by all blocks in this turn.
+            let msg_usage = msg.usage.map(|u| UsageDetail {
+                model: u.model,
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read_tokens: u.cache_read_tokens,
+                total_tokens: u.total_tokens,
+                total_cost: u.total_cost,
+            });
+
             for (content_block, bi) in msg.content.into_iter().zip(msg.block_indexes) {
                 let pos_idx = match pos_map.get(&bi) {
                     Some(&idx) => idx,
                     None => continue,
                 };
 
+                let is_sandbox = matches!(
+                    content_block,
+                    ChatHistoryContentBlock::SandboxNotificationContent { .. }
+                );
                 let content = content_block.into_content_block();
-                let type_char = content_type_char(&content, role);
+                let type_char = if is_sandbox {
+                    'S'
+                } else {
+                    content_type_char(&content, role)
+                };
                 let is_owner = owner.get(&bi) == Some(&thread_idx);
 
                 let cell = if is_owner {
+                    owner_content.insert(bi, content.clone());
                     if is_compaction {
                         CellKind::Summary(type_char)
                     } else {
                         CellKind::Unique(type_char)
                     }
                 } else {
-                    CellKind::Shared
+                    // Compare with owner's content — different means condensed/masked.
+                    match owner_content.get(&bi) {
+                        Some(owner_c) if *owner_c != content => CellKind::Condensed,
+                        _ => CellKind::Shared,
+                    }
                 };
 
                 grid[thread_idx][pos_idx] = cell;
-                details.insert((thread_idx, pos_idx), BlockDetail { role, content });
+                details.insert(
+                    (thread_idx, pos_idx),
+                    BlockDetail {
+                        role,
+                        content,
+                        usage: msg_usage.clone(),
+                    },
+                );
             }
         }
     }
@@ -661,8 +713,12 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let initial_col = grid
         .get(current_thread_idx)
         .and_then(|row| {
-            row.iter()
-                .position(|c| matches!(c, CellKind::Unique(_) | CellKind::Summary(_)))
+            row.iter().position(|c| {
+                matches!(
+                    c,
+                    CellKind::Unique(_) | CellKind::Summary(_) | CellKind::Condensed
+                )
+            })
         })
         .unwrap_or(0);
 

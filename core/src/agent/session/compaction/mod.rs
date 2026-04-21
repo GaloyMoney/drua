@@ -2,7 +2,7 @@ pub(super) mod estimation;
 pub(super) mod prune;
 pub(super) mod trigger;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use es_entity::EntityEvents;
@@ -10,7 +10,7 @@ use es_entity::EntityEvents;
 use crate::agent::config::ModelDefaults;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
-use super::message::{CompactionMetadata, TargetThread};
+use super::message::{CompactionMetadata, SandboxOperation, TargetThread};
 use super::settings::CompactionConfig;
 use super::thread::{NewSessionThread, SessionThreadId};
 use super::view::*;
@@ -113,15 +113,43 @@ pub(super) fn maybe_prune(
         CompactionAction::PruneOpportunistic | CompactionAction::PruneThenSummarize => {}
     }
 
-    let plan = build_pruning_plan(events.iter_all(), current_thread_id, is_main_thread, config);
+    let plan = build_pruning_plan(
+        events.iter_all(),
+        current_thread_id,
+        is_main_thread,
+        config,
+        current_prompt_definition,
+    );
     if plan.is_empty() {
         return None;
     }
 
     let new_thread_id = SessionThreadId::new();
 
-    // Transform the current thread's message views to apply the pruning plan
-    let transformed_messages = transform_message_views(&current_prompt_definition.messages, &plan);
+    // Compute the current total block count so we know where masked
+    // replacement blocks will land in the global content list.
+    let current_block_count = count_blocks(events.iter_all());
+
+    // Build original→replacement index mapping for masked tool results.
+    // The ToolResultsMasked event is emitted first (before CompactionApplied),
+    // so its blocks start at `current_block_count`.
+    let mask_remap: HashMap<MessageBlockIndex, MessageBlockIndex> = plan
+        .masked_tool_results
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            (
+                m.original_index,
+                MessageBlockIndex::new(current_block_count + i),
+            )
+        })
+        .collect();
+
+    // Transform the current thread's message views to apply the pruning plan.
+    // This remaps masked tool result indexes so that `into_prompt()` resolves
+    // to the masked replacement content.
+    let transformed_messages =
+        transform_message_views(&current_prompt_definition.messages, &plan, &mask_remap);
 
     let compaction_metadata = CompactionMetadata {
         follows_from: current_thread_id,
@@ -227,6 +255,9 @@ fn time_since_last_response_on_thread(
 /// Build an orphan result: a brand-new thread with only the pending user
 /// messages (no conversation carry-over). Used when idle time exceeds the
 /// configured reset threshold.
+///
+/// If a sandbox is currently attached, its notification is preserved as the
+/// first message so the agent knows about its sandbox environment.
 fn build_orphan_result<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     session_id: super::AgentSessionId,
@@ -241,8 +272,20 @@ fn build_orphan_result<'a>(
 
     // Only carry forward user messages that arrived after the last PromptSent
     // for this thread — not the entire conversation history.
-    let pending = pending_user_message_indexes(events, current_thread_id, is_main_thread);
-    let user_messages = UserMessagesView { indexes: pending };
+    let pending = pending_user_message_indexes(events.clone(), current_thread_id, is_main_thread);
+
+    // If a sandbox is currently attached, prepend its notification so the
+    // orphan thread's LLM knows about the sandbox mount.
+    let sandbox_idx = last_active_sandbox_attach_index(events);
+    let mut all_indexes = Vec::new();
+    if let Some(idx) = sandbox_idx {
+        all_indexes.push(idx);
+    }
+    all_indexes.extend(pending);
+
+    let user_messages = UserMessagesView {
+        indexes: all_indexes,
+    };
 
     let prompt_definition = PromptDefinition {
         model: model_defaults.model.clone(),
@@ -328,14 +371,78 @@ fn pending_user_message_indexes<'a>(
     pending
 }
 
+/// Find the block index of the last sandbox attach notification that is still
+/// active (not followed by a detach for the same sandbox). Returns `None` if
+/// no sandbox is currently attached.
+fn last_active_sandbox_attach_index<'a>(
+    events: impl Iterator<Item = &'a AgentSessionEvent> + Clone,
+) -> Option<MessageBlockIndex> {
+    // Forward scan: track attach/detach state per sandbox name and assign
+    // block indexes.
+    let mut block_counter = 0usize;
+    // sandbox_name → block index of last Attach
+    let mut attached: HashMap<String, MessageBlockIndex> = HashMap::new();
+
+    for event in events {
+        match event {
+            AgentSessionEvent::SandboxNotificationAdded {
+                sandbox_name,
+                operation,
+                ..
+            } => {
+                let idx = MessageBlockIndex::new(block_counter);
+                block_counter += 1;
+                match operation {
+                    SandboxOperation::Attach { .. } => {
+                        attached.insert(sandbox_name.clone(), idx);
+                    }
+                    SandboxOperation::Detach => {
+                        attached.remove(sandbox_name);
+                    }
+                }
+            }
+            AgentSessionEvent::UserInputAdded { .. } => {
+                block_counter += 1;
+            }
+            AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                block_counter += content.len();
+            }
+            AgentSessionEvent::ToolResultsAdded { results, .. } => {
+                block_counter += results.len();
+            }
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                block_counter += results.len();
+            }
+            _ => {}
+        }
+    }
+
+    // Return the most recently attached sandbox's block index.
+    // (Typically there is at most one active sandbox.)
+    attached.into_values().max()
+}
+
+/// Count the total number of content blocks in the event stream.
+fn count_blocks<'a>(events: impl Iterator<Item = &'a AgentSessionEvent>) -> usize {
+    events.fold(0usize, |acc, e| match e {
+        AgentSessionEvent::UserInputAdded { .. }
+        | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
+        AgentSessionEvent::AssistantResponseReceived { content, .. } => acc + content.len(),
+        AgentSessionEvent::ToolResultsAdded { results, .. } => acc + results.len(),
+        AgentSessionEvent::ToolResultsMasked { results, .. } => acc + results.len(),
+        _ => acc,
+    })
+}
+
 /// Transform message views by applying the pruning plan:
 /// - Filter out stripped user messages from User views
 /// - Filter out cleared thinking blocks from Assistant views
-///
-/// Tool result masking does NOT need view transformation here — the masked
-/// tool results are persisted via CompactionApplied and get new natural
-/// indexes when into_prompt() walks the event stream.
-fn transform_message_views(messages: &[MessageView], plan: &PruningPlan) -> Vec<MessageView> {
+/// - Remap masked tool result indexes to their replacement indexes
+fn transform_message_views(
+    messages: &[MessageView],
+    plan: &PruningPlan,
+    mask_remap: &HashMap<MessageBlockIndex, MessageBlockIndex>,
+) -> Vec<MessageView> {
     let stripped: HashSet<&MessageBlockIndex> = plan.stripped_user_messages.iter().collect();
     let cleared: HashSet<&MessageBlockIndex> = plan.cleared_thinking.iter().collect();
 
@@ -367,10 +474,16 @@ fn transform_message_views(messages: &[MessageView], plan: &PruningPlan) -> Vec<
                     }));
                 }
             }
-            MessageView::ToolResults(_) => {
-                // Tool results views pass through unchanged — masking is handled
-                // by the CompactionApplied event giving replacements new indexes
-                result.push(msg.clone());
+            MessageView::ToolResults(tool_results_view) => {
+                // Remap masked tool result indexes to their replacement indexes.
+                let remapped: Vec<MessageBlockIndex> = tool_results_view
+                    .indexes
+                    .iter()
+                    .map(|idx| mask_remap.get(idx).copied().unwrap_or(*idx))
+                    .collect();
+                result.push(MessageView::ToolResults(ToolResultsView {
+                    indexes: remapped,
+                }));
             }
         }
     }
@@ -402,7 +515,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = transform_message_views(&messages, &plan);
+        let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert_eq!(result.len(), 2);
         match &result[0] {
             MessageView::User(v) => assert_eq!(v.indexes.len(), 2),
@@ -427,7 +540,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = transform_message_views(&messages, &plan);
+        let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert_eq!(result.len(), 1);
         match &result[0] {
             MessageView::Assistant(v) => {
@@ -455,7 +568,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = transform_message_views(&messages, &plan);
+        let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert!(result.is_empty());
     }
+
 }

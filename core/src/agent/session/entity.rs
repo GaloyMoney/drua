@@ -261,27 +261,43 @@ impl AgentSession {
         }
         pending_indexes.reverse();
 
-        if !pending_indexes.is_empty() {
-            let user_messages_view = UserMessagesView {
-                indexes: pending_indexes,
-            };
-            let thread = self
-                .threads
-                .get_persisted_mut(&thread_id)
-                .ok_or(AgentSessionError::ThreadNotFound)?;
-            thread.add_user_message(user_messages_view);
-        }
-
+        // Build prompt definition from current thread WITHOUT adding
+        // the new user messages to the thread yet. We augment the
+        // prompt_definition directly so compaction can see the full
+        // context, but the old thread won't carry the user message
+        // if compaction creates a new thread (avoiding duplication).
         let thread = self
             .threads
             .get_persisted(&thread_id)
             .ok_or(AgentSessionError::ThreadNotFound)?;
-        let prompt_definition = thread.prompt_definition();
+        let mut prompt_definition = thread.prompt_definition();
+
+        let pending_user_view = if !pending_indexes.is_empty() {
+            let umv = UserMessagesView {
+                indexes: pending_indexes,
+            };
+            prompt_definition
+                .messages
+                .push(MessageView::User(umv.clone()));
+            Some(umv)
+        } else {
+            None
+        };
 
         // --- Compaction check ---
         let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
-            Some(result) => result,
-            None => (thread_id, prompt_definition),
+            Some(result) => result, // user messages carried to compacted thread
+            None => {
+                // No compaction — now add user messages to the old thread
+                if let Some(umv) = pending_user_view {
+                    let thread = self
+                        .threads
+                        .get_persisted_mut(&thread_id)
+                        .ok_or(AgentSessionError::ThreadNotFound)?;
+                    thread.add_user_message(umv);
+                }
+                (thread_id, prompt_definition)
+            }
         };
         let target = if self.current_main_thread == Some(thread_id) {
             TargetThread::Main
