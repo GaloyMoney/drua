@@ -4,6 +4,7 @@ pub mod error;
 pub mod history;
 pub(super) mod message;
 mod metadata;
+pub mod pi_export;
 pub mod repo;
 mod settings;
 mod thread;
@@ -192,6 +193,13 @@ impl Sessions {
     ) -> Result<Option<SessionThreadId>, AgentSessionError> {
         let session = self.repo.find_by_agent_id(agent_id).await?;
         Ok(session.current_main_thread_id())
+    }
+
+    #[instrument(name = "domain.agent_session.export_thread", skip(self))]
+    pub async fn export_thread(&self, agent_id: AgentId) -> Result<String, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        let (header, entries) = session.export_thread()?;
+        Ok(pi_export::to_jsonl(&header, &entries))
     }
 
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]

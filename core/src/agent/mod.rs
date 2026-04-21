@@ -516,6 +516,26 @@ impl Agents {
         Ok(self.sessions.thread_messages(agent_id, thread_id).await?)
     }
 
+    /// Export the current main thread of the given agent as Pi-compatible
+    /// JSONL (v3 format).
+    #[instrument(name = "domain.agent.export_thread", skip(self, sub))]
+    pub async fn export_thread(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+    ) -> Result<String, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.export_thread");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        let jsonl = self.sessions.export_thread(agent_id).await?;
+        Ok(jsonl)
+    }
+
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
         &self,

@@ -26,6 +26,11 @@ enum Command {
     Logout,
     /// Interactive TUI dashboard
     Dashboard,
+    /// Export an agent's thread as Pi-compatible JSONL
+    Export {
+        /// Agent ID (UUID)
+        agent_id: String,
+    },
     /// Workspace management
     Workspace {
         #[command(subcommand)]
@@ -61,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Status => commands::status::run().await,
         Command::Logout => commands::logout::run(),
         Command::Dashboard => commands::dashboard::run(cli.server).await,
+        Command::Export { agent_id } => commands::export::run(&agent_id).await,
         Command::Workspace { action } => match action {
             WorkspaceAction::List => commands::workspace::list().await,
             WorkspaceAction::Create { name, description } => {

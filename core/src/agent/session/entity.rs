@@ -7,8 +7,16 @@ use es_entity::*;
 use crate::agent::config::ModelDefaults;
 
 use super::{
-    compaction, error::AgentSessionError, history, message::*, metadata::*, settings::*, thread::*,
-    view::*, AgentSessionId,
+    compaction,
+    error::AgentSessionError,
+    history,
+    message::*,
+    metadata::*,
+    pi_export::{self, PiIdGenerator, PiSessionEntry, PiSessionHeader},
+    settings::*,
+    thread::*,
+    view::*,
+    AgentSessionId,
 };
 
 // ============================================================================
@@ -139,6 +147,118 @@ pub enum AgentSessionResponse {
 impl AgentSession {
     pub fn current_main_thread_id(&self) -> Option<SessionThreadId> {
         self.current_main_thread
+    }
+
+    /// Export the current main thread as Pi-compatible JSONL (v3).
+    ///
+    /// Walks session-level events, filters for those targeting the main
+    /// thread, and converts each to a [`PiSessionEntry`]. Returns the
+    /// header plus all entries; the caller serializes them with
+    /// [`pi_export::to_jsonl`].
+    pub fn export_thread(
+        &self,
+    ) -> Result<(PiSessionHeader, Vec<PiSessionEntry>), AgentSessionError> {
+        let thread_id = self
+            .current_main_thread
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+
+        let now = chrono::Utc::now();
+        let header = pi_export::build_header(self.id, now);
+
+        let mut id_gen = PiIdGenerator::new();
+        let mut entries = Vec::new();
+        let base_ts = self
+            .events
+            .entity_first_persisted_at()
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or_else(|| now.timestamp_millis());
+        // Use a small offset per entry to preserve ordering when real
+        // timestamps are unavailable.
+        let mut ts_offset: i64 = 0;
+
+        for event in self.events.iter_all() {
+            let parent_id = entries.last().map(|e: &PiSessionEntry| e.id.clone());
+            let parent_ref = parent_id.as_deref();
+            let ts = base_ts + ts_offset;
+
+            match event {
+                AgentSessionEvent::UserInputAdded { target, text, .. } => {
+                    if !self.targets_thread(target, thread_id) {
+                        continue;
+                    }
+                    entries.push(pi_export::build_user_entry(
+                        &mut id_gen,
+                        parent_ref,
+                        text,
+                        ts,
+                    ));
+                    ts_offset += 1;
+                }
+                AgentSessionEvent::SandboxNotificationAdded { target, text, .. } => {
+                    if !self.targets_thread(target, thread_id) {
+                        continue;
+                    }
+                    entries.push(pi_export::build_user_entry(
+                        &mut id_gen,
+                        parent_ref,
+                        text,
+                        ts,
+                    ));
+                    ts_offset += 1;
+                }
+                AgentSessionEvent::AssistantResponseReceived {
+                    thread_id: tid,
+                    content,
+                    stop_reason,
+                    metadata,
+                    ..
+                } if *tid == thread_id => {
+                    let reason = match stop_reason {
+                        StopReason::Stop => "end_turn",
+                        StopReason::Length => "max_tokens",
+                        StopReason::ToolUse => "tool_use",
+                        StopReason::Error => "error",
+                    };
+                    entries.push(pi_export::build_assistant_entry(
+                        &mut id_gen,
+                        parent_ref,
+                        content,
+                        reason,
+                        metadata,
+                        ts,
+                    ));
+                    ts_offset += 1;
+                }
+                AgentSessionEvent::ToolResultsAdded {
+                    thread_id: tid,
+                    results,
+                } if *tid == thread_id => {
+                    for result in results {
+                        let parent_id = entries.last().map(|e: &PiSessionEntry| e.id.clone());
+                        let parent_ref = parent_id.as_deref();
+                        let ts = base_ts + ts_offset;
+                        entries.push(pi_export::build_tool_result_entry(
+                            &mut id_gen,
+                            parent_ref,
+                            result,
+                            ts,
+                        ));
+                        ts_offset += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok((header, entries))
+    }
+
+    /// Whether a [`TargetThread`] references the given thread id.
+    fn targets_thread(&self, target: &TargetThread, thread_id: SessionThreadId) -> bool {
+        match target {
+            TargetThread::Main => self.current_main_thread == Some(thread_id),
+            TargetThread::Id(id) => *id == thread_id,
+        }
     }
 
     pub fn add_user_input(
