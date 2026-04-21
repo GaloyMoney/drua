@@ -558,6 +558,12 @@ impl ScreenState {
                     g.snap_to_nearest_non_empty();
                 }
                 g.ensure_cursor_visible();
+            } else {
+                // Already on top row — jump to beginning
+                if let Some(col) = g.first_non_empty() {
+                    g.cursor_col = col;
+                    g.scroll_col = 0;
+                }
             }
         }
     }
