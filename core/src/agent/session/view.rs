@@ -279,7 +279,22 @@ impl PromptDefinition {
                 }
                 AgentSessionEvent::AssistantResponseReceived { content, .. } => {
                     for block in content {
-                        all_blocks.push(BlockContent::AssistantBlock(block.clone()));
+                        // Sanitize null tool_use inputs (from events persisted before
+                        // the stream accumulator fix) — the Anthropic API rejects
+                        // `"input": null`, requiring a valid JSON object.
+                        let block = match block {
+                            AssistantBlock::ToolUse { id, name, input }
+                                if input.is_null() =>
+                            {
+                                AssistantBlock::ToolUse {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    input: serde_json::Value::Object(serde_json::Map::new()),
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        all_blocks.push(BlockContent::AssistantBlock(block));
                     }
                 }
                 AgentSessionEvent::ToolResultsAdded { results, .. } => {

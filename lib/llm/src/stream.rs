@@ -154,7 +154,16 @@ impl StreamAccumulator {
         }
 
         for tc in self.tool_calls {
-            let input = serde_json::from_str(&tc.json_buf).unwrap_or(serde_json::Value::Null);
+            // Zero-parameter tools may receive no InputJsonDelta events,
+            // leaving json_buf empty. Default to "{}" so the Anthropic
+            // API doesn't reject a null input on the next turn.
+            let json_str = if tc.json_buf.is_empty() {
+                "{}".to_string()
+            } else {
+                tc.json_buf
+            };
+            let input = serde_json::from_str(&json_str)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
             content.push(AssistantBlock::ToolUse {
                 id: tc.id,
                 name: tc.name,
