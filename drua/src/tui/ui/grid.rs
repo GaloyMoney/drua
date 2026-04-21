@@ -140,9 +140,8 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
             GridDisplayItem::Separator => {
                 let sep_char = "─ ";
                 let label_pad = " ".repeat(label_width);
-                let sep_content: String = std::iter::repeat(sep_char)
-                    .take((inner.width as usize - label_width) / sep_char.len())
-                    .collect();
+                let sep_content =
+                    sep_char.repeat((inner.width as usize - label_width) / sep_char.len());
                 let line = Line::from(vec![
                     Span::raw(label_pad),
                     Span::styled(sep_content, Style::default().fg(Color::DarkGray)),

@@ -495,7 +495,7 @@ impl ScreenState {
             } else {
                 // At end of line — try jumping to next row that has content to the right
                 for next_row in (g.cursor_row + 1)..g.threads.len() {
-                    let has_content_right = g.grid.get(next_row).map_or(false, |row| {
+                    let has_content_right = g.grid.get(next_row).is_some_and(|row| {
                         row.iter()
                             .skip(g.cursor_col + 1)
                             .any(|c| !matches!(c, CellKind::Empty))
