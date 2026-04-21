@@ -571,5 +571,4 @@ mod tests {
         let result = transform_message_views(&messages, &plan, &HashMap::new());
         assert!(result.is_empty());
     }
-
 }

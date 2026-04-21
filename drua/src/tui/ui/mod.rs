@@ -71,9 +71,7 @@ fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
         Focus::Sidebar => " │ ↑/↓:nav  n:new  r:refresh  Tab:agents  q:quit ",
         Focus::Agents => " │ ↑/↓:nav  Enter:chat  Tab:chat  Esc:sidebar ",
         Focus::Chat => " │ Enter:send  Esc:sidebar  ↑/↓:scroll  ^T:threads ",
-        Focus::Threads => {
-            " │ ←→:pos  ↑↓:thread  Tab:next  g/G:jump  ^T:close  Esc:sidebar "
-        }
+        Focus::Threads => " │ ←→:pos  ↑↓:thread  Tab:next  g/G:jump  ^T:close  Esc:sidebar ",
     };
     spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));
 

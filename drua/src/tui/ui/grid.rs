@@ -45,7 +45,10 @@ fn section_active_columns(
             }
         }
     }
-    active.into_iter().map(|s| s.into_iter().collect()).collect()
+    active
+        .into_iter()
+        .map(|s| s.into_iter().collect())
+        .collect()
 }
 
 pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
@@ -278,7 +281,12 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
 }
 
 /// Render a non-empty cell symbol + connector into the span list.
-fn render_cell_span(spans: &mut Vec<Span<'static>>, cell: CellKind, is_cursor: bool, conn_str: &str) {
+fn render_cell_span(
+    spans: &mut Vec<Span<'static>>,
+    cell: CellKind,
+    is_cursor: bool,
+    conn_str: &str,
+) {
     let (sym, sym_color, bold) = cell_symbol(cell);
     let sym_style = if is_cursor {
         Style::default().fg(Color::Black).bg(Color::Yellow)
@@ -383,11 +391,7 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         if let Some(detail) = grid.details.get(&(grid.cursor_row, grid.cursor_col)) {
             // Show usage summary before content so it's always visible.
             if let Some(ref usage) = detail.usage {
-                let model_short = usage
-                    .model
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&usage.model);
+                let model_short = usage.model.rsplit('/').next().unwrap_or(&usage.model);
                 let cost_str = if usage.total_cost > 0.0 {
                     format!(" ${:.4}", usage.total_cost)
                 } else {

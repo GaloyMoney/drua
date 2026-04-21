@@ -71,9 +71,8 @@ impl CodeAssistantToolSet {
                 .to_string()
                 .into(),
         );
-        tool.input_schema = Arc::new(
-            serde_json::from_value((*SEARCH_CODE_SCHEMA).clone()).unwrap_or_default(),
-        );
+        tool.input_schema =
+            Arc::new(serde_json::from_value((*SEARCH_CODE_SCHEMA).clone()).unwrap_or_default());
 
         let tools = vec![ToolSetEntry {
             name: "search_code".to_string(),

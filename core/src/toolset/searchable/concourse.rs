@@ -121,12 +121,10 @@ static EMPTY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-static PIPELINE_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<PipelineParams>);
+static PIPELINE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<PipelineParams>);
 static PIPELINE_JOB_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<PipelineJobParams>);
-static BUILD_ID_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<BuildIdParams>);
+static BUILD_ID_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<BuildIdParams>);
 static LIST_BUILDS_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<ListBuildsParams>);
 

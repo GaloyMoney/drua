@@ -353,7 +353,9 @@ fn resolve_message_view(
                             SandboxOperation::Detach => SandboxNotificationOp::Detach,
                         },
                     },
-                    _ => panic!("User view index does not point to UserText or SandboxNotification"),
+                    _ => {
+                        panic!("User view index does not point to UserText or SandboxNotification")
+                    }
                 })
                 .collect();
             ThreadMessage {
@@ -376,14 +378,16 @@ fn resolve_message_view(
                 .collect();
             // Look up metadata by the first block index in this assistant turn.
             let usage = block_indexes.first().and_then(|&first_idx| {
-                assistant_metadata.get(&first_idx).map(|meta| ThreadMessageUsage {
-                    model: meta.model.clone(),
-                    input_tokens: meta.usage.input,
-                    output_tokens: meta.usage.output,
-                    cache_read_tokens: meta.usage.cache_read,
-                    total_tokens: meta.usage.total_tokens,
-                    total_cost: meta.cost.total,
-                })
+                assistant_metadata
+                    .get(&first_idx)
+                    .map(|meta| ThreadMessageUsage {
+                        model: meta.model.clone(),
+                        input_tokens: meta.usage.input,
+                        output_tokens: meta.usage.output,
+                        cache_read_tokens: meta.usage.cache_read,
+                        total_tokens: meta.usage.total_tokens,
+                        total_cost: meta.cost.total,
+                    })
             });
             ThreadMessage {
                 role: ChatHistoryRole::Assistant,
