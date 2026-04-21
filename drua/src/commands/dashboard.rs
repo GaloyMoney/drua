@@ -571,10 +571,7 @@ async fn fetch_threads(client: &GraphqlClient, agent_id: &str) -> Result<ThreadG
         .query(THREADS_QUERY, serde_json::json!({ "agentId": agent_id }))
         .await?;
 
-    let thread_nodes = resp
-        .agent
-        .map(|a| a.session.threads)
-        .unwrap_or_default();
+    let thread_nodes = resp.agent.map(|a| a.session.threads).unwrap_or_default();
 
     Ok(build_thread_grid(thread_nodes))
 }
@@ -659,10 +656,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     }
 
     // Initial cursor: current thread, first unique/summary block.
-    let current_thread_idx = thread_infos
-        .iter()
-        .position(|t| t.is_current)
-        .unwrap_or(0);
+    let current_thread_idx = thread_infos.iter().position(|t| t.is_current).unwrap_or(0);
     let initial_col = grid
         .get(current_thread_idx)
         .and_then(|row| {
