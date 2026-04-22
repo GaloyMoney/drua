@@ -104,6 +104,7 @@ pub struct UsageDetail {
     pub input_tokens: i32,
     pub output_tokens: i32,
     pub cache_read_tokens: i32,
+    pub cache_write_tokens: i32,
     pub total_tokens: i32,
     pub total_cost: f64,
 }
@@ -114,6 +115,8 @@ pub struct BlockDetail {
     pub content: ContentBlock,
     /// Usage metadata — present for blocks from an assistant response.
     pub usage: Option<UsageDetail>,
+    /// Timestamp of the event that produced this block.
+    pub recorded_at: Option<String>,
 }
 
 /// Positionally-aligned thread grid state.
@@ -517,6 +520,12 @@ impl ScreenState {
                         return;
                     }
                 }
+                // Last row exhausted — wrap to the first cell of the first row.
+                g.cursor_row = 0;
+                if let Some(col) = g.first_non_empty() {
+                    g.cursor_col = col;
+                }
+                g.ensure_cursor_visible();
             }
         }
     }

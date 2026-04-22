@@ -46,6 +46,7 @@ pub struct TextContent {
 #[derive(SimpleObject, Clone)]
 pub struct ToolUseContent {
     pub name: String,
+    pub input: String,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -64,6 +65,9 @@ pub struct ToolResultContent {
 pub struct SandboxNotificationContent {
     pub sandbox_name: String,
     pub operation: SandboxNotificationOperation,
+    pub mode: Option<String>,
+    /// The rendered notification text that was injected into the prompt.
+    pub text: String,
 }
 
 #[derive(Enum, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +127,8 @@ pub struct ThreadMessageEntry {
     pub block_indexes: Vec<i32>,
     /// Token usage metadata (only present for assistant messages).
     pub usage: Option<ThreadMessageUsage>,
+    /// Timestamp of the event that produced this message.
+    pub recorded_at: Option<Timestamp>,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -131,6 +137,7 @@ pub struct ThreadMessageUsage {
     pub input_tokens: i32,
     pub output_tokens: i32,
     pub cache_read_tokens: i32,
+    pub cache_write_tokens: i32,
     pub total_tokens: i32,
     /// Total cost in USD.
     pub total_cost: f64,
@@ -192,8 +199,11 @@ impl From<history::ChatHistoryBlock> for ChatContentBlock {
             history::ChatHistoryBlock::Text { text } => {
                 ChatContentBlock::Text(TextContent { text })
             }
-            history::ChatHistoryBlock::ToolUse { name } => {
-                ChatContentBlock::ToolUse(ToolUseContent { name })
+            history::ChatHistoryBlock::ToolUse { name, input } => {
+                ChatContentBlock::ToolUse(ToolUseContent {
+                    name,
+                    input: serde_json::to_string_pretty(&input).unwrap_or_default(),
+                })
             }
             history::ChatHistoryBlock::Thinking { text } => {
                 ChatContentBlock::Thinking(ThinkingContent { text })
@@ -210,15 +220,23 @@ impl From<history::ChatHistoryBlock> for ChatContentBlock {
             history::ChatHistoryBlock::SandboxNotification {
                 sandbox_name,
                 operation,
-            } => ChatContentBlock::SandboxNotification(SandboxNotificationContent {
-                sandbox_name,
-                operation: match operation {
-                    history::SandboxNotificationOp::Attach { .. } => {
-                        SandboxNotificationOperation::Attach
+                text,
+            } => {
+                let (op, mode) = match operation {
+                    history::SandboxNotificationOp::Attach { mode, .. } => {
+                        (SandboxNotificationOperation::Attach, Some(mode))
                     }
-                    history::SandboxNotificationOp::Detach => SandboxNotificationOperation::Detach,
-                },
-            }),
+                    history::SandboxNotificationOp::Detach => {
+                        (SandboxNotificationOperation::Detach, None)
+                    }
+                };
+                ChatContentBlock::SandboxNotification(SandboxNotificationContent {
+                    sandbox_name,
+                    operation: op,
+                    mode,
+                    text,
+                })
+            }
         }
     }
 }
@@ -260,9 +278,11 @@ impl From<history::ThreadMessage> for ThreadMessageEntry {
                 input_tokens: u.input_tokens as i32,
                 output_tokens: u.output_tokens as i32,
                 cache_read_tokens: u.cache_read_tokens as i32,
+                cache_write_tokens: u.cache_write_tokens as i32,
                 total_tokens: u.total_tokens as i32,
                 total_cost: u.total_cost,
             }),
+            recorded_at: m.recorded_at.map(Timestamp::from),
         }
     }
 }

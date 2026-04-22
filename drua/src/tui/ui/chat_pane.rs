@@ -147,7 +147,7 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
                             )));
                         }
                     }
-                    ContentBlock::ToolUse(name) => {
+                    ContentBlock::ToolUse { name, .. } => {
                         lines.push(Line::from(Span::styled(
                             format!("[{name}]"),
                             Style::default().fg(Color::Yellow),
@@ -171,6 +171,19 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
                         lines.push(Line::from(Span::styled(
                             format!("  ↳ {summary}"),
                             Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    ContentBlock::Sandbox {
+                        sandbox_name,
+                        operation,
+                        mode,
+                        ..
+                    } => {
+                        let mode_suffix =
+                            mode.as_deref().map(|m| format!(" {m}")).unwrap_or_default();
+                        lines.push(Line::from(Span::styled(
+                            format!("[sandbox: {sandbox_name} — {operation}{mode_suffix}]"),
+                            Style::default().fg(Color::Green),
                         )));
                     }
                 }

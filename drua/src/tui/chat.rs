@@ -2,9 +2,18 @@
 #[derive(Clone, PartialEq, Eq)]
 pub enum ContentBlock {
     Text(String),
-    ToolUse(String),
+    ToolUse {
+        name: String,
+        input: String,
+    },
     Thinking(String),
     ToolResult(String),
+    Sandbox {
+        sandbox_name: String,
+        operation: String,
+        mode: Option<String>,
+        text: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,7 +82,10 @@ impl AssistantChat {
             .last_mut()
             .filter(|m| m.role == ChatRole::Assistant)
         {
-            msg.blocks.push(ContentBlock::ToolUse(name.into()));
+            msg.blocks.push(ContentBlock::ToolUse {
+                name: name.into(),
+                input: String::new(),
+            });
         }
     }
 

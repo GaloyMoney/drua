@@ -24,6 +24,7 @@ pub enum ChatHistoryBlock {
     },
     ToolUse {
         name: String,
+        input: serde_json::Value,
     },
     Thinking {
         text: String,
@@ -36,6 +37,8 @@ pub enum ChatHistoryBlock {
     SandboxNotification {
         sandbox_name: String,
         operation: SandboxNotificationOp,
+        /// The rendered `<sandbox>` XML injected into the prompt.
+        text: String,
     },
 }
 
@@ -57,9 +60,10 @@ impl ChatHistoryBlock {
     fn from_assistant_block(block: &AssistantBlock) -> Self {
         match block {
             AssistantBlock::Text { text } => ChatHistoryBlock::Text { text: text.clone() },
-            AssistantBlock::ToolUse { name, .. } => {
-                ChatHistoryBlock::ToolUse { name: name.clone() }
-            }
+            AssistantBlock::ToolUse { name, input, .. } => ChatHistoryBlock::ToolUse {
+                name: name.clone(),
+                input: input.clone(),
+            },
             AssistantBlock::Thinking { text, .. } => {
                 ChatHistoryBlock::Thinking { text: text.clone() }
             }
@@ -101,6 +105,7 @@ pub struct ThreadMessageUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub total_cost: f64,
 }
@@ -114,6 +119,8 @@ pub struct ThreadMessage {
     pub block_indexes: Vec<usize>,
     /// Usage metadata (only present for assistant messages).
     pub usage: Option<ThreadMessageUsage>,
+    /// Timestamp of the event that produced this message.
+    pub recorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // ─── Builder functions (delegated from AgentSession) ─────────────────────────
@@ -138,6 +145,7 @@ pub(super) fn build_chat_history<'a>(
             AgentSessionEvent::SandboxNotificationAdded {
                 sandbox_name,
                 operation,
+                text,
                 ..
             } => {
                 messages.push(ChatHistoryMessage {
@@ -154,6 +162,7 @@ pub(super) fn build_chat_history<'a>(
                             }
                             SandboxOperation::Detach => SandboxNotificationOp::Detach,
                         },
+                        text: text.clone(),
                     }],
                 });
                 seq += 1;
@@ -255,6 +264,9 @@ pub(super) fn build_thread_messages(
     // Build the global block content list from session events
     // (mirrors the event scan in PromptDefinition::into_prompt).
     let mut all_blocks: Vec<BlockContent> = Vec::new();
+    // Map: block index → recorded_at timestamp.
+    let mut block_timestamps: std::collections::HashMap<usize, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
     // Reverse map: replacement block index → original block index.
     // Used to report original positions in the GQL block_indexes output.
     let mut reverse_remap: std::collections::HashMap<usize, usize> =
@@ -263,19 +275,24 @@ pub(super) fn build_thread_messages(
     let mut assistant_metadata: std::collections::HashMap<usize, AssistantResponseMetadata> =
         std::collections::HashMap::new();
 
-    for event in events.iter_all() {
-        match event {
+    for pe in events.iter_persisted() {
+        let ts = pe.recorded_at;
+        match &pe.event {
             AgentSessionEvent::UserInputAdded { text, .. } => {
+                block_timestamps.insert(all_blocks.len(), ts);
                 all_blocks.push(BlockContent::UserText(text.clone()));
             }
             AgentSessionEvent::SandboxNotificationAdded {
                 sandbox_name,
                 operation,
+                text,
                 ..
             } => {
+                block_timestamps.insert(all_blocks.len(), ts);
                 all_blocks.push(BlockContent::SandboxNotification {
                     sandbox_name: sandbox_name.clone(),
                     operation: operation.clone(),
+                    text: text.clone(),
                 });
             }
             AgentSessionEvent::AssistantResponseReceived {
@@ -283,18 +300,21 @@ pub(super) fn build_thread_messages(
             } => {
                 let first_idx = all_blocks.len();
                 for block in content {
+                    block_timestamps.insert(all_blocks.len(), ts);
                     all_blocks.push(BlockContent::AssistantBlock(block.clone()));
                 }
                 assistant_metadata.insert(first_idx, metadata.clone());
             }
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
                 for result in results {
+                    block_timestamps.insert(all_blocks.len(), ts);
                     all_blocks.push(BlockContent::ToolResult(result.clone()));
                 }
             }
             AgentSessionEvent::ToolResultsMasked { results, .. } => {
                 for masked in results {
                     let replacement_idx = all_blocks.len();
+                    block_timestamps.insert(replacement_idx, ts);
                     reverse_remap.insert(replacement_idx, masked.original_index.index());
                     all_blocks.push(BlockContent::ToolResult(masked.replacement.clone()));
                 }
@@ -308,7 +328,13 @@ pub(super) fn build_thread_messages(
         .messages
         .iter()
         .map(|msg_view| {
-            resolve_message_view(msg_view, &all_blocks, &reverse_remap, &assistant_metadata)
+            resolve_message_view(
+                msg_view,
+                &all_blocks,
+                &reverse_remap,
+                &assistant_metadata,
+                &block_timestamps,
+            )
         })
         .collect()
 }
@@ -320,6 +346,7 @@ enum BlockContent {
     SandboxNotification {
         sandbox_name: String,
         operation: SandboxOperation,
+        text: String,
     },
     AssistantBlock(AssistantBlock),
     ToolResult(ToolResultInput),
@@ -330,10 +357,14 @@ fn resolve_message_view(
     all_blocks: &[BlockContent],
     reverse_remap: &std::collections::HashMap<usize, usize>,
     assistant_metadata: &std::collections::HashMap<usize, AssistantResponseMetadata>,
+    block_timestamps: &std::collections::HashMap<usize, chrono::DateTime<chrono::Utc>>,
 ) -> ThreadMessage {
     match view {
         MessageView::User(v) => {
             let block_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
+            let recorded_at = block_indexes
+                .first()
+                .and_then(|idx| block_timestamps.get(idx).copied());
             let blocks = block_indexes
                 .iter()
                 .map(|&idx| match &all_blocks[idx] {
@@ -341,6 +372,7 @@ fn resolve_message_view(
                     BlockContent::SandboxNotification {
                         sandbox_name,
                         operation,
+                        text,
                     } => ChatHistoryBlock::SandboxNotification {
                         sandbox_name: sandbox_name.clone(),
                         operation: match operation {
@@ -352,6 +384,7 @@ fn resolve_message_view(
                             }
                             SandboxOperation::Detach => SandboxNotificationOp::Detach,
                         },
+                        text: text.clone(),
                     },
                     _ => {
                         panic!("User view index does not point to UserText or SandboxNotification")
@@ -363,10 +396,14 @@ fn resolve_message_view(
                 blocks,
                 block_indexes,
                 usage: None,
+                recorded_at,
             }
         }
         MessageView::Assistant(v) => {
             let block_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
+            let recorded_at = block_indexes
+                .first()
+                .and_then(|idx| block_timestamps.get(idx).copied());
             let blocks = block_indexes
                 .iter()
                 .map(|&idx| match &all_blocks[idx] {
@@ -385,6 +422,7 @@ fn resolve_message_view(
                         input_tokens: meta.usage.input,
                         output_tokens: meta.usage.output,
                         cache_read_tokens: meta.usage.cache_read,
+                        cache_write_tokens: meta.usage.cache_write,
                         total_tokens: meta.usage.total_tokens,
                         total_cost: meta.cost.total,
                     })
@@ -394,12 +432,16 @@ fn resolve_message_view(
                 blocks,
                 block_indexes,
                 usage,
+                recorded_at,
             }
         }
         MessageView::ToolResults(v) => {
             // Resolve content from the actual view indexes (which may be
             // replacement indexes for compacted threads).
             let raw_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
+            let recorded_at = raw_indexes
+                .first()
+                .and_then(|idx| block_timestamps.get(idx).copied());
             let blocks = raw_indexes
                 .iter()
                 .map(|&idx| {
@@ -425,6 +467,7 @@ fn resolve_message_view(
                 blocks,
                 block_indexes,
                 usage: None,
+                recorded_at,
             }
         }
     }

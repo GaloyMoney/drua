@@ -216,7 +216,12 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                         let conn_style = Style::default().fg(Color::DarkGray);
 
                         if is_between {
-                            spans.push(Span::styled("─", conn_style));
+                            let skip_style = if is_cursor {
+                                Style::default().fg(Color::Black).bg(Color::Yellow)
+                            } else {
+                                Style::default().fg(Color::Rgb(200, 90, 90))
+                            };
+                            spans.push(Span::styled("x", skip_style));
                             spans.push(Span::styled(conn_str, conn_style));
                         } else {
                             match cell {
@@ -260,7 +265,15 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                             );
                             let conn_style = Style::default().fg(Color::DarkGray);
                             if between {
-                                spans.push(Span::styled("────", conn_style));
+                                let is_cursor =
+                                    row_idx == grid.cursor_row && col == grid.cursor_col;
+                                let skip_style = if is_cursor {
+                                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                                } else {
+                                    Style::default().fg(Color::Rgb(200, 90, 90))
+                                };
+                                spans.push(Span::styled("x", skip_style));
+                                spans.push(Span::styled("───", conn_style));
                             } else {
                                 spans.push(Span::styled("    ", conn_style));
                             }
@@ -388,28 +401,47 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         ]));
 
         if let Some(detail) = grid.details.get(&(grid.cursor_row, grid.cursor_col)) {
-            // Show usage summary before content so it's always visible.
-            if let Some(ref usage) = detail.usage {
+            // Show timestamp + usage on a single metadata line.
+            let ts_part = detail
+                .recorded_at
+                .as_deref()
+                .unwrap_or_default()
+                .to_string();
+            let usage_part = detail.usage.as_ref().map(|usage| {
                 let model_short = usage.model.rsplit('/').next().unwrap_or(&usage.model);
                 let cost_str = if usage.total_cost > 0.0 {
                     format!(" ${:.4}", usage.total_cost)
                 } else {
                     String::new()
                 };
-                let cache_str = if usage.cache_read_tokens > 0 {
-                    format!(" cache:{}", format_tokens(usage.cache_read_tokens))
-                } else {
-                    String::new()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "   {} in:{} out:{}{}{}",
-                        model_short,
-                        format_tokens(usage.input_tokens),
-                        format_tokens(usage.output_tokens),
-                        cache_str,
-                        cost_str,
+                let cache_str = match (usage.cache_read_tokens > 0, usage.cache_write_tokens > 0) {
+                    (true, true) => format!(
+                        " cr:{} cw:{}",
+                        format_tokens(usage.cache_read_tokens),
+                        format_tokens(usage.cache_write_tokens),
                     ),
+                    (true, false) => format!(" cr:{}", format_tokens(usage.cache_read_tokens)),
+                    (false, true) => format!(" cw:{}", format_tokens(usage.cache_write_tokens)),
+                    (false, false) => String::new(),
+                };
+                format!(
+                    "{} in:{} out:{}{}{}",
+                    model_short,
+                    format_tokens(usage.input_tokens),
+                    format_tokens(usage.output_tokens),
+                    cache_str,
+                    cost_str,
+                )
+            });
+            let meta_line = match (ts_part.is_empty(), usage_part) {
+                (false, Some(u)) => format!("   {ts_part}  {u}"),
+                (false, None) => format!("   {ts_part}"),
+                (true, Some(u)) => format!("   {u}"),
+                (true, None) => String::new(),
+            };
+            if !meta_line.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    meta_line,
                     Style::default().fg(Color::Gray),
                 )));
             }
@@ -443,31 +475,47 @@ fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'stat
                 ))
             })
             .collect(),
-        ContentBlock::ToolUse(name) => {
-            vec![Line::from(Span::styled(
+        ContentBlock::ToolUse { name, input } => {
+            let mut lines = vec![Line::from(Span::styled(
                 format!("   [{name}]"),
                 Style::default().fg(Color::Yellow),
-            ))]
+            ))];
+            if !input.is_empty() {
+                for l in input.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("   {l}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            lines
         }
-        ContentBlock::Thinking(text) => {
-            let preview = if text.len() > 120 {
-                format!("   💭 {}…", &text[..120])
-            } else {
-                format!("   💭 {text}")
-            };
-            vec![Line::from(Span::styled(
-                preview,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ))]
-        }
+        ContentBlock::Thinking(text) => text
+            .lines()
+            .map(|l| {
+                Line::from(Span::styled(
+                    format!("   {l}"),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ))
+            })
+            .collect(),
         ContentBlock::ToolResult(summary) => {
             vec![Line::from(Span::styled(
                 format!("   ↳ {summary}"),
                 Style::default().fg(Color::DarkGray),
             ))]
         }
+        ContentBlock::Sandbox { text, .. } => text
+            .lines()
+            .map(|l| {
+                Line::from(Span::styled(
+                    format!("   {l}"),
+                    Style::default().fg(Color::Green),
+                ))
+            })
+            .collect(),
     }
 }
 
@@ -478,6 +526,7 @@ fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
             let color = match c {
                 'U' => Color::Cyan,
                 'A' => Color::White,
+                't' => Color::Gray,
                 'T' => Color::Yellow,
                 'R' => Color::Gray,
                 'S' => Color::Green,
@@ -486,8 +535,8 @@ fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
             let bold = matches!(cell, CellKind::Summary(_));
             (c, color, bold)
         }
-        CellKind::Shared => ('·', Color::DarkGray, false),
-        CellKind::Condensed => ('≈', Color::DarkGray, false),
+        CellKind::Shared => ('·', Color::Gray, false),
+        CellKind::Condensed => ('≈', Color::Gray, false),
         CellKind::Empty => (' ', Color::DarkGray, false),
     }
 }

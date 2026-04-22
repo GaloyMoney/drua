@@ -149,10 +149,10 @@ const CHAT_HISTORY_QUERY: &str = r#"
                     content {
                         __typename
                         ... on TextContent { text }
-                        ... on ToolUseContent { name }
+                        ... on ToolUseContent { name input }
                         ... on ThinkingContent { text }
                         ... on ToolResultContent { toolUseId content isError }
-                        ... on SandboxNotificationContent { sandboxName operation }
+                        ... on SandboxNotificationContent { sandboxName operation mode text }
                     }
                 }
             }
@@ -193,6 +193,8 @@ enum ChatHistoryContentBlock {
     },
     ToolUseContent {
         name: String,
+        #[serde(default)]
+        input: String,
     },
     ThinkingContent {
         text: String,
@@ -208,8 +210,10 @@ enum ChatHistoryContentBlock {
     SandboxNotificationContent {
         #[serde(rename = "sandboxName")]
         sandbox_name: String,
-        #[allow(dead_code)]
         operation: String,
+        #[serde(default)]
+        mode: Option<String>,
+        text: String,
     },
 }
 
@@ -217,7 +221,7 @@ impl ChatHistoryContentBlock {
     fn into_content_block(self) -> ContentBlock {
         match self {
             Self::TextContent { text } => ContentBlock::Text(text),
-            Self::ToolUseContent { name } => ContentBlock::ToolUse(name),
+            Self::ToolUseContent { name, input } => ContentBlock::ToolUse { name, input },
             Self::ThinkingContent { text } => ContentBlock::Thinking(text),
             Self::ToolResultContent {
                 content, is_error, ..
@@ -232,7 +236,14 @@ impl ChatHistoryContentBlock {
             Self::SandboxNotificationContent {
                 sandbox_name,
                 operation,
-            } => ContentBlock::Text(format!("[sandbox: {sandbox_name} — {operation}]")),
+                mode,
+                text,
+            } => ContentBlock::Sandbox {
+                sandbox_name,
+                operation,
+                mode,
+                text,
+            },
         }
     }
 }
@@ -256,19 +267,21 @@ const THREADS_QUERY: &str = r#"
                         content {
                             __typename
                             ... on TextContent { text }
-                            ... on ToolUseContent { name }
+                            ... on ToolUseContent { name input }
                             ... on ThinkingContent { text }
                             ... on ToolResultContent { toolUseId content isError }
-                            ... on SandboxNotificationContent { sandboxName operation }
+                            ... on SandboxNotificationContent { sandboxName operation mode text }
                         }
                         usage {
                             model
                             inputTokens
                             outputTokens
                             cacheReadTokens
+                            cacheWriteTokens
                             totalTokens
                             totalCost
                         }
+                        recordedAt
                     }
                 }
             }
@@ -308,6 +321,7 @@ struct ThreadMessageNode {
     block_indexes: Vec<i32>,
     content: Vec<ChatHistoryContentBlock>,
     usage: Option<ThreadMessageUsageNode>,
+    recorded_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +331,7 @@ struct ThreadMessageUsageNode {
     input_tokens: i32,
     output_tokens: i32,
     cache_read_tokens: i32,
+    cache_write_tokens: i32,
     total_tokens: i32,
     total_cost: f64,
 }
@@ -658,9 +673,11 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
                 cache_read_tokens: u.cache_read_tokens,
+                cache_write_tokens: u.cache_write_tokens,
                 total_tokens: u.total_tokens,
                 total_cost: u.total_cost,
             });
+            let msg_recorded_at = msg.recorded_at;
 
             for (content_block, bi) in msg.content.into_iter().zip(msg.block_indexes) {
                 let pos_idx = match pos_map.get(&bi) {
@@ -668,16 +685,8 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                     None => continue,
                 };
 
-                let is_sandbox = matches!(
-                    content_block,
-                    ChatHistoryContentBlock::SandboxNotificationContent { .. }
-                );
                 let content = content_block.into_content_block();
-                let type_char = if is_sandbox {
-                    'S'
-                } else {
-                    content_type_char(&content, role)
-                };
+                let type_char = content_type_char(&content, role);
                 let is_owner = owner.get(&bi) == Some(&thread_idx);
 
                 let cell = if is_owner {
@@ -702,6 +711,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                         role,
                         content,
                         usage: msg_usage.clone(),
+                        recorded_at: msg_recorded_at.clone(),
                     },
                 );
             }
@@ -740,9 +750,10 @@ fn content_type_char(content: &ContentBlock, role: ChatRole) -> char {
             ChatRole::User => 'U',
             ChatRole::Assistant | ChatRole::System => 'A',
         },
-        ContentBlock::ToolUse(_) => 'T',
-        ContentBlock::Thinking(_) => 'A', // assistant reasoning
+        ContentBlock::ToolUse { .. } => 'T',
+        ContentBlock::Thinking(_) => 't',
         ContentBlock::ToolResult(_) => 'R',
+        ContentBlock::Sandbox { .. } => 'S',
     }
 }
 
