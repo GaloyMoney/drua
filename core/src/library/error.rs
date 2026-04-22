@@ -2,4 +2,6 @@
 pub enum LibraryError {
     #[error("LibraryError - IO: {0}")]
     Io(String),
+    #[error("LibraryError - Git: {0}")]
+    Git(String),
 }

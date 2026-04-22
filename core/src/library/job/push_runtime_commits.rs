@@ -59,8 +59,8 @@ impl JobRunner for PushRuntimeCommitsRunner {
                 break;
             }
 
-            if let Err(e) = self.sync_once().await {
-                tracing::error!(error = %e, "push-runtime-commits cycle failed");
+            if let Err(e) = self.try_push().await {
+                tracing::warn!(error = %e, "push-runtime-commits: push failed, will retry");
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -70,60 +70,36 @@ impl JobRunner for PushRuntimeCommitsRunner {
 }
 
 impl PushRuntimeCommitsRunner {
-    async fn sync_once(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn try_push(&self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.repo_path.join(".git").exists() {
-            tracing::debug!(path = %self.repo_path.display(), "not a git repo, skipping");
             return Ok(());
         }
 
+        // Check if there are commits to push (local ahead of remote)
         let status = tokio::process::Command::new("git")
-            .args(["add", "-A"])
+            .args(["status", "--porcelain", "-b"])
             .current_dir(&self.repo_path)
-            .status()
+            .output()
             .await?;
-        if !status.success() {
-            return Err("git add -A failed".into());
-        }
-
-        // Exit code 1 = staged changes exist; 0 = clean
-        let diff_status = tokio::process::Command::new("git")
-            .args(["diff", "--cached", "--quiet"])
-            .current_dir(&self.repo_path)
-            .status()
-            .await?;
-        if diff_status.success() {
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        if !stdout.contains("ahead") {
             return Ok(());
         }
 
-        let commit_status = tokio::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=drua",
-                "-c",
-                "user.email=drua@galoy.io",
-                "commit",
-                "-m",
-                "auto: sync runtime notes",
-            ])
-            .current_dir(&self.repo_path)
-            .status()
-            .await?;
-        if !commit_status.success() {
-            return Err("git commit failed".into());
-        }
-        tracing::info!("committed runtime changes");
-
-        let push_status = tokio::process::Command::new("git")
+        let push = tokio::process::Command::new("git")
             .args(["push"])
             .current_dir(&self.repo_path)
-            .status()
+            .output()
             .await?;
-        if !push_status.success() {
-            tracing::warn!("git push failed, will retry next cycle");
-        } else {
-            tracing::info!("pushed runtime changes");
+        if !push.status.success() {
+            return Err(format!(
+                "git push failed: {}",
+                String::from_utf8_lossy(&push.stderr)
+            )
+            .into());
         }
 
+        tracing::info!("pushed runtime commits");
         Ok(())
     }
 }

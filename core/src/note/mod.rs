@@ -214,7 +214,8 @@ impl Notes {
             note.id, note.workspace_id, tags_str, created_at, note.title, note.content
         );
 
-        if let Err(e) = self.library.write_runtime_file(&relative_path, &markdown).await {
+        let commit_msg = format!("note: {}", note.title);
+        if let Err(e) = self.library.write_runtime_file(&relative_path, &markdown, &commit_msg).await {
             tracing::error!(
                 note_id = %note.id,
                 path = %relative_path,
