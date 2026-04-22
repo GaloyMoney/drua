@@ -1,13 +1,14 @@
 mod error;
+mod file;
 mod job;
 mod upstream;
 
-use std::path::PathBuf;
-
 use self::job::PushRuntimeCommitsJobInitializer;
+use self::upstream::Upstream;
 pub use error::LibraryError;
+pub use file::RuntimeFile;
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
     /// Local path to clone the library repo into.
     /// Defaults to `<repo-root>/.library/`.
@@ -19,17 +20,17 @@ pub struct LibraryConfig {
 }
 
 impl LibraryConfig {
-    pub fn repo_path(&self) -> PathBuf {
+    pub fn repo_path(&self) -> std::path::PathBuf {
         match &self.data_dir {
-            Some(d) => PathBuf::from(d),
-            None => PathBuf::from(".library"),
+            Some(d) => std::path::PathBuf::from(d),
+            None => std::path::PathBuf::from(".library"),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct Library {
-    repo_path: PathBuf,
+    upstream: Upstream,
 }
 
 impl Library {
@@ -37,15 +38,9 @@ impl Library {
         config: &LibraryConfig,
         jobs: &mut ::job::Jobs,
     ) -> Result<Self, LibraryError> {
-        let repo_path = config.repo_path();
+        let upstream = Upstream::init(config.repo_url.as_deref(), config.repo_path()).await?;
 
-        if let Some(repo_url) = &config.repo_url {
-            if !repo_path.join(".git").exists() {
-                upstream::clone(repo_url, &repo_path).await?;
-            }
-        }
-
-        let init = PushRuntimeCommitsJobInitializer::new(config);
+        let init = PushRuntimeCommitsJobInitializer::new(upstream.clone());
         let spawner = jobs.add_initializer(init);
         tokio::spawn(async move {
             if let Err(e) = spawner
@@ -56,24 +51,16 @@ impl Library {
             }
         });
 
-        Ok(Self { repo_path })
+        Ok(Self { upstream })
     }
 
-    /// Write a file into the runtime area of the library repo, then
-    /// immediately `git add` + `git commit` it.
-    ///
-    /// The file is written to `{repo_path}/{relative_path}`, creating
-    /// intermediate directories as needed. The commit targets exactly the
-    /// written file. The push-runtime-commits job will push the commit to
-    /// the remote on its next cycle.
-    #[tracing::instrument(name = "library.write_runtime_file", skip(self, content))]
-    pub async fn write_runtime_file(
-        &self,
-        relative_path: &str,
-        content: &str,
-        commit_message: &str,
-    ) -> Result<(), LibraryError> {
-        let full_path = self.repo_path.join(relative_path);
+    #[tracing::instrument(name = "library.write", skip(self, file))]
+    pub async fn write(&self, file: RuntimeFile<'_>) -> Result<(), LibraryError> {
+        let relative_path = file.relative_path();
+        let content = file.content();
+        let commit_message = file.commit_message();
+
+        let full_path = self.upstream.repo_path().join(&relative_path);
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -84,9 +71,9 @@ impl Library {
             .map_err(|e| LibraryError::Io(e.to_string()))?;
         tracing::info!(path = %full_path.display(), "wrote runtime file");
 
-        if self.repo_path.join(".git").exists() {
-            upstream::add_and_commit(&self.repo_path, relative_path, commit_message).await?;
-        }
+        self.upstream
+            .add_and_commit(&relative_path, &commit_message)
+            .await?;
 
         Ok(())
     }

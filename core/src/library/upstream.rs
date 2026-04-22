@@ -1,8 +1,110 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::LibraryError;
 
-pub(super) async fn clone(repo_url: &str, repo_path: &Path) -> Result<(), LibraryError> {
+#[derive(Clone)]
+pub(super) struct Upstream {
+    repo_path: PathBuf,
+}
+
+impl Upstream {
+    pub async fn init(repo_url: Option<&str>, repo_path: PathBuf) -> Result<Self, LibraryError> {
+        if let Some(url) = repo_url {
+            if !repo_path.join(".git").exists() {
+                clone(url, &repo_path).await?;
+            }
+        }
+        Ok(Self { repo_path })
+    }
+
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
+    }
+
+    pub async fn add_and_commit(
+        &self,
+        relative_path: &str,
+        message: &str,
+    ) -> Result<(), LibraryError> {
+        if !self.repo_path.join(".git").exists() {
+            return Ok(());
+        }
+
+        let add = tokio::process::Command::new("git")
+            .args(["add", "--", relative_path])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git add: {e}")))?;
+        if !add.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            )));
+        }
+
+        let commit = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=drua",
+                "-c",
+                "user.email=drua@galoy.io",
+                "commit",
+                "-m",
+                message,
+                "--",
+                relative_path,
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
+        if !commit.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&commit.stderr)
+            )));
+        }
+
+        tracing::info!(path = relative_path, "committed runtime file");
+        Ok(())
+    }
+
+    pub async fn push_if_ahead(&self) -> Result<(), LibraryError> {
+        if !self.repo_path.join(".git").exists() {
+            return Ok(());
+        }
+
+        let status = tokio::process::Command::new("git")
+            .args(["status", "--porcelain", "-b"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git status: {e}")))?;
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        if !stdout.contains("ahead") {
+            return Ok(());
+        }
+
+        let push = tokio::process::Command::new("git")
+            .args(["push"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git push: {e}")))?;
+        if !push.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git push failed: {}",
+                String::from_utf8_lossy(&push.stderr)
+            )));
+        }
+
+        tracing::info!("pushed runtime commits");
+        Ok(())
+    }
+}
+
+async fn clone(repo_url: &str, repo_path: &Path) -> Result<(), LibraryError> {
     tracing::info!(url = %repo_url, path = %repo_path.display(), "cloning library repo");
     let output = tokio::process::Command::new("git")
         .args(["clone", repo_url, &repo_path.to_string_lossy()])
@@ -16,79 +118,5 @@ pub(super) async fn clone(repo_url: &str, repo_path: &Path) -> Result<(), Librar
         )));
     }
     tracing::info!(path = %repo_path.display(), "library repo cloned");
-    Ok(())
-}
-
-pub(super) async fn add_and_commit(
-    repo_path: &Path,
-    relative_path: &str,
-    message: &str,
-) -> Result<(), LibraryError> {
-    let add = tokio::process::Command::new("git")
-        .args(["add", "--", relative_path])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .map_err(|e| LibraryError::Git(format!("git add: {e}")))?;
-    if !add.status.success() {
-        return Err(LibraryError::Git(format!(
-            "git add failed: {}",
-            String::from_utf8_lossy(&add.stderr)
-        )));
-    }
-
-    let commit = tokio::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=drua",
-            "-c",
-            "user.email=drua@galoy.io",
-            "commit",
-            "-m",
-            message,
-            "--",
-            relative_path,
-        ])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
-    if !commit.status.success() {
-        return Err(LibraryError::Git(format!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&commit.stderr)
-        )));
-    }
-
-    tracing::info!(path = relative_path, "committed runtime file");
-    Ok(())
-}
-
-pub(super) async fn push_if_ahead(repo_path: &Path) -> Result<(), LibraryError> {
-    let status = tokio::process::Command::new("git")
-        .args(["status", "--porcelain", "-b"])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .map_err(|e| LibraryError::Git(format!("git status: {e}")))?;
-    let stdout = String::from_utf8_lossy(&status.stdout);
-    if !stdout.contains("ahead") {
-        return Ok(());
-    }
-
-    let push = tokio::process::Command::new("git")
-        .args(["push"])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .map_err(|e| LibraryError::Git(format!("git push: {e}")))?;
-    if !push.status.success() {
-        return Err(LibraryError::Git(format!(
-            "git push failed: {}",
-            String::from_utf8_lossy(&push.stderr)
-        )));
-    }
-
-    tracing::info!("pushed runtime commits");
     Ok(())
 }

@@ -1,10 +1,9 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use job::*;
 use serde::{Deserialize, Serialize};
 
-use super::upstream;
+use super::super::upstream::Upstream;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -12,14 +11,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 pub struct PushRuntimeCommitsConfig {}
 
 pub struct PushRuntimeCommitsJobInitializer {
-    repo_path: PathBuf,
+    upstream: Upstream,
 }
 
 impl PushRuntimeCommitsJobInitializer {
-    pub fn new(config: &super::super::LibraryConfig) -> Self {
-        Self {
-            repo_path: config.repo_path(),
-        }
+    pub fn new(upstream: Upstream) -> Self {
+        Self { upstream }
     }
 
     pub fn cfg() -> PushRuntimeCommitsConfig {
@@ -40,13 +37,13 @@ impl JobInitializer for PushRuntimeCommitsJobInitializer {
         _spawner: JobSpawner<Self::Config>,
     ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
         Ok(Box::new(PushRuntimeCommitsRunner {
-            repo_path: self.repo_path.clone(),
+            upstream: self.upstream.clone(),
         }))
     }
 }
 
 struct PushRuntimeCommitsRunner {
-    repo_path: PathBuf,
+    upstream: Upstream,
 }
 
 #[async_trait::async_trait]
@@ -56,13 +53,10 @@ impl JobRunner for PushRuntimeCommitsRunner {
         mut current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         loop {
-            if self.repo_path.join(".git").exists() {
-                if let Err(e) = upstream::push_if_ahead(&self.repo_path).await {
-                    tracing::warn!(error = %e, "push-runtime-commits: push failed, will retry");
-                }
+            if let Err(e) = self.upstream.push_if_ahead().await {
+                tracing::warn!(error = %e, "push-runtime-commits: push failed, will retry");
             }
 
-            // Wait for next cycle or shutdown, whichever comes first.
             tokio::select! {
                 biased;
                 shutdown = current_job.shutdown_requested() => {

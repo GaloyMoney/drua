@@ -191,11 +191,7 @@ impl Notes {
 
     async fn write_to_library(&self, note: &Note, workspace_name: &str) {
         let slug = slugify(&note.title);
-        let short_id = &note.id.to_string()[..8];
-        let relative_path = format!(
-            "runtime/workspaces/{}/notes/{}-{}.md",
-            workspace_name, slug, short_id
-        );
+        let id_prefix = &note.id.to_string()[..8];
 
         let created_at = note
             .events
@@ -214,11 +210,19 @@ impl Notes {
             note.id, note.workspace_id, tags_str, created_at, note.title, note.content
         );
 
-        let commit_msg = format!("note: {}", note.title);
-        if let Err(e) = self.library.write_runtime_file(&relative_path, &markdown, &commit_msg).await {
+        use crate::library::RuntimeFile;
+        if let Err(e) = self
+            .library
+            .write(RuntimeFile::Note {
+                workspace_name,
+                slug: &slug,
+                id_prefix,
+                content: &markdown,
+            })
+            .await
+        {
             tracing::error!(
                 note_id = %note.id,
-                path = %relative_path,
                 error = %e,
                 "failed to write note to library"
             );
