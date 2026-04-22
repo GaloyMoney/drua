@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::chat::{AssistantChat, ChatRole, ContentBlock};
+use super::keybindings::Keybindings;
 
 #[allow(dead_code)]
 pub struct WorkspaceItem {
@@ -253,6 +254,10 @@ pub struct ScreenState {
     pub focus: Focus,
     pub status_message: Option<String>,
 
+    // Keybindings
+    pub keybindings: Keybindings,
+    pub show_help: bool,
+
     // Chat
     pub chat_view: ChatViewState,
     pub chat_input: String,
@@ -275,7 +280,12 @@ pub struct ScreenState {
 }
 
 impl ScreenState {
-    pub fn new(workspaces: Vec<WorkspaceItem>, server_url: String, user_name: String) -> Self {
+    pub fn new(
+        workspaces: Vec<WorkspaceItem>,
+        server_url: String,
+        user_name: String,
+        keybindings: Keybindings,
+    ) -> Self {
         let selected_lead_id = workspaces
             .first()
             .and_then(|ws| ws.lead.as_ref())
@@ -289,6 +299,9 @@ impl ScreenState {
             should_quit: false,
             focus: Focus::default(),
             status_message: None,
+
+            keybindings,
+            show_help: false,
 
             agent_cursor: 0,
 
