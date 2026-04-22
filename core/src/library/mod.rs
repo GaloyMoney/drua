@@ -1,9 +1,11 @@
+mod error;
 mod job;
 
 use std::path::PathBuf;
 
 use sqlx::PgPool;
 
+pub use error::LibraryError;
 use self::job::{ImportLibCommitsJobInitializer, ImportRuntimeCommitsJobInitializer};
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -30,6 +32,7 @@ impl LibraryConfig {
 pub struct Library {
     #[allow(dead_code)]
     pool: PgPool,
+    repo_path: PathBuf,
 }
 
 impl Library {
@@ -59,6 +62,33 @@ impl Library {
             }
         });
 
-        Self { pool: pool.clone() }
+        Self {
+            pool: pool.clone(),
+            repo_path: config.repo_path(),
+        }
+    }
+
+    /// Write a file into the runtime area of the library repo.
+    ///
+    /// The file is written to `{repo_path}/{relative_path}`, creating
+    /// intermediate directories as needed. The import-runtime-commits job
+    /// will pick up the change and push it to the remote.
+    #[tracing::instrument(name = "library.write_runtime_file", skip(self, content))]
+    pub async fn write_runtime_file(
+        &self,
+        relative_path: &str,
+        content: &str,
+    ) -> Result<(), LibraryError> {
+        let full_path = self.repo_path.join(relative_path);
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| LibraryError::Io(e.to_string()))?;
+        }
+        tokio::fs::write(&full_path, content)
+            .await
+            .map_err(|e| LibraryError::Io(e.to_string()))?;
+        tracing::info!(path = %full_path.display(), "wrote runtime file");
+        Ok(())
     }
 }
