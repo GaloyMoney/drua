@@ -6,10 +6,6 @@ edition.workspace = true
 [lib]
 
 [[bin]]
-name = "drua"
-path = "src/main.rs"
-
-[[bin]]
 name = "write_sdl"
 path = "src/bin/write_sdl.rs"
 

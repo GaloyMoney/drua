@@ -1,6 +1,6 @@
 [package]
 name = "drua-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 
 [[bin]]
@@ -8,14 +8,8 @@ name = "drua"
 path = "src/main.rs"
 
 [dependencies]
+drua-client = { path = "../client" }
+drua-server = { path = "../server" }
 anyhow = { workspace = true }
 clap = { workspace = true }
-dirs = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
-ratatui = { workspace = true }
-crossterm = { workspace = true, features = ["event-stream"] }
-libc = { workspace = true }
-futures = { workspace = true }

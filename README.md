@@ -30,14 +30,14 @@ with `GITHUB_CLIENT_SECRET` set and an
 
 ```bash
 # Against the local dev server
-cargo run -p drua-cli -- dashboard
+cargo run -p drua-cli -- tui
 
 # Against production
-cargo run -p drua-cli -- --server https://dashboard.agents.galoy.io dashboard
+cargo run -p drua-cli -- tui --server https://dashboard.agents.galoy.io
 ```
 
 On first run it opens your browser to authenticate and generate an API token.
-Credentials are stored in `~/.drua/config.json`. See [`cli/README.md`](cli/README.md)
+Credentials are stored in `~/.drua/config.json`. See [`client/README.md`](client/README.md)
 for all commands and key bindings.
 
 ## Environment Variables
@@ -146,8 +146,9 @@ providers:
 ## Project Layout
 
 ```
-cli/            Terminal UI client (login, dashboard, workspace management)
-server/         Axum web server (routes, auth, GraphQL, templates, config)
+cli/            Unified binary entrypoint (dispatches to server or client)
+client/         TUI client library (login, tui, workspace management)
+server/         Axum web server library (routes, auth, GraphQL, templates, config)
 core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
 mcp-gateway/    MCP protocol gateway (rmcp-based)
 lib/            Shared libraries (anthropic-client, sandbox admin client, LLM)

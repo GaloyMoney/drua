@@ -5,21 +5,21 @@ CLI for Drua.
 ## Quick start
 
 ```bash
-cargo run -p drua-cli -- dashboard
+cargo run -p drua-cli -- tui
 ```
 
 This will:
 1. Open your browser to authenticate via GitHub OAuth
 2. Prompt you to paste the generated API token
-3. Launch the interactive TUI dashboard
+3. Launch the interactive TUI tui
 
-If you're already logged in, it skips straight to the dashboard.
+If you're already logged in, it skips straight to the tui.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `drua dashboard` | Interactive TUI (auto-triggers login if needed) |
+| `drua tui` | Interactive TUI (auto-triggers login if needed) |
 | `drua login` | Authenticate with a drua server |
 | `drua logout` | Remove stored credentials |
 | `drua status` | Show current connection status |

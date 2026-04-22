@@ -241,7 +241,7 @@
             buildInputs = [ drua ];
             buildPhase = ''
               echo "Generating default config..."
-              ${drua}/bin/drua dump-default-config > default-config-generated.yml
+              ${drua}/bin/drua server dump-default-config > default-config-generated.yml
 
               echo "Comparing with committed default config..."
               if ! diff -u dev/drua.default.yml default-config-generated.yml; then
@@ -398,7 +398,7 @@
             pkgs.onnxruntime
           ];
           config = {
-            Cmd = [ "${drua}/bin/drua" ];
+            Cmd = [ "${drua}/bin/drua" "server" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "ORT_DYLIB_PATH=${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"

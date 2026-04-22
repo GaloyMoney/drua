@@ -1318,6 +1318,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "drua-client",
+ "drua-server",
+ "tokio",
+]
+
+[[package]]
+name = "drua-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "crossterm",
  "dirs",
  "futures",
