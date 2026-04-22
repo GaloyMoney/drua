@@ -1,9 +1,6 @@
-mod config;
-mod tracing_init;
-
 use clap::{Parser, Subcommand};
 
-use config::{Config, EnvSecrets};
+use drua_server::config::{Config, EnvSecrets};
 
 #[derive(Parser)]
 #[command(name = "drua", about = "Drua CLI")]
@@ -68,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("Failed to install default CryptoProvider");
 
-    tracing_init::init_tracer(tracing_init::TracingConfig {
+    drua_server::tracing_init::init_tracer(drua_server::tracing_init::TracingConfig {
         service_name: "drua".to_string(),
     })?;
 
@@ -122,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     let app = drua_core::App::init(&pool, app_config).await?;
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
-    let server_config = drua_web::server::ServerConfig {
+    let server_config = drua_server::server::ServerConfig {
         host: config.server.host.clone(),
         port: config.server.port,
         secure_cookies: config.server.secure_cookies,
@@ -130,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_service = drua_mcp_gateway::McpGateway::service(app.clone());
 
-    let mut app_state = drua_web::AppState::new(
+    let mut app_state = drua_server::AppState::new(
         &pool,
         app,
         oauth_client,
@@ -141,13 +138,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize SA token validator for sandbox pod authentication (in-cluster only)
     if let Some(validator) =
-        drua_web::auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await
+        drua_server::auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await
     {
         tracing::info!("SA token validator initialized (in-cluster)");
         app_state = app_state.with_sa_token_validator(validator);
     }
 
-    let router = drua_web::server::build_app(&server_config, app_state, mcp_service);
+    let router = drua_server::server::build_app(&server_config, app_state, mcp_service);
 
     let addr: std::net::SocketAddr =
         format!("{}:{}", config.server.host, config.server.port).parse()?;
@@ -156,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
 
-    if let Err(e) = tracing_init::shutdown_tracer() {
+    if let Err(e) = drua_server::tracing_init::shutdown_tracer() {
         eprintln!("Error shutting down tracer: {e}");
     }
 

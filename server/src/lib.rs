@@ -1,8 +1,10 @@
 pub mod auth;
+pub mod config;
 pub mod graphql;
 mod routes;
 pub mod server;
 mod templates;
+pub mod tracing_init;
 
 use axum::Router;
 

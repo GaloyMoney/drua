@@ -90,7 +90,7 @@
         write-sdl = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "write-sdl";
-          cargoExtraArgs = "-p drua-web --bin write_sdl";
+          cargoExtraArgs = "-p drua-server --bin write_sdl";
         });
 
         pythonEnv = pkgs.python3.withPackages (ps:

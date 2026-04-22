@@ -147,9 +147,8 @@ providers:
 
 ```
 cli/            Terminal UI client (login, dashboard, workspace management)
-server/         Server entrypoint (config loading, main server binary)
+server/         Axum web server (routes, auth, GraphQL, templates, config)
 core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
-web/            Axum web server library (routes, OAuth, GraphQL, templates)
 mcp-gateway/    MCP protocol gateway (rmcp-based)
 lib/            Shared libraries (anthropic-client, sandbox admin client, LLM)
 images/sandbox/ Sandbox tool server (runs inside sandbox pods)

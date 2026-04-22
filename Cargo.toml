@@ -9,7 +9,6 @@ members = [
   "lib/anthropic-client",
   "lib/openai-client",
   "lib/llm",
-  "web",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",

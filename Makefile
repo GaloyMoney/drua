@@ -34,10 +34,10 @@ nix-run-server:
 	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) nix run . -- $(ARGS)
 
 sdl-rust:
-	SQLX_OFFLINE=true cargo run --bin write_sdl > web/src/graphql/schema.graphql
+	SQLX_OFFLINE=true cargo run --bin write_sdl > server/src/graphql/schema.graphql
 
 generate-default-config:
-	SQLX_OFFLINE=true cargo run -q -p drua-cli -- dump-default-config > dev/drua.default.yml
+	SQLX_OFFLINE=true cargo run -q -p drua-server -- dump-default-config > dev/drua.default.yml
 
 integration-tests: reset-deps
 	DATABASE_URL=$(PG_CON) cargo nextest run
