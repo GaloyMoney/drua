@@ -123,37 +123,6 @@ impl NoteSearchStore {
         Ok(results)
     }
 
-    /// List all notes in a workspace (no search, ordered by most recent first).
-    #[tracing::instrument(name = "note.search_store.list", skip_all)]
-    pub async fn list(
-        &self,
-        workspace_id: WorkspaceId,
-        limit: usize,
-    ) -> Result<Vec<NoteSearchResult>, NoteError> {
-        let rows: Vec<ListRow> = sqlx::query_as(
-            r#"SELECT s.note_id, s.title_text, s.content_text, s.tags
-               FROM note_search_data s
-               JOIN notes n ON n.id = s.note_id
-               WHERE s.workspace_id = $1 AND n.deleted = FALSE
-               ORDER BY n.created_at DESC
-               LIMIT $2"#,
-        )
-        .bind(workspace_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| NoteSearchResult {
-                id: r.note_id,
-                title: r.title_text,
-                content: r.content_text,
-                tags: parse_tags(&r.tags),
-                score: 0.0,
-            })
-            .collect())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,14 +149,6 @@ struct VecRow {
     distance: f32,
 }
 
-#[derive(sqlx::FromRow)]
-struct ListRow {
-    note_id: NoteId,
-    title_text: String,
-    content_text: String,
-    tags: serde_json::Value,
-}
-
 fn parse_tags(val: &serde_json::Value) -> Vec<String> {
     val.as_array()
         .map(|arr| {
@@ -199,11 +160,7 @@ fn parse_tags(val: &serde_json::Value) -> Vec<String> {
 }
 
 /// Reciprocal Rank Fusion: combine two ranked lists into one scored list.
-fn rrf_fuse(
-    fts_rows: Vec<FtsRow>,
-    vec_rows: Vec<VecRow>,
-    limit: usize,
-) -> Vec<NoteSearchResult> {
+fn rrf_fuse(fts_rows: Vec<FtsRow>, vec_rows: Vec<VecRow>, limit: usize) -> Vec<NoteSearchResult> {
     use std::collections::HashMap;
 
     const K: f64 = 60.0;
@@ -248,7 +205,11 @@ fn rrf_fuse(
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(limit);
     results
 }

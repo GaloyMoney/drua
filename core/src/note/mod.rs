@@ -218,7 +218,29 @@ impl Notes {
         limit: usize,
     ) -> Result<Vec<NoteSearchResult>, NoteError> {
         sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
-        self.search.list(workspace_id, limit).await
+        let query = es_entity::PaginatedQueryArgs {
+            first: limit,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                workspace_id,
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result
+            .entities
+            .into_iter()
+            .map(|n| NoteSearchResult {
+                id: n.id,
+                title: n.title,
+                content: n.content,
+                tags: n.tags,
+                score: 0.0,
+            })
+            .collect())
     }
 
     // -- internal helpers ---------------------------------------------------
