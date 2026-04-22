@@ -131,10 +131,7 @@ fn parse_stream_event(event: &serde_json::Value) -> Option<StreamEvent> {
             Some(StreamEvent::Delta(text.to_string()))
         }
         "ToolCallStartEvent" => {
-            let name = event
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("tool");
+            let name = event.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
             Some(StreamEvent::ToolStart(name.to_string()))
         }
         "ToolResultEvent" => {
