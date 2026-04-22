@@ -3,7 +3,7 @@ nameOverride: ""
 galoyAgents:
   resources: {}
   tracing:
-    serviceName: galoy-agents-dev
+    serviceName: drua-dev
     otelExporterOtlpEndpoint: "http://localhost:4317"
   server:
     service:
@@ -18,7 +18,7 @@ galoyAgents:
     tls: []
   labels: {}
   image:
-    repository: us.gcr.io/galoyorg/galoy-agents
+    repository: us.gcr.io/galoyorg/drua
     digest: "sha256:69a3157b6ad60c04e5514e1c6fcad69cf234fff2a644b42fc3e1f3df24525fcd"
     tag: edge
   replicas: 1
@@ -60,7 +60,7 @@ galoyAgents:
         compaction:
           resetTimeDeltaSeconds: 600
         systemPrompt: |
-          You are an agent operating inside a Galoy Agents workspace.
+          You are an agent operating inside a Drua workspace.
           You work on the tasks assigned to you and, when attached to
           a sandbox, you run commands and edit files inside it. Be
           concise and action-oriented.
@@ -116,7 +116,7 @@ galoyAgents:
   codeAssistant:
     indexHash: "9f885062a36bca6ca835cd6b809f054eb74d341cb9c3d0a798a74e42e40b64ec"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
-    gcsBucket: galoy-agents-models
+    gcsBucket: drua-models
     gcsCreds: ""
     initImage: google/cloud-sdk:slim
 kubernetes-mcp-server:
@@ -206,7 +206,7 @@ sandbox:
   ## MCP gateway URL for sandbox pods (e.g. "http://drua.drua.svc.cluster.local:5254/mcp")
   mcpGatewayUrl: ""
   ## Audience claim for the projected SA token (must match gateway validation)
-  saTokenAudience: "galoy-agents-mcp"
+  saTokenAudience: "drua-mcp"
   image:
     repository: us.gcr.io/galoyorg/sandbox
     digest: ""
@@ -231,7 +231,7 @@ sandbox:
   ## Example: Override or supplement nix cache config at runtime
   # env:
   # - name: NIX_CONFIG
-  #   value: "extra-substituters = https://galoy-agents.cachix.org\nextra-trusted-public-keys = galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY="
+  #   value: "extra-substituters = https://drua.cachix.org\nextra-trusted-public-keys = drua.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY="
   persistence:
     mountPath: /workspace
     size: 10Gi
@@ -243,7 +243,7 @@ postgresql:
     tag: 14.5.0-debian-11-r35
   auth:
     enablePostgresUser: false
-    username: galoy-agents
-    password: galoy-agents
-    database: galoy-agents
+    username: drua
+    password: drua
+    database: drua
 resources: {}

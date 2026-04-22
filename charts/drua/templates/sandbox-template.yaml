@@ -65,7 +65,7 @@ spec:
         {{- end }}
         volumeMounts:
         - name: mcp-token
-          mountPath: /var/run/secrets/galoy-agents
+          mountPath: /var/run/secrets/drua
           readOnly: true
         - name: workspace-secrets
           mountPath: /run/secrets
@@ -77,7 +77,7 @@ spec:
         projected:
           sources:
           - serviceAccountToken:
-              audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-mcp" }}
+              audience: {{ .Values.sandbox.saTokenAudience | default "drua-mcp" }}
               expirationSeconds: 3600
               path: token
       dnsConfig:

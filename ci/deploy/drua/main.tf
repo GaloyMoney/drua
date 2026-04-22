@@ -16,13 +16,13 @@ variable "anthropic_api_key" {
   default = ""
 }
 locals {
-  cluster_name         = "galoy-agents-cluster"
+  cluster_name         = "drua-cluster"
   cluster_location     = "us-east1-b"
-  gcp_project          = "galoy-agents"
-  namespace            = "galoy-agents"
-  sandbox_namespace    = "galoy-agents-sandboxes"
-  controller_namespace = "galoy-agents-sandbox-controller"
-  vpc_name             = "galoy-agents-vpc"
+  gcp_project          = "drua"
+  namespace            = "drua"
+  sandbox_namespace    = "drua-sandboxes"
+  controller_namespace = "drua-sandbox-controller"
+  vpc_name             = "drua-vpc"
   region               = "us-east1"
 
   github_app_private_key = fileexists("${path.module}/github-app-private-key.pem") ? file("${path.module}/github-app-private-key.pem") : ""
@@ -33,16 +33,16 @@ module "postgresql" {
 
   gcp_project    = local.gcp_project
   vpc_name       = local.vpc_name
-  instance_name  = "galoy-agents"
+  instance_name  = "drua"
   region         = local.region
-  databases      = ["galoy-agents"]
+  databases      = ["drua"]
   destroyable    = true
   highly_available = false
   tier           = "db-f1-micro"
   replication    = false
 }
 
-resource "kubernetes_namespace" "galoy_agents" {
+resource "kubernetes_namespace" "drua" {
   metadata {
     name = local.namespace
   }
@@ -60,14 +60,14 @@ resource "kubernetes_namespace" "sandbox_controller" {
   }
 }
 
-resource "kubernetes_secret" "galoy_agents" {
+resource "kubernetes_secret" "drua" {
   metadata {
-    name      = "galoy-agents"
+    name      = "drua"
     namespace = local.namespace
   }
 
   data = {
-    "pg-con"               = module.postgresql.creds["galoy-agents"].conn
+    "pg-con"               = module.postgresql.creds["drua"].conn
     "github-client-secret" = var.github_client_secret
     "gcs-creds"            = file("${path.module}/gcs-creds.json")
     "concourse-username"   = var.concourse_username
@@ -79,7 +79,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-app-private-key" = local.github_app_private_key
   }
 
-  depends_on = [kubernetes_namespace.galoy_agents]
+  depends_on = [kubernetes_namespace.drua]
 }
 
 resource "kubernetes_secret" "sandbox_anthropic" {
@@ -177,15 +177,15 @@ resource "kubectl_manifest" "sandbox_extensions" {
 }
 
 resource "postgresql_extension" "vector" {
-  provider = postgresql.galoy_agents
+  provider = postgresql.drua
   name     = "vector"
-  database = "galoy-agents"
+  database = "drua"
 
   depends_on = [module.postgresql]
 }
 
-resource "helm_release" "galoy_agents" {
-  name      = "galoy-agents"
+resource "helm_release" "drua" {
+  name      = "drua"
   chart     = "${path.module}/chart"
   namespace = local.namespace
 
@@ -193,7 +193,7 @@ resource "helm_release" "galoy_agents" {
     templatefile("${path.module}/prod-values.yml.tmpl", {
       image_digest                = var.image_digest
       sandbox_image_digest        = var.sandbox_image_digest
-      secret_checksum             = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
+      secret_checksum             = sha256(jsonencode(kubernetes_secret.drua.data))
     })
   ]
 
@@ -202,7 +202,7 @@ resource "helm_release" "galoy_agents" {
   timeout           = 900 # 15 minutes
 
   depends_on = [
-    kubernetes_secret.galoy_agents,
+    kubernetes_secret.drua,
     kubernetes_namespace.sandbox,
     google_container_node_pool.gvisor,
     kubectl_manifest.sandbox_controller,
@@ -235,12 +235,12 @@ provider "kubectl" {
 }
 
 provider "postgresql" {
-  alias    = "galoy_agents"
-  host     = module.postgresql.creds["galoy-agents"].host
+  alias    = "drua"
+  host     = module.postgresql.creds["drua"].host
   port     = 5432
   username = module.postgresql.admin-creds.user
   password = module.postgresql.admin-creds.password
-  database = "galoy-agents"
+  database = "drua"
   superuser = false
 }
 

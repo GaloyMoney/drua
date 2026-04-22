@@ -61,7 +61,7 @@ galoyAgents:
     tls:
       - hosts:
           - dashboard.agents.galoy.io
-        secretName: galoy-agents-tls
+        secretName: drua-tls
   secrets:
     create: false
   resources:
@@ -71,14 +71,14 @@ galoyAgents:
     limits:
       memory: 512Mi
   tracing:
-    serviceName: galoy-agents
-    otelExporterOtlpEndpoint: "http://opentelemetry-collector.galoy-agents-otel.svc.cluster.local:4317"
+    serviceName: drua
+    otelExporterOtlpEndpoint: "http://opentelemetry-collector.drua-otel.svc.cluster.local:4317"
 
 sandbox:
   enabled: true
   installController: false
-  namespace: galoy-agents-sandboxes
-  controllerNamespace: galoy-agents-sandbox-controller
+  namespace: drua-sandboxes
+  controllerNamespace: drua-sandbox-controller
   createNamespace: false
   templateName: agent-sandbox
   runtimeClassName: gvisor
@@ -91,8 +91,8 @@ sandbox:
     size: 10Gi
     storageClassName: standard-rwo
   anthropicApiKeySecret: anthropic-api-key
-  otelCollectorNamespace: galoy-agents-otel
-  mcpGatewayUrl: "http://galoy-agents.galoy-agents.svc.cluster.local:5254/mcp"
+  otelCollectorNamespace: drua-otel
+  mcpGatewayUrl: "http://drua.drua.svc.cluster.local:5254/mcp"
 
 kubernetes-mcp-server:
   enabled: true
