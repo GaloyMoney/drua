@@ -17,5 +17,5 @@ pub enum NoteError {
     #[error("NoteError - Embedding: {0}")]
     Embedding(String),
     #[error("NoteError - Library: {0}")]
-    Library(String),
+    Library(#[from] crate::library::LibraryError),
 }

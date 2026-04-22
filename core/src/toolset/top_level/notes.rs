@@ -160,6 +160,7 @@ impl TopLevelTool for StoreNote {
         let note = self
             .notes
             .store_or_update(
+                subject,
                 workspace_id,
                 &workspace_name,
                 params.note_id,
@@ -226,7 +227,7 @@ impl TopLevelTool for SearchNotes {
 
         let results = self
             .notes
-            .search(workspace_id, &params.query, params.limit)
+            .search(subject, workspace_id, &params.query, params.limit)
             .await
             .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
@@ -292,7 +293,7 @@ impl TopLevelTool for ListNotes {
 
         let results = self
             .notes
-            .list(workspace_id, params.limit)
+            .list(subject, workspace_id, params.limit)
             .await
             .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
@@ -358,7 +359,7 @@ impl TopLevelTool for GetNote {
 
         let note = self
             .notes
-            .find_by_id(workspace_id, params.note_id)
+            .find_by_id(subject, workspace_id, params.note_id)
             .await
             .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 

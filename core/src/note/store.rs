@@ -1,3 +1,4 @@
+use es_entity::AtomicOperation;
 use pgvector::Vector;
 use sqlx::PgPool;
 
@@ -27,9 +28,13 @@ impl NoteSearchStore {
         Self { pool: pool.clone() }
     }
 
-    /// Insert or update the search data row for a note.
-    #[tracing::instrument(name = "note.search_store.upsert", skip_all)]
-    pub async fn upsert(&self, note: &Note) -> Result<(), NoteError> {
+    /// Insert or update the search data row for a note within an atomic op.
+    #[tracing::instrument(name = "note.search_store.upsert_in_op", skip_all)]
+    pub async fn upsert_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        note: &Note,
+    ) -> Result<(), NoteError> {
         let tags_json = serde_json::to_value(&note.tags).unwrap_or_default();
         sqlx::query(
             r#"INSERT INTO note_search_data (note_id, workspace_id, title_text, content_text, tags)
@@ -44,7 +49,7 @@ impl NoteSearchStore {
         .bind(&note.title)
         .bind(&note.content)
         .bind(&tags_json)
-        .execute(&self.pool)
+        .execute(op.as_executor())
         .await?;
         Ok(())
     }

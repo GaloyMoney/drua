@@ -6,7 +6,7 @@ mod upstream;
 use self::job::PushRuntimeCommitsJobInitializer;
 use self::upstream::Upstream;
 pub use error::LibraryError;
-pub use file::RuntimeFile;
+pub use file::{GitFileHash, RuntimeFile};
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
@@ -53,7 +53,7 @@ impl Library {
     }
 
     #[tracing::instrument(name = "library.write", skip(self, file))]
-    pub async fn write(&self, file: RuntimeFile<'_>) -> Result<(), LibraryError> {
+    pub async fn write(&self, file: RuntimeFile) -> Result<(), LibraryError> {
         let relative_path = file.relative_path();
         let content = file.content();
         let commit_message = file.commit_message();

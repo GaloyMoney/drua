@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use crate::library::GitFileHash;
 use crate::primitives::*;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -15,11 +16,13 @@ pub enum NoteEvent {
         title: String,
         content: String,
         tags: Vec<String>,
+        file_hash: GitFileHash,
     },
     Updated {
         title: String,
         content: String,
         tags: Vec<String>,
+        file_hash: GitFileHash,
     },
     Archived {},
 }
@@ -34,19 +37,50 @@ pub struct Note {
     #[builder(default)]
     pub tags: Vec<String>,
     #[builder(default)]
+    pub file_hash: Option<GitFileHash>,
+    #[builder(default)]
     pub archived: bool,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
 impl Note {
-    pub fn update(&mut self, title: String, content: String, tags: Vec<String>) {
+    pub fn as_runtime_file(
+        &self,
+        workspace_name: &str,
+    ) -> crate::library::RuntimeFile {
+        let created_at = self
+            .events
+            .entity_first_persisted_at()
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+
+        crate::library::RuntimeFile::for_note(
+            self.id,
+            self.workspace_id,
+            workspace_name,
+            &self.title,
+            &self.content,
+            &self.tags,
+            &created_at,
+        )
+    }
+
+    pub fn update(
+        &mut self,
+        title: String,
+        content: String,
+        tags: Vec<String>,
+        file_hash: GitFileHash,
+    ) {
         self.title = title.clone();
         self.content = content.clone();
         self.tags = tags.clone();
+        self.file_hash = Some(file_hash.clone());
         self.events.push(NoteEvent::Updated {
             title,
             content,
             tags,
+            file_hash,
         });
     }
 
@@ -77,23 +111,27 @@ impl TryFromEvents<NoteEvent> for Note {
                     title,
                     content,
                     tags,
+                    file_hash,
                 } => {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
                         .title(title.clone())
                         .content(content.clone())
-                        .tags(tags.clone());
+                        .tags(tags.clone())
+                        .file_hash(Some(file_hash.clone()));
                 }
                 NoteEvent::Updated {
                     title,
                     content,
                     tags,
+                    file_hash,
                 } => {
                     builder = builder
                         .title(title.clone())
                         .content(content.clone())
-                        .tags(tags.clone());
+                        .tags(tags.clone())
+                        .file_hash(Some(file_hash.clone()));
                 }
                 NoteEvent::Archived {} => {
                     builder = builder.archived(true);
@@ -117,6 +155,7 @@ pub struct NewNote {
     pub(super) content: String,
     #[builder(default)]
     pub(super) tags: Vec<String>,
+    pub(super) file_hash: GitFileHash,
 }
 
 impl NewNote {
@@ -137,6 +176,7 @@ impl IntoEvents<NoteEvent> for NewNote {
                 title: self.title,
                 content: self.content,
                 tags: self.tags,
+                file_hash: self.file_hash,
             }],
         )
     }
@@ -146,17 +186,34 @@ impl IntoEvents<NoteEvent> for NewNote {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
+    use crate::library::GitFileHash;
     use crate::primitives::{NoteId, WorkspaceId};
 
     use super::{NewNote, Note};
 
+    fn test_hash() -> GitFileHash {
+        // Use RuntimeFile machinery to compute a real hash
+        let rf = crate::library::RuntimeFile::for_note(
+            NoteId::new(),
+            WorkspaceId::new(),
+            "test",
+            "Test Note",
+            "Some content here",
+            &["tag1".into(), "tag2".into()],
+            "",
+        );
+        rf.file_hash()
+    }
+
     fn new_note() -> Note {
+        let id = NoteId::new();
         let new = NewNote::builder()
-            .id(NoteId::new())
+            .id(id)
             .workspace_id(WorkspaceId::new())
             .title("Test Note")
             .content("Some content here")
             .tags(vec!["tag1".into(), "tag2".into()])
+            .file_hash(test_hash())
             .build()
             .unwrap();
 
@@ -170,6 +227,7 @@ mod tests {
         assert_eq!(note.content, "Some content here");
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
         assert!(!note.archived);
+        assert!(note.file_hash.is_some());
     }
 
     #[test]
@@ -179,6 +237,7 @@ mod tests {
             "Updated Title".into(),
             "Updated content".into(),
             vec!["new-tag".into()],
+            test_hash(),
         );
         assert_eq!(note.title, "Updated Title");
         assert_eq!(note.content, "Updated content");

@@ -1,4 +1,4 @@
-use crate::primitives::{AgentId, McpCredsId, SandboxId, WorkspaceId, WorkspaceSecretId};
+use crate::primitives::{AgentId, McpCredsId, NoteId, SandboxId, WorkspaceId, WorkspaceSecretId};
 
 // `External` carries a `String` so `AuthResource` cannot be `Copy`.
 // All other variants remain `Copy`-friendly.
@@ -24,6 +24,8 @@ pub enum AuthResource {
     /// MCP credentials. User-scoped (no workspace). Only `User` subjects
     /// and `Admin`-scoped agents can access these.
     McpCreds(Option<McpCredsId>),
+    /// A note inside a workspace.
+    Note(WorkspaceId, Option<NoteId>),
     /// The audit log for a workspace.
     AuditLog(WorkspaceId),
     /// An externally-defined resource. Matches [`super::AuthScope::External`]
@@ -39,6 +41,7 @@ impl AuthResource {
             AuthResource::Agent(ws, _)
             | AuthResource::Sandbox(ws, _)
             | AuthResource::WorkspaceSecret(ws, _)
+            | AuthResource::Note(ws, _)
             | AuthResource::AuditLog(ws) => Some(*ws),
             AuthResource::McpCreds(_) | AuthResource::External(_) => None,
         }

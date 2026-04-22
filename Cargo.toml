@@ -95,6 +95,7 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 
 # Hashing
+sha1 = "0.10"
 sha2 = "0.10"
 
 # Tokenization

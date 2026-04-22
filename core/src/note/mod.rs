@@ -14,7 +14,8 @@ use repo::*;
 pub use store::NoteSearchResult;
 use store::*;
 
-use crate::library::Library;
+use crate::auth::AuthSubject;
+use crate::library::{Library, RuntimeFile};
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -43,33 +44,54 @@ impl Notes {
     #[instrument(name = "note.store", skip(self))]
     pub async fn store(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         workspace_name: &str,
         title: String,
         content: String,
         tags: Vec<String>,
     ) -> Result<Note, NoteError> {
+        sub.can(AuthVerb::Create, AuthResource::Note(workspace_id, None))?;
+
+        let note_id = NoteId::new();
+        let runtime_file = RuntimeFile::for_note(
+            note_id,
+            workspace_id,
+            workspace_name,
+            &title,
+            &content,
+            &tags,
+            "",
+        );
+        let file_hash = runtime_file.file_hash();
+
         let new_note = NewNote::builder()
+            .id(note_id)
             .workspace_id(workspace_id)
             .title(&title)
             .content(&content)
             .tags(tags)
+            .file_hash(file_hash)
             .build()
             .expect("NewNote builder should not fail");
 
-        let note = self.repo.create(new_note).await?;
+        let mut op = self.repo.begin_op().await?;
+        let note = self.repo.create_in_op(&mut op, new_note).await?;
+        self.search.upsert_in_op(&mut op, &note).await?;
+        self.library.write(runtime_file).await?;
+        op.commit().await?;
 
-        self.search.upsert(&note).await?;
         self.spawn_embed(note.id, &note.title, &note.content);
-        self.write_to_library(&note, workspace_name).await;
 
         Ok(note)
     }
 
     /// Update an existing note.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "note.update", skip(self))]
     pub async fn update(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         workspace_name: &str,
         note_id: NoteId,
@@ -79,28 +101,51 @@ impl Notes {
     ) -> Result<Note, NoteError> {
         let mut note = self.repo.find_by_id(note_id).await?;
         if note.workspace_id != workspace_id {
-            return Err(NoteError::Authorization(
-                crate::primitives::AuthorizationError::Forbidden {
-                    verb: crate::primitives::AuthVerb::Read,
-                    resource: crate::primitives::AuthResource::Workspace(Some(workspace_id)),
-                },
-            ));
+            return Err(NoteError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Read,
+                resource: AuthResource::Workspace(Some(workspace_id)),
+            }));
         }
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
 
-        note.update(title, content, tags);
-        self.repo.update(&mut note).await?;
+        let created_at = note
+            .events
+            .entity_first_persisted_at()
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        let runtime_file = RuntimeFile::for_note(
+            note.id,
+            note.workspace_id,
+            workspace_name,
+            &title,
+            &content,
+            &tags,
+            &created_at,
+        );
+        let file_hash = runtime_file.file_hash();
 
-        self.search.upsert(&note).await?;
+        note.update(title, content, tags, file_hash);
+
+        let mut op = self.repo.begin_op().await?;
+        self.repo.update_in_op(&mut op, &mut note).await?;
+        self.search.upsert_in_op(&mut op, &note).await?;
+        self.library.write(runtime_file).await?;
+        op.commit().await?;
+
         self.spawn_embed(note.id, &note.title, &note.content);
-        self.write_to_library(&note, workspace_name).await;
 
         Ok(note)
     }
 
     /// Create or update a note. If `note_id` is provided, update; otherwise create.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "note.store_or_update", skip(self))]
     pub async fn store_or_update(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         workspace_name: &str,
         note_id: Option<NoteId>,
@@ -110,11 +155,11 @@ impl Notes {
     ) -> Result<Note, NoteError> {
         match note_id {
             Some(id) => {
-                self.update(workspace_id, workspace_name, id, title, content, tags)
+                self.update(sub, workspace_id, workspace_name, id, title, content, tags)
                     .await
             }
             None => {
-                self.store(workspace_id, workspace_name, title, content, tags)
+                self.store(sub, workspace_id, workspace_name, title, content, tags)
                     .await
             }
         }
@@ -124,17 +169,20 @@ impl Notes {
     #[instrument(name = "note.find_by_id", skip(self))]
     pub async fn find_by_id(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         note_id: NoteId,
     ) -> Result<Note, NoteError> {
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
         let note = self.repo.find_by_id(note_id).await?;
         if note.workspace_id != workspace_id {
-            return Err(NoteError::Authorization(
-                crate::primitives::AuthorizationError::Forbidden {
-                    verb: crate::primitives::AuthVerb::Read,
-                    resource: crate::primitives::AuthResource::Workspace(Some(workspace_id)),
-                },
-            ));
+            return Err(NoteError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Read,
+                resource: AuthResource::Workspace(Some(workspace_id)),
+            }));
         }
         Ok(note)
     }
@@ -143,10 +191,12 @@ impl Notes {
     #[instrument(name = "note.search", skip(self))]
     pub async fn search(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         query: &str,
         limit: usize,
     ) -> Result<Vec<NoteSearchResult>, NoteError> {
+        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
         let query_embedding = match self.embedder.embed_query(query).await {
             Ok(emb) => Some(emb),
             Err(e) => {
@@ -163,9 +213,11 @@ impl Notes {
     #[instrument(name = "note.list", skip(self))]
     pub async fn list(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         limit: usize,
     ) -> Result<Vec<NoteSearchResult>, NoteError> {
+        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
         self.search.list(workspace_id, limit).await
     }
 
@@ -175,6 +227,9 @@ impl Notes {
         let embedder = self.embedder.clone();
         let search = self.search.clone();
         let text = format!("{}\n\n{}", title, content);
+        // Fire-and-forget: embed_document uses spawn_blocking internally (ONNX
+        // inference is CPU-heavy). The outer tokio::spawn lets us return the
+        // note to the caller without waiting for embedding completion.
         tokio::spawn(async move {
             match embedder.embed_document(&text).await {
                 Ok(embedding) => {
@@ -189,67 +244,4 @@ impl Notes {
         });
     }
 
-    async fn write_to_library(&self, note: &Note, workspace_name: &str) {
-        let slug = slugify(&note.title);
-        let id_prefix = &note.id.to_string()[..8];
-
-        let created_at = note
-            .events
-            .entity_first_persisted_at()
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
-        let tags_str = note
-            .tags
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let markdown = format!(
-            "---\nid: {}\nworkspace: {}\ntags: [{}]\ncreated: {}\n---\n\n# {}\n\n{}\n",
-            note.id, note.workspace_id, tags_str, created_at, note.title, note.content
-        );
-
-        use crate::library::RuntimeFile;
-        if let Err(e) = self
-            .library
-            .write(RuntimeFile::Note {
-                workspace_name,
-                slug: &slug,
-                id_prefix,
-                content: &markdown,
-            })
-            .await
-        {
-            tracing::error!(
-                note_id = %note.id,
-                error = %e,
-                "failed to write note to library"
-            );
-        }
-    }
-}
-
-fn slugify(title: &str) -> String {
-    title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::slugify;
-
-    #[test]
-    fn slugify_basic() {
-        assert_eq!(slugify("Hello World"), "hello-world");
-        assert_eq!(slugify("  Spaces & Symbols!!  "), "spaces-symbols");
-        assert_eq!(slugify("already-slugged"), "already-slugged");
-    }
 }
