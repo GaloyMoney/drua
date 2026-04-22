@@ -34,8 +34,8 @@ impl From<llm::response::Usage> for AssistantResponseMetadata {
             usage: Usage {
                 input: usage.input_tokens as u64,
                 output: usage.output_tokens as u64,
-                cache_read: 0,
-                cache_write: 0,
+                cache_read: usage.cache_read_input_tokens as u64,
+                cache_write: usage.cache_creation_input_tokens as u64,
                 total_tokens: (usage.input_tokens + usage.output_tokens) as u64,
             },
             cost: Cost::default(),

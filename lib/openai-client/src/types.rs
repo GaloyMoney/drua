@@ -16,6 +16,8 @@ pub(crate) struct OpenAiRequest {
     pub model: String,
     pub messages: Vec<OpenAiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -138,4 +140,12 @@ pub(crate) struct OpenAiUsage {
     pub prompt_tokens: u32,
     #[serde(default)]
     pub completion_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
 }

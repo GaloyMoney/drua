@@ -33,6 +33,7 @@ async fn anthropic_round_trip_via_executor() {
         tools: Vec::new(),
         tool_choice: None,
         max_tokens: None, // executor should fill this in from default_max_tokens
+        cache_key: None,
     };
 
     let (request, response_rx) = PromptRequest::new(prompt);

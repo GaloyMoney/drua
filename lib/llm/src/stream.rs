@@ -33,6 +33,8 @@ pub enum StreamDelta {
     Usage {
         input_tokens: u32,
         output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
     },
     /// The stream is complete.
     Done { stop_reason: Option<StopReason> },
@@ -117,9 +119,13 @@ impl StreamAccumulator {
             StreamDelta::Usage {
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
             } => {
                 self.usage.input_tokens += *input_tokens;
                 self.usage.output_tokens += *output_tokens;
+                self.usage.cache_read_input_tokens += *cache_read_input_tokens;
+                self.usage.cache_creation_input_tokens += *cache_creation_input_tokens;
             }
             StreamDelta::Done { stop_reason } => {
                 self.stop_reason = *stop_reason;
@@ -196,6 +202,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 10,
             output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         });
         acc.process(&StreamDelta::TextDelta {
             text: "Hello".to_string(),
@@ -206,6 +214,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 0,
             output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
@@ -241,6 +251,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 0,
             output_tokens: 20,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
@@ -294,6 +306,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 15,
             output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         });
         // Thinking
         acc.process(&StreamDelta::ThinkingDelta {
@@ -315,6 +329,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 0,
             output_tokens: 30,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
@@ -410,6 +426,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 100,
             output_tokens: 0,
+            cache_read_input_tokens: 80,
+            cache_creation_input_tokens: 20,
         });
         acc.process(&StreamDelta::TextDelta {
             text: "hi".to_string(),
@@ -417,6 +435,8 @@ mod tests {
         acc.process(&StreamDelta::Usage {
             input_tokens: 0,
             output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
@@ -425,5 +445,7 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.usage.input_tokens, 100);
         assert_eq!(resp.usage.output_tokens, 50);
+        assert_eq!(resp.usage.cache_read_input_tokens, 80);
+        assert_eq!(resp.usage.cache_creation_input_tokens, 20);
     }
 }

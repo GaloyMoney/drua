@@ -212,7 +212,7 @@ impl AgentSession {
                 prompt_definition: prompt_definition.clone(),
                 user_messages_view,
             });
-            return prompt_definition.into_prompt(target, &self.events);
+            return self.build_prompt(target, prompt_definition);
         }
         let thread_id = thread_id.unwrap();
 
@@ -312,7 +312,7 @@ impl AgentSession {
             user_messages_view,
         });
 
-        prompt_definition.into_prompt(target, &self.events)
+        self.build_prompt(target, prompt_definition)
     }
 
     pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) {
@@ -487,6 +487,16 @@ impl AgentSession {
         });
         self.current_main_thread = Some(thread_id);
         prompt_definition
+    }
+
+    fn build_prompt(
+        &self,
+        target: TargetThread,
+        prompt_definition: PromptDefinition,
+    ) -> Result<Prompt, AgentSessionError> {
+        let mut prompt = prompt_definition.into_prompt(target, &self.events)?;
+        prompt.cache_key = Some(format!("agent-session:{}", self.id));
+        Ok(prompt)
     }
 
     fn materialize(&self) -> MaterializedSession<'_> {
@@ -1001,6 +1011,11 @@ mod tests {
             .expect("next_prompt should succeed");
 
         assert_eq!(prompt.model, "test-model");
+        let expected_cache_key = format!("agent-session:{}", session.id);
+        assert_eq!(
+            prompt.cache_key.as_deref(),
+            Some(expected_cache_key.as_str())
+        );
 
         assert_eq!(prompt.system.len(), 1);
         assert!(

@@ -15,8 +15,15 @@ pub struct PromptResponse {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// Total input tokens seen by the model. Providers that expose cache hits
+    /// or cache writes separately should still populate this with the full
+    /// prompt token count so downstream accounting stays consistent.
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

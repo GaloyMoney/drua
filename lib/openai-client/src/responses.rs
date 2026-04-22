@@ -221,6 +221,8 @@ struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ResponsesTool>>,
@@ -305,6 +307,7 @@ fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> R
         model: prompt.model.clone(),
         input,
         instructions: (!instructions.is_empty()).then_some(instructions),
+        prompt_cache_key: prompt.cache_key.clone(),
         max_output_tokens: match auth {
             OpenAiResponsesAuth::ApiKey { .. } => {
                 prompt.max_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS))
@@ -441,7 +444,7 @@ struct ResponsesDeltaSynthesizer {
     text: String,
     thinking: String,
     tool_calls: HashMap<String, ToolCallState>,
-    pending_usage: Option<(u32, u32)>,
+    pending_usage: Option<PendingUsage>,
     pending_incomplete_reason: Option<String>,
     saw_tool_call: bool,
     terminal_emitted: bool,
@@ -453,6 +456,13 @@ struct ToolCallState {
     name: String,
     arguments: String,
     started: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    cached_input_tokens: u32,
 }
 
 impl ResponsesDeltaSynthesizer {
@@ -489,10 +499,15 @@ impl ResponsesDeltaSynthesizer {
             ResponsesResponseEvent::ResponseCompleted { response }
             | ResponsesResponseEvent::ResponseDone { response }
             | ResponsesResponseEvent::ResponseIncomplete { response } => {
-                self.pending_usage = response
-                    .usage
-                    .as_ref()
-                    .map(|usage| (usage.input_tokens, usage.output_tokens));
+                self.pending_usage = response.usage.as_ref().map(|usage| PendingUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cached_input_tokens: usage
+                        .input_tokens_details
+                        .as_ref()
+                        .map(|details| details.cached_tokens)
+                        .unwrap_or(0),
+                });
                 self.pending_incomplete_reason = response.incomplete_reason();
                 Ok(Vec::new())
             }
@@ -668,7 +683,12 @@ impl ResponsesDeltaSynthesizer {
             return Ok(Vec::new());
         }
 
-        let Some((input_tokens, output_tokens)) = self.pending_usage else {
+        let Some(PendingUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        }) = self.pending_usage
+        else {
             return Err("OpenAI Responses stream ended without terminal response".to_string());
         };
 
@@ -677,6 +697,8 @@ impl ResponsesDeltaSynthesizer {
             StreamDelta::Usage {
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens: cached_input_tokens,
+                cache_creation_input_tokens: 0,
             },
             StreamDelta::Done {
                 stop_reason: Some(self.stop_reason()),
@@ -827,7 +849,15 @@ struct ResponsesUsage {
     #[serde(default)]
     input_tokens: u32,
     #[serde(default)]
+    input_tokens_details: Option<ResponsesInputTokensDetails>,
+    #[serde(default)]
     output_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesInputTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -943,6 +973,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: None,
             max_tokens: Some(1234),
+            cache_key: None,
         }
     }
 
@@ -1003,7 +1034,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(synth
-            .process_event(r#"{"type":"response.completed","response":{"incomplete_details":null,"usage":{"input_tokens":1,"output_tokens":1}}}"#)
+            .process_event(r#"{"type":"response.completed","response":{"incomplete_details":null,"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":1},"output_tokens":1}}}"#)
             .unwrap()
             .is_empty());
 
@@ -1016,6 +1047,15 @@ mod tests {
         )));
 
         let terminal = synth.process_event("[DONE]").unwrap();
+        assert!(terminal.iter().any(|delta| matches!(
+            delta,
+            StreamDelta::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: 1,
+                cache_creation_input_tokens: 0,
+            }
+        )));
         assert!(terminal.iter().any(|delta| matches!(
             delta,
             StreamDelta::Done {
@@ -1046,6 +1086,25 @@ mod tests {
         assert!(
             value.get("max_output_tokens").is_none(),
             "subscription endpoint should not receive max_output_tokens"
+        );
+    }
+
+    #[test]
+    fn requests_include_prompt_cache_key_when_present() {
+        let mut prompt = sample_prompt();
+        prompt.cache_key = Some("agent-session:test".to_string());
+
+        let request = prompt_to_responses_request(
+            &prompt,
+            &OpenAiResponsesAuth::ApiKey {
+                api_key: "sk-test".to_string(),
+            },
+        );
+
+        let value = serde_json::to_value(request).expect("request serializes");
+        assert_eq!(
+            value["prompt_cache_key"],
+            serde_json::json!("agent-session:test")
         );
     }
 }

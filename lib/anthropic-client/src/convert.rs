@@ -190,8 +190,12 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
 
     // Truncate u64 → u32 (safe for realistic token counts).
     let usage = Usage {
-        input_tokens: acc.usage.input_tokens as u32,
+        input_tokens: (acc.usage.input_tokens
+            + acc.usage.cache_read_tokens
+            + acc.usage.cache_write_tokens) as u32,
         output_tokens: acc.usage.output_tokens as u32,
+        cache_read_input_tokens: acc.usage.cache_read_tokens as u32,
+        cache_creation_input_tokens: acc.usage.cache_write_tokens as u32,
     };
 
     PromptResponse {
@@ -258,10 +262,28 @@ impl AnthropicDeltaConverter {
 
         Ok(match event {
             AnthropicStreamEvent::MessageStart { message } => {
-                let input_tokens = message.usage.map(|u| u.input as u32).unwrap_or(0);
+                let input_tokens = message
+                    .usage
+                    .as_ref()
+                    .map(|u| {
+                        (u.input + u.cache_read.unwrap_or(0) + u.cache_write.unwrap_or(0)) as u32
+                    })
+                    .unwrap_or(0);
+                let cache_read_input_tokens = message
+                    .usage
+                    .as_ref()
+                    .and_then(|u| u.cache_read)
+                    .unwrap_or(0) as u32;
+                let cache_creation_input_tokens = message
+                    .usage
+                    .as_ref()
+                    .and_then(|u| u.cache_write)
+                    .unwrap_or(0) as u32;
                 vec![StreamDelta::Usage {
                     input_tokens,
                     output_tokens: 0,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
                 }]
             }
             AnthropicStreamEvent::ContentBlockStart {
@@ -323,6 +345,8 @@ impl AnthropicDeltaConverter {
                     deltas.push(StreamDelta::Usage {
                         input_tokens: 0,
                         output_tokens: u.output_tokens as u32,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
                     });
                 }
                 let stop_reason = delta.stop_reason.map(|sr| match sr {

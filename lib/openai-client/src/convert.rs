@@ -55,6 +55,7 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
     OpenAiRequest {
         model: prompt.model.clone(),
         messages,
+        prompt_cache_key: prompt.cache_key.clone(),
         max_completion_tokens: prompt.max_tokens,
         temperature: None,
         tools,
@@ -226,9 +227,16 @@ impl DeltaSynthesizer {
         // Usage chunk (OpenAI sends it in a separate chunk when
         // stream_options.include_usage is true).
         if let Some(usage) = &chunk.usage {
+            let cached_tokens = usage
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens)
+                .unwrap_or(0);
             deltas.push(StreamDelta::Usage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
+                cache_read_input_tokens: cached_tokens,
+                cache_creation_input_tokens: 0,
             });
         }
 
@@ -320,6 +328,7 @@ mod tests {
             }],
             tool_choice: None,
             max_tokens: Some(1024),
+            cache_key: None,
         }
     }
 
@@ -334,9 +343,19 @@ mod tests {
         assert_eq!(req.messages[0].role, "system");
         assert_eq!(req.messages[1].role, "user");
         assert_eq!(req.max_completion_tokens, Some(1024));
+        assert!(req.prompt_cache_key.is_none());
         assert!(req.tools.is_some());
         assert_eq!(req.tools.as_ref().unwrap().len(), 1);
         assert_eq!(req.tools.as_ref().unwrap()[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn prompt_to_request_includes_prompt_cache_key() {
+        let mut prompt = sample_prompt();
+        prompt.cache_key = Some("agent-session:test".to_string());
+
+        let req = prompt_to_request(&prompt);
+        assert_eq!(req.prompt_cache_key.as_deref(), Some("agent-session:test"));
     }
 
     #[test]
@@ -367,6 +386,7 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             max_tokens: None,
+            cache_key: None,
         };
 
         let req = prompt_to_request(&prompt);
@@ -398,6 +418,7 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             max_tokens: None,
+            cache_key: None,
         };
 
         let req = prompt_to_request(&prompt);
@@ -456,7 +477,9 @@ mod tests {
             d,
             StreamDelta::Usage {
                 input_tokens: 10,
-                output_tokens: 5
+                output_tokens: 5,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }
         )));
         assert!(deltas.iter().any(|d| matches!(
