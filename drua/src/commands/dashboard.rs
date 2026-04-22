@@ -370,7 +370,7 @@ fn spawn_chat_stream(
             |event| {
                 let evt = parse_gql_event(&event);
                 if let Some(evt) = evt {
-                    return !tx.send(evt).is_err();
+                    return tx.send(evt).is_ok();
                 }
                 true // continue for ignored event types
             },
