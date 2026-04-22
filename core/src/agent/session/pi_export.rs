@@ -115,7 +115,7 @@ pub enum PiAgentMessage {
     ToolResult {
         tool_call_id: String,
         tool_name: String,
-        content: String,
+        content: Vec<PiContentBlock>,
         is_error: bool,
         timestamp: i64,
     },
@@ -339,7 +339,9 @@ pub(super) fn build_tool_result_entry(
         message: PiAgentMessage::ToolResult {
             tool_call_id: result.tool_use_id.clone(),
             tool_name: String::new(),
-            content: result.content.clone(),
+            content: vec![PiContentBlock::Text {
+                text: result.content.clone(),
+            }],
             is_error: result.is_error,
             timestamp: ts.timestamp_millis(),
         },
@@ -449,13 +451,16 @@ mod tests {
         let msg = PiAgentMessage::ToolResult {
             tool_call_id: "tc_1".to_string(),
             tool_name: "bash".to_string(),
-            content: "output".to_string(),
+            content: vec![PiContentBlock::Text {
+                text: "output".to_string(),
+            }],
             is_error: false,
             timestamp: 1704067200000,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"role\":\"toolResult\""));
         assert!(json.contains("\"toolCallId\":\"tc_1\""));
+        assert!(json.contains("\"content\":[{\"type\":\"text\""));
     }
 
     #[test]
