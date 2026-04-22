@@ -67,10 +67,8 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, auth: AuthSubject
         let _ = socket
             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
-                reason: format!(
-                    "missing AuthScope::Tunnel({deployment_id}) on caller credentials"
-                )
-                .into(),
+                reason: format!("missing AuthScope::Tunnel({deployment_id}) on caller credentials")
+                    .into(),
             })))
             .await;
         return;

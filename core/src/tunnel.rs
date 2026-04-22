@@ -104,7 +104,9 @@ impl TunnelHandle {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let id = uuid::Uuid::new_v4().to_string();
-        let result = self.call_tool_inner(&id, upstream, tool_name, arguments).await;
+        let result = self
+            .call_tool_inner(&id, upstream, tool_name, arguments)
+            .await;
         // Single cleanup point: remove is a no-op if a successful `resolve`
         // already took the entry out. Covers timeout, send failure, and
         // serialization failure without repeating cleanup at each `?`.

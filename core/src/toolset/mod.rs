@@ -165,7 +165,9 @@ impl ToolSets {
         let mut sets = self.sets.write().expect("toolset lock poisoned");
         let before = sets.len();
         sets.retain(|s| match s.scope() {
-            Some(ToolSetScope::Tunnel { deployment_id: d, .. }) => d != deployment_id,
+            Some(ToolSetScope::Tunnel {
+                deployment_id: d, ..
+            }) => d != deployment_id,
             _ => true,
         });
         let removed = before - sets.len();
@@ -189,7 +191,9 @@ impl ToolSets {
         let mut sets = self.sets.write().expect("toolset lock poisoned");
         let before = sets.len();
         sets.retain(|s| match s.scope() {
-            Some(ToolSetScope::Tunnel { session_id: sid, .. }) => *sid != session_id,
+            Some(ToolSetScope::Tunnel {
+                session_id: sid, ..
+            }) => *sid != session_id,
             _ => true,
         });
         let removed = before - sets.len();

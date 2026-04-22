@@ -143,8 +143,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(()) => tracing::info!("tunnel closed cleanly"),
             Err(e) => tracing::error!(error = %e, "tunnel session failed"),
         }
-        let jitter =
-            std::time::Duration::from_millis(rand::random::<u64>() % JITTER_MS_MAX);
+        let jitter = std::time::Duration::from_millis(rand::random::<u64>() % JITTER_MS_MAX);
         let delay = backoff + jitter;
         tracing::info!(delay_ms = %delay.as_millis(), "reconnecting");
         tokio::time::sleep(delay).await;

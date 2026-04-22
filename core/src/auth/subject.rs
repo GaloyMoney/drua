@@ -192,8 +192,8 @@ impl AuthSubject {
 
 #[cfg(test)]
 mod tests {
-    use crate::primitives::{AgentId, McpCredsId, UserId};
     use super::*;
+    use crate::primitives::{AgentId, McpCredsId, UserId};
 
     fn a_user_id() -> UserId {
         UserId::from(uuid::Uuid::new_v4())
