@@ -263,10 +263,8 @@ pub(super) fn build_thread_messages(
 ) -> Vec<ThreadMessage> {
     // Build the global block content list from session events
     // (mirrors the event scan in PromptDefinition::into_prompt).
+    // Uses iter_all() so unpersisted events (e.g. in tests) are included.
     let mut all_blocks: Vec<BlockContent> = Vec::new();
-    // Map: block index → recorded_at timestamp.
-    let mut block_timestamps: std::collections::HashMap<usize, chrono::DateTime<chrono::Utc>> =
-        std::collections::HashMap::new();
     // Reverse map: replacement block index → original block index.
     // Used to report original positions in the GQL block_indexes output.
     let mut reverse_remap: std::collections::HashMap<usize, usize> =
@@ -275,11 +273,9 @@ pub(super) fn build_thread_messages(
     let mut assistant_metadata: std::collections::HashMap<usize, AssistantResponseMetadata> =
         std::collections::HashMap::new();
 
-    for pe in events.iter_persisted() {
-        let ts = pe.recorded_at;
-        match &pe.event {
+    for event in events.iter_all() {
+        match event {
             AgentSessionEvent::UserInputAdded { text, .. } => {
-                block_timestamps.insert(all_blocks.len(), ts);
                 all_blocks.push(BlockContent::UserText(text.clone()));
             }
             AgentSessionEvent::SandboxNotificationAdded {
@@ -288,7 +284,6 @@ pub(super) fn build_thread_messages(
                 text,
                 ..
             } => {
-                block_timestamps.insert(all_blocks.len(), ts);
                 all_blocks.push(BlockContent::SandboxNotification {
                     sandbox_name: sandbox_name.clone(),
                     operation: operation.clone(),
@@ -300,23 +295,54 @@ pub(super) fn build_thread_messages(
             } => {
                 let first_idx = all_blocks.len();
                 for block in content {
-                    block_timestamps.insert(all_blocks.len(), ts);
                     all_blocks.push(BlockContent::AssistantBlock(block.clone()));
                 }
                 assistant_metadata.insert(first_idx, metadata.clone());
             }
             AgentSessionEvent::ToolResultsAdded { results, .. } => {
                 for result in results {
-                    block_timestamps.insert(all_blocks.len(), ts);
                     all_blocks.push(BlockContent::ToolResult(result.clone()));
                 }
             }
             AgentSessionEvent::ToolResultsMasked { results, .. } => {
                 for masked in results {
                     let replacement_idx = all_blocks.len();
-                    block_timestamps.insert(replacement_idx, ts);
                     reverse_remap.insert(replacement_idx, masked.original_index.index());
                     all_blocks.push(BlockContent::ToolResult(masked.replacement.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Build timestamp map from persisted events (new events won't have timestamps).
+    let mut block_timestamps: std::collections::HashMap<usize, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
+    let mut block_idx = 0usize;
+    for pe in events.iter_persisted() {
+        let ts = pe.recorded_at;
+        match &pe.event {
+            AgentSessionEvent::UserInputAdded { .. }
+            | AgentSessionEvent::SandboxNotificationAdded { .. } => {
+                block_timestamps.insert(block_idx, ts);
+                block_idx += 1;
+            }
+            AgentSessionEvent::AssistantResponseReceived { content, .. } => {
+                for _ in content {
+                    block_timestamps.insert(block_idx, ts);
+                    block_idx += 1;
+                }
+            }
+            AgentSessionEvent::ToolResultsAdded { results, .. } => {
+                for _ in results {
+                    block_timestamps.insert(block_idx, ts);
+                    block_idx += 1;
+                }
+            }
+            AgentSessionEvent::ToolResultsMasked { results, .. } => {
+                for _ in results {
+                    block_timestamps.insert(block_idx, ts);
+                    block_idx += 1;
                 }
             }
             _ => {}
