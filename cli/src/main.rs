@@ -65,6 +65,10 @@ enum Command {
 
     /// Chat with an agent interactively
     Chat {
+        /// Server URL (default: http://localhost:4200)
+        #[arg(long, env = "DRUA_SERVER_URL")]
+        server: Option<String>,
+
         /// Agent ID to chat with (default: auto-provisioned workspace lead)
         #[arg(long)]
         agent: Option<String>,
@@ -142,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Login { server } => drua_client::commands::login::run(server).await,
         Command::Status => drua_client::commands::status::run().await,
         Command::Logout => drua_client::commands::logout::run(),
-        Command::Chat { agent } => drua_client::commands::chat::run(agent).await,
+        Command::Chat { server, agent } => drua_client::commands::chat::run(server, agent).await,
         Command::Export { agent_id } => drua_client::commands::export::run(&agent_id).await,
         Command::Workspace { action } => match action {
             WorkspaceAction::List => drua_client::commands::workspace::list().await,
