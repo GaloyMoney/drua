@@ -11,6 +11,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rmcp = { workspace = true }
 serde = { workspace = true }

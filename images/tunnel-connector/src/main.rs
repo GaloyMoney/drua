@@ -114,6 +114,14 @@ fn parse_upstreams(raw: &str) -> Vec<UpstreamConfig> {
 // Main
 // ---------------------------------------------------------------------------
 
+// Reconnect backoff: start at 1s and double up to 60s between attempts,
+// with ±jitter_ms of random jitter added on top so a fleet of connectors
+// reconnecting simultaneously after a central drua rollout doesn't
+// resonate into a thundering herd.
+const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+const JITTER_MS_MAX: u64 = 1_000;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -125,17 +133,30 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("no upstreams configured — provide at least one name=url pair");
     }
 
+    let mut backoff = INITIAL_BACKOFF;
     loop {
-        match run_tunnel(&cli, &upstreams).await {
+        // `run_tunnel` resets `backoff` to `INITIAL_BACKOFF` once it has
+        // successfully sent the Register frame. That way a long-lived
+        // session that eventually errors out doesn't start its *next*
+        // reconnect from a stale high backoff.
+        match run_tunnel(&cli, &upstreams, &mut backoff).await {
             Ok(()) => tracing::info!("tunnel closed cleanly"),
             Err(e) => tracing::error!(error = %e, "tunnel session failed"),
         }
-        tracing::info!("reconnecting in 5 seconds...");
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let jitter =
+            std::time::Duration::from_millis(rand::random::<u64>() % JITTER_MS_MAX);
+        let delay = backoff + jitter;
+        tracing::info!(delay_ms = %delay.as_millis(), "reconnecting");
+        tokio::time::sleep(delay).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
-async fn run_tunnel(cli: &Cli, upstreams: &[UpstreamConfig]) -> anyhow::Result<()> {
+async fn run_tunnel(
+    cli: &Cli,
+    upstreams: &[UpstreamConfig],
+    backoff: &mut std::time::Duration,
+) -> anyhow::Result<()> {
     // ── 1. Discover tools from local MCP servers ──────────────────────────
     let mut mcp_clients: HashMap<String, RunningService<RoleClient, ()>> = HashMap::new();
     let mut registrations: Vec<RegisteredToolSet> = Vec::new();
@@ -197,6 +218,11 @@ async fn run_tunnel(cli: &Cli, upstreams: &[UpstreamConfig]) -> anyhow::Result<(
     let json = serde_json::to_string(&register_msg)?;
     ws_tx.send(tungstenite::Message::Text(json.into())).await?;
     tracing::info!("registration sent");
+
+    // Past the connect-and-register gauntlet — this session is working.
+    // Reset reconnect backoff so a later in-session failure starts the
+    // next attempt fresh, instead of inheriting stale doubling.
+    *backoff = INITIAL_BACKOFF;
 
     // ── 4. Relay loop ─────────────────────────────────────────────────────
     while let Some(msg) = ws_rx.next().await {

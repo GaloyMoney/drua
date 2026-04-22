@@ -5915,6 +5915,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "rand 0.8.6",
  "reqwest 0.13.2",
  "rmcp",
  "serde",
