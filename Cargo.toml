@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "admin-cli",
+  "cli",
   "server",
   "lib/concourse-client",
   "core",

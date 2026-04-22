@@ -1313,7 +1313,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "drua-admin-cli"
+name = "drua-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",

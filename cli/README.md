@@ -5,7 +5,7 @@ CLI for Drua.
 ## Quick start
 
 ```bash
-cargo run -p drua-admin-cli -- dashboard
+cargo run -p drua-cli -- dashboard
 ```
 
 This will:
