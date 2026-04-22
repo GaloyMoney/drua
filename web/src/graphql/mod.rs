@@ -31,8 +31,7 @@ pub type AgentsSchema = Schema<Query, Mutation, Subscription>;
 /// Follows lana-bank's pattern: `app` is optional so that the `write_sdl`
 /// binary can generate the SDL without a live database connection.
 pub fn schema(app: Option<domain::App>) -> AgentsSchema {
-    let mut builder =
-        Schema::build(Query, Mutation, Subscription).extension(extensions::Tracing);
+    let mut builder = Schema::build(Query, Mutation, Subscription).extension(extensions::Tracing);
 
     if let Some(app) = app {
         builder = builder.data(app);

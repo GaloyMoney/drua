@@ -118,10 +118,9 @@ where
     let ws_url = format!("{ws_url}/graphql/ws");
 
     let mut request = tungstenite::client::IntoClientRequest::into_client_request(ws_url)?;
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {token}").parse().unwrap(),
-    );
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
         "graphql-transport-ws".parse().unwrap(),
@@ -163,10 +162,8 @@ where
             }
         }
     });
-    ws.send(tungstenite::Message::Text(
-        subscribe_msg.to_string().into(),
-    ))
-    .await?;
+    ws.send(tungstenite::Message::Text(subscribe_msg.to_string().into()))
+        .await?;
 
     // Receive events
     while let Some(msg) = ws.next().await {
@@ -204,4 +201,3 @@ where
 
     Ok(())
 }
-
