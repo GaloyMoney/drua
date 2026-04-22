@@ -54,16 +54,21 @@ impl JobRunner for PushRuntimeCommitsRunner {
         mut current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         loop {
-            if current_job.is_shutdown_requested() {
-                tracing::info!("push-runtime-commits: shutdown requested");
-                break;
-            }
-
             if let Err(e) = self.try_push().await {
                 tracing::warn!(error = %e, "push-runtime-commits: push failed, will retry");
             }
 
-            tokio::time::sleep(POLL_INTERVAL).await;
+            // Wait for next cycle or shutdown, whichever comes first.
+            tokio::select! {
+                biased;
+                shutdown = current_job.shutdown_requested() => {
+                    if shutdown {
+                        tracing::info!("push-runtime-commits: shutdown requested");
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+            }
         }
         Ok(JobCompletion::Complete)
     }
@@ -92,11 +97,9 @@ impl PushRuntimeCommitsRunner {
             .output()
             .await?;
         if !push.status.success() {
-            return Err(format!(
-                "git push failed: {}",
-                String::from_utf8_lossy(&push.stderr)
-            )
-            .into());
+            return Err(
+                format!("git push failed: {}", String::from_utf8_lossy(&push.stderr)).into(),
+            );
         }
 
         tracing::info!("pushed runtime commits");

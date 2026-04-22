@@ -159,7 +159,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         encryption: Default::default(),
         sandbox: config.sandbox.clone(),
         github_app: github_app_config,
-        library: Default::default(),
+        library: config.library.clone(),
     };
 
     let app = domain::App::init(&pool, app_config).await?;

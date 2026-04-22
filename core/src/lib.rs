@@ -61,6 +61,7 @@ pub struct App {
     tunnels: Arc<tunnel::TunnelRegistry>,
     library: Library,
     notes: Arc<Notes>,
+    jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
     _prompt_executor: Arc<PromptExecutor>,
@@ -209,6 +210,7 @@ impl App {
         jobs.start_poll()
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
+        let jobs = Arc::new(jobs);
 
         Ok(Self {
             users: Arc::new(Users::new(pool)),
@@ -225,6 +227,7 @@ impl App {
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
             notes,
+            jobs,
             _prompt_executor: prompt_executor,
         })
     }
@@ -283,6 +286,14 @@ impl App {
 
     pub fn notes(&self) -> &Notes {
         &self.notes
+    }
+
+    /// Gracefully shut down background jobs (e.g. push-runtime-commits).
+    /// Call this on SIGTERM / ctrl-c before exiting.
+    pub async fn shutdown(&self) {
+        if let Err(e) = self.jobs.shutdown().await {
+            tracing::error!(error = %e, "job shutdown failed");
+        }
     }
 }
 
