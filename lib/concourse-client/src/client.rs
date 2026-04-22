@@ -291,7 +291,7 @@ impl ConcourseClient {
 
 /// Format a Unix epoch timestamp as `HH:MM:SS` UTC.
 pub(crate) fn format_epoch(epoch: i64) -> String {
-    let secs = ((epoch % 86400) + 86400) % 86400; // handle negative mod
+    let secs = epoch.rem_euclid(86400);
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
