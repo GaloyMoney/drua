@@ -411,6 +411,19 @@ impl AgentSession {
             .collect();
         let is_tool_use = matches!(stop_reason, StopReason::ToolUse) && !tool_uses.is_empty();
 
+        // Strip orphaned tool_use blocks when we won't execute them (e.g.
+        // stop_reason is EndTurn/MaxTokens/None). Persisting tool_use blocks
+        // without matching tool_result blocks causes the next prompt to be
+        // rejected by the API.
+        let content = if !is_tool_use && !tool_uses.is_empty() {
+            content
+                .into_iter()
+                .filter(|b| !matches!(b, AssistantBlock::ToolUse { .. }))
+                .collect()
+        } else {
+            content
+        };
+
         self.events
             .push(AgentSessionEvent::AssistantResponseReceived {
                 thread_id,
