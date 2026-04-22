@@ -42,14 +42,12 @@ impl Library {
 
         let init = PushRuntimeCommitsJobInitializer::new(upstream.clone());
         let spawner = jobs.add_initializer(init);
-        tokio::spawn(async move {
-            if let Err(e) = spawner
-                .spawn_unique(::job::JobId::new(), PushRuntimeCommitsJobInitializer::cfg())
-                .await
-            {
-                tracing::error!(error = %e, "Failed to spawn push-runtime-commits job");
-            }
-        });
+        if let Err(e) = spawner
+            .spawn_unique(::job::JobId::new(), PushRuntimeCommitsJobInitializer::cfg())
+            .await
+        {
+            tracing::error!(error = %e, "Failed to spawn push-runtime-commits job");
+        }
 
         Ok(Self { upstream })
     }
