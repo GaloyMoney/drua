@@ -73,30 +73,30 @@ async fn provision_workspace(client: &GraphqlClient) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("workspace created but no lead agent returned"))
 }
 
-async fn ensure_agent(
-    config: &mut Config,
-    client: &GraphqlClient,
-    explicit_agent: Option<String>,
-) -> Result<String> {
+async fn ensure_agent(config: &mut Config, explicit_agent: Option<String>) -> Result<String> {
     if let Some(id) = explicit_agent {
         return Ok(id);
     }
 
     if let Some(ref id) = config.chat_agent_id {
-        match verify_agent(client, id).await {
+        let client = GraphqlClient::new(&config.server_url, &config.auth_token);
+        match verify_agent(&client, id).await {
             Ok(true) => return Ok(id.clone()),
             Ok(false) => {
-                eprintln!("Stored agent no longer exists, creating new workspace...");
+                eprintln!("Stored agent no longer exists, re-authenticating...");
             }
-            Err(e) => {
-                eprintln!("Could not verify stored agent: {e}");
-                eprintln!("Creating new workspace...");
+            Err(_) => {
+                eprintln!("Session expired, re-authenticating...");
             }
         }
+        // Token may be stale — force re-auth before provisioning
+        config.chat_agent_id = None;
+        *config = Config::load_or_dev_login_fresh(&config.server_url).await?;
     }
 
+    let client = GraphqlClient::new(&config.server_url, &config.auth_token);
     eprintln!("Provisioning chat workspace...");
-    let agent_id = provision_workspace(client).await?;
+    let agent_id = provision_workspace(&client).await?;
     config.chat_agent_id = Some(agent_id.clone());
     config.save()?;
     Ok(agent_id)
@@ -283,9 +283,8 @@ async fn stream_response(base_url: &str, token: &str, agent_id: &str, prompt: &s
 
 pub async fn run(server: Option<String>, agent_id: Option<String>) -> Result<()> {
     let mut config = Config::load_or_dev_login(server).await?;
-    let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
-    let agent_id = ensure_agent(&mut config, &client, agent_id).await?;
+    let agent_id = ensure_agent(&mut config, agent_id).await?;
     eprintln!("Agent: {agent_id}");
     eprintln!("Type /exit to quit, Ctrl-C to interrupt.\n");
 

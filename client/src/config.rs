@@ -71,6 +71,36 @@ impl Config {
         Ok(config)
     }
 
+    /// Force a fresh dev-token authentication, ignoring any cached config.
+    /// Used when the stored token turns out to be stale.
+    pub async fn load_or_dev_login_fresh(server_url: &str) -> Result<Self> {
+        let http = reqwest::Client::new();
+        let resp = http
+            .post(format!("{server_url}/auth/dev-token"))
+            .send()
+            .await;
+
+        let resp = match resp {
+            Ok(r) if r.status().is_success() => r,
+            _ => anyhow::bail!("not logged in — run `drua login` first"),
+        };
+
+        let body: serde_json::Value = resp.json().await?;
+        let token = body
+            .get("token")
+            .and_then(|t| t.as_str())
+            .context("unexpected response from dev-token endpoint")?;
+
+        let config = Config {
+            server_url: server_url.to_string(),
+            auth_token: token.to_string(),
+            chat_agent_id: None,
+        };
+        config.save()?;
+        eprintln!("Auto-authenticated as Dev User");
+        Ok(config)
+    }
+
     pub fn save(&self) -> Result<()> {
         let dir = config_dir()?;
         fs::create_dir_all(&dir).context("failed to create config directory")?;
