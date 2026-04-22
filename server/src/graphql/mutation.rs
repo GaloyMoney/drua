@@ -32,7 +32,7 @@ impl Mutation {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let ws = app
             .workspaces()
-            .update(sub, input.id, input.name, input.description)
+            .update(sub, input.id, input.description)
             .await?;
         Ok(WorkspaceUpdatePayload::from(Workspace::from(ws)))
     }

@@ -17,7 +17,6 @@ pub enum WorkspaceEvent {
         description: Option<String>,
     },
     Updated {
-        name: String,
         description: Option<String>,
     },
     Archived {
@@ -49,12 +48,10 @@ impl Workspace {
         self.archived_at.is_some()
     }
 
-    pub(super) fn update(&mut self, name: impl Into<String>, description: Option<String>) {
-        let name = name.into();
-        self.name = name.clone();
+    pub(super) fn update(&mut self, description: Option<String>) {
         self.description = description.clone();
         self.events
-            .push(WorkspaceEvent::Updated { name, description });
+            .push(WorkspaceEvent::Updated { description });
     }
 
     pub(super) fn archive(&mut self) -> Idempotent<()> {
@@ -93,8 +90,7 @@ impl TryFromEvents<WorkspaceEvent> for Workspace {
                         builder = builder.description(desc.clone());
                     }
                 }
-                WorkspaceEvent::Updated { name, description } => {
-                    builder = builder.name(name.clone());
+                WorkspaceEvent::Updated { description } => {
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
                     }

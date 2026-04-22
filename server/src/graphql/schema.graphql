@@ -358,7 +358,6 @@ scalar WorkspaceId
 input WorkspaceUpdateInput {
 	description: String
 	id: WorkspaceId!
-	name: String!
 }
 
 type WorkspaceUpdatePayload {

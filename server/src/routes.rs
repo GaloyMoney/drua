@@ -582,8 +582,13 @@ async fn workspace_new(session: Session) -> Response {
 }
 
 #[derive(serde::Deserialize)]
-pub struct WorkspaceForm {
+pub struct WorkspaceCreateForm {
     name: String,
+    description: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceUpdateForm {
     description: Option<String>,
 }
 
@@ -591,7 +596,7 @@ pub struct WorkspaceForm {
 async fn workspace_create(
     State(state): State<AppState>,
     session: Session,
-    Form(form): Form<WorkspaceForm>,
+    Form(form): Form<WorkspaceCreateForm>,
 ) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
@@ -647,7 +652,7 @@ async fn workspace_update(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
-    Form(form): Form<WorkspaceForm>,
+    Form(form): Form<WorkspaceUpdateForm>,
 ) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
@@ -660,7 +665,7 @@ async fn workspace_update(
     match state
         .app
         .workspaces()
-        .update(&sub, workspace_id, &form.name, description)
+        .update(&sub, workspace_id, description)
         .await
     {
         Ok(_) => Redirect::to(&format!("/workspaces/{id}")).into_response(),

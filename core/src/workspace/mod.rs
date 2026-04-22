@@ -101,7 +101,6 @@ impl Workspaces {
         &self,
         sub: &AuthSubject,
         id: impl Into<WorkspaceId> + std::fmt::Debug,
-        name: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Workspace, WorkspaceError> {
         let id = id.into();
@@ -109,7 +108,7 @@ impl Workspaces {
         Audit::record_action_if_unset("workspace.update");
         Audit::record_workspace_id(id);
         let mut workspace = self.repo.find_by_id(id).await?;
-        workspace.update(name, description);
+        workspace.update(description);
         self.repo.update(&mut workspace).await?;
         Ok(workspace)
     }
