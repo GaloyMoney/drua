@@ -13,6 +13,8 @@ pub struct Prompt {
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +150,9 @@ impl Prompt {
     /// primary use-case is cache keys — strings are directly usable in file
     /// names, database columns, and log output without further conversion.
     pub fn hash(&self) -> String {
-        let value = serde_json::to_value(self).expect("Prompt is always serializable");
+        let mut prompt = self.clone();
+        prompt.cache_key = None;
+        let value = serde_json::to_value(prompt).expect("Prompt is always serializable");
         let canonical = canonicalize(&value);
         let bytes = serde_json::to_vec(&canonical).expect("canonical Value is always serializable");
         let digest = Sha256::digest(&bytes);
@@ -229,6 +233,92 @@ impl Prompt {
 
         total
     }
+
+    /// Mark the largest reusable Anthropic prefix with a single explicit cache
+    /// breakpoint. Anthropic automatically checks earlier block boundaries
+    /// before this explicit marker, so append-only chat histories only need the
+    /// final cacheable block marked.
+    pub fn enable_anthropic_prompt_caching(&mut self, ttl: Option<CacheTtl>) -> bool {
+        self.clear_cache_controls();
+        let marker = Some(CacheControl::Ephemeral { ttl });
+
+        for message in self.messages.iter_mut().rev() {
+            match message {
+                Message::User { content } => {
+                    if let Some(
+                        UserBlock::Text { cache_control, .. }
+                        | UserBlock::ToolResult { cache_control, .. },
+                    ) = content.last_mut()
+                    {
+                        *cache_control = marker.clone();
+                        return true;
+                    }
+                }
+                Message::Assistant { content } => {
+                    if let Some(cache_control) =
+                        content.iter_mut().rev().find_map(|block| match block {
+                            AssistantBlock::Text { cache_control, .. }
+                            | AssistantBlock::ToolUse { cache_control, .. } => Some(cache_control),
+                            AssistantBlock::Thinking { .. } => None,
+                        })
+                    {
+                        *cache_control = marker.clone();
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if let Some(SystemBlock::Text { cache_control, .. }) = self.system.last_mut() {
+            *cache_control = marker.clone();
+            return true;
+        }
+
+        if let Some(tool) = self.tools.last_mut() {
+            tool.cache_control = marker;
+            return true;
+        }
+
+        false
+    }
+
+    fn clear_cache_controls(&mut self) {
+        for block in &mut self.system {
+            match block {
+                SystemBlock::Text { cache_control, .. } => *cache_control = None,
+            }
+        }
+
+        for tool in &mut self.tools {
+            tool.cache_control = None;
+        }
+
+        for message in &mut self.messages {
+            match message {
+                Message::User { content } => {
+                    for block in content {
+                        match block {
+                            UserBlock::Text { cache_control, .. }
+                            | UserBlock::ToolResult { cache_control, .. } => {
+                                *cache_control = None;
+                            }
+                        }
+                    }
+                }
+                Message::Assistant { content } => {
+                    for block in content {
+                        match block {
+                            AssistantBlock::Text { cache_control, .. }
+                            | AssistantBlock::ToolUse { cache_control, .. } => {
+                                *cache_control = None;
+                            }
+                            AssistantBlock::Thinking { .. } => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +352,7 @@ mod tests {
             }],
             tool_choice: None,
             max_tokens: Some(1024),
+            cache_key: None,
         }
     }
 
@@ -307,6 +398,7 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             max_tokens: None,
+            cache_key: None,
         };
 
         assert_eq!(make(input_a).hash(), make(input_b).hash());
@@ -331,5 +423,58 @@ mod tests {
         let mut without_tools = sample_prompt("Hi");
         without_tools.tools.clear();
         assert!(with_tools.estimate_tokens() > without_tools.estimate_tokens());
+    }
+
+    #[test]
+    fn hash_ignores_cache_key() {
+        let mut a = sample_prompt("hello");
+        let mut b = sample_prompt("hello");
+        a.cache_key = Some("session-a".to_string());
+        b.cache_key = Some("session-b".to_string());
+
+        assert_eq!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn enable_anthropic_prompt_caching_marks_last_cacheable_block() {
+        let mut prompt = Prompt {
+            model: "claude-sonnet-4-20250514".to_string(),
+            system: vec![SystemBlock::Text {
+                text: "sys".to_string(),
+                cache_control: None,
+            }],
+            messages: vec![Message::Assistant {
+                content: vec![
+                    AssistantBlock::Thinking {
+                        text: "thinking".to_string(),
+                        signature: None,
+                    },
+                    AssistantBlock::Text {
+                        text: "visible".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: None,
+            cache_key: None,
+        };
+
+        assert!(prompt.enable_anthropic_prompt_caching(Some(CacheTtl::FiveMinutes)));
+        match &prompt.messages[0] {
+            Message::Assistant { content } => {
+                assert!(matches!(
+                    &content[1],
+                    AssistantBlock::Text {
+                        cache_control: Some(CacheControl::Ephemeral {
+                            ttl: Some(CacheTtl::FiveMinutes)
+                        }),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected assistant message"),
+        }
     }
 }

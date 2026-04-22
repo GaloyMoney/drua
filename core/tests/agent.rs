@@ -93,6 +93,8 @@ async fn send_message_round_trip_via_prompt_channel() {
             usage: Usage {
                 input_tokens: 5,
                 output_tokens: 3,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             stop_reason: None,
         })))
@@ -255,6 +257,8 @@ async fn send_message_dispatches_registered_tool_call() {
             usage: Usage {
                 input_tokens: 7,
                 output_tokens: 4,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             stop_reason: Some(StopReason::ToolUse),
         })))
@@ -276,6 +280,8 @@ async fn send_message_dispatches_registered_tool_call() {
             usage: Usage {
                 input_tokens: 9,
                 output_tokens: 2,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             stop_reason: None,
         })))

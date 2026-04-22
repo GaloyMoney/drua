@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use anthropic_client::AnthropicClient;
+use llm::prompt::CacheTtl;
 use llm::provider::LlmProvider;
 use llm::{Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
 use openai_client::{
@@ -234,6 +235,7 @@ impl ExecutorState {
                 if request.prompt.max_tokens.is_none() {
                     request.prompt.max_tokens = model.default_max_tokens;
                 }
+                request.prompt = model.prepare_prompt(request.prompt);
                 let client = model.client.clone();
                 tokio::spawn(async move {
                     evaluate_streaming(client, request.prompt, request.response_channel).await;
@@ -279,27 +281,140 @@ async fn evaluate_streaming(
 struct ResolvedModel {
     name: String,
     default_max_tokens: Option<u32>,
+    provider_kind: ResolvedProviderKind,
     client: Arc<dyn LlmProvider>,
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedProviderKind {
+    Anthropic,
+    OpenAi,
+    OpenAiResponses,
 }
 
 impl ResolvedModel {
     fn from_config(config: ModelConfig) -> Self {
-        let client: Arc<dyn LlmProvider> = match config.provider {
-            Provider::Anthropic { api_key } => Arc::new(AnthropicClient::new(api_key)),
-            Provider::OpenAi { api_key } => Arc::new(OpenAiClient::new(api_key)),
-            Provider::OpenAiResponses { auth } => {
+        let (provider_kind, client): (ResolvedProviderKind, Arc<dyn LlmProvider>) = match config
+            .provider
+        {
+            Provider::Anthropic { api_key } => (
+                ResolvedProviderKind::Anthropic,
+                Arc::new(AnthropicClient::new(api_key)),
+            ),
+            Provider::OpenAi { api_key } => (
+                ResolvedProviderKind::OpenAi,
+                Arc::new(OpenAiClient::new(api_key)),
+            ),
+            Provider::OpenAiResponses { auth } => (
+                ResolvedProviderKind::OpenAiResponses,
                 Arc::new(OpenAiResponsesClient::new(match auth {
                     OpenAiResponsesAuth::ApiKey { api_key } => {
                         ClientOpenAiResponsesAuth::ApiKey { api_key }
                     }
                     OpenAiResponsesAuth::Subscription => ClientOpenAiResponsesAuth::Subscription,
-                }))
-            }
+                })),
+            ),
         };
         Self {
             name: config.name,
             default_max_tokens: config.default_max_tokens,
+            provider_kind,
             client,
+        }
+    }
+
+    fn prepare_prompt(&self, mut prompt: Prompt) -> Prompt {
+        if matches!(self.provider_kind, ResolvedProviderKind::Anthropic) {
+            prompt.enable_anthropic_prompt_caching(Some(CacheTtl::FiveMinutes));
+        }
+        prompt
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llm::prompt::{AssistantBlock, CacheControl, Message, UserBlock};
+
+    fn sample_prompt() -> Prompt {
+        Prompt {
+            model: "test-model".to_string(),
+            system: Vec::new(),
+            messages: vec![Message::Assistant {
+                content: vec![
+                    AssistantBlock::Thinking {
+                        text: "thinking".to_string(),
+                        signature: None,
+                    },
+                    AssistantBlock::Text {
+                        text: "visible".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: None,
+            cache_key: Some("agent-session:test".to_string()),
+        }
+    }
+
+    #[test]
+    fn prepare_prompt_marks_anthropic_cache_breakpoint() {
+        let model = ResolvedModel {
+            name: "test-model".to_string(),
+            default_max_tokens: None,
+            provider_kind: ResolvedProviderKind::Anthropic,
+            client: Arc::new(AnthropicClient::new("test")),
+        };
+
+        let prompt = model.prepare_prompt(sample_prompt());
+        match &prompt.messages[0] {
+            Message::Assistant { content } => {
+                assert!(matches!(
+                    &content[1],
+                    AssistantBlock::Text {
+                        cache_control: Some(CacheControl::Ephemeral {
+                            ttl: Some(CacheTtl::FiveMinutes)
+                        }),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected assistant message"),
+        }
+    }
+
+    #[test]
+    fn prepare_prompt_leaves_openai_prompt_unmarked() {
+        let model = ResolvedModel {
+            name: "test-model".to_string(),
+            default_max_tokens: None,
+            provider_kind: ResolvedProviderKind::OpenAi,
+            client: Arc::new(OpenAiClient::new("test")),
+        };
+
+        let prompt = model.prepare_prompt(Prompt {
+            messages: vec![Message::User {
+                content: vec![UserBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            ..sample_prompt()
+        });
+
+        match &prompt.messages[0] {
+            Message::User { content } => {
+                assert!(matches!(
+                    &content[0],
+                    UserBlock::Text {
+                        cache_control: None,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected user message"),
         }
     }
 }

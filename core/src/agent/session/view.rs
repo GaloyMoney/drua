@@ -383,6 +383,7 @@ impl PromptDefinition {
             target_thread,
             model: self.model,
             max_tokens_per_response: self.max_tokens_per_response,
+            cache_key: None,
             system,
             tools,
             messages: merged,

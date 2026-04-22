@@ -24,6 +24,8 @@ pub struct Prompt {
     pub target_thread: TargetThread,
     pub model: String,
     pub max_tokens_per_response: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system: Vec<SystemBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -122,6 +124,7 @@ impl From<Prompt> for llm::Prompt {
         llm::Prompt {
             model: p.model,
             max_tokens: Some(p.max_tokens_per_response),
+            cache_key: p.cache_key,
             system: p
                 .system
                 .into_iter()
