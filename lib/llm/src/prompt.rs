@@ -245,26 +245,25 @@ impl Prompt {
         for message in self.messages.iter_mut().rev() {
             match message {
                 Message::User { content } => {
-                    for block in content.iter_mut().rev() {
-                        match block {
-                            UserBlock::Text { cache_control, .. }
-                            | UserBlock::ToolResult { cache_control, .. } => {
-                                *cache_control = marker.clone();
-                                return true;
-                            }
-                        }
+                    if let Some(
+                        UserBlock::Text { cache_control, .. }
+                        | UserBlock::ToolResult { cache_control, .. },
+                    ) = content.last_mut()
+                    {
+                        *cache_control = marker.clone();
+                        return true;
                     }
                 }
                 Message::Assistant { content } => {
-                    for block in content.iter_mut().rev() {
-                        match block {
+                    if let Some(cache_control) =
+                        content.iter_mut().rev().find_map(|block| match block {
                             AssistantBlock::Text { cache_control, .. }
-                            | AssistantBlock::ToolUse { cache_control, .. } => {
-                                *cache_control = marker.clone();
-                                return true;
-                            }
-                            AssistantBlock::Thinking { .. } => {}
-                        }
+                            | AssistantBlock::ToolUse { cache_control, .. } => Some(cache_control),
+                            AssistantBlock::Thinking { .. } => None,
+                        })
+                    {
+                        *cache_control = marker.clone();
+                        return true;
                     }
                 }
             }
