@@ -23,6 +23,28 @@ pub struct AppConfig {
     /// When set, sandbox agents receive a `github-token` file secret.
     #[serde(default)]
     pub github_app: Option<GitHubAppConfig>,
+    /// Optional Keybase bot credentials for chat integration.
+    #[serde(default)]
+    pub keybase: KeybaseConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct KeybaseConfig {
+    /// The Keybase bot username.
+    #[serde(default)]
+    pub bot_username: Option<String>,
+    /// The Keybase bot paperkey (secret).
+    #[serde(default)]
+    pub paperkey: Option<String>,
+    /// Path to the `keybase` binary. Defaults to "keybase".
+    #[serde(default = "KeybaseConfig::default_path")]
+    pub path: String,
+}
+
+impl KeybaseConfig {
+    fn default_path() -> String {
+        "keybase".to_owned()
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

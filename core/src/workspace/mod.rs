@@ -114,6 +114,24 @@ impl Workspaces {
         Ok(workspace)
     }
 
+    #[instrument(name = "domain.workspace.update_keybase_config", skip(self, sub))]
+    pub async fn update_keybase_config(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<WorkspaceId> + std::fmt::Debug,
+        keybase_team: Option<String>,
+        keybase_channel: Option<String>,
+    ) -> Result<Workspace, WorkspaceError> {
+        let id = id.into();
+        sub.can(AuthVerb::Update, AuthResource::Workspace(Some(id)))?;
+        Audit::record_action_if_unset("workspace.update_keybase_config");
+        Audit::record_workspace_id(id);
+        let mut workspace = self.repo.find_by_id(id).await?;
+        workspace.update_keybase_config(keybase_team, keybase_channel);
+        self.repo.update(&mut workspace).await?;
+        Ok(workspace)
+    }
+
     #[instrument(name = "domain.workspace.delete", skip(self, sub))]
     pub async fn delete(
         &self,

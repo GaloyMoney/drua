@@ -14,6 +14,7 @@ members = [
   "code-assistant/crates/cli",
   "images/sandbox/server",
   "images/tunnel-connector",
+  "lib/keybase-client",
 ]
 resolver = "2"
 
@@ -48,6 +49,7 @@ code-assistant-core = { path = "code-assistant/crates/core" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
 openai-client = { path = "lib/openai-client" }
+keybase-client = { path = "lib/keybase-client" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }

@@ -20,6 +20,10 @@ pub enum WorkspaceEvent {
         name: String,
         description: Option<String>,
     },
+    KeybaseConfigUpdated {
+        keybase_team: Option<String>,
+        keybase_channel: Option<String>,
+    },
     Archived {
         archived_at: DateTime<Utc>,
     },
@@ -33,6 +37,10 @@ pub struct Workspace {
     pub name: String,
     #[builder(setter(strip_option), default)]
     pub description: Option<String>,
+    #[builder(setter(strip_option), default)]
+    pub keybase_team: Option<String>,
+    #[builder(setter(strip_option), default)]
+    pub keybase_channel: Option<String>,
     #[builder(setter(strip_option), default)]
     pub archived_at: Option<DateTime<Utc>>,
     events: EntityEvents<WorkspaceEvent>,
@@ -55,6 +63,19 @@ impl Workspace {
         self.description = description.clone();
         self.events
             .push(WorkspaceEvent::Updated { name, description });
+    }
+
+    pub(super) fn update_keybase_config(
+        &mut self,
+        keybase_team: Option<String>,
+        keybase_channel: Option<String>,
+    ) {
+        self.keybase_team = keybase_team.clone();
+        self.keybase_channel = keybase_channel.clone();
+        self.events.push(WorkspaceEvent::KeybaseConfigUpdated {
+            keybase_team,
+            keybase_channel,
+        });
     }
 
     pub(super) fn archive(&mut self) -> Idempotent<()> {
@@ -97,6 +118,17 @@ impl TryFromEvents<WorkspaceEvent> for Workspace {
                     builder = builder.name(name.clone());
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
+                    }
+                }
+                WorkspaceEvent::KeybaseConfigUpdated {
+                    keybase_team,
+                    keybase_channel,
+                } => {
+                    if let Some(team) = keybase_team {
+                        builder = builder.keybase_team(team.clone());
+                    }
+                    if let Some(channel) = keybase_channel {
+                        builder = builder.keybase_channel(channel.clone());
                     }
                 }
                 WorkspaceEvent::Archived { archived_at } => {
