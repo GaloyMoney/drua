@@ -114,9 +114,6 @@ url = "2"
 es-entity = "0.10"
 derive_builder = "0.20"
 
-# Job processing
-job = "0.6"
-
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 

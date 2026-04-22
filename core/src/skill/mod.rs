@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tracing::instrument;
 
 pub use crate::primitives::*;
-use crate::library::Library;
 use crate::sandbox::Sandboxes;
 pub use entity::*;
 pub use error::*;
@@ -17,17 +16,12 @@ use repo::*;
 pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
-    library: Library,
 }
 
 impl Skills {
-    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>, library: Library) -> Self {
+    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>) -> Self {
         let repo = SkillRepo::new(pool);
-        Self {
-            repo,
-            sandboxes,
-            library,
-        }
+        Self { repo, sandboxes }
     }
 
     pub fn sandboxes(&self) -> &Sandboxes {

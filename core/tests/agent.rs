@@ -59,16 +59,9 @@ async fn send_message_round_trip_via_prompt_channel() {
             .await
             .expect("init sandboxes"),
     );
-    let job_config = job::JobSvcConfig::builder()
-        .pool(pool.clone())
-        .build()
-        .expect("build JobSvcConfig");
-    let mut jobs = job::Jobs::init(job_config).await.expect("init jobs");
-    let library = drua_core::library::Library::new(&pool, &Default::default(), &mut jobs);
     let skills = Arc::new(drua_core::skill::Skills::new(
         &pool,
         Arc::clone(&sandboxes),
-        library,
     ));
     let agents = Agents::new(
         &pool,
@@ -224,16 +217,9 @@ async fn send_message_dispatches_registered_tool_call() {
             .await
             .expect("init sandboxes"),
     );
-    let job_config = job::JobSvcConfig::builder()
-        .pool(pool.clone())
-        .build()
-        .expect("build JobSvcConfig");
-    let mut jobs = job::Jobs::init(job_config).await.expect("init jobs");
-    let library = drua_core::library::Library::new(&pool, &Default::default(), &mut jobs);
     let skills = Arc::new(drua_core::skill::Skills::new(
         &pool,
         Arc::clone(&sandboxes),
-        library,
     ));
     let agents = Agents::new(
         &pool,

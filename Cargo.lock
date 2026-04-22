@@ -1384,7 +1384,6 @@ dependencies = [
  "futures",
  "hex",
  "http",
- "job",
  "jsonwebtoken",
  "llm",
  "openai-client",
@@ -1604,8 +1603,6 @@ dependencies = [
  "derive_builder",
  "es-entity-macros",
  "im",
- "opentelemetry",
- "opentelemetry_sdk",
  "parking_lot",
  "pin-project",
  "serde",
@@ -1613,8 +1610,6 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
- "tracing-opentelemetry",
  "uuid",
 ]
 
@@ -2599,28 +2594,6 @@ checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 dependencies = [
  "quote",
  "syn",
-]
-
-[[package]]
-name = "job"
-version = "0.6.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28f0117de3cc478e2f23e69a0becfc58b010e814fe446d7a75b28f86c53b18b9"
-dependencies = [
- "async-trait",
- "chrono",
- "derive_builder",
- "es-entity",
- "futures",
- "rand 0.10.1",
- "serde",
- "serde_json",
- "serde_with",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -1,12 +1,8 @@
 mod error;
-mod job;
 
 use std::path::PathBuf;
 
-use sqlx::PgPool;
-
 pub use error::LibraryError;
-use self::job::{ImportLibCommitsJobInitializer, ImportRuntimeCommitsJobInitializer};
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct LibraryConfig {
@@ -30,40 +26,12 @@ impl LibraryConfig {
 
 #[derive(Clone)]
 pub struct Library {
-    #[allow(dead_code)]
-    pool: PgPool,
     repo_path: PathBuf,
 }
 
 impl Library {
-    pub fn new(pool: &PgPool, config: &LibraryConfig, jobs: &mut ::job::Jobs) -> Self {
-        let lib_init = ImportLibCommitsJobInitializer::new(pool, config);
-        let lib_spawner = jobs.add_initializer(lib_init);
-        tokio::spawn(async move {
-            if let Err(e) = lib_spawner
-                .spawn_unique(::job::JobId::new(), ImportLibCommitsJobInitializer::cfg())
-                .await
-            {
-                tracing::error!(error = %e, "Failed to spawn import-lib-commits job");
-            }
-        });
-
-        let runtime_init = ImportRuntimeCommitsJobInitializer::new(pool, config);
-        let runtime_spawner = jobs.add_initializer(runtime_init);
-        tokio::spawn(async move {
-            if let Err(e) = runtime_spawner
-                .spawn_unique(
-                    ::job::JobId::new(),
-                    ImportRuntimeCommitsJobInitializer::cfg(),
-                )
-                .await
-            {
-                tracing::error!(error = %e, "Failed to spawn import-runtime-commits job");
-            }
-        });
-
+    pub fn new(config: &LibraryConfig) -> Self {
         Self {
-            pool: pool.clone(),
             repo_path: config.repo_path(),
         }
     }
@@ -71,8 +39,7 @@ impl Library {
     /// Write a file into the runtime area of the library repo.
     ///
     /// The file is written to `{repo_path}/{relative_path}`, creating
-    /// intermediate directories as needed. The import-runtime-commits job
-    /// will pick up the change and push it to the remote.
+    /// intermediate directories as needed.
     #[tracing::instrument(name = "library.write_runtime_file", skip(self, content))]
     pub async fn write_runtime_file(
         &self,
