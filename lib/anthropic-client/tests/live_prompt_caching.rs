@@ -2,7 +2,7 @@ use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anthropic_client::AnthropicClient;
-use llm::prompt::{CacheTtl, Message, SystemBlock, UserBlock};
+use llm::prompt::{CacheControl, CacheTtl, Message, SystemBlock, UserBlock};
 use llm::Prompt;
 
 const LIVE_TESTS_ENV: &str = "DRUA_LIVE_CACHE_TESTS";
@@ -52,6 +52,15 @@ fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) 
     }
 }
 
+fn mark_system_prefix_for_cache(prompt: &mut Prompt) {
+    let Some(SystemBlock::Text { cache_control, .. }) = prompt.system.last_mut() else {
+        panic!("expected a system block to mark for Anthropic prompt caching");
+    };
+    *cache_control = Some(CacheControl::Ephemeral {
+        ttl: Some(CacheTtl::FiveMinutes),
+    });
+}
+
 fn build_large_system_prefix(model: &str, nonce: &str) -> String {
     let mut prefix = String::new();
     let mut line = 0usize;
@@ -98,10 +107,11 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
         system_text.clone(),
         "Reply with the single word: seeded",
     );
-    assert!(
-        warm_prompt.enable_anthropic_prompt_caching(Some(CacheTtl::FiveMinutes)),
-        "expected prompt caching marker to be applied"
-    );
+    // For this standalone two-request test, cache only the static system
+    // prefix. The generic helper marks the last cacheable block, which is
+    // correct for append-only conversations but would include the varying user
+    // message here and prevent cache hits.
+    mark_system_prefix_for_cache(&mut warm_prompt);
     let warm_response = client
         .send_prompt(&warm_prompt)
         .await
@@ -123,10 +133,7 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
             system_text.clone(),
             format!("Reply with the single word: warmed-{attempt}"),
         );
-        assert!(
-            prompt.enable_anthropic_prompt_caching(Some(CacheTtl::FiveMinutes)),
-            "expected prompt caching marker to be applied"
-        );
+        mark_system_prefix_for_cache(&mut prompt);
 
         let response = client
             .send_prompt(&prompt)
