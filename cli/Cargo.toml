@@ -1,6 +1,6 @@
 [package]
 name = "drua-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 
 [[bin]]
@@ -8,23 +8,8 @@ name = "drua"
 path = "src/main.rs"
 
 [dependencies]
-drua-core = { path = "../core" }
-drua-mcp-gateway = { path = "../mcp-gateway" }
-drua-web = { path = "../web" }
-sandbox = { workspace = true }
-anyhow = "1"
-axum = { workspace = true }
-clap = { version = "4", features = ["derive", "env"] }
-rustls = "0.23"
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
-tokio = { version = "1", features = ["full"] }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-opentelemetry = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-opentelemetry-semantic-conventions = { workspace = true }
+drua-client = { path = "../client" }
+drua-server = { path = "../server" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }

@@ -3,7 +3,7 @@ fn main() {
 
     println!(
         "{}",
-        drua_web::graphql::schema(None)
+        drua_server::graphql::schema(None)
             .sdl_with_options(
                 SDLExportOptions::new()
                     .sorted_fields()

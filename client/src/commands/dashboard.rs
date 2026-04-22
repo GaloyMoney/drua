@@ -362,97 +362,45 @@ fn spawn_chat_stream(
     tx: mpsc::UnboundedSender<ChatStreamEvent>,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = stream_chat_response(&base_url, &token, &agent_id, &prompt, &tx).await {
+        let result = crate::graphql::subscribe_agent_message(
+            &base_url,
+            &token,
+            &agent_id,
+            &prompt,
+            |event| {
+                let evt = parse_gql_event(&event);
+                if let Some(evt) = evt {
+                    return tx.send(evt).is_ok();
+                }
+                true // continue for ignored event types
+            },
+        )
+        .await;
+
+        if let Err(e) = result {
             let _ = tx.send(ChatStreamEvent::Error(e.to_string()));
         }
         let _ = tx.send(ChatStreamEvent::Done);
     });
 }
 
-async fn stream_chat_response(
-    base_url: &str,
-    token: &str,
-    agent_id: &str,
-    prompt: &str,
-    tx: &mpsc::UnboundedSender<ChatStreamEvent>,
-) -> Result<()> {
-    let http = reqwest::Client::new();
-    let url = format!("{base_url}/api/v1/agents/{agent_id}/message");
-
-    let resp = http
-        .post(&url)
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "prompt": prompt }))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("server returned {status}: {text}");
-    }
-
-    let mut buf = String::new();
-    let mut response = resp;
-
-    while let Some(chunk) = response.chunk().await? {
-        let text = String::from_utf8_lossy(&chunk);
-        buf.push_str(&text);
-
-        while let Some(end) = buf.find("\n\n") {
-            let block = buf[..end].to_string();
-            buf = buf[end + 2..].to_string();
-            if let Some(evt) = parse_sse_block(&block) {
-                if tx.send(evt).is_err() {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    // Process any remaining data
-    if !buf.trim().is_empty() {
-        if let Some(evt) = parse_sse_block(&buf) {
-            let _ = tx.send(evt);
-        }
-    }
-
-    Ok(())
-}
-
-fn parse_sse_block(block: &str) -> Option<ChatStreamEvent> {
-    let mut event_type = String::new();
-    let mut data = String::new();
-
-    for line in block.lines() {
-        if let Some(rest) = line.strip_prefix("event: ") {
-            event_type = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("data: ") {
-            data = rest.trim().to_string();
-        }
-    }
-
-    if data.is_empty() {
-        return None;
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
-
-    match event_type.as_str() {
-        "text_delta" => {
-            let text = json.get("text")?.as_str()?;
+fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
+    let typename = event.get("__typename")?.as_str()?;
+    match typename {
+        "TextDeltaEvent" => {
+            let text = event.get("text")?.as_str()?;
             Some(ChatStreamEvent::Delta(text.to_string()))
         }
         // assistant_text is the complete message — skip if we already got deltas
-        "assistant_text" => None,
-        "tool_call_start" => {
-            let name = json.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+        "AssistantTextEvent" => None,
+        "ToolCallStartEvent" => {
+            let name = event.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
             Some(ChatStreamEvent::ToolUse(name.to_string()))
         }
-        "tool_result" => {
-            let name = json.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-            let is_error = json
-                .get("is_error")
+        "ToolResultEvent" => {
+            let name = event.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+            let is_error = event
+                .get("isError")
                 .and_then(|e| e.as_bool())
                 .unwrap_or(false);
             let label = if is_error {
@@ -462,21 +410,15 @@ fn parse_sse_block(block: &str) -> Option<ChatStreamEvent> {
             };
             Some(ChatStreamEvent::ToolResult(label))
         }
-        "error" => {
-            let msg = json
+        "ErrorEvent" => {
+            let msg = event
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
             Some(ChatStreamEvent::Error(msg.to_string()))
         }
-        "assistant_done" => Some(ChatStreamEvent::Done),
+        "AssistantDoneEvent" => Some(ChatStreamEvent::Done),
         // Ignore events we don't need to display
-        "user_message"
-        | "thinking"
-        | "thinking_delta"
-        | "tool_call"
-        | "tool_call_input_delta"
-        | "service" => None,
         _ => None,
     }
 }

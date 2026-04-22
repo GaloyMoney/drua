@@ -250,6 +250,58 @@
         container.scrollTop = container.scrollHeight;
       }
 
+      const AGENT_MESSAGE_SUBSCRIPTION = `subscription ($agentId: AgentId!, $prompt: String!) {
+        agentSendMessage(agentId: $agentId, prompt: $prompt) {
+          __typename
+          ... on TextDeltaEvent { text }
+          ... on ThinkingDeltaEvent { text }
+          ... on ToolCallStartEvent { name }
+          ... on ToolCallInputDeltaEvent { partialJson }
+          ... on AssistantTextEvent { text }
+          ... on ThinkingEvent { text }
+          ... on UserMessageEvent { text }
+          ... on ToolCallEvent { name arguments }
+          ... on ToolResultEvent { name isError }
+          ... on AssistantDoneEvent { turns inputTokens outputTokens durationMs costUsd }
+          ... on ErrorEvent { message }
+          ... on ServiceEvent { message }
+        }
+      }`;
+
+      function handleStreamEvent(event) {
+        const t = event.__typename;
+        if (t === 'TextDeltaEvent') {
+          appendOrStream('msg-assistant', event.text);
+        } else if (t === 'ThinkingDeltaEvent') {
+          appendOrStream('msg-system', event.text);
+        } else if (t === 'ToolCallStartEvent') {
+          appendMsg('msg-system', 'Calling tool: ' + event.name + '...');
+        } else if (t === 'ToolCallInputDeltaEvent') {
+          // partial JSON — ignore in UI
+        } else if (t === 'AssistantTextEvent') {
+          appendMsg('msg-assistant', event.text);
+        } else if (t === 'ThinkingEvent') {
+          appendMsg('msg-system', '(thinking) ' + event.text);
+        } else if (t === 'UserMessageEvent') {
+          // Already rendered locally
+        } else if (t === 'ToolCallEvent') {
+          const args = event.arguments ? ' ' + event.arguments : '';
+          appendMsg('msg-system', 'tool: ' + event.name + args);
+        } else if (t === 'ToolResultEvent') {
+          appendMsg('msg-system', (event.isError ? 'error: ' : 'ok: ') + event.name);
+        } else if (t === 'AssistantDoneEvent') {
+          const tokens = (event.inputTokens || 0) + (event.outputTokens || 0);
+          const parts = [(event.turns || 0) + ' turns', tokens + ' tokens'];
+          if (event.durationMs) parts.push((event.durationMs / 1000).toFixed(1) + 's');
+          if (event.costUsd) parts.push('$' + event.costUsd.toFixed(4));
+          appendMsg('msg-result', 'Done — ' + parts.join(', '));
+        } else if (t === 'ErrorEvent') {
+          appendMsg('msg-error', event.message || JSON.stringify(event));
+        } else if (t === 'ServiceEvent') {
+          appendMsg('msg-system', event.message);
+        }
+      }
+
       async function sendMessage() {
         const textarea = document.getElementById('prompt');
         const prompt = textarea.value.trim();
@@ -260,19 +312,17 @@
         appendMsg('msg-system', '> ' + prompt);
 
         try {
-          const resp = await fetch('/api/v1/agents/' + agentId + '/message', {
+          const resp = await fetch('/graphql/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt }),
+            body: JSON.stringify({
+              query: AGENT_MESSAGE_SUBSCRIPTION,
+              variables: { agentId: agentId, prompt: prompt }
+            }),
           });
 
           if (!resp.ok) {
-            try {
-              const err = await resp.json();
-              appendMsg('msg-error', err.error || ('Error: ' + resp.status));
-            } catch {
-              appendMsg('msg-error', 'Error: ' + resp.status);
-            }
+            appendMsg('msg-error', 'Error: ' + resp.status);
             return;
           }
 
@@ -288,45 +338,21 @@
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
 
+            let eventType = '';
             for (const line of lines) {
-              if (line.startsWith('data:')) {
+              if (line.startsWith('event:')) {
+                eventType = line.slice(6).trim();
+              } else if (line.startsWith('data:')) {
                 const data = line.slice(5).trim();
-                if (!data) continue;
+                if (eventType === 'complete' || !data) continue;
                 try {
-                  const parsed = JSON.parse(data);
-                  if (parsed.type === 'text_delta') {
-                    appendOrStream('msg-assistant', parsed.text);
-                  } else if (parsed.type === 'thinking_delta') {
-                    appendOrStream('msg-system', parsed.text);
-                  } else if (parsed.type === 'tool_call_start') {
-                    appendMsg('msg-system', 'Calling tool: ' + parsed.name + '...');
-                  } else if (parsed.type === 'tool_call_input_delta') {
-                    // partial JSON — ignore in UI
-                  } else if (parsed.type === 'assistant_text') {
-                    appendMsg('msg-assistant', parsed.text);
-                  } else if (parsed.type === 'thinking') {
-                    appendMsg('msg-system', '(thinking) ' + parsed.text);
-                  } else if (parsed.type === 'user_message') {
-                    // Already rendered locally
-                  } else if (parsed.type === 'tool_call') {
-                    const args = parsed.arguments ? ' ' + JSON.stringify(parsed.arguments) : '';
-                    appendMsg('msg-system', 'tool: ' + parsed.name + args);
-                  } else if (parsed.type === 'tool_result') {
-                    appendMsg('msg-system', (parsed.is_error ? 'error: ' : 'ok: ') + parsed.name);
-                  } else if (parsed.type === 'assistant_done' || parsed.type === 'done') {
-                    const tokens = (parsed.input_tokens || 0) + (parsed.output_tokens || 0);
-                    const parts = [(parsed.turns || 0) + ' turns', tokens + ' tokens'];
-                    if (parsed.duration_ms) parts.push((parsed.duration_ms / 1000).toFixed(1) + 's');
-                    if (parsed.cost_usd) parts.push('$' + parsed.cost_usd.toFixed(4));
-                    appendMsg('msg-result', 'Done — ' + parts.join(', '));
-                  } else if (parsed.type === 'error') {
-                    appendMsg('msg-error', parsed.message || JSON.stringify(parsed));
-                  } else if (parsed.type === 'service') {
-                    appendMsg('msg-system', parsed.message);
+                  const gqlResp = JSON.parse(data);
+                  if (gqlResp.errors && gqlResp.errors.length) {
+                    appendMsg('msg-error', gqlResp.errors[0].message);
+                  } else if (gqlResp.data && gqlResp.data.agentSendMessage) {
+                    handleStreamEvent(gqlResp.data.agentSendMessage);
                   }
-                } catch {
-                  appendMsg('msg-assistant', data);
-                }
+                } catch { /* ignore parse errors */ }
               }
             }
           }

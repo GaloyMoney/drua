@@ -3,13 +3,13 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::config::{AuthConfig, LoginMethod};
 use drua_core::agent::{AgentsConfig, ModelDefaults};
 use drua_core::prompt_executor::{
     ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
 };
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
-use drua_web::auth::config::{AuthConfig, LoginMethod};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

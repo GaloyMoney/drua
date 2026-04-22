@@ -90,7 +90,7 @@
         write-sdl = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "write-sdl";
-          cargoExtraArgs = "-p drua-web --bin write_sdl";
+          cargoExtraArgs = "-p drua-server --bin write_sdl";
         });
 
         pythonEnv = pkgs.python3.withPackages (ps:
@@ -220,7 +220,7 @@
               ${write-sdl}/bin/write_sdl > schema-generated.graphql
 
               echo "Comparing with committed schema..."
-              if ! diff -u web/src/graphql/schema.graphql schema-generated.graphql; then
+              if ! diff -u server/src/graphql/schema.graphql schema-generated.graphql; then
                 echo "ERROR: GraphQL schema is out of date!"
                 echo "Run 'make sdl-rust' to update the schema"
                 exit 1
@@ -241,7 +241,7 @@
             buildInputs = [ drua ];
             buildPhase = ''
               echo "Generating default config..."
-              ${drua}/bin/drua dump-default-config > default-config-generated.yml
+              ${drua}/bin/drua server dump-default-config > default-config-generated.yml
 
               echo "Comparing with committed default config..."
               if ! diff -u dev/drua.default.yml default-config-generated.yml; then
@@ -398,7 +398,7 @@
             pkgs.onnxruntime
           ];
           config = {
-            Cmd = [ "${drua}/bin/drua" ];
+            Cmd = [ "${drua}/bin/drua" "server" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "ORT_DYLIB_PATH=${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"

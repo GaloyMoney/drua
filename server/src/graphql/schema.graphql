@@ -32,6 +32,18 @@ type AgentSession {
 	threads: [SessionThread!]!
 }
 
+type AssistantDoneEvent {
+	costUsd: Float
+	durationMs: Int
+	inputTokens: Int!
+	outputTokens: Int!
+	turns: Int!
+}
+
+type AssistantTextEvent {
+	text: String!
+}
+
 union ChatContentBlock = TextContent | ToolUseContent | ThinkingContent | ToolResultContent | SandboxNotificationContent
 
 type ChatMessage {
@@ -46,6 +58,12 @@ type ChatMessage {
 enum ChatMessageRole {
 	ASSISTANT
 	USER
+}
+
+union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | ToolCallEvent | TextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent
+
+type ErrorEvent {
+	message: String!
 }
 
 type Me {
@@ -135,6 +153,10 @@ enum SandboxNotificationOperation {
 	DETACH
 }
 
+type ServiceEvent {
+	message: String!
+}
+
 type SessionThread {
 	id: SessionThreadId!
 	"""
@@ -158,11 +180,30 @@ type SessionThread {
 
 scalar SessionThreadId
 
+type Subscription {
+	"""
+	Send a message to an agent and stream back response events.
+	"""
+	agentSendMessage(agentId: AgentId!, prompt: String!): ChatStreamEvent!
+}
+
 type TextContent {
 	text: String!
 }
 
+type TextDeltaEvent {
+	text: String!
+}
+
 type ThinkingContent {
+	text: String!
+}
+
+type ThinkingDeltaEvent {
+	text: String!
+}
+
+type ThinkingEvent {
 	text: String!
 }
 
@@ -215,10 +256,28 @@ An ISO 8601 UTC timestamp (e.g., 2024-01-15T09:30:00Z). Always in UTC.
 """
 scalar Timestamp
 
+type ToolCallEvent {
+	arguments: String
+	name: String!
+}
+
+type ToolCallInputDeltaEvent {
+	partialJson: String!
+}
+
+type ToolCallStartEvent {
+	name: String!
+}
+
 type ToolResultContent {
 	content: String!
 	isError: Boolean!
 	toolUseId: String!
+}
+
+type ToolResultEvent {
+	isError: Boolean!
+	name: String!
 }
 
 type ToolUseContent {
@@ -227,6 +286,10 @@ type ToolUseContent {
 }
 
 scalar UUID
+
+type UserMessageEvent {
+	text: String!
+}
 
 type Workspace {
 	"""
@@ -312,4 +375,5 @@ directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: Query
 	mutation: Mutation
+	subscription: Subscription
 }

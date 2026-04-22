@@ -1313,11 +1313,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "drua"
+name = "drua-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "drua-client",
+ "drua-server",
+ "tokio",
+]
+
+[[package]]
+name = "drua-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "crossterm",
  "dirs",
  "futures",
@@ -1327,32 +1337,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "drua-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "drua-core",
- "drua-mcp-gateway",
- "drua-web",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk",
- "rustls",
- "sandbox",
- "serde",
- "serde_yaml",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1412,7 +1396,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "drua-web"
+name = "drua-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1424,16 +1408,24 @@ dependencies = [
  "axum",
  "axum-extra",
  "chrono",
+ "clap",
  "drua-core",
+ "drua-mcp-gateway",
  "es-entity",
  "k8s-openapi",
  "kube",
  "oauth2",
  "opentelemetry",
  "opentelemetry-http",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
  "reqwest 0.12.28",
+ "rustls",
+ "sandbox",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "sqlx",
  "thiserror 2.0.18",
@@ -1445,6 +1437,7 @@ dependencies = [
  "tower-sessions",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]

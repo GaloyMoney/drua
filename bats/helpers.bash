@@ -27,7 +27,7 @@ start_server() {
   export DRUA_CONFIG="$REPO_ROOT/drua.yml"
   export CODE_ASSISTANT_DB_PATH=""  # disable code assistant in tests
 
-  $DRUA_BIN > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
+  $DRUA_BIN server > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
 
   # Wait for server

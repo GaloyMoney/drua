@@ -1,15 +1,12 @@
 [package]
-name = "drua"
-version = "0.1.0"
+name = "drua-client"
+version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "drua"
-path = "src/main.rs"
+[lib]
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
 dirs = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
