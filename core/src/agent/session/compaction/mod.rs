@@ -95,6 +95,7 @@ pub(super) fn maybe_prune(
     let action = config.determine_action(
         estimated_tokens,
         model_defaults.context_window_tokens,
+        model_defaults.cache_ttl_seconds,
         time_since_last_turn,
     );
 

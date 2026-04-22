@@ -33,8 +33,6 @@ pub struct CompactionConfig {
     pub token_threshold_fraction: f64,
     /// Number of recent tool results to keep unmasked.
     pub keep_recent_tool_results: usize,
-    /// Provider cache TTL in seconds — prune freely after this inactivity period.
-    pub cache_ttl_seconds: u64,
     /// If set, start a fresh thread (orphan) when a user message arrives
     /// more than this many seconds after the previous assistant response.
     #[serde(default)]
@@ -51,10 +49,14 @@ impl CompactionConfig {
     ///
     /// `Orphan` takes priority: if the reset threshold is exceeded the session
     /// starts a brand-new thread regardless of token counts.
+    ///
+    /// `cache_ttl_seconds` is the provider's prompt-cache TTL sourced from
+    /// [`ModelDefaults`](crate::agent::config::ModelDefaults).
     pub fn determine_action(
         &self,
         estimated_tokens: u64,
         context_window_tokens: u64,
+        cache_ttl_seconds: u64,
         time_since_last_turn: Duration,
     ) -> CompactionAction {
         if !self.enabled {
@@ -69,7 +71,7 @@ impl CompactionConfig {
         }
 
         let threshold = (context_window_tokens as f64 * self.token_threshold_fraction) as u64;
-        let cache_ttl = Duration::from_secs(self.cache_ttl_seconds);
+        let cache_ttl = Duration::from_secs(cache_ttl_seconds);
         let cache_cold = time_since_last_turn > cache_ttl;
 
         match (estimated_tokens > threshold, cache_cold) {
@@ -86,7 +88,6 @@ impl Default for CompactionConfig {
             enabled: true,
             token_threshold_fraction: 0.6,
             keep_recent_tool_results: 10,
-            cache_ttl_seconds: 300,
             reset_time_delta_seconds: None,
         }
     }
