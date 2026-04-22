@@ -220,7 +220,7 @@
               ${write-sdl}/bin/write_sdl > schema-generated.graphql
 
               echo "Comparing with committed schema..."
-              if ! diff -u web/src/graphql/schema.graphql schema-generated.graphql; then
+              if ! diff -u server/src/graphql/schema.graphql schema-generated.graphql; then
                 echo "ERROR: GraphQL schema is out of date!"
                 echo "Run 'make sdl-rust' to update the schema"
                 exit 1
