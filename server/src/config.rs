@@ -40,6 +40,8 @@ pub struct Config {
 pub struct ProviderConfig {
     pub name: String,
     #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
     pub models: Vec<ProviderModelConfig>,
 }
 
@@ -70,20 +72,25 @@ impl Config {
         let mut models = Vec::new();
 
         for provider_cfg in &self.providers {
+            let base_url = provider_cfg.base_url.clone();
             let provider = match provider_cfg.name.as_str() {
                 "openai" => Provider::OpenAi {
                     api_key: self.openai_api_key.clone(),
+                    base_url,
                 },
                 "openai-responses" => Provider::OpenAiResponses {
                     auth: OpenAiResponsesAuth::ApiKey {
                         api_key: self.openai_api_key.clone(),
                     },
+                    base_url,
                 },
                 "openai-codex" => Provider::OpenAiResponses {
                     auth: OpenAiResponsesAuth::Subscription,
+                    base_url,
                 },
                 _ => Provider::Anthropic {
                     api_key: self.anthropic_api_key.clone(),
+                    base_url,
                 },
             };
 

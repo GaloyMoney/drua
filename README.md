@@ -143,6 +143,42 @@ providers:
         context_window_tokens: 200000
 ```
 
+### Custom / Alternative Providers
+
+Any provider entry supports an optional `base_url` field to point at an
+OpenAI-compatible or Anthropic-compatible endpoint — for example OpenRouter,
+a local Llama server, vLLM, or any proxy.
+
+The client appends the standard API path (`/v1/messages` for Anthropic,
+`/v1/chat/completions` for `openai`, `/v1/responses` for `openai-responses`),
+so `base_url` should be the scheme + host + any path prefix, without the
+trailing API path.
+
+```yaml
+providers:
+  # Route Anthropic-protocol models through OpenRouter
+  - name: anthropic
+    base_url: https://openrouter.ai/api
+    models:
+      - name: claude-haiku-4-5-20251001
+        max_tokens_per_response: 4096
+
+  # Use a local Llama server via the OpenAI Chat Completions protocol
+  - name: openai
+    base_url: http://localhost:8080
+    models:
+      - name: llama-3-8b
+        max_tokens_per_response: 4096
+        context_window_tokens: 128000
+        cache_ttl_seconds: 0
+```
+
+When `base_url` is set, API-key prefix validation (`sk-ant-`, `sk-`) is
+skipped, since alternative providers use different credential formats.
+Set the corresponding API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
+to whatever the target endpoint expects — or leave it empty if the endpoint
+requires no authentication.
+
 ## Project Layout
 
 ```

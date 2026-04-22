@@ -24,6 +24,7 @@ use crate::sse::{parse_sse_stream, SseError};
 pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient, OpenAiResponsesError};
 
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const API_PATH: &str = "/v1/chat/completions";
 
 #[derive(Debug, Error)]
 pub enum OpenAiChatCompletionsError {
@@ -63,6 +64,14 @@ impl OpenAiClient {
             api_key: api_key.into(),
             api_url: DEFAULT_API_URL.to_string(),
         }
+    }
+
+    pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
+        if let Some(base) = base_url {
+            let base = base.trim_end_matches('/');
+            self.api_url = format!("{base}{API_PATH}");
+        }
+        self
     }
 
     /// Issue a streaming Chat Completions request and return the

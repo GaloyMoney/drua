@@ -23,7 +23,8 @@ use crate::convert::{accumulated_to_response, prompt_to_request, AnthropicDeltaC
 use crate::sse::{parse_sse_stream, SseError};
 use crate::stream::StreamAccumulator;
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const API_PATH: &str = "/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 
 #[derive(Debug, Error)]
@@ -57,6 +58,7 @@ impl From<SseError> for AnthropicError {
 pub struct AnthropicClient {
     http: reqwest::Client,
     api_key: String,
+    api_url: String,
 }
 
 impl AnthropicClient {
@@ -64,7 +66,16 @@ impl AnthropicClient {
         Self {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
+            api_url: format!("{DEFAULT_BASE_URL}{API_PATH}"),
         }
+    }
+
+    pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
+        if let Some(base) = base_url {
+            let base = base.trim_end_matches('/');
+            self.api_url = format!("{base}{API_PATH}");
+        }
+        self
     }
 
     /// Issue a streaming Messages API request and return the fully-accumulated
@@ -80,7 +91,7 @@ impl AnthropicClient {
 
         let resp = self
             .http
-            .post(API_URL)
+            .post(&self.api_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("accept", "text/event-stream")
@@ -146,7 +157,7 @@ impl AnthropicClient {
 
         let resp = self
             .http
-            .post(API_URL)
+            .post(&self.api_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("accept", "text/event-stream")
