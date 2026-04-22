@@ -46,9 +46,10 @@ impl AuthScope {
                 resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
             }
 
-            // SandboxUse grants only the Use verb on the matching sandbox.
+            // SandboxUse grants Use and Read on the matching sandbox
+            // (write implies read).
             AuthScope::SandboxUse(sb) => {
-                verb == AuthVerb::Use
+                matches!(verb, AuthVerb::Use | AuthVerb::Read)
                     && matches!(
                         resource,
                         AuthResource::Sandbox(_, Some(res_sb)) if *res_sb == *sb

@@ -147,7 +147,7 @@ async fn execute_inspect(
     };
 
     let client = sandboxes
-        .instance_client_for(sub, params.sandbox_id)
+        .instance_client_for_read(sub, params.sandbox_id)
         .await
         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 

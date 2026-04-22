@@ -363,10 +363,31 @@ impl Sandboxes {
         sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<InstanceClient, SandboxError> {
+        self.instance_client_with_verb(sub, id, AuthVerb::Use).await
+    }
+
+    /// Like [`instance_client_for`] but requires only `Read` permission.
+    /// Use this for read-only sandbox tools (ls, read, grep, glob).
+    #[instrument(name = "domain.sandbox.instance_client_for_read", skip(self, sub))]
+    pub async fn instance_client_for_read(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<InstanceClient, SandboxError> {
+        self.instance_client_with_verb(sub, id, AuthVerb::Read)
+            .await
+    }
+
+    async fn instance_client_with_verb(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+        verb: AuthVerb,
+    ) -> Result<InstanceClient, SandboxError> {
         let id = id.into();
         let sandbox = self.repo.find_by_id(id).await?;
         sub.can(
-            AuthVerb::Use,
+            verb,
             AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
         )?;
         Audit::record_action_if_unset("sandbox.instance_client_for");

@@ -144,11 +144,16 @@ impl TopLevelTool for TextEditor {
         };
         Audit::record_sandbox_id(sandbox_id);
 
-        let client = self
-            .sandboxes
-            .instance_client_for(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+        let client = if command_is_mutating(command) {
+            self.sandboxes
+                .instance_client_for(subject, sandbox_id)
+                .await
+        } else {
+            self.sandboxes
+                .instance_client_for_read(subject, sandbox_id)
+                .await
+        }
+        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
         let req = ExecuteRequest {
             tool: "str_replace_based_edit_tool".to_string(),

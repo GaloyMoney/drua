@@ -118,7 +118,7 @@ impl TopLevelTool for Grep {
 
         let client = self
             .sandboxes
-            .instance_client_for(subject, sandbox_id)
+            .instance_client_for_read(subject, sandbox_id)
             .await
             .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
