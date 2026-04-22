@@ -216,17 +216,20 @@ impl AgentSession {
                 // tool_use and tool_result, breaking the API's required
                 // assistant(tool_use) → tool_result sequence.
                 AgentSessionEvent::SandboxNotificationAdded { .. } => {}
+                // Skip intermediate tool-use loops: Pi's import doesn't
+                // reconstruct them correctly for the Anthropic API.
+                // Only emit the final assistant response per turn.
                 AgentSessionEvent::AssistantResponseReceived {
                     thread_id: tid,
                     content,
                     stop_reason,
                     metadata,
                     ..
-                } if *tid == thread_id => {
+                } if *tid == thread_id && !matches!(stop_reason, StopReason::ToolUse) => {
                     let reason = match stop_reason {
                         StopReason::Stop => "stop",
                         StopReason::Length => "max_tokens",
-                        StopReason::ToolUse => "tool_use",
+                        StopReason::ToolUse => unreachable!(),
                         StopReason::Error => "error",
                     };
                     entries.push(pi_export::build_assistant_entry(
@@ -239,23 +242,9 @@ impl AgentSession {
                     ));
                     ts_offset += 1;
                 }
-                AgentSessionEvent::ToolResultsAdded {
-                    thread_id: tid,
-                    results,
-                } if *tid == thread_id => {
-                    for result in results {
-                        let parent_id = entries.last().map(|e| e.id().to_string());
-                        let parent_ref = parent_id.as_deref();
-                        let ts = pi_export::ts_from_ms(base_ts, ts_offset);
-                        entries.push(pi_export::build_tool_result_entry(
-                            &mut id_gen,
-                            parent_ref,
-                            result,
-                            ts,
-                        ));
-                        ts_offset += 1;
-                    }
-                }
+                // Skip tool results — they pair with tool_use assistant
+                // messages which are also skipped above.
+                AgentSessionEvent::ToolResultsAdded { .. } => {}
                 _ => {}
             }
         }

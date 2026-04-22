@@ -325,6 +325,7 @@ pub(super) fn build_assistant_entry(
     })
 }
 
+#[allow(dead_code)]
 pub(super) fn build_tool_result_entry(
     id_gen: &mut PiIdGenerator,
     parent_id: Option<&str>,
