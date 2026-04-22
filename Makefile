@@ -28,7 +28,7 @@ build-sandbox:
 	cargo build -p sandbox-tool-server
 
 run-server: build-sandbox
-	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- $(ARGS)
+	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-server -- $(ARGS)
 
 nix-run-server:
 	@PG_CON=$(PG_CON) GITHUB_CLIENT_SECRET=$(GITHUB_CLIENT_SECRET) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) nix run . -- $(ARGS)
@@ -43,4 +43,4 @@ integration-tests: reset-deps
 	DATABASE_URL=$(PG_CON) cargo nextest run
 
 start: reset-deps
-	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- --set oauth.login=dev $(ARGS)
+	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-server -- --set oauth.login=dev $(ARGS)

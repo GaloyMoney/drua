@@ -1313,7 +1313,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "drua"
+name = "drua-admin-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1327,32 +1327,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "drua-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "drua-core",
- "drua-mcp-gateway",
- "drua-web",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk",
- "rustls",
- "sandbox",
- "serde",
- "serde_yaml",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1409,6 +1383,32 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "drua-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "drua-core",
+ "drua-mcp-gateway",
+ "drua-web",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
+ "rustls",
+ "sandbox",
+ "serde",
+ "serde_yaml",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

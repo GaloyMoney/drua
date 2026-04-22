@@ -30,14 +30,14 @@ with `GITHUB_CLIENT_SECRET` set and an
 
 ```bash
 # Against the local dev server
-cargo run -p drua -- dashboard
+cargo run -p drua-admin-cli -- dashboard
 
 # Against production
-cargo run -p drua -- --server https://dashboard.agents.galoy.io dashboard
+cargo run -p drua-admin-cli -- --server https://dashboard.agents.galoy.io dashboard
 ```
 
 On first run it opens your browser to authenticate and generate an API token.
-Credentials are stored in `~/.drua/config.json`. See [`drua/README.md`](drua/README.md)
+Credentials are stored in `~/.drua/config.json`. See [`admin-cli/README.md`](admin-cli/README.md)
 for all commands and key bindings.
 
 ## Environment Variables
@@ -46,7 +46,7 @@ All secrets are loaded from environment variables (or CLI flags). Non-secret
 configuration lives in a YAML config file (`drua.yml` by default).
 A complete `.env.example` is provided at the repo root.
 
-### Main Server (`drua-cli`)
+### Main Server (`drua-server`)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -146,10 +146,10 @@ providers:
 ## Project Layout
 
 ```
-drua/           Terminal UI client (login, dashboard, workspace management)
-cli/            CLI entrypoint (config loading, main server binary)
+admin-cli/      Terminal UI client (login, dashboard, workspace management)
+server/         Server entrypoint (config loading, main server binary)
 core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
-web/            Axum web server (routes, OAuth, templates)
+web/            Axum web server library (routes, OAuth, GraphQL, templates)
 mcp-gateway/    MCP protocol gateway (rmcp-based)
 lib/            Shared libraries (anthropic-client, sandbox admin client, LLM)
 images/sandbox/ Sandbox tool server (runs inside sandbox pods)

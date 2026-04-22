@@ -1,7 +1,7 @@
 [workspace]
 members = [
-  "drua",
-  "cli",
+  "admin-cli",
+  "server",
   "lib/concourse-client",
   "core",
   "mcp-gateway",
