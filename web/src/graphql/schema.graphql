@@ -93,9 +93,11 @@ type Query {
 	"""
 	agent(id: AgentId!): Agent
 	"""
-	Export an agent's current thread as Pi-compatible JSONL (v3 format).
+	Export a thread as Pi-compatible JSONL (v3 format).
+	
+	When `thread_id` is omitted the current main thread is exported.
 	"""
-	exportThread(agentId: AgentId!): String!
+	exportThread(agentId: AgentId!, threadId: SessionThreadId): String!
 	"""
 	The currently authenticated user, if any.
 	"""
@@ -119,8 +121,13 @@ enum SandboxAttachmentMode {
 scalar SandboxId
 
 type SandboxNotificationContent {
+	mode: String
 	operation: SandboxNotificationOperation!
 	sandboxName: String!
+	"""
+	The rendered notification text that was injected into the prompt.
+	"""
+	text: String!
 }
 
 enum SandboxNotificationOperation {
@@ -166,6 +173,10 @@ type ThreadMessageEntry {
 	"""
 	blockIndexes: [Int!]!
 	content: [ChatContentBlock!]!
+	"""
+	Timestamp of the event that produced this message.
+	"""
+	recordedAt: Timestamp
 	role: ChatMessageRole!
 	"""
 	Token usage metadata (only present for assistant messages).
@@ -175,6 +186,7 @@ type ThreadMessageEntry {
 
 type ThreadMessageUsage {
 	cacheReadTokens: Int!
+	cacheWriteTokens: Int!
 	inputTokens: Int!
 	model: String!
 	outputTokens: Int!
@@ -210,6 +222,7 @@ type ToolResultContent {
 }
 
 type ToolUseContent {
+	input: String!
 	name: String!
 }
 
