@@ -26,6 +26,8 @@ pub struct AppState {
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
     pub code_assistant: Option<CodeAssistant>,
+    /// Serialized YAML config exposed via the `appConfig` GraphQL query.
+    pub app_config_yaml: graphql::Yaml,
     /// Optional SA token validator — present when running in-cluster.
     pub sa_token_validator: Option<SaTokenValidator>,
     /// Postgres-backed session store shared with the session layer.
@@ -40,6 +42,7 @@ impl AppState {
         login: LoginMethod,
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
+        app_config_yaml: graphql::Yaml,
     ) -> Self {
         let code_assistant = app.code_assistant().cloned();
         Self {
@@ -49,6 +52,7 @@ impl AppState {
             mcp_endpoint,
             github_allowed_teams,
             code_assistant,
+            app_config_yaml,
             sa_token_validator: None,
             session_store: PgSessionStore::new(pool),
         }
@@ -156,6 +160,8 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
 
     let mcp_service = drua_mcp_gateway::McpGateway::service(app.clone());
 
+    let app_config_yaml: graphql::Yaml = serde_yaml::to_string(&config)?.into();
+
     let mut app_state = AppState::new(
         &pool,
         app,
@@ -163,6 +169,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         auth_config.login,
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
+        app_config_yaml,
     );
 
     if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await {

@@ -15,6 +15,17 @@ pub use drua_core::auth::AuthSubject;
 
 pub use es_entity::graphql::UUID;
 
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct Yaml(String);
+async_graphql::scalar!(Yaml);
+
+impl From<String> for Yaml {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Timestamp(chrono::DateTime<chrono::Utc>);

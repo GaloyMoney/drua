@@ -6,6 +6,7 @@ use async_graphql::{
 use super::agent::Agent;
 use super::primitives::*;
 use super::workspace::Workspace;
+use super::AppConfigYaml;
 
 use drua_core::workspace::WorkspaceByCreatedAtCursor;
 
@@ -23,6 +24,10 @@ pub struct Query;
 impl Query {
     async fn ping(&self) -> &str {
         "pong"
+    }
+
+    async fn app_config(&self, ctx: &Context<'_>) -> Yaml {
+        ctx.data_unchecked::<AppConfigYaml>().0.clone()
     }
 
     /// The currently authenticated user, if any.
