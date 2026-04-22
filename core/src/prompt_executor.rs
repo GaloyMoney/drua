@@ -327,32 +327,31 @@ enum ResolvedProviderKind {
 
 impl ResolvedModel {
     fn from_config(config: ModelConfig) -> Self {
-        let (provider_kind, client): (ResolvedProviderKind, Arc<dyn LlmProvider>) = match config
-            .provider
-        {
-            Provider::Anthropic { api_key, base_url } => (
-                ResolvedProviderKind::Anthropic,
-                Arc::new(AnthropicClient::new(api_key).with_base_url(base_url)),
-            ),
-            Provider::OpenAi { api_key, base_url } => (
-                ResolvedProviderKind::OpenAi,
-                Arc::new(OpenAiClient::new(api_key).with_base_url(base_url)),
-            ),
-            Provider::OpenAiResponses { auth, base_url } => (
-                ResolvedProviderKind::OpenAiResponses,
-                Arc::new(
-                    OpenAiResponsesClient::new(match auth {
-                        OpenAiResponsesAuth::ApiKey { api_key } => {
-                            ClientOpenAiResponsesAuth::ApiKey { api_key }
-                        }
-                        OpenAiResponsesAuth::Subscription => {
-                            ClientOpenAiResponsesAuth::Subscription
-                        }
-                    })
-                    .with_base_url(base_url),
+        let (provider_kind, client): (ResolvedProviderKind, Arc<dyn LlmProvider>) =
+            match config.provider {
+                Provider::Anthropic { api_key, base_url } => (
+                    ResolvedProviderKind::Anthropic,
+                    Arc::new(AnthropicClient::new(api_key).with_base_url(base_url)),
                 ),
-            ),
-        };
+                Provider::OpenAi { api_key, base_url } => (
+                    ResolvedProviderKind::OpenAi,
+                    Arc::new(OpenAiClient::new(api_key).with_base_url(base_url)),
+                ),
+                Provider::OpenAiResponses { auth, base_url } => (
+                    ResolvedProviderKind::OpenAiResponses,
+                    Arc::new(
+                        OpenAiResponsesClient::new(match auth {
+                            OpenAiResponsesAuth::ApiKey { api_key } => {
+                                ClientOpenAiResponsesAuth::ApiKey { api_key }
+                            }
+                            OpenAiResponsesAuth::Subscription => {
+                                ClientOpenAiResponsesAuth::Subscription
+                            }
+                        })
+                        .with_base_url(base_url),
+                    ),
+                ),
+            };
         Self {
             name: config.name,
             default_max_tokens: config.default_max_tokens,

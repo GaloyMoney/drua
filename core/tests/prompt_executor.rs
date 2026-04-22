@@ -14,7 +14,10 @@ async fn anthropic_round_trip_via_executor() {
     let config = PromptExecutorConfig {
         models: vec![ModelConfig {
             name: MODEL.to_string(),
-            provider: Provider::Anthropic { api_key, base_url: None },
+            provider: Provider::Anthropic {
+                api_key,
+                base_url: None,
+            },
             default_max_tokens: Some(64),
         }],
     };
