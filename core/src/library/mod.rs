@@ -1,8 +1,10 @@
 mod error;
+mod job;
 
 use std::path::PathBuf;
 
 pub use error::LibraryError;
+use self::job::PushRuntimeCommitsJobInitializer;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct LibraryConfig {
@@ -30,7 +32,21 @@ pub struct Library {
 }
 
 impl Library {
-    pub fn new(config: &LibraryConfig) -> Self {
+    pub fn new(config: &LibraryConfig, jobs: &mut ::job::Jobs) -> Self {
+        let init = PushRuntimeCommitsJobInitializer::new(config);
+        let spawner = jobs.add_initializer(init);
+        tokio::spawn(async move {
+            if let Err(e) = spawner
+                .spawn_unique(
+                    ::job::JobId::new(),
+                    PushRuntimeCommitsJobInitializer::cfg(),
+                )
+                .await
+            {
+                tracing::error!(error = %e, "Failed to spawn push-runtime-commits job");
+            }
+        });
+
         Self {
             repo_path: config.repo_path(),
         }
@@ -39,7 +55,8 @@ impl Library {
     /// Write a file into the runtime area of the library repo.
     ///
     /// The file is written to `{repo_path}/{relative_path}`, creating
-    /// intermediate directories as needed.
+    /// intermediate directories as needed. The push-runtime-commits job
+    /// will pick up the change and push it to the remote.
     #[tracing::instrument(name = "library.write_runtime_file", skip(self, content))]
     pub async fn write_runtime_file(
         &self,

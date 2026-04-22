@@ -147,7 +147,14 @@ impl App {
             }
         };
 
-        let library = Library::new(&config.library);
+        let job_config = job::JobSvcConfig::builder()
+            .pool(pool.clone())
+            .build()
+            .expect("Failed to build JobSvcConfig");
+        let mut jobs = job::Jobs::init(job_config)
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
+        let library = Library::new(&config.library, &mut jobs);
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
         let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes)));
@@ -198,6 +205,10 @@ impl App {
             Arc::clone(&audit),
             Arc::clone(&workspaces),
         ));
+
+        jobs.start_poll()
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
 
         Ok(Self {
             users: Arc::new(Users::new(pool)),
@@ -291,4 +302,6 @@ pub enum AppError {
     PromptExecutor(String),
     #[error("AppError - Sandbox: {0}")]
     Sandbox(#[from] sandbox::error::SandboxError),
+    #[error("AppError - Job: {0}")]
+    Job(String),
 }
