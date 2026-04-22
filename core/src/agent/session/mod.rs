@@ -1,11 +1,10 @@
 mod compaction;
 mod entity;
 pub mod error;
-mod export;
+pub mod export;
 pub mod history;
-pub(super) mod message;
-mod metadata;
-mod pi_export;
+pub mod message;
+pub mod metadata;
 pub mod repo;
 mod settings;
 mod thread;
@@ -201,10 +200,9 @@ impl Sessions {
         &self,
         agent_id: AgentId,
         target: TargetThread,
-    ) -> Result<String, AgentSessionError> {
+    ) -> Result<export::ExportableThread, AgentSessionError> {
         let session = self.repo.find_by_agent_id(agent_id).await?;
-        let exportable = session.exportable_thread(target)?;
-        Ok(pi_export::export_to_jsonl(&exportable))
+        session.exportable_thread(target)
     }
 
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]

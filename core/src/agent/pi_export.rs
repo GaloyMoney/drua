@@ -10,7 +10,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
-use super::{
+use super::session::{
     export::{ExportableEntry, ExportableThread},
     message::{AssistantBlock, StopReason},
     metadata::AssistantResponseMetadata,

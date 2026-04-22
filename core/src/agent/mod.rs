@@ -1,6 +1,7 @@
 pub mod config;
 mod entity;
 pub mod error;
+mod pi_export;
 pub mod repo;
 pub mod session;
 mod system_prompt;
@@ -537,8 +538,8 @@ impl Agents {
         let target = thread_id
             .map(session::TargetThread::Id)
             .unwrap_or(session::TargetThread::Main);
-        let jsonl = self.sessions.export_thread(agent_id, target).await?;
-        Ok(jsonl)
+        let exportable = self.sessions.export_thread(agent_id, target).await?;
+        Ok(pi_export::export_to_jsonl(&exportable))
     }
 
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
