@@ -1446,7 +1446,7 @@ mod tests {
             matches!(&assistant.blocks[0], ChatHistoryBlock::Text { text } if text == "Let me check.")
         );
         assert!(
-            matches!(&assistant.blocks[1], ChatHistoryBlock::ToolUse { name } if name == "get_weather")
+            matches!(&assistant.blocks[1], ChatHistoryBlock::ToolUse { name, .. } if name == "get_weather")
         );
     }
 
