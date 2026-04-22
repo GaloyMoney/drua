@@ -40,6 +40,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
+            ..Default::default()
         },
     );
     let config = AgentsConfig {
@@ -193,6 +194,7 @@ async fn send_message_dispatches_registered_tool_call() {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
+            ..Default::default()
         },
     );
     let config = AgentsConfig {

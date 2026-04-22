@@ -681,6 +681,7 @@ mod tests {
                 model: "test-model".into(),
                 max_tokens_per_response: 1024,
                 context_window_tokens: 200_000,
+                ..Default::default()
             })
             .compaction_config(CompactionConfig {
                 enabled: false,
@@ -1081,12 +1082,12 @@ mod tests {
                 model: "test-model".into(),
                 max_tokens_per_response: 1024,
                 context_window_tokens: 100,
+                cache_ttl_seconds: 0, // cache always cold
             })
             .compaction_config(CompactionConfig {
                 enabled: true,
                 token_threshold_fraction: 0.0, // always over threshold
                 keep_recent_tool_results: keep_recent,
-                cache_ttl_seconds: 0, // cache always cold
                 reset_time_delta_seconds: None,
             })
             .system_blocks(vec![SystemBlock::Text {

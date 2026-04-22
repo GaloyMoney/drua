@@ -49,10 +49,18 @@ pub struct ProviderModelConfig {
     pub max_tokens_per_response: u32,
     #[serde(default = "default_context_window")]
     pub context_window_tokens: u64,
+    /// Provider prompt-cache TTL in seconds. Defaults to 300 (Anthropic).
+    /// Set to 0 for providers without prompt caching.
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl_seconds: u64,
 }
 
 fn default_context_window() -> u64 {
     200_000
+}
+
+fn default_cache_ttl() -> u64 {
+    300
 }
 
 impl Config {
@@ -213,6 +221,7 @@ impl Config {
                         model: model.name.clone(),
                         max_tokens_per_response: model.max_tokens_per_response,
                         context_window_tokens: model.context_window_tokens,
+                        cache_ttl_seconds: model.cache_ttl_seconds,
                     },
                 );
             }
