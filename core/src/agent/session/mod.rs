@@ -197,9 +197,13 @@ impl Sessions {
     }
 
     #[instrument(name = "domain.agent_session.export_thread", skip(self))]
-    pub async fn export_thread(&self, agent_id: AgentId) -> Result<String, AgentSessionError> {
+    pub async fn export_thread(
+        &self,
+        agent_id: AgentId,
+        target: TargetThread,
+    ) -> Result<String, AgentSessionError> {
         let session = self.repo.find_by_agent_id(agent_id).await?;
-        let exportable = session.exportable_thread()?;
+        let exportable = session.exportable_thread(target)?;
         Ok(pi_export::export_to_jsonl(&exportable))
     }
 

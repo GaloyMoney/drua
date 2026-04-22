@@ -141,18 +141,27 @@ impl AgentSession {
         self.current_main_thread
     }
 
-    /// Build a format-agnostic [`ExportableThread`] for the current main thread.
+    /// Build a format-agnostic [`ExportableThread`] for the given target.
     ///
+    /// Defaults to the current main thread when `target` is `Main`.
     /// Format-specific modules (e.g. `pi_export`) consume the returned
     /// intermediate representation to produce their output.
-    pub fn exportable_thread(&self) -> Result<export::ExportableThread, AgentSessionError> {
-        self.current_main_thread
-            .ok_or(AgentSessionError::ThreadNotFound)?;
+    pub fn exportable_thread(
+        &self,
+        target: TargetThread,
+    ) -> Result<export::ExportableThread, AgentSessionError> {
+        let thread_id = match target {
+            TargetThread::Main => self
+                .current_main_thread
+                .ok_or(AgentSessionError::ThreadNotFound)?,
+            TargetThread::Id(id) => id,
+        };
 
         Ok(export::build_exportable_thread(
             self.id,
             &self.model_defaults.model,
             &self.events,
+            thread_id,
             self.current_main_thread,
         ))
     }

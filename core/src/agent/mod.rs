@@ -516,13 +516,15 @@ impl Agents {
         Ok(self.sessions.thread_messages(agent_id, thread_id).await?)
     }
 
-    /// Export the current main thread of the given agent as Pi-compatible
-    /// JSONL (v3 format).
+    /// Export a thread of the given agent as Pi-compatible JSONL (v3 format).
+    ///
+    /// When `thread_id` is `None`, the current main thread is exported.
     #[instrument(name = "domain.agent.export_thread", skip(self, sub))]
     pub async fn export_thread(
         &self,
         sub: &AuthSubject,
         agent_id: AgentId,
+        thread_id: Option<session::SessionThreadId>,
     ) -> Result<String, AgentError> {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
@@ -532,7 +534,10 @@ impl Agents {
         Audit::record_action_if_unset("agent.export_thread");
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(agent_id);
-        let jsonl = self.sessions.export_thread(agent_id).await?;
+        let target = thread_id
+            .map(session::TargetThread::Id)
+            .unwrap_or(session::TargetThread::Main);
+        let jsonl = self.sessions.export_thread(agent_id, target).await?;
         Ok(jsonl)
     }
 

@@ -45,10 +45,9 @@ pub(super) fn build_exportable_thread(
     session_id: AgentSessionId,
     model: &str,
     events: &EntityEvents<AgentSessionEvent>,
+    thread_id: SessionThreadId,
     current_main_thread: Option<SessionThreadId>,
 ) -> ExportableThread {
-    let thread_id = current_main_thread.expect("caller must verify thread exists");
-
     let base_timestamp = events.entity_first_persisted_at().unwrap_or_else(Utc::now);
 
     let mut entries = Vec::new();
