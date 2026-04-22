@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Result};
-use futures::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize};
-use tokio_tungstenite::tungstenite;
 
 #[derive(Debug, Deserialize)]
 struct GraphqlResponse<T> {
@@ -75,7 +73,7 @@ impl GraphqlClient {
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL subscription over WebSocket (graphql-transport-ws protocol)
+// GraphQL subscription over SSE (POST /graphql/stream)
 // ---------------------------------------------------------------------------
 
 const AGENT_MESSAGE_SUBSCRIPTION: &str = r#"
@@ -98,10 +96,11 @@ subscription AgentMessage($agentId: AgentId!, $prompt: String!) {
 }
 "#;
 
-/// Stream agent message events over a GraphQL subscription (WebSocket).
+/// Stream agent message events over a GraphQL subscription (SSE).
 ///
-/// Each received event is parsed and sent to the `on_event` callback.
-/// Returns when the subscription completes or an error occurs.
+/// POSTs the subscription query to `/graphql/stream` and parses the SSE
+/// event stream. Each `next` event carries a GraphQL response; the
+/// `complete` event signals end of stream.
 pub async fn subscribe_agent_message<F>(
     base_url: &str,
     token: &str,
@@ -112,90 +111,76 @@ pub async fn subscribe_agent_message<F>(
 where
     F: Fn(serde_json::Value) -> bool,
 {
-    let ws_url = base_url
-        .replace("http://", "ws://")
-        .replace("https://", "wss://");
-    let ws_url = format!("{ws_url}/graphql/ws");
+    let http = reqwest::Client::new();
+    let url = format!("{base_url}/graphql/stream");
 
-    let mut request = tungstenite::client::IntoClientRequest::into_client_request(ws_url)?;
-    request
-        .headers_mut()
-        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        "graphql-transport-ws".parse().unwrap(),
-    );
-
-    let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
-
-    // connection_init
-    ws.send(tungstenite::Message::Text(
-        serde_json::json!({"type": "connection_init"})
-            .to_string()
-            .into(),
-    ))
-    .await?;
-
-    // Wait for connection_ack
-    loop {
-        let msg = ws
-            .next()
-            .await
-            .ok_or_else(|| anyhow!("WebSocket closed before connection_ack"))??;
-        if let tungstenite::Message::Text(text) = msg {
-            let parsed: serde_json::Value = serde_json::from_str(&text)?;
-            if parsed["type"] == "connection_ack" {
-                break;
-            }
-        }
-    }
-
-    // Subscribe
-    let subscribe_msg = serde_json::json!({
-        "type": "subscribe",
-        "id": "1",
-        "payload": {
-            "query": AGENT_MESSAGE_SUBSCRIPTION,
-            "variables": {
-                "agentId": agent_id,
-                "prompt": prompt,
-            }
+    let body = serde_json::json!({
+        "query": AGENT_MESSAGE_SUBSCRIPTION,
+        "variables": {
+            "agentId": agent_id,
+            "prompt": prompt,
         }
     });
-    ws.send(tungstenite::Message::Text(subscribe_msg.to_string().into()))
+
+    let resp = http
+        .post(&url)
+        .bearer_auth(token)
+        .header("Accept", "text/event-stream")
+        .json(&body)
+        .send()
         .await?;
 
-    // Receive events
-    while let Some(msg) = ws.next().await {
-        let msg = msg?;
-        match msg {
-            tungstenite::Message::Text(text) => {
-                let parsed: serde_json::Value = serde_json::from_str(&text)?;
-                match parsed["type"].as_str() {
-                    Some("next") => {
-                        if let Some(event) = parsed
-                            .get("payload")
-                            .and_then(|p| p.get("data"))
-                            .and_then(|d| d.get("agentSendMessage"))
-                        {
-                            if !on_event(event.clone()) {
-                                break;
-                            }
-                        }
-                    }
-                    Some("error") => {
-                        let msg = parsed
-                            .get("payload")
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "unknown error".to_string());
-                        return Err(anyhow!("Subscription error: {msg}"));
-                    }
-                    Some("complete") => break,
-                    _ => {}
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("server returned {status}: {text}");
+    }
+
+    let mut buf = String::new();
+    let mut response = resp;
+
+    while let Some(chunk) = response.chunk().await? {
+        let text = String::from_utf8_lossy(&chunk);
+        buf.push_str(&text);
+
+        while let Some(end) = buf.find("\n\n") {
+            let block = buf[..end].to_string();
+            buf = buf[end + 2..].to_string();
+
+            let mut event_type = String::new();
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    event_type = rest.trim().to_string();
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data = rest.trim().to_string();
                 }
             }
-            tungstenite::Message::Close(_) => break,
-            _ => {}
+
+            if event_type == "complete" {
+                return Ok(());
+            }
+
+            if event_type == "next" && !data.is_empty() {
+                let gql_resp: serde_json::Value = serde_json::from_str(&data)?;
+
+                // Check for GraphQL errors
+                if let Some(errors) = gql_resp.get("errors").and_then(|e| e.as_array()) {
+                    if let Some(first) = errors.first() {
+                        let msg = first
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error");
+                        return Err(anyhow!("GraphQL error: {msg}"));
+                    }
+                }
+
+                if let Some(event) = gql_resp.get("data").and_then(|d| d.get("agentSendMessage")) {
+                    if !on_event(event.clone()) {
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 

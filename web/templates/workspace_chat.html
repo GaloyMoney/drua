@@ -160,7 +160,7 @@ function handleStreamEvent(event) {
   }
 }
 
-function sendMessage() {
+async function sendMessage() {
   const textarea = document.getElementById('prompt');
   const prompt = textarea.value.trim();
   if (!prompt) return;
@@ -169,46 +169,57 @@ function sendMessage() {
   document.getElementById('send-btn').disabled = true;
   appendMsg('msg-system', '> ' + prompt);
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(
-    protocol + '//' + window.location.host + '/graphql/ws',
-    'graphql-transport-ws'
-  );
+  try {
+    const resp = await fetch('/graphql/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: AGENT_MESSAGE_SUBSCRIPTION,
+        variables: { agentId: agentId, prompt: prompt }
+      }),
+    });
 
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'connection_init' }));
-  };
-
-  ws.onmessage = function(e) {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'connection_ack') {
-      ws.send(JSON.stringify({
-        type: 'subscribe',
-        id: '1',
-        payload: {
-          query: AGENT_MESSAGE_SUBSCRIPTION,
-          variables: { agentId: agentId, prompt: prompt }
-        }
-      }));
-    } else if (msg.type === 'next') {
-      handleStreamEvent(msg.payload.data.agentSendMessage);
-    } else if (msg.type === 'error') {
-      const errMsg = msg.payload ? JSON.stringify(msg.payload) : 'Unknown error';
-      appendMsg('msg-error', errMsg);
-      ws.close();
-    } else if (msg.type === 'complete') {
-      ws.close();
+    if (!resp.ok) {
+      appendMsg('msg-error', 'Error: ' + resp.status);
+      return;
     }
-  };
 
-  ws.onerror = function() {
-    appendMsg('msg-error', 'WebSocket error');
-  };
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-  ws.onclose = function() {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      let eventType = '';
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventType = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          if (eventType === 'complete' || !data) continue;
+          try {
+            const gqlResp = JSON.parse(data);
+            if (gqlResp.errors && gqlResp.errors.length) {
+              appendMsg('msg-error', gqlResp.errors[0].message);
+            } else if (gqlResp.data && gqlResp.data.agentSendMessage) {
+              handleStreamEvent(gqlResp.data.agentSendMessage);
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    }
+  } catch (e) {
+    appendMsg('msg-error', 'Network error: ' + e.message);
+  } finally {
     document.getElementById('send-btn').disabled = false;
     textarea.focus();
-  };
+  }
 }
 
 document.getElementById('prompt').addEventListener('keydown', function(e) {

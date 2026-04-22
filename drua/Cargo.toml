@@ -19,4 +19,3 @@ ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 libc = { workspace = true }
 futures = { workspace = true }
-tokio-tungstenite = { workspace = true }

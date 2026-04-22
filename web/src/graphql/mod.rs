@@ -9,14 +9,20 @@ mod subscription;
 mod types;
 mod workspace;
 
-use async_graphql::{extensions, Data, Schema};
-use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
+use std::convert::Infallible;
+
+use async_graphql::{extensions, Schema};
+use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
-    extract::{ws::WebSocketUpgrade, State},
-    response::Response,
-    routing::{get, post},
-    Extension, Router,
+    extract::State,
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
+    routing::post,
+    Extension, Json, Router,
 };
+use tokio_stream::{self as stream, StreamExt};
 
 use crate::AppState;
 
@@ -46,7 +52,7 @@ pub fn router() -> Router<AppState> {
 
     Router::new()
         .route("/graphql", post(graphql_handler))
-        .route("/graphql/ws", get(graphql_ws_handler))
+        .route("/graphql/stream", post(graphql_sse_handler))
         .layer(Extension(gql_schema))
 }
 
@@ -75,34 +81,43 @@ async fn graphql_handler(
     schema.execute(request).await.into()
 }
 
-/// WebSocket handler for GraphQL subscriptions (graphql-ws protocol).
+/// SSE handler for GraphQL subscriptions.
 ///
-/// Auth is resolved from the HTTP upgrade request by the auth middleware,
-/// then injected into the subscription context via `on_connection_init`.
-async fn graphql_ws_handler(
+/// Clients POST a standard GraphQL request body (containing a subscription
+/// query) and receive an SSE stream of `next` events, followed by a final
+/// `complete` event. Same pattern as lana-bank's admin-server.
+async fn graphql_sse_handler(
     State(state): State<AppState>,
     Extension(schema): Extension<AgentsSchema>,
     auth: Option<Extension<domain::auth::AuthSubject>>,
-    protocol: GraphQLProtocol,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let app = state.app.clone();
+    Json(req): Json<async_graphql::Request>,
+) -> impl IntoResponse {
     let auth_subject = auth
         .map(|Extension(sub)| sub)
         .unwrap_or(domain::auth::AuthSubject::Anonymous);
 
-    ws.protocols(["graphql-transport-ws", "graphql-ws"])
-        .on_upgrade(move |socket| async move {
-            GraphQLWebSocket::new(socket, schema, protocol)
-                .on_connection_init(move |_| async move {
-                    let mut data = Data::default();
-                    data.insert(app);
-                    data.insert(auth_subject);
-                    Ok(data)
-                })
-                .serve()
-                .await
-        })
+    let request = req.data(state.app.clone()).data(auth_subject);
+
+    let responses = schema.execute_stream(request);
+
+    let events = responses.map(|r| {
+        Ok::<_, Infallible>(
+            Event::default()
+                .event("next")
+                .json_data(&r)
+                .unwrap_or_else(|_| {
+                    Event::default()
+                        .event("next")
+                        .data(r#"{"errors":[{"message":"Serialization error"}]}"#)
+                }),
+        )
+    });
+
+    let complete = stream::iter([Ok::<_, Infallible>(
+        Event::default().event("complete").data(""),
+    )]);
+
+    Sse::new(events.chain(complete))
 }
 
 use drua_core as domain;
