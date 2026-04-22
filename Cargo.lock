@@ -111,6 +111,7 @@ name = "anthropic-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dotenvy",
  "futures",
  "llm",
  "reqwest 0.12.28",

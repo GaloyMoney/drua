@@ -83,6 +83,7 @@ These are only needed when running specific integration tests:
 | Variable | Test File | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `core/tests/prompt_executor.rs` | Anthropic round-trip test. |
+| `ANTHROPIC_API_KEY` + `DRUA_LIVE_CACHE_TESTS=1` | `lib/anthropic-client/tests/live_prompt_caching.rs` | Local-only Anthropic prompt-caching test. Loads `.env` when present and asserts cache creation on the warm request plus cache reads on a warmed follow-up request. |
 | `OPENAI_API_KEY` + `DRUA_LIVE_CACHE_TESTS=1` | `lib/openai-client/tests/live_prompt_caching.rs` | Local-only OpenAI Responses prompt-caching test. Loads `.env` when present and asserts cached prompt tokens are reported on a warmed follow-up request. |
 | `DATABASE_URL` | `core/tests/agent.rs` | Postgres URL for agent integration tests. |
 | `HONEYCOMB_AUTH_HEADER` | `core/tests/toolset.rs` | Auth header for MCP upstream toolset test. |
