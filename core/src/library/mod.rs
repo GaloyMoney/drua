@@ -1,10 +1,11 @@
 mod error;
 mod job;
+mod upstream;
 
 use std::path::PathBuf;
 
-pub use error::LibraryError;
 use self::job::PushRuntimeCommitsJobInitializer;
+pub use error::LibraryError;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct LibraryConfig {
@@ -40,23 +41,7 @@ impl Library {
 
         if let Some(repo_url) = &config.repo_url {
             if !repo_path.join(".git").exists() {
-                tracing::info!(
-                    url = %repo_url,
-                    path = %repo_path.display(),
-                    "cloning library repo"
-                );
-                let output = tokio::process::Command::new("git")
-                    .args(["clone", repo_url, &repo_path.to_string_lossy()])
-                    .output()
-                    .await
-                    .map_err(|e| LibraryError::Git(format!("git clone: {e}")))?;
-                if !output.status.success() {
-                    return Err(LibraryError::Git(format!(
-                        "git clone failed: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    )));
-                }
-                tracing::info!(path = %repo_path.display(), "library repo cloned");
+                upstream::clone(repo_url, &repo_path).await?;
             }
         }
 
@@ -64,10 +49,7 @@ impl Library {
         let spawner = jobs.add_initializer(init);
         tokio::spawn(async move {
             if let Err(e) = spawner
-                .spawn_unique(
-                    ::job::JobId::new(),
-                    PushRuntimeCommitsJobInitializer::cfg(),
-                )
+                .spawn_unique(::job::JobId::new(), PushRuntimeCommitsJobInitializer::cfg())
                 .await
             {
                 tracing::error!(error = %e, "Failed to spawn push-runtime-commits job");
@@ -103,49 +85,9 @@ impl Library {
         tracing::info!(path = %full_path.display(), "wrote runtime file");
 
         if self.repo_path.join(".git").exists() {
-            self.git_commit(relative_path, commit_message).await?;
+            upstream::add_and_commit(&self.repo_path, relative_path, commit_message).await?;
         }
 
-        Ok(())
-    }
-
-    async fn git_commit(
-        &self,
-        relative_path: &str,
-        message: &str,
-    ) -> Result<(), LibraryError> {
-        let add = tokio::process::Command::new("git")
-            .args(["add", "--", relative_path])
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .map_err(|e| LibraryError::Git(format!("git add: {e}")))?;
-        if !add.status.success() {
-            return Err(LibraryError::Git(format!(
-                "git add failed: {}",
-                String::from_utf8_lossy(&add.stderr)
-            )));
-        }
-
-        let commit = tokio::process::Command::new("git")
-            .args([
-                "-c", "user.name=drua",
-                "-c", "user.email=drua@galoy.io",
-                "commit", "-m", message,
-                "--", relative_path,
-            ])
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
-        if !commit.status.success() {
-            return Err(LibraryError::Git(format!(
-                "git commit failed: {}",
-                String::from_utf8_lossy(&commit.stderr)
-            )));
-        }
-
-        tracing::info!(path = relative_path, "committed runtime file");
         Ok(())
     }
 }

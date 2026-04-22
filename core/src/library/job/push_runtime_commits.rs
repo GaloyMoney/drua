@@ -4,6 +4,8 @@ use std::time::Duration;
 use job::*;
 use serde::{Deserialize, Serialize};
 
+use super::upstream;
+
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,8 +56,10 @@ impl JobRunner for PushRuntimeCommitsRunner {
         mut current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         loop {
-            if let Err(e) = self.try_push().await {
-                tracing::warn!(error = %e, "push-runtime-commits: push failed, will retry");
+            if self.repo_path.join(".git").exists() {
+                if let Err(e) = upstream::push_if_ahead(&self.repo_path).await {
+                    tracing::warn!(error = %e, "push-runtime-commits: push failed, will retry");
+                }
             }
 
             // Wait for next cycle or shutdown, whichever comes first.
@@ -71,38 +75,5 @@ impl JobRunner for PushRuntimeCommitsRunner {
             }
         }
         Ok(JobCompletion::Complete)
-    }
-}
-
-impl PushRuntimeCommitsRunner {
-    async fn try_push(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.repo_path.join(".git").exists() {
-            return Ok(());
-        }
-
-        // Check if there are commits to push (local ahead of remote)
-        let status = tokio::process::Command::new("git")
-            .args(["status", "--porcelain", "-b"])
-            .current_dir(&self.repo_path)
-            .output()
-            .await?;
-        let stdout = String::from_utf8_lossy(&status.stdout);
-        if !stdout.contains("ahead") {
-            return Ok(());
-        }
-
-        let push = tokio::process::Command::new("git")
-            .args(["push"])
-            .current_dir(&self.repo_path)
-            .output()
-            .await?;
-        if !push.status.success() {
-            return Err(
-                format!("git push failed: {}", String::from_utf8_lossy(&push.stderr)).into(),
-            );
-        }
-
-        tracing::info!("pushed runtime commits");
-        Ok(())
     }
 }
