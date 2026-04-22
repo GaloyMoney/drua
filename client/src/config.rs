@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub server_url: String,
     pub auth_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_agent_id: Option<String>,
 }
 
 fn config_dir() -> Result<PathBuf> {

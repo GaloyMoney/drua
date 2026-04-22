@@ -66,6 +66,7 @@ pub async fn run(server: Option<String>) -> Result<()> {
     let config = Config {
         server_url,
         auth_token: token,
+        chat_agent_id: None,
     };
     config.save()?;
 
