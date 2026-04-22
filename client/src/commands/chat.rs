@@ -161,10 +161,7 @@ fn parse_stream_event(event: &serde_json::Value) -> Option<StreamEvent> {
             Some(StreamEvent::Error(msg.to_string()))
         }
         "AssistantDoneEvent" => {
-            let turns = event
-                .get("turns")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+            let turns = event.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let input_tokens = event
                 .get("inputTokens")
                 .and_then(|v| v.as_u64())
@@ -325,8 +322,8 @@ pub async fn run(agent_id: Option<String>) -> Result<()> {
             _ => {}
         }
 
-        if let Err(e) = stream_response(&config.server_url, &config.auth_token, &agent_id, input)
-            .await
+        if let Err(e) =
+            stream_response(&config.server_url, &config.auth_token, &agent_id, input).await
         {
             eprintln!("\x1b[31m[error] {e}\x1b[0m");
         }
