@@ -278,59 +278,11 @@ async fn stream_response(base_url: &str, token: &str, agent_id: &str, prompt: &s
 }
 
 // ---------------------------------------------------------------------------
-// Dev auto-login
-// ---------------------------------------------------------------------------
-
-const DEFAULT_SERVER_URL: &str = "http://localhost:4200";
-
-async fn try_dev_login(server_url: &str) -> Result<Config> {
-    let http = reqwest::Client::new();
-    let resp = http
-        .post(format!("{server_url}/auth/dev-token"))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!("not logged in — run `drua login` first");
-    }
-
-    let body: serde_json::Value = resp.json().await?;
-    let token = body
-        .get("token")
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow::anyhow!("unexpected response from dev-token endpoint"))?;
-
-    let config = Config {
-        server_url: server_url.to_string(),
-        auth_token: token.to_string(),
-        chat_agent_id: None,
-    };
-    config.save()?;
-    eprintln!("Auto-authenticated as Dev User");
-    Ok(config)
-}
-
-fn load_or_dev_login(server: Option<String>) -> impl std::future::Future<Output = Result<Config>> {
-    async move {
-        match Config::load() {
-            Ok(config) => Ok(config),
-            Err(_) => {
-                let server_url = server
-                    .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
-                    .trim_end_matches('/')
-                    .to_string();
-                try_dev_login(&server_url).await
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // REPL
 // ---------------------------------------------------------------------------
 
 pub async fn run(server: Option<String>, agent_id: Option<String>) -> Result<()> {
-    let mut config = load_or_dev_login(server).await?;
+    let mut config = Config::load_or_dev_login(server).await?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
     let agent_id = ensure_agent(&mut config, &client, agent_id).await?;

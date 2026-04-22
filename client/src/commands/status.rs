@@ -18,7 +18,7 @@ struct MeUser {
 }
 
 pub async fn run() -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load_or_dev_login(None).await?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
     let resp: MeResponse = client

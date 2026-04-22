@@ -53,7 +53,7 @@ struct WorkspaceShowResponse {
 }
 
 pub async fn list() -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load_or_dev_login(None).await?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
     let query = r#"
@@ -90,7 +90,7 @@ pub async fn list() -> Result<()> {
 }
 
 pub async fn create(name: &str, description: Option<&str>) -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load_or_dev_login(None).await?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
     let query = r#"
@@ -131,7 +131,7 @@ pub async fn create(name: &str, description: Option<&str>) -> Result<()> {
 }
 
 pub async fn show(id: &str) -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load_or_dev_login(None).await?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
     let query = r#"

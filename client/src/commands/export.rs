@@ -12,7 +12,7 @@ struct ExportThreadResponse {
 
 /// Export the current thread for an agent as Pi-compatible JSONL and print to stdout.
 pub async fn run(agent_id: &str) -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load_or_dev_login(None).await?;
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
 
     let query = r#"
