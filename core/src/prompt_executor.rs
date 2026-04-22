@@ -30,9 +30,21 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Provider {
-    Anthropic { api_key: String },
-    OpenAi { api_key: String },
-    OpenAiResponses { auth: OpenAiResponsesAuth },
+    Anthropic {
+        api_key: String,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    OpenAi {
+        api_key: String,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    OpenAiResponses {
+        auth: OpenAiResponsesAuth,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,15 +66,22 @@ impl PromptExecutorConfig {
     pub fn validate(&self) -> Result<(), PromptExecutorConfigError> {
         for model in &self.models {
             match &model.provider {
-                Provider::Anthropic { api_key } if api_key.is_empty() => {
+                Provider::Anthropic { api_key, .. } if api_key.is_empty() => {
                     tracing::warn!(
                         model = %model.name,
                         "Anthropic credential is empty — agent prompts will fail until ANTHROPIC_API_KEY is set",
                     );
                 }
-                Provider::Anthropic { api_key } => {
+                Provider::Anthropic { api_key, base_url } => {
                     let preview = masked_preview(api_key);
-                    if !api_key.starts_with("sk-ant-") {
+                    if base_url.is_some() {
+                        tracing::info!(
+                            model = %model.name,
+                            key_preview = %preview,
+                            base_url = %base_url.as_deref().unwrap_or("default"),
+                            "Anthropic credential loaded (custom endpoint — key prefix validation skipped)"
+                        );
+                    } else if !api_key.starts_with("sk-ant-") {
                         tracing::warn!(
                             model = %model.name,
                             key_preview = %preview,
@@ -77,15 +96,22 @@ impl PromptExecutorConfig {
                         );
                     }
                 }
-                Provider::OpenAi { api_key } if api_key.is_empty() => {
+                Provider::OpenAi { api_key, .. } if api_key.is_empty() => {
                     tracing::warn!(
                         model = %model.name,
                         "OpenAI credential is empty — agent prompts will fail until OPENAI_API_KEY is set",
                     );
                 }
-                Provider::OpenAi { api_key } => {
+                Provider::OpenAi { api_key, base_url } => {
                     let preview = masked_preview(api_key);
-                    if !api_key.starts_with("sk-") {
+                    if base_url.is_some() {
+                        tracing::info!(
+                            model = %model.name,
+                            key_preview = %preview,
+                            base_url = %base_url.as_deref().unwrap_or("default"),
+                            "OpenAI credential loaded (custom endpoint — key prefix validation skipped)"
+                        );
+                    } else if !api_key.starts_with("sk-") {
                         tracing::warn!(
                             model = %model.name,
                             key_preview = %preview,
@@ -100,7 +126,7 @@ impl PromptExecutorConfig {
                         );
                     }
                 }
-                Provider::OpenAiResponses { auth } => match auth {
+                Provider::OpenAiResponses { auth, base_url } => match auth {
                     OpenAiResponsesAuth::ApiKey { api_key } if api_key.is_empty() => {
                         tracing::warn!(
                             model = %model.name,
@@ -109,7 +135,14 @@ impl PromptExecutorConfig {
                     }
                     OpenAiResponsesAuth::ApiKey { api_key } => {
                         let preview = masked_preview(api_key);
-                        if !api_key.starts_with("sk-") {
+                        if base_url.is_some() {
+                            tracing::info!(
+                                model = %model.name,
+                                key_preview = %preview,
+                                base_url = %base_url.as_deref().unwrap_or("default"),
+                                "OpenAI Responses credential loaded (custom endpoint — key prefix validation skipped)"
+                            );
+                        } else if !api_key.starts_with("sk-") {
                             tracing::warn!(
                                 model = %model.name,
                                 key_preview = %preview,
@@ -294,27 +327,31 @@ enum ResolvedProviderKind {
 
 impl ResolvedModel {
     fn from_config(config: ModelConfig) -> Self {
-        let (provider_kind, client): (ResolvedProviderKind, Arc<dyn LlmProvider>) = match config
-            .provider
-        {
-            Provider::Anthropic { api_key } => (
-                ResolvedProviderKind::Anthropic,
-                Arc::new(AnthropicClient::new(api_key)),
-            ),
-            Provider::OpenAi { api_key } => (
-                ResolvedProviderKind::OpenAi,
-                Arc::new(OpenAiClient::new(api_key)),
-            ),
-            Provider::OpenAiResponses { auth } => (
-                ResolvedProviderKind::OpenAiResponses,
-                Arc::new(OpenAiResponsesClient::new(match auth {
-                    OpenAiResponsesAuth::ApiKey { api_key } => {
-                        ClientOpenAiResponsesAuth::ApiKey { api_key }
-                    }
-                    OpenAiResponsesAuth::Subscription => ClientOpenAiResponsesAuth::Subscription,
-                })),
-            ),
-        };
+        let (provider_kind, client): (ResolvedProviderKind, Arc<dyn LlmProvider>) =
+            match config.provider {
+                Provider::Anthropic { api_key, base_url } => (
+                    ResolvedProviderKind::Anthropic,
+                    Arc::new(AnthropicClient::new(api_key).with_base_url(base_url)),
+                ),
+                Provider::OpenAi { api_key, base_url } => (
+                    ResolvedProviderKind::OpenAi,
+                    Arc::new(OpenAiClient::new(api_key).with_base_url(base_url)),
+                ),
+                Provider::OpenAiResponses { auth, base_url } => (
+                    ResolvedProviderKind::OpenAiResponses,
+                    Arc::new(
+                        OpenAiResponsesClient::new(match auth {
+                            OpenAiResponsesAuth::ApiKey { api_key } => {
+                                ClientOpenAiResponsesAuth::ApiKey { api_key }
+                            }
+                            OpenAiResponsesAuth::Subscription => {
+                                ClientOpenAiResponsesAuth::Subscription
+                            }
+                        })
+                        .with_base_url(base_url),
+                    ),
+                ),
+            };
         Self {
             name: config.name,
             default_max_tokens: config.default_max_tokens,

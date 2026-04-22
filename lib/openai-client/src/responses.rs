@@ -17,6 +17,8 @@ use crate::sse::{parse_sse_stream, SseError};
 
 const DEFAULT_RESPONSES_API_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_SUBSCRIPTION_API_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const RESPONSES_API_PATH: &str = "/v1/responses";
+const SUBSCRIPTION_API_PATH: &str = "/backend-api/codex/responses";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 const DEFAULT_REASONING_EFFORT: &str = "low";
 const DEFAULT_TEXT_VERBOSITY: &str = "medium";
@@ -79,6 +81,18 @@ impl OpenAiResponsesClient {
 
     pub fn with_subscription() -> Self {
         Self::new(OpenAiResponsesAuth::Subscription)
+    }
+
+    pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
+        if let Some(base) = base_url {
+            let base = base.trim_end_matches('/');
+            let path = match &self.auth {
+                OpenAiResponsesAuth::ApiKey { .. } => RESPONSES_API_PATH,
+                OpenAiResponsesAuth::Subscription => SUBSCRIPTION_API_PATH,
+            };
+            self.api_url = format!("{base}{path}");
+        }
+        self
     }
 
     #[instrument(name = "openai_responses_client.send_prompt_streaming", skip_all)]
