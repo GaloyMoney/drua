@@ -3200,6 +3200,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "dirs",
+ "dotenvy",
  "futures",
  "llm",
  "reqwest 0.12.28",
