@@ -8,21 +8,21 @@ use self::job::PushRuntimeCommitsJobInitializer;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct LibraryConfig {
-    /// Directory for the bare git clone. Defaults to `$TMPDIR/galoy-agents-library`.
+    /// Local path to clone the library repo into.
+    /// Defaults to `<repo-root>/.library/`.
     #[serde(default)]
     pub data_dir: Option<String>,
-    /// Git remote URL or local path to the library repo.
+    /// Git remote URL to clone from.
     #[serde(default)]
     pub repo_url: Option<String>,
 }
 
 impl LibraryConfig {
     pub fn repo_path(&self) -> PathBuf {
-        let base = match &self.data_dir {
+        match &self.data_dir {
             Some(d) => PathBuf::from(d),
-            None => std::env::temp_dir(),
-        };
-        base.join("galoy-agents-library")
+            None => PathBuf::from(".library"),
+        }
     }
 }
 
@@ -32,7 +32,34 @@ pub struct Library {
 }
 
 impl Library {
-    pub fn new(config: &LibraryConfig, jobs: &mut ::job::Jobs) -> Self {
+    pub async fn init(
+        config: &LibraryConfig,
+        jobs: &mut ::job::Jobs,
+    ) -> Result<Self, LibraryError> {
+        let repo_path = config.repo_path();
+
+        if let Some(repo_url) = &config.repo_url {
+            if !repo_path.join(".git").exists() {
+                tracing::info!(
+                    url = %repo_url,
+                    path = %repo_path.display(),
+                    "cloning library repo"
+                );
+                let output = tokio::process::Command::new("git")
+                    .args(["clone", repo_url, &repo_path.to_string_lossy()])
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git clone: {e}")))?;
+                if !output.status.success() {
+                    return Err(LibraryError::Git(format!(
+                        "git clone failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+                tracing::info!(path = %repo_path.display(), "library repo cloned");
+            }
+        }
+
         let init = PushRuntimeCommitsJobInitializer::new(config);
         let spawner = jobs.add_initializer(init);
         tokio::spawn(async move {
@@ -47,9 +74,7 @@ impl Library {
             }
         });
 
-        Self {
-            repo_path: config.repo_path(),
-        }
+        Ok(Self { repo_path })
     }
 
     /// Write a file into the runtime area of the library repo, then

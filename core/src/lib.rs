@@ -155,7 +155,9 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::new(&config.library, &mut jobs);
+        let library = Library::init(&config.library, &mut jobs)
+            .await
+            .map_err(|e| AppError::Library(e.to_string()))?;
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
         let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes)));
@@ -315,4 +317,6 @@ pub enum AppError {
     Sandbox(#[from] sandbox::error::SandboxError),
     #[error("AppError - Job: {0}")]
     Job(String),
+    #[error("AppError - Library: {0}")]
+    Library(String),
 }
