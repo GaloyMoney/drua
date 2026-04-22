@@ -84,4 +84,18 @@ impl Query {
                 .list(sub, query, es_entity::ListDirection::Descending)
         )
     }
+
+    /// Export a thread as Pi-compatible JSONL (v3 format).
+    ///
+    /// When `thread_id` is omitted the current main thread is exported.
+    async fn export_thread(
+        &self,
+        ctx: &Context<'_>,
+        agent_id: AgentId,
+        thread_id: Option<SessionThreadId>,
+    ) -> async_graphql::Result<String> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let jsonl = app.agents().export_thread(sub, agent_id, thread_id).await?;
+        Ok(jsonl)
+    }
 }

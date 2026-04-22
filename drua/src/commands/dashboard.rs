@@ -350,6 +350,8 @@ enum ChatStreamEvent {
     HistoryLoaded(String, Vec<ChatMessage>),
     /// Thread grid data loaded for an agent (agent_id, grid_state).
     ThreadsLoaded(String, ThreadGridState),
+    /// Thread export completed — (path, result message).
+    ExportComplete(String),
 }
 
 fn spawn_chat_stream(
@@ -757,6 +759,57 @@ fn content_type_char(content: &ContentBlock, role: ChatRole) -> char {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Thread export
+// ---------------------------------------------------------------------------
+
+const EXPORT_THREAD_QUERY: &str = r#"
+    query ExportThread($agentId: AgentId!) {
+        exportThread(agentId: $agentId)
+    }
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportThreadResponse {
+    export_thread: String,
+}
+
+fn spawn_thread_export(
+    base_url: String,
+    token: String,
+    agent_id: String,
+    path: String,
+    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        let result: Result<ExportThreadResponse> = client
+            .query(
+                EXPORT_THREAD_QUERY,
+                serde_json::json!({ "agentId": agent_id }),
+            )
+            .await;
+        match result {
+            Ok(resp) => match std::fs::write(&path, &resp.export_thread) {
+                Ok(()) => {
+                    let _ = tx.send(ChatStreamEvent::ExportComplete(format!(
+                        "Exported to {path}"
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(ChatStreamEvent::Error(format!(
+                        "Failed to write {path}: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                let _ = tx.send(ChatStreamEvent::Error(format!("Export failed: {e}")));
+            }
+        }
+    });
+}
+
 fn spawn_threads_fetch(
     base_url: String,
     token: String,
@@ -815,6 +868,9 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
                 state.thread_view = Some(grid);
                 state.focus = Focus::Threads;
             }
+        }
+        ChatStreamEvent::ExportComplete(msg) => {
+            state.status_message = Some(msg);
         }
     }
 }
@@ -931,6 +987,16 @@ async fn run_event_loop(
                                     config.auth_token.clone(),
                                     agent_id,
                                     prompt,
+                                    stream_tx.clone(),
+                                );
+                            }
+                            handlers::Action::ExportThread { agent_id, path } => {
+                                state.status_message = Some("Exporting…".to_string());
+                                spawn_thread_export(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    agent_id,
+                                    path,
                                     stream_tx.clone(),
                                 );
                             }

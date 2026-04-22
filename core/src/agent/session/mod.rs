@@ -1,9 +1,10 @@
 mod compaction;
 mod entity;
 pub mod error;
+pub mod export;
 pub mod history;
-pub(super) mod message;
-mod metadata;
+pub mod message;
+pub mod metadata;
 pub mod repo;
 mod settings;
 mod thread;
@@ -192,6 +193,16 @@ impl Sessions {
     ) -> Result<Option<SessionThreadId>, AgentSessionError> {
         let session = self.repo.find_by_agent_id(agent_id).await?;
         Ok(session.current_main_thread_id())
+    }
+
+    #[instrument(name = "domain.agent_session.export_thread", skip(self))]
+    pub async fn export_thread(
+        &self,
+        agent_id: AgentId,
+        target: TargetThread,
+    ) -> Result<export::ExportableThread, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        session.exportable_thread(target)
     }
 
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]

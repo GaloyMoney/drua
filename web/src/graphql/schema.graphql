@@ -93,6 +93,12 @@ type Query {
 	"""
 	agent(id: AgentId!): Agent
 	"""
+	Export a thread as Pi-compatible JSONL (v3 format).
+	
+	When `thread_id` is omitted the current main thread is exported.
+	"""
+	exportThread(agentId: AgentId!, threadId: SessionThreadId): String!
+	"""
 	The currently authenticated user, if any.
 	"""
 	me: Me

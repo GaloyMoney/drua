@@ -1,6 +1,7 @@
 pub mod config;
 mod entity;
 pub mod error;
+mod pi_export;
 pub mod repo;
 pub mod session;
 mod system_prompt;
@@ -514,6 +515,31 @@ impl Agents {
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(agent_id);
         Ok(self.sessions.thread_messages(agent_id, thread_id).await?)
+    }
+
+    /// Export a thread of the given agent as Pi-compatible JSONL (v3 format).
+    ///
+    /// When `thread_id` is `None`, the current main thread is exported.
+    #[instrument(name = "domain.agent.export_thread", skip(self, sub))]
+    pub async fn export_thread(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+        thread_id: Option<session::SessionThreadId>,
+    ) -> Result<String, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.export_thread");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        let target = thread_id
+            .map(session::TargetThread::Id)
+            .unwrap_or(session::TargetThread::Main);
+        let exportable = self.sessions.export_thread(agent_id, target).await?;
+        Ok(pi_export::export_to_jsonl(&exportable))
     }
 
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]

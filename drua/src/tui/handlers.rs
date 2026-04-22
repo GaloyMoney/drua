@@ -11,6 +11,7 @@ pub enum Action {
     CreateWorkspace { name: String, description: String },
     SendChat { agent_id: String, prompt: String },
     ToggleThreads,
+    ExportThread { agent_id: String, path: String },
 }
 
 /// Top-level key dispatcher — routes to mode/focus-specific handlers.
@@ -51,6 +52,7 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Focus::Threads => handle_threads_key(state, key),
         },
         Mode::CreateWorkspace => handle_create_key(state, key),
+        Mode::ExportThread => handle_export_key(state, key),
     }
 }
 
@@ -177,6 +179,11 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_tab_next();
             Action::None
         }
+        // e — export thread to file
+        KeyCode::Char('e') => {
+            state.enter_export_mode();
+            Action::None
+        }
         KeyCode::Esc => {
             state.focus = Focus::Sidebar;
             Action::None
@@ -232,6 +239,41 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             let name = state.input_name.trim().to_string();
             let description = state.input_description.trim().to_string();
             Action::CreateWorkspace { name, description }
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            state.exit_export_mode();
+            Action::None
+        }
+        KeyCode::Backspace => {
+            state.export_path.pop();
+            Action::None
+        }
+        KeyCode::Char(c) => {
+            state.export_path.push(c);
+            Action::None
+        }
+        KeyCode::Enter => {
+            let path = state.export_path.trim().to_string();
+            if path.is_empty() {
+                state.status_message = Some("Path is required".to_string());
+                return Action::None;
+            }
+            match state.selected_agent_id() {
+                Some(agent_id) => {
+                    state.exit_export_mode();
+                    Action::ExportThread { agent_id, path }
+                }
+                None => {
+                    state.status_message = Some("No agent selected".to_string());
+                    Action::None
+                }
+            }
         }
         _ => Action::None,
     }

@@ -30,6 +30,7 @@ pub enum Mode {
     #[default]
     Browse,
     CreateWorkspace,
+    ExportThread,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -268,6 +269,9 @@ pub struct ScreenState {
     pub input_name: String,
     pub input_description: String,
     pub input_field: u8,
+
+    // Export thread modal
+    pub export_path: String,
 }
 
 impl ScreenState {
@@ -299,6 +303,8 @@ impl ScreenState {
             input_name: String::new(),
             input_description: String::new(),
             input_field: 0,
+
+            export_path: String::new(),
             selected_lead_id,
         }
     }
@@ -373,6 +379,16 @@ impl ScreenState {
         self.input_name.clear();
         self.input_description.clear();
         self.input_field = 0;
+    }
+
+    pub fn enter_export_mode(&mut self) {
+        self.export_path = "export.jsonl".to_string();
+        self.mode = Mode::ExportThread;
+    }
+
+    pub fn exit_export_mode(&mut self) {
+        self.mode = Mode::Browse;
+        self.export_path.clear();
     }
 
     pub fn active_input_mut(&mut self) -> &mut String {
