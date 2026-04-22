@@ -3,15 +3,85 @@
 //! The Pi session format uses newline-delimited JSON where:
 //! - Line 1 is a [`PiSessionHeader`] with `type: "session"`, version 3
 //! - Lines 2+ are [`PiEntry`] variants discriminated on `type`
+//!
+//! The only public entry point is [`export_to_jsonl`], which takes a
+//! format-agnostic [`ExportableThread`] and produces the JSONL string.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
 use super::{
-    message::{AssistantBlock, ToolResultInput},
+    export::{ExportableEntry, ExportableThread},
+    message::{AssistantBlock, StopReason},
     metadata::AssistantResponseMetadata,
     AgentSessionId,
 };
+
+// ============================================================================
+// Public entry point
+// ============================================================================
+
+/// Convert a format-agnostic [`ExportableThread`] into a Pi-compatible JSONL string.
+pub fn export_to_jsonl(thread: &ExportableThread) -> String {
+    let now = chrono::Utc::now();
+    let header = build_header(thread.session_id, now);
+
+    let mut id_gen = PiIdGenerator::new();
+    let mut entries: Vec<PiEntry> = Vec::new();
+    let base_ts = thread.base_timestamp.timestamp_millis();
+    let mut ts_offset: i64 = 0;
+
+    // Emit model_change and thinking_level_change before messages.
+    let ts = ts_from_ms(base_ts, ts_offset);
+    entries.push(build_model_change(&mut id_gen, None, ts, &thread.model));
+    ts_offset += 1;
+
+    let parent_id = entries.last().map(|e| e.id().to_string());
+    let ts = ts_from_ms(base_ts, ts_offset);
+    entries.push(build_thinking_level_change(
+        &mut id_gen,
+        parent_id.as_deref(),
+        ts,
+        "medium",
+    ));
+    ts_offset += 1;
+
+    for entry in &thread.entries {
+        let parent_id = entries.last().map(|e| e.id().to_string());
+        let parent_ref = parent_id.as_deref();
+        let ts = ts_from_ms(base_ts, ts_offset);
+
+        match entry {
+            ExportableEntry::UserMessage { text } => {
+                entries.push(build_user_entry(&mut id_gen, parent_ref, text, ts));
+                ts_offset += 1;
+            }
+            ExportableEntry::AssistantResponse {
+                content,
+                stop_reason,
+                metadata,
+            } => {
+                let reason = match stop_reason {
+                    StopReason::Stop => "stop",
+                    StopReason::Length => "max_tokens",
+                    StopReason::ToolUse => "stop",
+                    StopReason::Error => "error",
+                };
+                entries.push(build_assistant_entry(
+                    &mut id_gen,
+                    parent_ref,
+                    content,
+                    reason,
+                    metadata,
+                    ts,
+                ));
+                ts_offset += 1;
+            }
+        }
+    }
+
+    to_jsonl(&header, &entries)
+}
 
 // ============================================================================
 // Top-level JSONL types
@@ -20,65 +90,65 @@ use super::{
 /// Line 1 of every Pi session export.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PiSessionHeader {
+struct PiSessionHeader {
     #[serde(rename = "type")]
-    pub entry_type: &'static str,
-    pub version: u32,
-    pub id: String,
-    pub timestamp: String,
-    pub cwd: String,
+    entry_type: &'static str,
+    version: u32,
+    id: String,
+    timestamp: String,
+    cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_session: Option<String>,
+    parent_session: Option<String>,
 }
 
 /// Model-change entry emitted before messages.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PiModelChangeEntry {
+struct PiModelChangeEntry {
     #[serde(rename = "type")]
-    pub entry_type: &'static str,
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub provider: String,
-    pub model_id: String,
+    entry_type: &'static str,
+    id: String,
+    parent_id: Option<String>,
+    timestamp: String,
+    provider: String,
+    model_id: String,
 }
 
 /// Thinking-level-change entry emitted after model change.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PiThinkingLevelEntry {
+struct PiThinkingLevelEntry {
     #[serde(rename = "type")]
-    pub entry_type: &'static str,
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub thinking_level: String,
+    entry_type: &'static str,
+    id: String,
+    parent_id: Option<String>,
+    timestamp: String,
+    thinking_level: String,
 }
 
 /// Message entry — wraps a single user, assistant, or tool-result message.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PiSessionEntry {
+struct PiSessionEntry {
     #[serde(rename = "type")]
-    pub entry_type: &'static str,
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub message: PiAgentMessage,
+    entry_type: &'static str,
+    id: String,
+    parent_id: Option<String>,
+    timestamp: String,
+    message: PiAgentMessage,
 }
 
 /// Unified enum for all Pi entries (excluding the header).
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
-pub enum PiEntry {
+enum PiEntry {
     ModelChange(PiModelChangeEntry),
     ThinkingLevelChange(PiThinkingLevelEntry),
     Message(PiSessionEntry),
 }
 
 impl PiEntry {
-    pub fn id(&self) -> &str {
+    fn id(&self) -> &str {
         match self {
             PiEntry::ModelChange(e) => &e.id,
             PiEntry::ThinkingLevelChange(e) => &e.id,
@@ -94,7 +164,7 @@ impl PiEntry {
 /// A single message in Pi format, discriminated on `role`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
-pub enum PiAgentMessage {
+enum PiAgentMessage {
     #[serde(rename = "user")]
     User {
         content: Vec<PiContentBlock>,
@@ -111,20 +181,12 @@ pub enum PiAgentMessage {
         timestamp: i64,
         response_id: String,
     },
-    #[serde(rename = "toolResult", rename_all = "camelCase")]
-    ToolResult {
-        tool_call_id: String,
-        tool_name: String,
-        content: Vec<PiContentBlock>,
-        is_error: bool,
-        timestamp: i64,
-    },
 }
 
 /// Content block inside a message.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub enum PiContentBlock {
+enum PiContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
@@ -145,24 +207,24 @@ pub enum PiContentBlock {
 /// Token usage in Pi format.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PiUsage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-    pub total_tokens: u64,
-    pub cost: PiCost,
+struct PiUsage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    total_tokens: u64,
+    cost: PiCost,
 }
 
 /// Cost breakdown in Pi format (nested inside usage).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PiCost {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
-    pub total: f64,
+struct PiCost {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    total: f64,
 }
 
 // ============================================================================
@@ -173,7 +235,7 @@ fn format_ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-pub(super) fn ts_from_ms(base_ms: i64, offset: i64) -> DateTime<Utc> {
+fn ts_from_ms(base_ms: i64, offset: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(base_ms + offset).unwrap_or_default()
 }
 
@@ -182,24 +244,24 @@ pub(super) fn ts_from_ms(base_ms: i64, offset: i64) -> DateTime<Utc> {
 // ============================================================================
 
 /// Incrementing hex-ID generator for Pi entries.
-pub(super) struct PiIdGenerator {
+struct PiIdGenerator {
     counter: u32,
 }
 
 impl PiIdGenerator {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { counter: 0 }
     }
 
     /// Returns an 8-character hex string.
-    pub fn next_id(&mut self) -> String {
+    fn next_id(&mut self) -> String {
         let id = format!("{:08x}", self.counter);
         self.counter += 1;
         id
     }
 }
 
-pub(super) fn build_header(session_id: AgentSessionId, now: DateTime<Utc>) -> PiSessionHeader {
+fn build_header(session_id: AgentSessionId, now: DateTime<Utc>) -> PiSessionHeader {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -213,7 +275,7 @@ pub(super) fn build_header(session_id: AgentSessionId, now: DateTime<Utc>) -> Pi
     }
 }
 
-pub(super) fn build_model_change(
+fn build_model_change(
     id_gen: &mut PiIdGenerator,
     parent_id: Option<&str>,
     ts: DateTime<Utc>,
@@ -229,7 +291,7 @@ pub(super) fn build_model_change(
     })
 }
 
-pub(super) fn build_thinking_level_change(
+fn build_thinking_level_change(
     id_gen: &mut PiIdGenerator,
     parent_id: Option<&str>,
     ts: DateTime<Utc>,
@@ -244,7 +306,7 @@ pub(super) fn build_thinking_level_change(
     })
 }
 
-pub(super) fn build_user_entry(
+fn build_user_entry(
     id_gen: &mut PiIdGenerator,
     parent_id: Option<&str>,
     text: &str,
@@ -264,7 +326,7 @@ pub(super) fn build_user_entry(
     })
 }
 
-pub(super) fn build_assistant_entry(
+fn build_assistant_entry(
     id_gen: &mut PiIdGenerator,
     parent_id: Option<&str>,
     content: &[AssistantBlock],
@@ -325,36 +387,12 @@ pub(super) fn build_assistant_entry(
     })
 }
 
-#[allow(dead_code)]
-pub(super) fn build_tool_result_entry(
-    id_gen: &mut PiIdGenerator,
-    parent_id: Option<&str>,
-    result: &ToolResultInput,
-    ts: DateTime<Utc>,
-) -> PiEntry {
-    PiEntry::Message(PiSessionEntry {
-        entry_type: "message",
-        id: id_gen.next_id(),
-        parent_id: parent_id.map(String::from),
-        timestamp: format_ts(ts),
-        message: PiAgentMessage::ToolResult {
-            tool_call_id: result.tool_use_id.clone(),
-            tool_name: String::new(),
-            content: vec![PiContentBlock::Text {
-                text: result.content.clone(),
-            }],
-            is_error: result.is_error,
-            timestamp: ts.timestamp_millis(),
-        },
-    })
-}
-
 // ============================================================================
 // JSONL serialization
 // ============================================================================
 
 /// Serialize a header and entries into a JSONL string.
-pub fn to_jsonl(header: &PiSessionHeader, entries: &[PiEntry]) -> String {
+fn to_jsonl(header: &PiSessionHeader, entries: &[PiEntry]) -> String {
     let mut lines = Vec::with_capacity(1 + entries.len());
     lines.push(serde_json::to_string(header).expect("header serialization"));
     for entry in entries {
@@ -445,23 +483,6 @@ mod tests {
         assert!(json.contains("\"totalTokens\":150"));
         assert!(json.contains("\"cacheRead\":0"));
         assert!(json.contains("\"cost\":{"));
-    }
-
-    #[test]
-    fn tool_result_serializes_with_role() {
-        let msg = PiAgentMessage::ToolResult {
-            tool_call_id: "tc_1".to_string(),
-            tool_name: "bash".to_string(),
-            content: vec![PiContentBlock::Text {
-                text: "output".to_string(),
-            }],
-            is_error: false,
-            timestamp: 1704067200000,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"role\":\"toolResult\""));
-        assert!(json.contains("\"toolCallId\":\"tc_1\""));
-        assert!(json.contains("\"content\":[{\"type\":\"text\""));
     }
 
     #[test]

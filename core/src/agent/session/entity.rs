@@ -7,16 +7,8 @@ use es_entity::*;
 use crate::agent::config::ModelDefaults;
 
 use super::{
-    compaction,
-    error::AgentSessionError,
-    history,
-    message::*,
-    metadata::*,
-    pi_export::{self, PiEntry, PiIdGenerator, PiSessionHeader},
-    settings::*,
-    thread::*,
-    view::*,
-    AgentSessionId,
+    compaction, error::AgentSessionError, export, history, message::*, metadata::*, settings::*,
+    thread::*, view::*, AgentSessionId,
 };
 
 // ============================================================================
@@ -149,115 +141,20 @@ impl AgentSession {
         self.current_main_thread
     }
 
-    /// Export the current main thread as Pi-compatible JSONL (v3).
+    /// Build a format-agnostic [`ExportableThread`] for the current main thread.
     ///
-    /// Walks session-level events, filters for those targeting the main
-    /// thread, and converts each to a [`PiEntry`]. Returns the header
-    /// plus all entries; the caller serializes them with
-    /// [`pi_export::to_jsonl`].
-    pub fn export_thread(&self) -> Result<(PiSessionHeader, Vec<PiEntry>), AgentSessionError> {
-        let thread_id = self
-            .current_main_thread
+    /// Format-specific modules (e.g. `pi_export`) consume the returned
+    /// intermediate representation to produce their output.
+    pub fn exportable_thread(&self) -> Result<export::ExportableThread, AgentSessionError> {
+        self.current_main_thread
             .ok_or(AgentSessionError::ThreadNotFound)?;
 
-        let now = chrono::Utc::now();
-        let header = pi_export::build_header(self.id, now);
-
-        let mut id_gen = PiIdGenerator::new();
-        let mut entries: Vec<PiEntry> = Vec::new();
-        let base_ts = self
-            .events
-            .entity_first_persisted_at()
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or_else(|| now.timestamp_millis());
-        // Use a small offset per entry to preserve ordering when real
-        // timestamps are unavailable.
-        let mut ts_offset: i64 = 0;
-
-        // Emit model_change and thinking_level_change before messages.
-        let ts = pi_export::ts_from_ms(base_ts, ts_offset);
-        entries.push(pi_export::build_model_change(
-            &mut id_gen,
-            None,
-            ts,
+        Ok(export::build_exportable_thread(
+            self.id,
             &self.model_defaults.model,
-        ));
-        ts_offset += 1;
-
-        let parent_id = entries.last().map(|e| e.id().to_string());
-        let ts = pi_export::ts_from_ms(base_ts, ts_offset);
-        entries.push(pi_export::build_thinking_level_change(
-            &mut id_gen,
-            parent_id.as_deref(),
-            ts,
-            "medium",
-        ));
-        ts_offset += 1;
-
-        for event in self.events.iter_all() {
-            let parent_id = entries.last().map(|e| e.id().to_string());
-            let parent_ref = parent_id.as_deref();
-            let ts = pi_export::ts_from_ms(base_ts, ts_offset);
-
-            match event {
-                AgentSessionEvent::UserInputAdded { target, text, .. } => {
-                    if !self.targets_thread(target, thread_id) {
-                        continue;
-                    }
-                    entries.push(pi_export::build_user_entry(
-                        &mut id_gen,
-                        parent_ref,
-                        text,
-                        ts,
-                    ));
-                    ts_offset += 1;
-                }
-                // Skip SandboxNotificationAdded — they can fire between
-                // tool_use and tool_result, breaking the API's required
-                // assistant(tool_use) → tool_result sequence.
-                AgentSessionEvent::SandboxNotificationAdded { .. } => {}
-                // Skip intermediate tool-use loops: Pi's import doesn't
-                // reconstruct them correctly for the Anthropic API.
-                // Only emit the final assistant response per turn.
-                AgentSessionEvent::AssistantResponseReceived {
-                    thread_id: tid,
-                    content,
-                    stop_reason,
-                    metadata,
-                    ..
-                } if *tid == thread_id && !matches!(stop_reason, StopReason::ToolUse) => {
-                    let reason = match stop_reason {
-                        StopReason::Stop => "stop",
-                        StopReason::Length => "max_tokens",
-                        StopReason::ToolUse => unreachable!(),
-                        StopReason::Error => "error",
-                    };
-                    entries.push(pi_export::build_assistant_entry(
-                        &mut id_gen,
-                        parent_ref,
-                        content,
-                        reason,
-                        metadata,
-                        ts,
-                    ));
-                    ts_offset += 1;
-                }
-                // Skip tool results — they pair with tool_use assistant
-                // messages which are also skipped above.
-                AgentSessionEvent::ToolResultsAdded { .. } => {}
-                _ => {}
-            }
-        }
-
-        Ok((header, entries))
-    }
-
-    /// Whether a [`TargetThread`] references the given thread id.
-    fn targets_thread(&self, target: &TargetThread, thread_id: SessionThreadId) -> bool {
-        match target {
-            TargetThread::Main => self.current_main_thread == Some(thread_id),
-            TargetThread::Id(id) => *id == thread_id,
-        }
+            &self.events,
+            self.current_main_thread,
+        ))
     }
 
     pub fn add_user_input(
