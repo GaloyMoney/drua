@@ -1,16 +1,10 @@
-use std::convert::Infallible;
-
 use axum::{
     extract::{Path, Query, State},
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse, Redirect, Response,
-    },
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Extension, Form, Json, Router,
 };
 use serde::Deserialize;
-use tokio_stream::wrappers::ReceiverStream;
 use tower_sessions::Session;
 use tracing::instrument;
 
@@ -1749,81 +1743,7 @@ async fn workspace_chat(
 // ---------------------------------------------------------------------------
 
 pub fn api_router() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/agents/{id}/message", post(api_agent_message))
-        .route("/api/v1/agents/{id}/secrets", get(api_agent_secrets))
-}
-
-#[derive(Deserialize)]
-struct AgentMessageRequest {
-    prompt: String,
-}
-
-#[instrument(name = "api.agent.message", skip_all)]
-async fn api_agent_message(
-    Extension(auth): Extension<AuthSubject>,
-    State(state): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-    Json(body): Json<AgentMessageRequest>,
-) -> Response {
-    // Caller must carry an originating-user identity (User or ExportedAgent).
-    // Plain Agent / Anonymous tokens can't use this endpoint.
-    if !matches!(
-        auth,
-        AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _)
-    ) {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let agent_id = AgentId::from(id);
-
-    let rx = match state
-        .app
-        .agents()
-        .send_message(auth, agent_id, body.prompt)
-        .await
-    {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to send message to agent");
-            let body = serde_json::json!({ "error": e.to_string() });
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
-        }
-    };
-
-    let (tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
-
-    tokio::spawn(async move {
-        let mut rx = rx;
-        while let Some(event) = rx.recv().await {
-            let event_name = match &event {
-                domain::primitives::ChatOutputEvent::UserMessage { .. } => "user_message",
-                domain::primitives::ChatOutputEvent::AssistantText { .. } => "assistant_text",
-                domain::primitives::ChatOutputEvent::Thinking { .. } => "thinking",
-                domain::primitives::ChatOutputEvent::ToolCall { .. } => "tool_call",
-                domain::primitives::ChatOutputEvent::TextDelta { .. } => "text_delta",
-                domain::primitives::ChatOutputEvent::ThinkingDelta { .. } => "thinking_delta",
-                domain::primitives::ChatOutputEvent::ToolCallStart { .. } => "tool_call_start",
-                domain::primitives::ChatOutputEvent::ToolCallInputDelta { .. } => {
-                    "tool_call_input_delta"
-                }
-                domain::primitives::ChatOutputEvent::ToolResult { .. } => "tool_result",
-                domain::primitives::ChatOutputEvent::AssistantDone { .. } => "assistant_done",
-                domain::primitives::ChatOutputEvent::Error { .. } => "error",
-                domain::primitives::ChatOutputEvent::Service { .. } => "service",
-            };
-            let data = serde_json::to_string(&event).unwrap_or_default();
-            let sse_event = Event::default().event(event_name).data(data);
-            if tx.send(Ok(sse_event)).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let stream = ReceiverStream::new(sse_rx);
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    Router::new().route("/api/v1/agents/{id}/secrets", get(api_agent_secrets))
 }
 
 // ---------------------------------------------------------------------------
