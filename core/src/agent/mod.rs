@@ -604,6 +604,7 @@ impl Agents {
             .next_prompt(id, session::TargetThread::Main)
             .await?;
 
+        let model_name = prompt_state.model.clone();
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
         self.prompt_requests
             .send(request)
@@ -618,6 +619,7 @@ impl Agents {
             let mut turn: u32 = 0;
             let mut input_tokens: u32 = 0;
             let mut output_tokens: u32 = 0;
+            let mut current_model = model_name;
             loop {
                 turn += 1;
                 let result = match next {
@@ -648,7 +650,7 @@ impl Agents {
 
                 // Persist the complete response to the session.
                 let session_response = match sessions
-                    .assistant_response_received(id, response.clone())
+                    .assistant_response_received(id, response.clone(), current_model.clone())
                     .await
                 {
                     Ok(r) => r,
@@ -719,6 +721,7 @@ impl Agents {
                     _ => break,
                 };
 
+                current_model = next_prompt.model.clone();
                 let (request, rx_next) = llm::PromptRequest::new(next_prompt);
                 if prompt_requests.send(request).await.is_err() {
                     let _ = tx

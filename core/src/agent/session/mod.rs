@@ -96,6 +96,7 @@ impl Sessions {
         &self,
         agent_id: AgentId,
         response: llm::PromptResponse,
+        model: String,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
         let mut session = self.repo.find_by_agent_id(agent_id).await?;
         let thread_id = session
@@ -111,7 +112,8 @@ impl Sessions {
             .stop_reason
             .map(StopReason::from)
             .unwrap_or(StopReason::Stop);
-        let metadata = AssistantResponseMetadata::from(response.usage);
+        let mut metadata = AssistantResponseMetadata::from(response.usage);
+        metadata.model = model;
 
         let result =
             session.assistant_response_received(thread_id, content, stop_reason, None, metadata)?;
