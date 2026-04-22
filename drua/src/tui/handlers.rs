@@ -16,32 +16,36 @@ pub enum Action {
 
 /// Top-level key dispatcher — routes to mode/focus-specific handlers.
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let kb = &state.keybindings;
 
-    if ctrl {
-        match key.code {
-            KeyCode::Char('c') => return Action::Quit,
-            KeyCode::Char('z') => return Action::Suspend,
-            // Ctrl+O — jump to lead agent chat (global, like command-center)
-            KeyCode::Char('o') => {
-                state.select_lead_and_focus_chat();
-                return Action::None;
-            }
-            // Ctrl+R — refresh workspaces
-            KeyCode::Char('r') => return Action::Refresh,
-            // Ctrl+H / Ctrl+L — focus left / right
-            KeyCode::Char('h') => {
-                state.focus_left();
-                return Action::None;
-            }
-            KeyCode::Char('l') => {
-                state.focus_right();
-                return Action::None;
-            }
-            // Ctrl+T — toggle thread explorer
-            KeyCode::Char('t') => return Action::ToggleThreads,
-            _ => {}
-        }
+    // ── Global bindings (checked first, regardless of mode/focus) ────
+    if kb.global.quit.matches(&key) {
+        return Action::Quit;
+    }
+    if kb.global.suspend.matches(&key) {
+        return Action::Suspend;
+    }
+    if kb.global.focus_lead.matches(&key) {
+        state.select_lead_and_focus_chat();
+        return Action::None;
+    }
+    if kb.global.refresh.matches(&key) {
+        return Action::Refresh;
+    }
+    if kb.global.focus_left.matches(&key) {
+        state.focus_left();
+        return Action::None;
+    }
+    if kb.global.focus_right.matches(&key) {
+        state.focus_right();
+        return Action::None;
+    }
+    if kb.global.toggle_threads.matches(&key) {
+        return Action::ToggleThreads;
+    }
+    if kb.global.show_help.matches(&key) {
+        state.show_help = !state.show_help;
+        return Action::None;
     }
 
     match state.mode {
@@ -58,138 +62,135 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 
 fn handle_sidebar_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     state.status_message = None;
-    match key.code {
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.cursor_down();
-            Action::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.cursor_up();
-            Action::None
-        }
-        KeyCode::Enter => {
-            state.select_lead_and_focus_chat();
-            Action::None
-        }
-        KeyCode::Char('n') => {
-            state.enter_create_mode();
-            Action::None
-        }
-        KeyCode::Tab => {
-            state.toggle_focus();
-            Action::None
-        }
-        _ => Action::None,
+    let kb = &state.keybindings.sidebar;
+
+    if kb.quit.matches(&key) {
+        return Action::Quit;
     }
+    if kb.navigate_down.matches(&key) {
+        state.cursor_down();
+        return Action::None;
+    }
+    if kb.navigate_up.matches(&key) {
+        state.cursor_up();
+        return Action::None;
+    }
+    if kb.select.matches(&key) {
+        state.select_lead_and_focus_chat();
+        return Action::None;
+    }
+    if kb.new_workspace.matches(&key) {
+        state.enter_create_mode();
+        return Action::None;
+    }
+    if kb.toggle_focus.matches(&key) {
+        state.toggle_focus();
+        return Action::None;
+    }
+    Action::None
 }
 
 fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     state.status_message = None;
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.agent_cursor_down();
-            Action::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.agent_cursor_up();
-            Action::None
-        }
-        KeyCode::Tab => {
-            state.toggle_focus();
-            Action::None
-        }
-        KeyCode::Esc => {
-            state.focus = Focus::Sidebar;
-            Action::None
-        }
-        KeyCode::Enter => {
-            // Close thread view so chat pane is visible, switch to chat for typing
-            state.thread_view = None;
-            state.focus = Focus::Chat;
-            Action::None
-        }
-        _ => Action::None,
+    let kb = &state.keybindings.agents;
+
+    if kb.navigate_down.matches(&key) {
+        state.agent_cursor_down();
+        return Action::None;
     }
+    if kb.navigate_up.matches(&key) {
+        state.agent_cursor_up();
+        return Action::None;
+    }
+    if kb.toggle_focus.matches(&key) {
+        state.toggle_focus();
+        return Action::None;
+    }
+    if kb.back.matches(&key) {
+        state.focus = Focus::Sidebar;
+        return Action::None;
+    }
+    if kb.open_chat.matches(&key) {
+        // Close thread view so chat pane is visible, switch to chat for typing
+        state.thread_view = None;
+        state.focus = Focus::Chat;
+        return Action::None;
+    }
+    Action::None
 }
 
 fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Esc => {
-            state.focus = Focus::Sidebar;
-            Action::None
-        }
-        KeyCode::Tab => {
-            state.toggle_focus();
-            Action::None
-        }
-        KeyCode::Enter => {
-            let input = state.chat_input.trim().to_string();
-            if input.is_empty() {
-                return Action::None;
-            }
-            send_chat_to_selected_agent(state, input)
-        }
-        KeyCode::Up => {
-            state.chat_view.scroll_up();
-            Action::None
-        }
-        KeyCode::Down => {
-            state.chat_view.scroll_down();
-            Action::None
-        }
-        _ => {
-            handle_input_editing(state, &key);
-            Action::None
-        }
+    let kb = &state.keybindings.chat;
+
+    if kb.back.matches(&key) {
+        state.focus = Focus::Sidebar;
+        return Action::None;
     }
+    if kb.toggle_focus.matches(&key) {
+        state.toggle_focus();
+        return Action::None;
+    }
+    if kb.send.matches(&key) {
+        let input = state.chat_input.trim().to_string();
+        if input.is_empty() {
+            return Action::None;
+        }
+        return send_chat_to_selected_agent(state, input);
+    }
+    if kb.scroll_up.matches(&key) {
+        state.chat_view.scroll_up();
+        return Action::None;
+    }
+    if kb.scroll_down.matches(&key) {
+        state.chat_view.scroll_down();
+        return Action::None;
+    }
+
+    // Fall through to text input editing
+    handle_input_editing(state, &key);
+    Action::None
 }
 
 fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    match key.code {
-        // ←→ navigate positions (columns)
-        KeyCode::Left | KeyCode::Char('h') => {
-            state.grid_move_left();
-            Action::None
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            state.grid_move_right();
-            Action::None
-        }
-        // ↑↓ navigate threads (rows)
-        KeyCode::Up | KeyCode::Char('k') => {
-            state.grid_move_up();
-            Action::None
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            state.grid_move_down();
-            Action::None
-        }
-        // g/G — jump to start/end of positions
-        KeyCode::Char('g') => {
-            state.grid_jump_start();
-            Action::None
-        }
-        KeyCode::Char('G') => {
-            state.grid_jump_end();
-            Action::None
-        }
-        // Tab — jump to next unique/summary cell
-        KeyCode::Tab => {
-            state.grid_tab_next();
-            Action::None
-        }
-        // e — export thread to file
-        KeyCode::Char('e') => {
-            state.enter_export_mode();
-            Action::None
-        }
-        KeyCode::Esc => {
-            state.focus = Focus::Sidebar;
-            Action::None
-        }
-        _ => Action::None,
+    let kb = &state.keybindings.threads;
+
+    if kb.navigate_left.matches(&key) {
+        state.grid_move_left();
+        return Action::None;
     }
+    if kb.navigate_right.matches(&key) {
+        state.grid_move_right();
+        return Action::None;
+    }
+    if kb.navigate_up.matches(&key) {
+        state.grid_move_up();
+        return Action::None;
+    }
+    if kb.navigate_down.matches(&key) {
+        state.grid_move_down();
+        return Action::None;
+    }
+    if kb.jump_start.matches(&key) {
+        state.grid_jump_start();
+        return Action::None;
+    }
+    if kb.jump_end.matches(&key) {
+        state.grid_jump_end();
+        return Action::None;
+    }
+    if kb.tab_next.matches(&key) {
+        state.grid_tab_next();
+        return Action::None;
+    }
+    if kb.export.matches(&key) {
+        state.enter_export_mode();
+        return Action::None;
+    }
+    if kb.back.matches(&key) {
+        state.focus = Focus::Sidebar;
+        return Action::None;
+    }
+    Action::None
 }
 
 // ── Shared input editing ────────────────────────────────────────────
@@ -214,34 +215,37 @@ fn handle_input_editing(state: &mut ScreenState, key: &KeyEvent) {
 }
 
 fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let kb = &state.keybindings.create_workspace;
+
+    if kb.cancel.matches(&key) {
+        state.exit_create_mode();
+        return Action::None;
+    }
+    if kb.switch_field.matches(&key) {
+        state.input_field = (state.input_field + 1) % 2;
+        return Action::None;
+    }
+    if kb.confirm.matches(&key) {
+        if state.input_name.trim().is_empty() {
+            state.status_message = Some("Name is required".to_string());
+            return Action::None;
+        }
+        let name = state.input_name.trim().to_string();
+        let description = state.input_description.trim().to_string();
+        return Action::CreateWorkspace { name, description };
+    }
+
+    // Fall through to character input for the create form
     match key.code {
-        KeyCode::Esc => {
-            state.exit_create_mode();
-            Action::None
-        }
-        KeyCode::Tab | KeyCode::BackTab => {
-            state.input_field = (state.input_field + 1) % 2;
-            Action::None
-        }
         KeyCode::Backspace => {
             state.active_input_mut().pop();
-            Action::None
         }
         KeyCode::Char(c) => {
             state.active_input_mut().push(c);
-            Action::None
         }
-        KeyCode::Enter => {
-            if state.input_name.trim().is_empty() {
-                state.status_message = Some("Name is required".to_string());
-                return Action::None;
-            }
-            let name = state.input_name.trim().to_string();
-            let description = state.input_description.trim().to_string();
-            Action::CreateWorkspace { name, description }
-        }
-        _ => Action::None,
+        _ => {}
     }
+    Action::None
 }
 
 fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {

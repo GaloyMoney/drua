@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
+use crate::tui::keybindings::Keybindings;
 use crate::tui::state::{
     AgentItem, BlockDetail, CellKind, Focus, SandboxInfo, ScreenState, ThreadGridState, ThreadInfo,
     UsageDetail, WorkspaceItem,
@@ -908,7 +909,17 @@ pub async fn run(server: Option<String>) -> Result<()> {
     let (config, client, user_name) = ensure_authenticated(server).await?;
     let workspaces = fetch_workspaces(&client).await?;
 
-    let mut state = ScreenState::new(workspaces, config.server_url.clone(), user_name);
+    let keybindings_path = dirs::home_dir()
+        .map(|h| h.join(".drua").join("keybindings.toml"))
+        .unwrap_or_default();
+    let keybindings = Keybindings::load(&keybindings_path);
+
+    let mut state = ScreenState::new(
+        workspaces,
+        config.server_url.clone(),
+        user_name,
+        keybindings,
+    );
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
