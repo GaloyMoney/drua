@@ -110,6 +110,7 @@ type Query {
 	Look up a single agent by ID.
 	"""
 	agent(id: AgentId!): Agent
+	appConfig: Yaml!
 	"""
 	Export a thread as Pi-compatible JSONL (v3 format).
 	
@@ -363,6 +364,8 @@ input WorkspaceUpdateInput {
 type WorkspaceUpdatePayload {
 	workspace: Workspace!
 }
+
+scalar Yaml
 
 """
 Directs the executor to include this field or fragment only when the `if` argument is true.
