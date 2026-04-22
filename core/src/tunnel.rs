@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::auth::AuthSubject;
-use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetsError};
+use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError};
 
 // ---------------------------------------------------------------------------
 // Wire protocol
@@ -90,6 +90,13 @@ impl TunnelHandle {
     }
 
     /// Send a tool call through the tunnel and wait for the result.
+    ///
+    /// Every non-happy-path exit (timeout, tunnel closed mid-call, send
+    /// failure) removes the id from `pending` before returning — otherwise
+    /// the entry (and the `oneshot::Sender` it holds) would linger for the
+    /// lifetime of every cloned [`TunnelHandle`], which is the entire
+    /// registered `TunnelToolSet`. That's the leak the PR #127 review
+    /// flagged.
     pub async fn call_tool(
         &self,
         upstream: &str,
@@ -97,15 +104,30 @@ impl TunnelHandle {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let id = uuid::Uuid::new_v4().to_string();
+        let result = self.call_tool_inner(&id, upstream, tool_name, arguments).await;
+        // Single cleanup point: remove is a no-op if a successful `resolve`
+        // already took the entry out. Covers timeout, send failure, and
+        // serialization failure without repeating cleanup at each `?`.
+        self.pending.lock().await.remove(&id);
+        result
+    }
+
+    async fn call_tool_inner(
+        &self,
+        id: &str,
+        upstream: &str,
+        tool_name: &str,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
         let (resp_tx, resp_rx) = oneshot::channel();
 
         {
             let mut pending = self.pending.lock().await;
-            pending.insert(id.clone(), resp_tx);
+            pending.insert(id.to_string(), resp_tx);
         }
 
         let msg = TunnelMessage::CallTool {
-            id: id.clone(),
+            id: id.to_string(),
             upstream: upstream.to_string(),
             tool_name: tool_name.to_string(),
             arguments,
@@ -115,18 +137,14 @@ impl TunnelHandle {
             .map_err(|e| ToolSetsError::Tunnel(format!("serialize: {e}")))?;
 
         if self.tx.send(json).await.is_err() {
-            let mut pending = self.pending.lock().await;
-            pending.remove(&id);
             return Err(ToolSetsError::Tunnel("tunnel disconnected".to_string()));
         }
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(120), resp_rx)
+        tokio::time::timeout(std::time::Duration::from_secs(120), resp_rx)
             .await
             .map_err(|_| ToolSetsError::Tunnel("tool call timed out after 120s".to_string()))?
             .map_err(|_| ToolSetsError::Tunnel("tunnel disconnected".to_string()))?
-            .map_err(ToolSetsError::Tunnel)?;
-
-        Ok(result)
+            .map_err(ToolSetsError::Tunnel)
     }
 
     /// Resolve a pending call with a result (called by the WebSocket handler).
@@ -135,6 +153,30 @@ impl TunnelHandle {
         if let Some(tx) = pending.remove(id) {
             let _ = tx.send(result);
         }
+    }
+
+    /// Drain every outstanding pending call with `error`. Called from the
+    /// WS handler's cleanup block when the relay loop exits, so in-flight
+    /// callers fail immediately instead of waiting the full 120s timeout
+    /// for a response that will never arrive.
+    ///
+    /// Cleanup ordering in the WS handler (see `web/src/tunnel.rs`):
+    ///   1. `unregister_searchable_by_session` — no new calls can reach us.
+    ///   2. `fail_all_pending` — drain anything that beat the unregister.
+    ///   3. `TunnelRegistry::release`.
+    pub async fn fail_all_pending(&self, error: &str) {
+        let mut pending = self.pending.lock().await;
+        let drained: Vec<_> = pending.drain().collect();
+        drop(pending);
+        for (_, tx) in drained {
+            let _ = tx.send(Err(error.to_string()));
+        }
+    }
+
+    /// Number of outstanding pending tool calls. Test/observability helper.
+    #[cfg(test)]
+    pub async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
     }
 }
 
@@ -247,6 +289,12 @@ pub struct TunnelToolSet {
     upstream_name: String,
     tools: Vec<ToolSetEntry>,
     handle: TunnelHandle,
+    /// Scope tag — both the `deployment_id` (so
+    /// [`super::toolset::ToolSets::replace_tunnel_toolsets`] can atomically
+    /// swap a deployment's toolsets on takeover) and the `session_id`
+    /// (so an evicted WS loop's cleanup doesn't remove the live session's
+    /// entries).
+    scope: ToolSetScope,
 }
 
 impl TunnelToolSet {
@@ -255,8 +303,11 @@ impl TunnelToolSet {
     /// The `name` is scoped to the deployment (e.g. `staging-kubernetes`)
     /// and the `prefix` is scoped similarly (e.g. `staging_k8s`) so that
     /// multiple deployments' toolsets don't collide in the catalog.
+    /// `session_id` identifies the WS session that owns this toolset —
+    /// cleanup keys on it so takeover is safe.
     pub fn new(
         deployment_id: &str,
+        session_id: uuid::Uuid,
         registration: &RegisteredToolSet,
         handle: TunnelHandle,
     ) -> Result<Self, String> {
@@ -284,6 +335,10 @@ impl TunnelToolSet {
             upstream_name: registration.name.clone(),
             tools,
             handle,
+            scope: ToolSetScope::Tunnel {
+                deployment_id: deployment_id.to_string(),
+                session_id,
+            },
         })
     }
 }
@@ -308,6 +363,10 @@ impl SearchableToolSet for TunnelToolSet {
 
     fn tools(&self) -> &[ToolSetEntry] {
         &self.tools
+    }
+
+    fn scope(&self) -> Option<&ToolSetScope> {
+        Some(&self.scope)
     }
 
     async fn call(
@@ -423,5 +482,116 @@ mod tests {
         // Fresh session can still release itself.
         registry.release("galoy-staging", fresh_session);
         assert!(registry.is_empty());
+    }
+
+    // ── TunnelHandle pending-map tests ──────────────────────────────────
+    //
+    // Each scenario below proves that `pending` does not leak under an
+    // abnormal exit path. Before these fixes, an in-flight call that hit
+    // a disconnect-after-send or a timeout would leave its `oneshot::Sender`
+    // in the map forever, pinned alive by cloned `TunnelHandle`s inside
+    // the registered `TunnelToolSet`s.
+
+    /// Successful resolve: happy path — entry is removed by `resolve`,
+    /// and the outer cleanup in `call_tool` is a no-op.
+    #[tokio::test]
+    async fn pending_cleared_on_success() {
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let handle = TunnelHandle::new(tx);
+
+        // Consume the outbound message so send doesn't block the channel.
+        // Resolve after a brief delay so the caller is already awaiting.
+        let handle_bg = handle.clone();
+        let resolver = tokio::spawn(async move {
+            let json = rx.recv().await.expect("outbound");
+            let parsed: TunnelMessage = serde_json::from_str(&json).unwrap();
+            let id = match parsed {
+                TunnelMessage::CallTool { id, .. } => id,
+                _ => panic!("expected CallTool"),
+            };
+            let result: CallToolResult =
+                serde_json::from_value(serde_json::json!({ "content": [], "isError": false }))
+                    .unwrap();
+            handle_bg.resolve(&id, Ok(result)).await;
+        });
+
+        let result = handle.call_tool("kubernetes", "list_pods", None).await;
+        assert!(result.is_ok());
+        resolver.await.unwrap();
+        assert_eq!(handle.pending_len().await, 0);
+    }
+
+    /// Send failure: outbound receiver dropped before the call goes out.
+    /// The entry must still be cleaned up — otherwise every call after a
+    /// disconnect would leak.
+    #[tokio::test]
+    async fn pending_cleared_on_send_failure() {
+        let (tx, rx) = mpsc::channel::<String>(8);
+        let handle = TunnelHandle::new(tx);
+        drop(rx); // simulate relay loop already gone
+
+        let result = handle.call_tool("kubernetes", "list_pods", None).await;
+        assert!(matches!(result, Err(ToolSetsError::Tunnel(_))));
+        assert_eq!(handle.pending_len().await, 0);
+    }
+
+    /// `fail_all_pending` drains outstanding calls and fails them
+    /// immediately, instead of them sitting on the full 120s timeout.
+    /// This is the fix for PR #127's "callers sit 120s after tunnel
+    /// death" review comment.
+    #[tokio::test(start_paused = true)]
+    async fn fail_all_pending_drains_immediately() {
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let handle = TunnelHandle::new(tx);
+
+        // Launch a call that will park on resp_rx forever without intervention.
+        let caller = {
+            let h = handle.clone();
+            tokio::spawn(async move { h.call_tool("k8s", "get_pods", None).await })
+        };
+
+        // Let the caller reach the await point and register in pending.
+        tokio::task::yield_now().await;
+        // Spin until the pending entry is visible — avoids a timing race
+        // on slow runners without real-wall-clock sleep (tokio is paused).
+        for _ in 0..100 {
+            if handle.pending_len().await == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(handle.pending_len().await, 1);
+
+        handle.fail_all_pending("tunnel disconnected").await;
+
+        // Caller should return essentially immediately, not after 120s.
+        let result = caller.await.unwrap();
+        assert!(matches!(result, Err(ToolSetsError::Tunnel(_))));
+        assert_eq!(handle.pending_len().await, 0);
+    }
+
+    /// Timeout path: a call whose resp_rx never fires must clean its own
+    /// pending entry. Using `start_paused = true` so the 120s timeout
+    /// fires in virtual time without blocking the test for 2 minutes.
+    #[tokio::test(start_paused = true)]
+    async fn pending_cleared_on_timeout() {
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let handle = TunnelHandle::new(tx);
+
+        let caller = {
+            let h = handle.clone();
+            tokio::spawn(async move { h.call_tool("k8s", "get_pods", None).await })
+        };
+
+        // Drain the outbound queue so send succeeds — otherwise the call
+        // would exit via the send-failure path instead of timeout.
+        let _outbound = rx.recv().await.expect("outbound message");
+
+        // Advance past the 120s timeout.
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+
+        let result = caller.await.unwrap();
+        assert!(matches!(result, Err(ToolSetsError::Tunnel(_))));
+        assert_eq!(handle.pending_len().await, 0);
     }
 }

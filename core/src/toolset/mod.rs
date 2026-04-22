@@ -143,14 +143,62 @@ impl ToolSets {
         sets.push(toolset);
     }
 
-    /// Remove a searchable toolset by name. Used when a tunnel disconnects
-    /// so its tools are no longer advertised.
-    pub fn unregister_searchable(&self, name: &str) {
+    /// Atomically replace every tunnel toolset currently registered under
+    /// `deployment_id` with `new_sets`. Done under a single write lock, which:
+    ///
+    /// 1. closes the overlap window between a new connector's registration
+    ///    and the evicted connector's cleanup — without this, first-match
+    ///    routing in the append-only vec would temporarily send calls to
+    ///    the dying connector;
+    /// 2. prevents duplicate toolset names for a deployment, so
+    ///    `describe_tool` / `search_tools` never show two copies of the
+    ///    same entry during takeover.
+    ///
+    /// The evicted loop's later [`Self::unregister_searchable_by_session`]
+    /// call will find nothing matching its own session_id and no-op,
+    /// leaving the freshly-registered entries intact.
+    pub fn replace_tunnel_toolsets(
+        &self,
+        deployment_id: &str,
+        new_sets: Vec<Arc<dyn SearchableToolSet>>,
+    ) {
         let mut sets = self.sets.write().expect("toolset lock poisoned");
         let before = sets.len();
-        sets.retain(|s| s.name() != name);
-        if sets.len() < before {
-            tracing::info!(name = %name, "Unregistered toolset");
+        sets.retain(|s| match s.scope() {
+            Some(ToolSetScope::Tunnel { deployment_id: d, .. }) => d != deployment_id,
+            _ => true,
+        });
+        let removed = before - sets.len();
+        let added = new_sets.len();
+        sets.extend(new_sets);
+        tracing::info!(
+            deployment_id = %deployment_id,
+            removed,
+            added,
+            "Replaced tunnel toolsets"
+        );
+    }
+
+    /// Remove every tunnel-scoped toolset owned by `session_id`. Called
+    /// from a WS loop's cleanup path. If the session was already evicted
+    /// by a newer connector (which reused the `deployment_id` via
+    /// [`Self::replace_tunnel_toolsets`]), this is a no-op — the new
+    /// session has a different `session_id` and its entries are not
+    /// touched. This is the invariant that makes takeover safe.
+    pub fn unregister_searchable_by_session(&self, session_id: uuid::Uuid) {
+        let mut sets = self.sets.write().expect("toolset lock poisoned");
+        let before = sets.len();
+        sets.retain(|s| match s.scope() {
+            Some(ToolSetScope::Tunnel { session_id: sid, .. }) => *sid != session_id,
+            _ => true,
+        });
+        let removed = before - sets.len();
+        if removed > 0 {
+            tracing::info!(
+                session_id = %session_id,
+                removed,
+                "Unregistered toolsets for session"
+            );
         }
     }
 
@@ -268,4 +316,184 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
         })
         .sum();
     (total_chars / 4).max(1) as u64
+}
+
+#[cfg(test)]
+impl ToolSets {
+    /// Test-only: construct an empty ToolSets without running `init`'s
+    /// I/O (upstream MCP dialers, Concourse client). Tests exercising the
+    /// catalog's dynamic-registration primitives don't need any of that.
+    pub fn empty_for_test() -> Self {
+        Self {
+            sets: Arc::new(RwLock::new(Vec::new())),
+            top_level: RwLock::new(HashMap::new()),
+            audit: None,
+            init_errors: Vec::new(),
+        }
+    }
+
+    /// Test-only: snapshot the current set of toolset names, in
+    /// registration order. Used to assert takeover semantics without
+    /// exposing the internal Vec.
+    pub fn toolset_names_for_test(&self) -> Vec<String> {
+        self.sets
+            .read()
+            .expect("toolset lock poisoned")
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::CallToolResult;
+
+    /// A minimal stub to exercise `replace_tunnel_toolsets` /
+    /// `unregister_searchable_by_session` without spinning up a real
+    /// tunnel. Its `call()` will never be invoked by these tests.
+    struct StubToolSet {
+        name: String,
+        scope: Option<ToolSetScope>,
+        tools: Vec<ToolSetEntry>,
+    }
+
+    impl StubToolSet {
+        fn tunnel(name: &str, deployment_id: &str, session_id: uuid::Uuid) -> Self {
+            Self {
+                name: name.to_string(),
+                scope: Some(ToolSetScope::Tunnel {
+                    deployment_id: deployment_id.to_string(),
+                    session_id,
+                }),
+                tools: Vec::new(),
+            }
+        }
+
+        fn static_(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                scope: None,
+                tools: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SearchableToolSet for StubToolSet {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn category(&self) -> &str {
+            "stub"
+        }
+        fn category_description(&self) -> &str {
+            "stub"
+        }
+        fn tools(&self) -> &[ToolSetEntry] {
+            &self.tools
+        }
+        fn scope(&self) -> Option<&ToolSetScope> {
+            self.scope.as_ref()
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _tool_name: &str,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            unreachable!("stub: call should not be invoked by these tests")
+        }
+    }
+
+    /// Atomic swap: `replace_tunnel_toolsets` drops every toolset whose
+    /// scope is `Tunnel(deployment_id, _)` and appends the new ones —
+    /// in one write-lock, so routing never sees the old entries.
+    #[test]
+    fn replace_tunnel_toolsets_swaps_by_deployment() {
+        let toolsets = ToolSets::empty_for_test();
+        let old_session = uuid::Uuid::new_v4();
+        toolsets.register_searchable(StubToolSet::tunnel("stg-k8s", "staging", old_session));
+        toolsets.register_searchable(StubToolSet::tunnel("stg-pg", "staging", old_session));
+        toolsets.register_searchable(StubToolSet::static_("concourse"));
+        assert_eq!(
+            toolsets.toolset_names_for_test(),
+            vec!["stg-k8s", "stg-pg", "concourse"]
+        );
+
+        let new_session = uuid::Uuid::new_v4();
+        let new_sets: Vec<Arc<dyn SearchableToolSet>> = vec![Arc::new(StubToolSet::tunnel(
+            "stg-k8s",
+            "staging",
+            new_session,
+        ))];
+        toolsets.replace_tunnel_toolsets("staging", new_sets);
+
+        // Both old "staging" entries gone; static "concourse" untouched;
+        // new "stg-k8s" appended.
+        assert_eq!(
+            toolsets.toolset_names_for_test(),
+            vec!["concourse", "stg-k8s"]
+        );
+    }
+
+    /// Atomic swap only touches the target deployment — other
+    /// deployments' tunnel toolsets are preserved.
+    #[test]
+    fn replace_tunnel_toolsets_spares_other_deployments() {
+        let toolsets = ToolSets::empty_for_test();
+        let staging_session = uuid::Uuid::new_v4();
+        let prod_session = uuid::Uuid::new_v4();
+        toolsets.register_searchable(StubToolSet::tunnel("stg-k8s", "staging", staging_session));
+        toolsets.register_searchable(StubToolSet::tunnel("prd-k8s", "production", prod_session));
+
+        toolsets.replace_tunnel_toolsets("staging", Vec::new());
+
+        assert_eq!(toolsets.toolset_names_for_test(), vec!["prd-k8s"]);
+    }
+
+    /// Session-aware unregister: after an eviction-style replace, the
+    /// evicted loop's `unregister_searchable_by_session(old_session)` is a
+    /// no-op — it only matches entries whose scope carries `old_session`,
+    /// of which there are none after the swap. The new session's entries
+    /// survive.
+    #[test]
+    fn unregister_by_session_is_noop_for_evicted_session() {
+        let toolsets = ToolSets::empty_for_test();
+        let old_session = uuid::Uuid::new_v4();
+        let new_session = uuid::Uuid::new_v4();
+
+        toolsets.register_searchable(StubToolSet::tunnel("stg-k8s", "staging", old_session));
+        toolsets.replace_tunnel_toolsets(
+            "staging",
+            vec![Arc::new(StubToolSet::tunnel(
+                "stg-k8s",
+                "staging",
+                new_session,
+            ))],
+        );
+
+        // Evicted loop's late cleanup must not remove the new session's entries.
+        toolsets.unregister_searchable_by_session(old_session);
+        assert_eq!(toolsets.toolset_names_for_test(), vec!["stg-k8s"]);
+
+        // The real owner can still release itself.
+        toolsets.unregister_searchable_by_session(new_session);
+        assert!(toolsets.toolset_names_for_test().is_empty());
+    }
+
+    /// Clean disconnect path (no takeover): a session registers toolsets,
+    /// then `unregister_searchable_by_session` with its own id cleans them up.
+    #[test]
+    fn unregister_by_session_clean_disconnect() {
+        let toolsets = ToolSets::empty_for_test();
+        let session = uuid::Uuid::new_v4();
+        toolsets.register_searchable(StubToolSet::tunnel("stg-k8s", "staging", session));
+        toolsets.register_searchable(StubToolSet::static_("concourse"));
+
+        toolsets.unregister_searchable_by_session(session);
+        // Static toolsets are never removed by session-based unregister.
+        assert_eq!(toolsets.toolset_names_for_test(), vec!["concourse"]);
+    }
 }

@@ -102,21 +102,25 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, auth: AuthSubject
         );
     }
 
-    // ── 3. Register toolsets ──────────────────────────────────────────────
-    let mut registered_names = Vec::new();
+    // ── 3. Build + atomically swap toolsets ───────────────────────────────
+    // `replace_tunnel_toolsets` retains any evicted session's entries out
+    // of the catalog and appends the new ones under a single write lock,
+    // so (a) first-match routing never sees stale entries for this
+    // deployment, and (b) the evicted loop's later session-scoped
+    // cleanup is a no-op on the new entries.
+    let mut new_sets: Vec<std::sync::Arc<dyn SearchableToolSet>> =
+        Vec::with_capacity(toolset_registrations.len());
     for reg in &toolset_registrations {
-        match TunnelToolSet::new(&deployment_id, reg, handle.clone()) {
+        match TunnelToolSet::new(&deployment_id, session_id, reg, handle.clone()) {
             Ok(ts) => {
-                let name = ts.name().to_string();
-                state.app.toolsets().register_searchable(ts);
-                registered_names.push(name.clone());
                 tracing::info!(
                     deployment_id = %deployment_id,
                     toolset = %reg.name,
                     tools = reg.tools.len(),
-                    registered_as = %name,
-                    "tunnel toolset registered"
+                    registered_as = %ts.name(),
+                    "tunnel toolset prepared"
                 );
+                new_sets.push(std::sync::Arc::new(ts));
             }
             Err(e) => {
                 tracing::warn!(
@@ -128,6 +132,11 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, auth: AuthSubject
             }
         }
     }
+    let registered_count = new_sets.len();
+    state
+        .app
+        .toolsets()
+        .replace_tunnel_toolsets(&deployment_id, new_sets);
 
     // ── 4. Relay loop ─────────────────────────────────────────────────────
     loop {
@@ -182,16 +191,29 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, auth: AuthSubject
     }
 
     // ── 5. Cleanup ────────────────────────────────────────────────────────
-    for name in &registered_names {
-        state.app.toolsets().unregister_searchable(name);
-    }
-    // `release` is a no-op if we were evicted (the new session owns the
-    // entry now) — the session_id check in `TunnelRegistry::release`
-    // ensures we only remove an entry that's still ours.
+    // Ordering matters here:
+    //
+    //   1. `unregister_searchable_by_session` — removes our entries from the
+    //      catalog so no *new* tool calls can reach our handle. Session-scoped
+    //      so an already-evicted loop (whose entries were replaced by a newer
+    //      connector via `replace_tunnel_toolsets`) is a safe no-op.
+    //
+    //   2. `fail_all_pending` — drains any call that slipped in between the
+    //      tunnel going down and the unregister completing. Without this,
+    //      those callers wait the full 120s timeout for a response that
+    //      will never arrive (the `TunnelHandle` clones inside the now-
+    //      unregistered `TunnelToolSet`s kept the pending map alive).
+    //
+    //   3. `TunnelRegistry::release` — same session_id invariant as above.
+    state
+        .app
+        .toolsets()
+        .unregister_searchable_by_session(session_id);
+    handle.fail_all_pending("tunnel disconnected").await;
     state.app.tunnels().release(&deployment_id, session_id);
     tracing::info!(
         deployment_id = %deployment_id,
-        toolsets = registered_names.len(),
+        toolsets = registered_count,
         "tunnel toolsets unregistered"
     );
 }
