@@ -12,7 +12,7 @@ use super::{
     history,
     message::*,
     metadata::*,
-    pi_export::{self, PiIdGenerator, PiSessionEntry, PiSessionHeader},
+    pi_export::{self, PiEntry, PiIdGenerator, PiSessionHeader},
     settings::*,
     thread::*,
     view::*,
@@ -152,12 +152,10 @@ impl AgentSession {
     /// Export the current main thread as Pi-compatible JSONL (v3).
     ///
     /// Walks session-level events, filters for those targeting the main
-    /// thread, and converts each to a [`PiSessionEntry`]. Returns the
-    /// header plus all entries; the caller serializes them with
+    /// thread, and converts each to a [`PiEntry`]. Returns the header
+    /// plus all entries; the caller serializes them with
     /// [`pi_export::to_jsonl`].
-    pub fn export_thread(
-        &self,
-    ) -> Result<(PiSessionHeader, Vec<PiSessionEntry>), AgentSessionError> {
+    pub fn export_thread(&self) -> Result<(PiSessionHeader, Vec<PiEntry>), AgentSessionError> {
         let thread_id = self
             .current_main_thread
             .ok_or(AgentSessionError::ThreadNotFound)?;
@@ -166,7 +164,7 @@ impl AgentSession {
         let header = pi_export::build_header(self.id, now);
 
         let mut id_gen = PiIdGenerator::new();
-        let mut entries = Vec::new();
+        let mut entries: Vec<PiEntry> = Vec::new();
         let base_ts = self
             .events
             .entity_first_persisted_at()
@@ -176,10 +174,30 @@ impl AgentSession {
         // timestamps are unavailable.
         let mut ts_offset: i64 = 0;
 
+        // Emit model_change and thinking_level_change before messages.
+        let ts = pi_export::ts_from_ms(base_ts, ts_offset);
+        entries.push(pi_export::build_model_change(
+            &mut id_gen,
+            None,
+            ts,
+            &self.model_defaults.model,
+        ));
+        ts_offset += 1;
+
+        let parent_id = entries.last().map(|e| e.id().to_string());
+        let ts = pi_export::ts_from_ms(base_ts, ts_offset);
+        entries.push(pi_export::build_thinking_level_change(
+            &mut id_gen,
+            parent_id.as_deref(),
+            ts,
+            "medium",
+        ));
+        ts_offset += 1;
+
         for event in self.events.iter_all() {
-            let parent_id = entries.last().map(|e: &PiSessionEntry| e.id.clone());
+            let parent_id = entries.last().map(|e| e.id().to_string());
             let parent_ref = parent_id.as_deref();
-            let ts = base_ts + ts_offset;
+            let ts = pi_export::ts_from_ms(base_ts, ts_offset);
 
             match event {
                 AgentSessionEvent::UserInputAdded { target, text, .. } => {
@@ -214,7 +232,7 @@ impl AgentSession {
                     ..
                 } if *tid == thread_id => {
                     let reason = match stop_reason {
-                        StopReason::Stop => "end_turn",
+                        StopReason::Stop => "stop",
                         StopReason::Length => "max_tokens",
                         StopReason::ToolUse => "tool_use",
                         StopReason::Error => "error",
@@ -234,9 +252,9 @@ impl AgentSession {
                     results,
                 } if *tid == thread_id => {
                     for result in results {
-                        let parent_id = entries.last().map(|e: &PiSessionEntry| e.id.clone());
+                        let parent_id = entries.last().map(|e| e.id().to_string());
                         let parent_ref = parent_id.as_deref();
-                        let ts = base_ts + ts_offset;
+                        let ts = pi_export::ts_from_ms(base_ts, ts_offset);
                         entries.push(pi_export::build_tool_result_entry(
                             &mut id_gen,
                             parent_ref,
