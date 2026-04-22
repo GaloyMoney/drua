@@ -212,18 +212,10 @@ impl AgentSession {
                     ));
                     ts_offset += 1;
                 }
-                AgentSessionEvent::SandboxNotificationAdded { target, text, .. } => {
-                    if !self.targets_thread(target, thread_id) {
-                        continue;
-                    }
-                    entries.push(pi_export::build_user_entry(
-                        &mut id_gen,
-                        parent_ref,
-                        text,
-                        ts,
-                    ));
-                    ts_offset += 1;
-                }
+                // Skip SandboxNotificationAdded — they can fire between
+                // tool_use and tool_result, breaking the API's required
+                // assistant(tool_use) → tool_result sequence.
+                AgentSessionEvent::SandboxNotificationAdded { .. } => {}
                 AgentSessionEvent::AssistantResponseReceived {
                     thread_id: tid,
                     content,
