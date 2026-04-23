@@ -14,8 +14,6 @@ pub enum NoteError {
     Sqlx(#[from] sqlx::Error),
     #[error("NoteError - Authorization: {0}")]
     Authorization(#[from] crate::primitives::AuthorizationError),
-    #[error("NoteError - Embedding: {0}")]
-    Embedding(String),
     #[error("NoteError - Library: {0}")]
     Library(#[from] crate::library::LibraryError),
 }

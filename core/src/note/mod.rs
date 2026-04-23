@@ -1,9 +1,6 @@
 mod entity;
 pub mod error;
 pub(crate) mod repo;
-mod store;
-
-use std::sync::Arc;
 
 use tracing::instrument;
 
@@ -11,32 +8,22 @@ pub use entity::Note;
 use entity::*;
 pub use error::*;
 use repo::*;
-pub use store::NoteSearchResult;
-use store::*;
 
 use crate::auth::AuthSubject;
-use crate::library::{Library, RuntimeFile};
+use crate::library::{DocType, Library, RuntimeFile, SearchResult};
 use crate::primitives::*;
 
 #[derive(Clone)]
 pub struct Notes {
     repo: NoteRepo,
-    search: NoteSearchStore,
     library: Library,
-    embedder: Arc<code_assistant_core::embedder::Embedder>,
 }
 
 impl Notes {
-    pub fn new(
-        pool: &sqlx::PgPool,
-        library: Library,
-        embedder: Arc<code_assistant_core::embedder::Embedder>,
-    ) -> Self {
+    pub fn new(pool: &sqlx::PgPool, library: Library) -> Self {
         Self {
             repo: NoteRepo::new(pool),
-            search: NoteSearchStore::new(pool),
             library,
-            embedder,
         }
     }
 
@@ -77,11 +64,9 @@ impl Notes {
 
         let mut op = self.repo.begin_op().await?;
         let note = self.repo.create_in_op(&mut op, new_note).await?;
-        self.search.upsert_in_op(&mut op, &note).await?;
-        self.library.write(runtime_file).await?;
         op.commit().await?;
 
-        self.spawn_embed(note.id, &note.title, &note.content);
+        self.library.write(runtime_file).await?;
 
         Ok(note)
     }
@@ -131,11 +116,9 @@ impl Notes {
 
         let mut op = self.repo.begin_op().await?;
         self.repo.update_in_op(&mut op, &mut note).await?;
-        self.search.upsert_in_op(&mut op, &note).await?;
-        self.library.write(runtime_file).await?;
         op.commit().await?;
 
-        self.spawn_embed(note.id, &note.title, &note.content);
+        self.library.write(runtime_file).await?;
 
         Ok(note)
     }
@@ -195,18 +178,17 @@ impl Notes {
         workspace_id: WorkspaceId,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<NoteSearchResult>, NoteError> {
+    ) -> Result<Vec<SearchResult>, NoteError> {
         sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
-        let query_embedding = match self.embedder.embed_query(query).await {
-            Ok(emb) => Some(emb),
-            Err(e) => {
-                tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
-                None
-            }
-        };
-        self.search
-            .search(workspace_id, query, query_embedding, limit)
+        self.library
+            .search(
+                uuid::Uuid::from(workspace_id),
+                query,
+                Some(DocType::Note),
+                limit,
+            )
             .await
+            .map_err(NoteError::from)
     }
 
     /// List all notes in a workspace.
@@ -216,7 +198,7 @@ impl Notes {
         sub: &AuthSubject,
         workspace_id: WorkspaceId,
         limit: usize,
-    ) -> Result<Vec<NoteSearchResult>, NoteError> {
+    ) -> Result<Vec<SearchResult>, NoteError> {
         sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: limit,
@@ -233,8 +215,9 @@ impl Notes {
         Ok(result
             .entities
             .into_iter()
-            .map(|n| NoteSearchResult {
-                id: n.id,
+            .map(|n| SearchResult {
+                doc_id: uuid::Uuid::from(n.id),
+                doc_type: DocType::Note,
                 title: n.title,
                 content: n.content,
                 tags: n.tags,
@@ -242,28 +225,4 @@ impl Notes {
             })
             .collect())
     }
-
-    // -- internal helpers ---------------------------------------------------
-
-    fn spawn_embed(&self, note_id: NoteId, title: &str, content: &str) {
-        let embedder = self.embedder.clone();
-        let search = self.search.clone();
-        let text = format!("{}\n\n{}", title, content);
-        // Fire-and-forget: embed_document uses spawn_blocking internally (ONNX
-        // inference is CPU-heavy). The outer tokio::spawn lets us return the
-        // note to the caller without waiting for embedding completion.
-        tokio::spawn(async move {
-            match embedder.embed_document(&text).await {
-                Ok(embedding) => {
-                    if let Err(e) = search.set_embedding(note_id, embedding).await {
-                        tracing::error!(note_id = %note_id, error = %e, "failed to store embedding");
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(note_id = %note_id, error = %e, "failed to generate embedding");
-                }
-            }
-        });
-    }
-
 }

@@ -1,12 +1,17 @@
 mod error;
 mod file;
 mod job;
+mod search;
 mod upstream;
 
+use std::sync::Arc;
+
 use self::job::PushRuntimeCommitsJobInitializer;
+use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
-pub use file::{GitFileHash, RuntimeFile};
+pub use file::{DocType, GitFileHash, RuntimeFile, SearchableFields};
+pub use search::SearchResult;
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
@@ -31,14 +36,19 @@ impl LibraryConfig {
 #[derive(Clone)]
 pub struct Library {
     upstream: Upstream,
+    search: SearchStore,
+    embedder: Arc<code_assistant_core::embedder::Embedder>,
 }
 
 impl Library {
     pub async fn init(
         config: &LibraryConfig,
+        pool: &sqlx::PgPool,
+        embedder: Arc<code_assistant_core::embedder::Embedder>,
         jobs: &mut ::job::Jobs,
     ) -> Result<Self, LibraryError> {
         let upstream = Upstream::init(config.repo_url.as_deref(), config.repo_path()).await?;
+        let search = SearchStore::new(pool);
 
         let init = PushRuntimeCommitsJobInitializer::new(upstream.clone());
         let spawner = jobs.add_initializer(init);
@@ -49,7 +59,11 @@ impl Library {
             tracing::error!(error = %e, "Failed to spawn push-runtime-commits job");
         }
 
-        Ok(Self { upstream })
+        Ok(Self {
+            upstream,
+            search,
+            embedder,
+        })
     }
 
     #[tracing::instrument(name = "library.write", skip(self, file))]
@@ -57,6 +71,7 @@ impl Library {
         let relative_path = file.relative_path();
         let content = file.content();
         let commit_message = file.commit_message();
+        let fields = file.searchable_fields();
 
         let full_path = self.upstream.repo_path().join(&relative_path);
         if let Some(parent) = full_path.parent() {
@@ -64,7 +79,7 @@ impl Library {
                 .await
                 .map_err(|e| LibraryError::Io(e.to_string()))?;
         }
-        tokio::fs::write(&full_path, content)
+        tokio::fs::write(&full_path, &content)
             .await
             .map_err(|e| LibraryError::Io(e.to_string()))?;
         tracing::info!(path = %full_path.display(), "wrote runtime file");
@@ -73,6 +88,54 @@ impl Library {
             .add_and_commit(&relative_path, &commit_message)
             .await?;
 
+        // Search upsert is non-fatal — log and continue.
+        if let Err(e) = self.search.upsert(&fields).await {
+            tracing::error!(error = %e, "search upsert failed");
+        }
+
+        self.spawn_embed(&fields);
+
         Ok(())
+    }
+
+    /// Hybrid search across library documents.
+    #[tracing::instrument(name = "library.search", skip(self))]
+    pub async fn search(
+        &self,
+        workspace_id: uuid::Uuid,
+        query: &str,
+        doc_type: Option<DocType>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, LibraryError> {
+        let query_embedding = match self.embedder.embed_query(query).await {
+            Ok(emb) => Some(emb),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
+                None
+            }
+        };
+        self.search
+            .search(workspace_id, query, query_embedding, doc_type, limit)
+            .await
+    }
+
+    fn spawn_embed(&self, fields: &SearchableFields) {
+        let embedder = self.embedder.clone();
+        let search = self.search.clone();
+        let doc_id = fields.doc_id;
+        let doc_type = fields.doc_type;
+        let text = format!("{}\n\n{}", fields.title, fields.body);
+        tokio::spawn(async move {
+            match embedder.embed_document(&text).await {
+                Ok(embedding) => {
+                    if let Err(e) = search.set_embedding(doc_id, doc_type, embedding).await {
+                        tracing::error!(%doc_id, error = %e, "failed to store embedding");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(%doc_id, error = %e, "failed to generate embedding");
+                }
+            }
+        });
     }
 }

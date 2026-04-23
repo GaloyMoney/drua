@@ -17,45 +17,91 @@ impl std::fmt::Display for GitFileHash {
     }
 }
 
+/// Discriminator for document types stored in the library search index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocType {
+    Note,
+}
+
+impl DocType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DocType::Note => "note",
+        }
+    }
+}
+
+/// Fields extracted from a `RuntimeFile` for search indexing.
+pub struct SearchableFields {
+    pub doc_id: uuid::Uuid,
+    pub doc_type: DocType,
+    pub workspace_id: uuid::Uuid,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+}
+
 pub enum RuntimeFile {
     Note {
+        doc_id: NoteId,
+        workspace_id: WorkspaceId,
         workspace_name: String,
+        title: String,
+        body: String,
+        tags: Vec<String>,
+        created_at: String,
         slug: String,
         id_prefix: String,
-        content: String,
     },
 }
 
 impl RuntimeFile {
     /// Build a `RuntimeFile::Note` from raw note fields.
-    ///
-    /// Used by both `Note::as_runtime_file` (existing entity) and the store
-    /// flow (pre-entity, where `created_at` is empty).
     pub fn for_note(
         note_id: NoteId,
         workspace_id: WorkspaceId,
         workspace_name: &str,
         title: &str,
-        content: &str,
+        body: &str,
         tags: &[String],
         created_at: &str,
     ) -> Self {
-        let tags_str = tags
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let md_content = format!(
-            "---\nid: {}\nworkspace: {}\ntags: [{}]\ncreated: {}\n---\n\n# {}\n\n{}\n",
-            note_id, workspace_id, tags_str, created_at, title, content
-        );
-
         RuntimeFile::Note {
+            doc_id: note_id,
+            workspace_id,
             workspace_name: workspace_name.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            tags: tags.to_vec(),
+            created_at: created_at.to_string(),
             slug: slugify(title),
             id_prefix: note_id.to_string()[..8].to_string(),
-            content: md_content,
+        }
+    }
+
+    pub fn doc_type(&self) -> DocType {
+        match self {
+            RuntimeFile::Note { .. } => DocType::Note,
+        }
+    }
+
+    pub fn searchable_fields(&self) -> SearchableFields {
+        match self {
+            RuntimeFile::Note {
+                doc_id,
+                workspace_id,
+                title,
+                body,
+                tags,
+                ..
+            } => SearchableFields {
+                doc_id: uuid::Uuid::from(*doc_id),
+                doc_type: DocType::Note,
+                workspace_id: uuid::Uuid::from(*workspace_id),
+                title: title.clone(),
+                body: body.clone(),
+                tags: tags.clone(),
+            },
         }
     }
 
@@ -73,9 +119,28 @@ impl RuntimeFile {
         }
     }
 
-    pub(super) fn content(&self) -> &str {
+    /// Render the file content on-the-fly from structured fields.
+    pub(super) fn content(&self) -> String {
         match self {
-            RuntimeFile::Note { content, .. } => content,
+            RuntimeFile::Note {
+                doc_id,
+                workspace_id,
+                title,
+                body,
+                tags,
+                created_at,
+                ..
+            } => {
+                let tags_str = tags
+                    .iter()
+                    .map(|t| format!("\"{}\"", t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "---\nid: {}\nworkspace: {}\ntags: [{}]\ncreated: {}\n---\n\n# {}\n\n{}\n",
+                    doc_id, workspace_id, tags_str, created_at, title, body
+                )
+            }
         }
     }
 

@@ -4,7 +4,8 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::auth::AuthSubject;
-use crate::note::{NoteSearchResult, Notes};
+use crate::library::SearchResult;
+use crate::note::Notes;
 use crate::primitives::NoteId;
 use crate::workspace::Workspaces;
 
@@ -100,7 +101,7 @@ fn format_note(note: &crate::note::Note) -> String {
     )
 }
 
-fn format_search_result(r: &NoteSearchResult) -> String {
+fn format_search_result(r: &SearchResult) -> String {
     let tags = if r.tags.is_empty() {
         String::new()
     } else {
@@ -109,7 +110,7 @@ fn format_search_result(r: &NoteSearchResult) -> String {
     let content_preview: String = r.content.chars().take(200).collect();
     format!(
         "id: {}\ntitle: {}\n{}preview: {}\n",
-        r.id, r.title, tags, content_preview
+        r.doc_id, r.title, tags, content_preview
     )
 }
 

@@ -4,4 +4,6 @@ pub enum LibraryError {
     Io(String),
     #[error("LibraryError - Git: {0}")]
     Git(String),
+    #[error("LibraryError - Sqlx: {0}")]
+    Sqlx(#[from] sqlx::Error),
 }

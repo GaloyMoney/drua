@@ -155,7 +155,7 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::init(&config.library, &mut jobs)
+        let library = Library::init(&config.library, pool, embedder.clone(), &mut jobs)
             .await
             .map_err(|e| AppError::Library(e.to_string()))?;
 
@@ -193,7 +193,7 @@ impl App {
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
 
         // Notes: workspace-scoped knowledge base with hybrid RAG search.
-        let notes = Arc::new(Notes::new(pool, library.clone(), embedder));
+        let notes = Arc::new(Notes::new(pool, library.clone()));
         toolsets.register_top_level(StoreNote::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(SearchNotes::new(Arc::clone(&notes)));
         toolsets.register_top_level(ListNotes::new(Arc::clone(&notes)));
