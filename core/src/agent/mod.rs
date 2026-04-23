@@ -614,8 +614,29 @@ impl Agents {
 
         match session_response {
             session::AgentSessionResponse::PromptPending { .. } => {}
-            // Message queued — assistant or tools still in progress
-            _ => return Ok(rx),
+            other => {
+                // Session is not ready for a new prompt — thread is stuck in
+                // an assistant or tool-use turn. Send a Service event so the
+                // caller sees *something* instead of an empty stream.
+                let msg = match other {
+                    session::AgentSessionResponse::AwaitingToolUsageComplete => {
+                        "Message queued — session is waiting for tool results that will never arrive. Consider creating a new workspace."
+                    }
+                    session::AgentSessionResponse::AwaitingAssistantResponse => {
+                        "Message queued — session is waiting for an assistant response. Try again shortly."
+                    }
+                    _ => "Message queued — session is busy.",
+                };
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx_clone
+                        .send(ChatOutputEvent::Service {
+                            message: msg.to_string(),
+                        })
+                        .await;
+                });
+                return Ok(rx);
+            }
         }
 
         let _ = tx
