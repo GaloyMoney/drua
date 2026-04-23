@@ -277,6 +277,7 @@ type ToolResultContent {
 }
 
 type ToolResultEvent {
+	content: String
 	isError: Boolean!
 	name: String!
 }

@@ -53,6 +53,7 @@ pub struct ToolCallInputDeltaEvent {
 pub struct ToolResultEvent {
     pub name: String,
     pub is_error: bool,
+    pub content: Option<String>,
 }
 
 #[derive(SimpleObject)]
@@ -119,9 +120,15 @@ impl From<drua_core::primitives::ChatOutputEvent> for ChatStreamEvent {
             ChatOutputEvent::ToolCallInputDelta { partial_json } => {
                 Self::ToolCallInputDelta(ToolCallInputDeltaEvent { partial_json })
             }
-            ChatOutputEvent::ToolResult { name, is_error } => {
-                Self::ToolResult(ToolResultEvent { name, is_error })
-            }
+            ChatOutputEvent::ToolResult {
+                name,
+                is_error,
+                content,
+            } => Self::ToolResult(ToolResultEvent {
+                name,
+                is_error,
+                content,
+            }),
             ChatOutputEvent::AssistantDone {
                 turns,
                 input_tokens,

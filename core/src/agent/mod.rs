@@ -879,10 +879,21 @@ async fn fan_out_tool_calls(
     let outcomes = futures::future::join_all(dispatches).await;
     let mut results = Vec::with_capacity(outcomes.len());
     for (name, result) in outcomes {
+        // Truncate content to keep the stream lightweight.
+        const MAX_CONTENT_LEN: usize = 4096;
+        let content = if result.content.is_empty() {
+            None
+        } else if result.content.len() <= MAX_CONTENT_LEN {
+            Some(result.content.clone())
+        } else {
+            let truncated: String = result.content.chars().take(MAX_CONTENT_LEN).collect();
+            Some(truncated + "…")
+        };
         let _ = tx
             .send(ChatOutputEvent::ToolResult {
                 name,
                 is_error: result.is_error,
+                content,
             })
             .await;
         results.push(result);
