@@ -194,7 +194,7 @@ impl Notes {
         sub: &AuthSubject,
         workspace_id: WorkspaceId,
         limit: usize,
-    ) -> Result<Vec<SearchResult>, NoteError> {
+    ) -> Result<Vec<Note>, NoteError> {
         sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: limit,
@@ -208,17 +208,6 @@ impl Notes {
                 es_entity::ListDirection::Descending,
             )
             .await?;
-        Ok(result
-            .entities
-            .into_iter()
-            .map(|n| SearchResult {
-                doc_id: uuid::Uuid::from(n.id),
-                doc_type: DocType::Note,
-                title: n.title,
-                content: n.content,
-                tags: n.tags,
-                score: 0.0,
-            })
-            .collect())
+        Ok(result.entities)
     }
 }

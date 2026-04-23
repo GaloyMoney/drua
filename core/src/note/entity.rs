@@ -32,22 +32,27 @@ pub enum NoteEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Note {
     pub id: NoteId,
-    pub workspace_id: WorkspaceId,
+    pub(crate) workspace_id: WorkspaceId,
     #[builder(default)]
-    pub workspace_name: String,
-    pub title: String,
-    pub content: String,
+    pub(crate) workspace_name: String,
+    pub(crate) title: String,
+    pub(crate) content: String,
     #[builder(default)]
-    pub tags: Vec<String>,
+    pub(crate) tags: Vec<String>,
     #[builder(default)]
-    pub file_hash: Option<GitFileHash>,
+    pub(crate) file_hash: Option<GitFileHash>,
     #[builder(default)]
-    pub archived: bool,
+    pub(crate) archived: bool,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
 impl Note {
-    pub fn as_runtime_file(&self) -> crate::library::RuntimeFile {
+    /// Full document content (with frontmatter) as stored in the library.
+    pub fn content(&self) -> String {
+        self.as_runtime_file().content()
+    }
+
+    pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
         let created_at = self
             .events
             .entity_first_persisted_at()
@@ -90,6 +95,19 @@ impl Note {
         self.archived = true;
         self.events.push(NoteEvent::Archived {});
         Idempotent::Executed(())
+    }
+}
+
+impl From<Note> for crate::library::SearchResult {
+    fn from(n: Note) -> Self {
+        Self {
+            doc_id: uuid::Uuid::from(n.id),
+            doc_type: crate::library::DocType::Note,
+            title: n.title,
+            content: n.content,
+            tags: n.tags,
+            score: 0.0,
+        }
     }
 }
 

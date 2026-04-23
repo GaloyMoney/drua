@@ -4,6 +4,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::auth::AuthSubject;
+use crate::library::SearchResult;
 use crate::note::Notes;
 use crate::primitives::NoteId;
 use crate::workspace::Workspaces;
@@ -162,12 +163,11 @@ impl TopLevelTool for NotesTool {
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                let content = note.as_runtime_file().content();
-                Ok(CallToolResult::success(vec![Content::text(content)]))
+                Ok(CallToolResult::success(vec![Content::text(note.content())]))
             }
 
             NotesParams::Search { query, limit } => {
-                let results = self
+                let results: Vec<SearchResult> = self
                     .notes
                     .search(subject, workspace_id, &query, limit)
                     .await
@@ -191,18 +191,20 @@ impl TopLevelTool for NotesTool {
             }
 
             NotesParams::List { limit } => {
-                let results = self
+                let notes = self
                     .notes
                     .list(subject, workspace_id, limit)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                if results.is_empty() {
+                if notes.is_empty() {
                     return Ok(CallToolResult::success(vec![Content::text(
                         "No notes in this workspace yet.",
                     )]));
                 }
 
+                let results: Vec<SearchResult> =
+                    notes.into_iter().map(SearchResult::from).collect();
                 let text = results
                     .iter()
                     .map(|r| r.to_string())
