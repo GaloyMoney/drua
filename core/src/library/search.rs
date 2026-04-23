@@ -26,9 +26,13 @@ impl SearchStore {
         Self { pool: pool.clone() }
     }
 
-    /// Insert or update the search data row for a document.
-    #[tracing::instrument(name = "library.search_store.upsert", skip_all)]
-    pub async fn upsert(&self, fields: &SearchableFields) -> Result<(), LibraryError> {
+    /// Insert or update the search data row for a document within an atomic op.
+    #[tracing::instrument(name = "library.search_store.upsert_in_op", skip_all)]
+    pub async fn upsert_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        fields: &SearchableFields,
+    ) -> Result<(), LibraryError> {
         let tags_json = serde_json::to_value(&fields.tags).unwrap_or_default();
         let doc_type = fields.doc_type.as_str();
         sqlx::query(
@@ -45,7 +49,7 @@ impl SearchStore {
         .bind(&fields.title)
         .bind(&fields.body)
         .bind(&tags_json)
-        .execute(&self.pool)
+        .execute(op.as_executor())
         .await?;
         Ok(())
     }

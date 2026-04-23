@@ -64,9 +64,8 @@ impl Notes {
 
         let mut op = self.repo.begin_op().await?;
         let note = self.repo.create_in_op(&mut op, new_note).await?;
+        self.library.write_in_op(&mut op, &runtime_file).await?;
         op.commit().await?;
-
-        self.library.write(runtime_file).await?;
 
         Ok(note)
     }
@@ -116,9 +115,8 @@ impl Notes {
 
         let mut op = self.repo.begin_op().await?;
         self.repo.update_in_op(&mut op, &mut note).await?;
+        self.library.write_in_op(&mut op, &runtime_file).await?;
         op.commit().await?;
-
-        self.library.write(runtime_file).await?;
 
         Ok(note)
     }

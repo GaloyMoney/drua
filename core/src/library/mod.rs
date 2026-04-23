@@ -66,12 +66,20 @@ impl Library {
         })
     }
 
-    #[tracing::instrument(name = "library.write", skip(self, file))]
-    pub async fn write(&self, file: RuntimeFile) -> Result<(), LibraryError> {
+    /// Upsert search data within the transaction, then write file to disk,
+    /// git-commit, and fire-and-forget embedding.
+    #[tracing::instrument(name = "library.write_in_op", skip_all)]
+    pub async fn write_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        file: &RuntimeFile,
+    ) -> Result<(), LibraryError> {
+        let fields = file.searchable_fields();
+        self.search.upsert_in_op(op, &fields).await?;
+
         let relative_path = file.relative_path();
         let content = file.content();
         let commit_message = file.commit_message();
-        let fields = file.searchable_fields();
 
         let full_path = self.upstream.repo_path().join(&relative_path);
         if let Some(parent) = full_path.parent() {
@@ -87,11 +95,6 @@ impl Library {
         self.upstream
             .add_and_commit(&relative_path, &commit_message)
             .await?;
-
-        // Search upsert is non-fatal — log and continue.
-        if let Err(e) = self.search.upsert(&fields).await {
-            tracing::error!(error = %e, "search upsert failed");
-        }
 
         self.spawn_embed(&fields);
 
