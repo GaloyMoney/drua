@@ -124,7 +124,6 @@ impl RuntimeFile {
         match self {
             RuntimeFile::Note {
                 doc_id,
-                workspace_id,
                 title,
                 body,
                 tags,
@@ -136,10 +135,12 @@ impl RuntimeFile {
                     .map(|t| format!("\"{}\"", t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(
-                    "---\nid: {}\nworkspace: {}\ntags: [{}]\ncreated: {}\n---\n\n# {}\n\n{}\n",
-                    doc_id, workspace_id, tags_str, created_at, title, body
-                )
+                let mut front = format!("---\nid: {}\ntags: [{}]", doc_id, tags_str);
+                if !created_at.is_empty() {
+                    front.push_str(&format!("\ncreated: {}", created_at));
+                }
+                front.push_str("\n---");
+                format!("{front}\n\n# {title}\n\n{body}\n")
             }
         }
     }
