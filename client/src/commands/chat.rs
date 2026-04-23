@@ -143,7 +143,11 @@ fn fmt_tokens(n: u32) -> String {
 enum StreamEvent {
     Delta(String),
     ToolStart(String),
-    ToolResult { name: String, is_error: bool },
+    ToolResult {
+        name: String,
+        is_error: bool,
+        content: Option<String>,
+    },
     Service(String),
     Error(String),
     Done(UsageInfo),
@@ -178,7 +182,15 @@ fn parse_stream_event(event: &serde_json::Value) -> Option<StreamEvent> {
                 .get("isError")
                 .and_then(|e| e.as_bool())
                 .unwrap_or(false);
-            Some(StreamEvent::ToolResult { name, is_error })
+            let content = event
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            Some(StreamEvent::ToolResult {
+                name,
+                is_error,
+                content,
+            })
         }
         "ServiceEvent" => {
             let msg = event.get("message")?.as_str()?;
@@ -258,9 +270,26 @@ async fn stream_response(base_url: &str, token: &str, agent_id: &str, prompt: &s
                         if needs_newline { println!(); needs_newline = false; }
                         println!("\x1b[2m[tool] calling {name}...\x1b[0m");
                     }
-                    StreamEvent::ToolResult { name, is_error } => {
+                    StreamEvent::ToolResult {
+                        name,
+                        is_error,
+                        content,
+                    } => {
                         let status = if is_error { "error" } else { "done" };
-                        println!("\x1b[2m[tool] {name} {status}\x1b[0m");
+                        let preview = content
+                            .as_deref()
+                            .map(|c| {
+                                let line = c.lines().next().unwrap_or("");
+                                if line.len() > 120 {
+                                    format!(" → {}…", &line[..120])
+                                } else if !line.is_empty() {
+                                    format!(" → {line}")
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .unwrap_or_default();
+                        println!("\x1b[2m[tool] {name} {status}{preview}\x1b[0m");
                     }
                     StreamEvent::Service(msg) => {
                         if needs_newline { println!(); needs_newline = false; }
