@@ -44,3 +44,8 @@ integration-tests: reset-deps
 
 start: reset-deps
 	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
+
+.PHONY: dev
+dev:
+	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
+
