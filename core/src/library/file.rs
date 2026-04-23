@@ -135,12 +135,10 @@ impl RuntimeFile {
                     .map(|t| format!("\"{}\"", t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let mut front = format!("---\nid: {}\ntags: [{}]", doc_id, tags_str);
-                if !created_at.is_empty() {
-                    front.push_str(&format!("\ncreated: {}", created_at));
-                }
-                front.push_str("\n---");
-                format!("{front}\n\n# {title}\n\n{body}\n")
+                format!(
+                    "---\nid: {}\ntags: [{}]\ncreated: {}\n---\n\n# {}\n\n{}\n",
+                    doc_id, tags_str, created_at, title, body
+                )
             }
         }
     }

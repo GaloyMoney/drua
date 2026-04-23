@@ -40,7 +40,10 @@ impl Notes {
     ) -> Result<Note, NoteError> {
         sub.can(AuthVerb::Create, AuthResource::Note(workspace_id, None))?;
 
+        let mut op = self.repo.begin_op().await?.with_db_time().await?;
+
         let note_id = NoteId::new();
+        let created_at = op.now().to_rfc3339();
         let runtime_file = RuntimeFile::for_note(
             note_id,
             workspace_id,
@@ -48,7 +51,7 @@ impl Notes {
             &title,
             &content,
             &tags,
-            "",
+            &created_at,
         );
         let file_hash = runtime_file.file_hash();
 
@@ -63,7 +66,6 @@ impl Notes {
             .build()
             .expect("NewNote builder should not fail");
 
-        let mut op = self.repo.begin_op().await?;
         let note = self.repo.create_in_op(&mut op, new_note).await?;
         self.library.write_in_op(&mut op, &runtime_file).await?;
         op.commit().await?;
