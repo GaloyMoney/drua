@@ -103,7 +103,7 @@ static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceLog {
     fn name(&self) -> &str {
-        "query_workspace_audit_log"
+        "log"
     }
 
     fn description(&self) -> &str {

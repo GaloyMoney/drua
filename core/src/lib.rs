@@ -30,9 +30,7 @@ use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets,
-    ToolSetsError, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate, WorkspaceAgentDetachSandbox,
-    WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceInspectSandbox, WorkspaceListAgents,
-    WorkspaceListSandboxes, WorkspaceLog,
+    ToolSetsError, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -169,23 +167,12 @@ impl App {
             Arc::clone(&skills),
         ));
 
-        // Register workspace-scoped management tools now that both services
-        // are available. Uses interior-mutable `register_top_level` so the
-        // already-Arc'd toolsets can be extended.
-        toolsets.register_top_level(WorkspaceAgentCreate::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceAgentAttachSandbox::new(
+        // Register consolidated workspace-scoped management tools.
+        toolsets.register_top_level(WorkspaceAgent::new(
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
         ));
-        toolsets.register_top_level(WorkspaceAgentDetachSandbox::new(
-            Arc::clone(&agents),
-            Arc::clone(&sandboxes),
-        ));
-        toolsets.register_top_level(WorkspaceListAgents::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceCreateSandbox::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(WorkspaceListSandboxes::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(WorkspaceGetSandbox::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(WorkspaceInspectSandbox::new(Arc::clone(&sandboxes)));
+        toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
 

@@ -89,7 +89,6 @@ mod bash;
 mod catalog;
 mod glob;
 mod grep;
-mod inspect;
 mod log;
 mod ls;
 mod read;
@@ -97,18 +96,14 @@ mod sandbox;
 mod text_editor;
 mod whoami;
 
-pub use agent::{
-    WorkspaceAgentAttachSandbox, WorkspaceAgentCreate, WorkspaceAgentDetachSandbox,
-    WorkspaceListAgents,
-};
+pub use agent::WorkspaceAgent;
 pub use bash::Bash;
 pub use catalog::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
 pub use glob::GlobTool;
 pub use grep::Grep;
-pub use inspect::WorkspaceInspectSandbox;
 pub use log::WorkspaceLog;
 pub use ls::Ls;
 pub use read::Read;
-pub use sandbox::{WorkspaceCreateSandbox, WorkspaceGetSandbox, WorkspaceListSandboxes};
+pub use sandbox::WorkspaceSandbox;
 pub use text_editor::TextEditor;
 pub use whoami::WhoAmI;

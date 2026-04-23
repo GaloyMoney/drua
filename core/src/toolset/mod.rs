@@ -11,9 +11,7 @@ pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
     Bash, CallCatalogTool, DescribeCatalogTool, GlobTool, Grep, Ls, Read, SearchCatalog,
-    TextEditor, WhoAmI, WorkspaceAgentAttachSandbox, WorkspaceAgentCreate,
-    WorkspaceAgentDetachSandbox, WorkspaceCreateSandbox, WorkspaceGetSandbox,
-    WorkspaceInspectSandbox, WorkspaceListAgents, WorkspaceListSandboxes, WorkspaceLog,
+    TextEditor, WhoAmI, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 pub use traits::*;
 
