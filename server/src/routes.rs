@@ -538,6 +538,8 @@ fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
         name: ws.name.clone(),
         description: ws.description.clone().unwrap_or_default(),
         created_at: ws.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+        keybase_team: ws.keybase_team.clone().unwrap_or_default(),
+        keybase_channel: ws.keybase_channel.clone().unwrap_or_default(),
     }
 }
 
@@ -600,6 +602,8 @@ async fn workspace_new(session: Session) -> Response {
 pub struct WorkspaceForm {
     name: String,
     description: Option<String>,
+    keybase_team: Option<String>,
+    keybase_channel: Option<String>,
 }
 
 #[instrument(name = "web.workspace_create", skip_all)]
@@ -672,18 +676,29 @@ async fn workspace_update(
     let sub = AuthSubject::User(user_id);
     let workspace_id = domain::primitives::WorkspaceId::from(id);
     let description = form.description.filter(|d| !d.is_empty());
-    match state
+    if let Err(e) = state
         .app
         .workspaces()
         .update(&sub, workspace_id, &form.name, description)
         .await
     {
-        Ok(_) => Redirect::to(&format!("/workspaces/{id}")).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to update workspace");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        tracing::error!(error = %e, "Failed to update workspace");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+
+    let keybase_team = form.keybase_team.filter(|s| !s.is_empty());
+    let keybase_channel = form.keybase_channel.filter(|s| !s.is_empty());
+    if let Err(e) = state
+        .app
+        .workspaces()
+        .update_keybase_config(&sub, workspace_id, keybase_team, keybase_channel)
+        .await
+    {
+        tracing::error!(error = %e, "Failed to update workspace keybase config");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Redirect::to(&format!("/workspaces/{id}")).into_response()
 }
 
 #[instrument(name = "web.workspace_delete", skip_all)]

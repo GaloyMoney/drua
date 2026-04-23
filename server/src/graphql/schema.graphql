@@ -81,6 +81,7 @@ type Mutation {
 	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
 	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
 	workspaceUpdate(input: WorkspaceUpdateInput!): WorkspaceUpdatePayload!
+	workspaceUpdateKeybaseConfig(input: WorkspaceUpdateKeybaseConfigInput!): WorkspaceUpdateKeybaseConfigPayload!
 }
 
 """
@@ -300,6 +301,8 @@ type Workspace {
 	createdAt: Timestamp!
 	description: String
 	id: WorkspaceId!
+	keybaseChannel: String
+	keybaseTeam: String
 	"""
 	The workspace lead agent.
 	"""
@@ -359,6 +362,16 @@ input WorkspaceUpdateInput {
 	description: String
 	id: WorkspaceId!
 	name: String!
+}
+
+input WorkspaceUpdateKeybaseConfigInput {
+	id: WorkspaceId!
+	keybaseChannel: String
+	keybaseTeam: String
+}
+
+type WorkspaceUpdateKeybaseConfigPayload {
+	workspace: Workspace!
 }
 
 type WorkspaceUpdatePayload {

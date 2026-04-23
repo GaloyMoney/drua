@@ -13,6 +13,8 @@ pub struct Workspace {
     id: WorkspaceId,
     name: String,
     description: Option<String>,
+    keybase_team: Option<String>,
+    keybase_channel: Option<String>,
 
     #[graphql(skip)]
     pub(super) entity: Arc<DomainWorkspace>,
@@ -50,6 +52,8 @@ impl From<DomainWorkspace> for Workspace {
             id: entity.id,
             name: entity.name.clone(),
             description: entity.description.clone(),
+            keybase_team: entity.keybase_team.clone(),
+            keybase_channel: entity.keybase_channel.clone(),
             entity: Arc::new(entity),
         }
     }
@@ -78,3 +82,12 @@ pub struct WorkspaceDeleteInput {
 }
 
 mutation_payload! { WorkspaceDeletePayload, workspace: Workspace }
+
+#[derive(InputObject)]
+pub struct WorkspaceUpdateKeybaseConfigInput {
+    pub id: WorkspaceId,
+    pub keybase_team: Option<String>,
+    pub keybase_channel: Option<String>,
+}
+
+mutation_payload! { WorkspaceUpdateKeybaseConfigPayload, workspace: Workspace }

@@ -114,6 +114,8 @@ pub struct WorkspaceView {
     pub name: String,
     pub description: String,
     pub created_at: String,
+    pub keybase_team: String,
+    pub keybase_channel: String,
 }
 
 #[derive(Template, WebTemplate)]

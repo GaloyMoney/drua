@@ -109,6 +109,20 @@
     Description
     <textarea name="description" rows="3">{{ workspace.description }}</textarea>
   </label>
+
+  <fieldset>
+    <legend>Keybase Integration</legend>
+    <p><small>Connect this workspace to a Keybase team channel. Messages in the channel will be forwarded to the workspace lead agent.</small></p>
+    <label>
+      Team
+      <input type="text" name="keybase_team" placeholder="e.g. mycompany" value="{{ workspace.keybase_team }}">
+    </label>
+    <label>
+      Channel
+      <input type="text" name="keybase_channel" placeholder="e.g. workspace-bot" value="{{ workspace.keybase_channel }}">
+    </label>
+  </fieldset>
+
   <div style="display: flex; gap: 1rem;">
     <button type="submit">Save Changes</button>
     <a href="/workspaces/{{ workspace.id }}/chat" role="button" class="outline">Back to Chat</a>

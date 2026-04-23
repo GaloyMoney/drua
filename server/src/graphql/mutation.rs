@@ -46,4 +46,19 @@ impl Mutation {
         let ws = app.workspaces().delete(sub, input.id).await?;
         Ok(WorkspaceDeletePayload::from(Workspace::from(ws)))
     }
+
+    async fn workspace_update_keybase_config(
+        &self,
+        ctx: &Context<'_>,
+        input: WorkspaceUpdateKeybaseConfigInput,
+    ) -> async_graphql::Result<WorkspaceUpdateKeybaseConfigPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let ws = app
+            .workspaces()
+            .update_keybase_config(sub, input.id, input.keybase_team, input.keybase_channel)
+            .await?;
+        Ok(WorkspaceUpdateKeybaseConfigPayload::from(Workspace::from(
+            ws,
+        )))
+    }
 }
