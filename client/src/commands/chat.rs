@@ -307,9 +307,10 @@ pub async fn run(server: Option<String>, agent_id: Option<String>) -> Result<()>
 
         let line = tokio::select! {
             result = lines.next_line() => {
-                match result? {
-                    Some(line) => line,
-                    None => break, // EOF
+                match result {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,        // EOF
+                    Err(_) => break,           // stdin error (e.g. EINTR from Ctrl-C)
                 }
             }
             _ = tokio::signal::ctrl_c() => {
