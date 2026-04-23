@@ -829,7 +829,9 @@ async fn consume_stream(
 fn delta_to_chat_event(delta: &llm::stream::StreamDelta) -> Option<ChatOutputEvent> {
     use llm::stream::StreamDelta;
     match delta {
-        StreamDelta::TextDelta { text } => Some(ChatOutputEvent::AssistantTextDelta { text: text.clone() }),
+        StreamDelta::TextDelta { text } => {
+            Some(ChatOutputEvent::AssistantTextDelta { text: text.clone() })
+        }
         StreamDelta::ThinkingDelta { text } => {
             Some(ChatOutputEvent::ThinkingDelta { text: text.clone() })
         }
