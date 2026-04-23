@@ -173,6 +173,10 @@ impl App {
         toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
+        // Notes service created before Agents so pinned notes can be
+        // injected into agent system prompts at creation time.
+        let notes = Arc::new(Notes::new(pool, library.clone()));
+
         let agents = Arc::new(Agents::new(
             pool,
             config.agents,
@@ -180,6 +184,7 @@ impl App {
             prompt_tx,
             Arc::clone(&sandboxes),
             Arc::clone(&skills),
+            Some(Arc::clone(&notes)),
         ));
 
         // Register consolidated workspace-scoped management tools.
@@ -190,9 +195,6 @@ impl App {
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
-
-        // Notes: workspace-scoped knowledge base with hybrid RAG search.
-        let notes = Arc::new(Notes::new(pool, library.clone()));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
 
         // Admin tools live behind progressive disclosure (search_tools →

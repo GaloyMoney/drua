@@ -1,7 +1,12 @@
 use super::repo::{NoteCreateError, NoteFindError, NoteModifyError, NoteQueryError};
 
+/// Maximum allowed length for note content in characters.
+pub const MAX_NOTE_CONTENT_LEN: usize = 4000;
+
 #[derive(thiserror::Error, Debug)]
 pub enum NoteError {
+    #[error("NoteError - ContentTooLarge: content is {0} chars, max {MAX_NOTE_CONTENT_LEN}")]
+    ContentTooLarge(usize),
     #[error("NoteError - Create: {0}")]
     Create(#[from] NoteCreateError),
     #[error("NoteError - Modify: {0}")]

@@ -38,6 +38,9 @@ impl Notes {
         content: String,
         tags: Vec<String>,
     ) -> Result<Note, NoteError> {
+        if content.len() > MAX_NOTE_CONTENT_LEN {
+            return Err(NoteError::ContentTooLarge(content.len()));
+        }
         sub.can(AuthVerb::Create, AuthResource::Note(workspace_id, None))?;
 
         let mut op = self.repo.begin_op().await?.with_db_time().await?;
@@ -85,6 +88,9 @@ impl Notes {
         content: String,
         tags: Vec<String>,
     ) -> Result<Note, NoteError> {
+        if content.len() > MAX_NOTE_CONTENT_LEN {
+            return Err(NoteError::ContentTooLarge(content.len()));
+        }
         let mut note = self.repo.find_by_id(note_id).await?;
         if note.workspace_id != workspace_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
@@ -285,5 +291,74 @@ impl Notes {
             )
             .await?;
         Ok(result.entities)
+    }
+
+    /// Maximum total characters of pinned note content to inject into an
+    /// agent's system prompt. Notes are included most-recently-updated-first;
+    /// once this budget is exhausted, remaining pinned notes are omitted with
+    /// a hint to use the `notes search` tool.
+    const PINNED_INJECTION_BUDGET: usize = 8000;
+
+    /// Build formatted pinned-notes content for system prompt injection.
+    /// Returns `None` if no pinned notes exist for the workspace.
+    /// This is an internal method (no auth check) — called at agent creation.
+    #[instrument(name = "note.pinned_context_for_workspace", skip(self))]
+    pub async fn pinned_context_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<String>, NoteError> {
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                workspace_id,
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+
+        let mut pinned: Vec<&Note> = result.entities.iter().filter(|n| n.pinned).collect();
+        if pinned.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort by most-recently-updated first (events timestamp).
+        pinned.sort_by(|a, b| {
+            let a_ts = a.events.entity_last_modified_at();
+            let b_ts = b.events.entity_last_modified_at();
+            b_ts.cmp(&a_ts)
+        });
+
+        let mut buf = String::from("# Workspace Notes (pinned)\n\n\
+            The following notes are pinned to this workspace. \
+            Use the `notes` tool with command `search` to find additional notes.\n");
+        let mut remaining = Self::PINNED_INJECTION_BUDGET;
+        let mut included = 0;
+        let total = pinned.len();
+
+        for note in &pinned {
+            let entry = format!(
+                "\n## {}\n{}\n",
+                note.title, note.content,
+            );
+            if entry.len() > remaining {
+                break;
+            }
+            buf.push_str(&entry);
+            remaining -= entry.len();
+            included += 1;
+        }
+
+        if included < total {
+            buf.push_str(&format!(
+                "\n({} more pinned note(s) omitted — use `notes search` to find them)\n",
+                total - included,
+            ));
+        }
+
+        Ok(Some(buf))
     }
 }
