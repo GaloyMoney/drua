@@ -137,12 +137,8 @@ pub struct ServerConfig {
     pub tunnel: TunnelConfig,
 }
 
-/// Tunnel-deployment public keys, keyed by `deployment_id`. Value is a
-/// base64 (URL-safe, no padding) 32-byte Ed25519 public key. The
-/// matching private key lives only on the deployment side (Terraform
-/// provisions both halves in lockstep). Config-driven rather than
-/// DB-driven — deployment identity is infrastructure, not user content,
-/// and Terraform is the single source of truth for the keypair.
+/// `deployment_id` → PEM Ed25519 public key. Config-driven; keypairs
+/// live in Terraform.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelConfig {

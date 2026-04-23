@@ -1,21 +1,6 @@
-//! Tunnel connector — runs in a target cluster and relays MCP tool calls
-//! from drua to local MCP servers over an outbound WebSocket.
-//!
-//! # Usage
-//!
-//! ```text
-//! tunnel-connector \
-//!   --server-url wss://dashboard.agents.galoy.io/tunnel/ws \
-//!   --private-key-file /var/run/secrets/tunnel/private_key.pem \
-//!   --deployment-id galoy-staging \
-//!   --upstreams "kubernetes=http://k8s-mcp:8080/mcp,postgres=http://pg-mcp:8000/mcp"
-//! ```
-//!
-//! The connector discovers tools from each upstream MCP server at
-//! startup, signs an Ed25519 handshake header identifying itself as
-//! `deployment_id`, connects to drua, registers the tool catalog, and
-//! enters a relay loop. On disconnect it reconnects with exponential
-//! backoff + jitter.
+//! Tunnel connector — runs in a target cluster, discovers MCP tools
+//! locally, dials out to drua over WSS with an Ed25519-signed handshake,
+//! relays tool calls. Reconnects with exponential backoff + jitter.
 
 use std::collections::HashMap;
 
@@ -118,24 +103,15 @@ fn parse_upstreams(raw: &str) -> Vec<UpstreamConfig> {
         .collect()
 }
 
-/// Load an Ed25519 signing key from a PKCS#8 PEM file. The companion
-/// `tls_private_key` resource in galoy-deployments emits this exact
-/// shape, so no custom format handling is needed here.
 fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
-    let pem = std::fs::read_to_string(path).map_err(|e| {
-        anyhow::anyhow!(
-            "tunnel-connector: reading private key from {}: {e}",
-            path.display()
-        )
-    })?;
-    SigningKey::from_pkcs8_pem(&pem).map_err(|e| {
-        anyhow::anyhow!("tunnel-connector: private key is not PKCS#8 Ed25519 PEM: {e}")
-    })
+    let pem = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("reading private key from {}: {e}", path.display()))?;
+    SigningKey::from_pkcs8_pem(&pem)
+        .map_err(|e| anyhow::anyhow!("private key is not PKCS#8 Ed25519 PEM: {e}"))
 }
 
-/// Build the `Authorization: Tunnel <deployment_id>:<ts_ms>:<sig>` value
-/// drua's handshake verifier expects. Fresh timestamp on every call, so
-/// a reconnect after the replay window cannot reuse a previous header.
+/// `Authorization: Tunnel <deployment_id>:<ts_ms>:<sig>`. Fresh ts per
+/// call so a stolen header can't outlive drua's replay window.
 fn sign_handshake(deployment_id: &str, signing_key: &SigningKey) -> String {
     let ts_ms = chrono::Utc::now().timestamp_millis();
     let payload = format!("{deployment_id}|{ts_ms}");
@@ -148,10 +124,8 @@ fn sign_handshake(deployment_id: &str, signing_key: &SigningKey) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
-// Reconnect backoff: start at 1s and double up to 60s between attempts,
-// with ±jitter_ms of random jitter added on top so a fleet of connectors
-// reconnecting simultaneously after a central drua rollout doesn't
-// resonate into a thundering herd.
+// Exp backoff with jitter so a fleet of connectors doesn't resonate on
+// simultaneous drua rollout.
 const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
 const JITTER_MS_MAX: u64 = 1_000;

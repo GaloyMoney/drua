@@ -28,6 +28,8 @@ galoyAgents:
       host: "0.0.0.0"
       secureCookies: true
       mcpEndpoint: ""
+      tunnel:
+        deployments: {}
     oauth:
       githubClientId: ""
       githubRedirectUri: ""

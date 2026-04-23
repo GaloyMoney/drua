@@ -154,6 +154,7 @@ jobs:
         LINGO_API_KEY: #@ data.values.lingo_api_key
         ANTHROPIC_API_KEY: #@ data.values.deploy_anthropic_api_key
         GITHUB_APP_PRIVATE_KEY: #@ data.values.deploy_github_app_private_key
+        TUNNEL_DEPLOYMENTS_PUBLIC_KEYS: #@ data.values.tunnel_deployments_public_keys
       run:
         path: sh
         args:
@@ -182,6 +183,7 @@ jobs:
 
             printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json
             printf '%s' "$GITHUB_APP_PRIVATE_KEY" | base64 -d > deployment/tf/github-app-private-key.pem
+            printf '%s' "$TUNNEL_DEPLOYMENTS_PUBLIC_KEYS" > deployment/tf/tunnel-deployments-public-keys.json
             set -x
             echo "Deployment files prepared"
   - put: tf-galoy-agents-prod

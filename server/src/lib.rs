@@ -21,11 +21,7 @@ use auth::sa_token::SaTokenValidator;
 use auth::session_store::PgSessionStore;
 use domain::code_assistant::CodeAssistant;
 
-/// Pre-parsed tunnel-deployment public keys, keyed by `deployment_id`.
-/// Built once at app init from `config.server.tunnel.deployments`; the
-/// `/tunnel/ws` handshake verifier looks up by `deployment_id` and
-/// calls `VerifyingKey::verify(...)` at each upgrade. Wrapped in an
-/// `Arc` for cheap `Clone` in `AppState`.
+/// Parsed once at boot from `config.server.tunnel.deployments`.
 pub type TunnelPublicKeys = Arc<HashMap<String, ed25519_dalek::VerifyingKey>>;
 
 /// Unified application state shared by all routes and middleware.
@@ -178,8 +174,6 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
 
     let app_config_yaml: graphql::Yaml = serde_yaml::to_string(&config)?.into();
 
-    // Parse tunnel-deployment public keys up-front so a bad config
-    // fails at boot (loud), not at first handshake (silent).
     let tunnel_public_keys = tunnel::parse_configured_keys(&config.server.tunnel)?;
     if !tunnel_public_keys.is_empty() {
         tracing::info!(

@@ -1,16 +1,6 @@
-//! WebSocket endpoint for tunnel connections from deployment connectors.
-//!
-//! The connector in a target cluster dials out to `/tunnel/ws` carrying
-//! a signed `Authorization: Tunnel …` header (see [`verify_handshake`]).
-//! drua looks up the corresponding `TunnelDeployment` public key in
-//! config-driven state, verifies the Ed25519 signature over a fresh
-//! timestamp, and only then upgrades the socket and enters the relay
-//! loop.
-//!
-//! Intentionally decoupled from [`crate::auth`]: this endpoint is **not**
-//! routed through `auth_middleware`, and a connector's identity is
-//! **not** carried by any MCP credential. A deployment is its own
-//! first-class principal — see `config.server.tunnel.deployments`.
+//! `/tunnel/ws` — signed-handshake auth, then relay. Does not flow
+//! through `auth_middleware`; identity is a `deployment_id` verified
+//! via [`verify_handshake`] against `config.server.tunnel.deployments`.
 
 use std::collections::HashMap;
 
@@ -34,16 +24,11 @@ use domain::tunnel::{TunnelHandle, TunnelMessage, TunnelToolSet};
 use crate::config::TunnelConfig;
 use crate::AppState;
 
-/// Max clock skew between connector and drua on the handshake timestamp.
-/// Anything outside this window is rejected as a replay / stale signature.
+/// Replay-window for the handshake timestamp, in either direction.
 const HANDSHAKE_MAX_SKEW_MS: i64 = 60_000;
 
-/// Parse the `TunnelConfig.deployments` map from config (PEM-encoded
-/// `SubjectPublicKeyInfo` strings, exactly what `tls_private_key`
-/// resources emit in galoy-deployments) into pre-verified
-/// [`VerifyingKey`]s. Done once at boot so the handshake hot path does
-/// no parsing work per request. Fails loudly on any malformed entry —
-/// better than silently rejecting that deployment's handshakes forever.
+/// Decode every config entry to a [`VerifyingKey`] at boot; fail loudly
+/// on any bad entry rather than silently rejecting its handshakes.
 pub fn parse_configured_keys(cfg: &TunnelConfig) -> anyhow::Result<HashMap<String, VerifyingKey>> {
     let mut out = HashMap::with_capacity(cfg.deployments.len());
     for (deployment_id, pem) in &cfg.deployments {
@@ -55,33 +40,16 @@ pub fn parse_configured_keys(cfg: &TunnelConfig) -> anyhow::Result<HashMap<Strin
     Ok(out)
 }
 
-/// Outcome of validating the tunnel handshake header.
-///
-/// On success carries only the verified `deployment_id` — that's the
-/// entire identity a connector has on drua's side. There is no scope
-/// list, no user, no agent; the downstream relay code takes
-/// `deployment_id` as the sole authorization input.
 #[derive(Debug)]
 pub enum HandshakeOutcome {
     Verified { deployment_id: String },
     Rejected { reason: &'static str },
 }
 
-/// Verify a tunnel handshake header against the configured public keys.
-///
-/// Header grammar:
-///
-/// ```text
-/// Authorization: Tunnel <deployment_id>:<timestamp_ms>:<base64_signature>
-/// ```
-///
-/// where `signature = Ed25519.sign(private_key, deployment_id || "|" || timestamp_ms)`.
-///
-/// Rejects if the header is malformed, the `deployment_id` is unknown,
-/// the timestamp is outside [`HANDSHAKE_MAX_SKEW_MS`], or the signature
-/// doesn't verify. The rejection reason is intentionally coarse ("bad
-/// signature", "unknown deployment", …) — a detailed error would leak
-/// information useful for probing.
+/// Parse `Authorization: Tunnel <deployment_id>:<ts_ms>:<sig_b64>` and
+/// verify the Ed25519 signature (over `deployment_id || "|" || ts_ms`)
+/// against the configured key for `deployment_id`. Rejection reasons
+/// are deliberately coarse to avoid leaking probe-useful info.
 pub fn verify_handshake(
     headers: &HeaderMap,
     public_keys: &HashMap<String, VerifyingKey>,
@@ -107,11 +75,9 @@ pub fn verify_handshake(
         }
     };
 
-    // `deployment_id:timestamp_ms:signature`. Split from the right so
-    // a (future) deployment_id that accidentally contains a colon
-    // still parses — the signature is base64 (no colons) and the
-    // timestamp is ascii digits (no colons), so the two rightmost
-    // colons are unambiguous.
+    // Split from the right: signature and ts contain no colons, so
+    // the two rightmost colons are unambiguous even if a deployment_id
+    // ever contains one.
     let (ts_and_id, signature_b64) = match rest.rsplit_once(':') {
         Some(pair) => pair,
         None => {
@@ -183,11 +149,6 @@ pub fn verify_handshake(
     }
 }
 
-/// HTTP handler — verifies handshake, then upgrades to WebSocket.
-///
-/// This route does **not** flow through `auth_middleware` (see
-/// [`crate::routes::api_router`]); the handshake verifier is the only
-/// auth layer for this endpoint.
 #[instrument(name = "web.tunnel.ws", skip_all)]
 pub async fn tunnel_ws_handler(
     ws: WebSocketUpgrade,
@@ -205,15 +166,10 @@ pub async fn tunnel_ws_handler(
     ws.on_upgrade(move |socket| handle_tunnel(socket, state, deployment_id))
 }
 
-/// Main tunnel lifecycle: read register frame → relay loop → cleanup.
-/// `deployment_id` here is the one the handshake verifier returned —
-/// the connector cannot spoof a different one via the register frame
-/// because we ignore `deployment_id` from that frame entirely.
+/// `deployment_id` comes from the already-verified handshake; any
+/// `deployment_id` field in the register frame is ignored.
 async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: String) {
     // ── 1. Read register frame ────────────────────────────────────────────
-    // The handshake already verified *who* the connector is. The register
-    // frame just advertises the catalog; any `deployment_id` the frame
-    // carries is informational only.
     let toolset_registrations = match read_registration(&mut socket).await {
         Some(r) => r,
         None => return,
