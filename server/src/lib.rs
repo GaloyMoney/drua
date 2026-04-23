@@ -7,6 +7,9 @@ mod templates;
 pub mod tracing_init;
 pub mod tunnel;
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use axum::Router;
 
 use drua_core as domain;
@@ -17,6 +20,13 @@ use auth::config::{LoginMethod, OAuthClient};
 use auth::sa_token::SaTokenValidator;
 use auth::session_store::PgSessionStore;
 use domain::code_assistant::CodeAssistant;
+
+/// Pre-parsed tunnel-deployment public keys, keyed by `deployment_id`.
+/// Built once at app init from `config.server.tunnel.deployments`; the
+/// `/tunnel/ws` handshake verifier looks up by `deployment_id` and
+/// calls `VerifyingKey::verify(...)` at each upgrade. Wrapped in an
+/// `Arc` for cheap `Clone` in `AppState`.
+pub type TunnelPublicKeys = Arc<HashMap<String, ed25519_dalek::VerifyingKey>>;
 
 /// Unified application state shared by all routes and middleware.
 #[derive(Clone)]
@@ -33,6 +43,8 @@ pub struct AppState {
     pub sa_token_validator: Option<SaTokenValidator>,
     /// Postgres-backed session store shared with the session layer.
     pub session_store: PgSessionStore,
+    /// Parsed tunnel-deployment public keys. See [`TunnelPublicKeys`].
+    pub tunnel_public_keys: TunnelPublicKeys,
 }
 
 impl AppState {
@@ -44,6 +56,7 @@ impl AppState {
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
         app_config_yaml: graphql::Yaml,
+        tunnel_public_keys: TunnelPublicKeys,
     ) -> Self {
         let code_assistant = app.code_assistant().cloned();
         Self {
@@ -56,6 +69,7 @@ impl AppState {
             app_config_yaml,
             sa_token_validator: None,
             session_store: PgSessionStore::new(pool),
+            tunnel_public_keys,
         }
     }
 
@@ -163,6 +177,16 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
 
     let app_config_yaml: graphql::Yaml = serde_yaml::to_string(&config)?.into();
 
+    // Parse tunnel-deployment public keys up-front so a bad config
+    // fails at boot (loud), not at first handshake (silent).
+    let tunnel_public_keys = tunnel::parse_configured_keys(&config.server.tunnel)?;
+    if !tunnel_public_keys.is_empty() {
+        tracing::info!(
+            count = tunnel_public_keys.len(),
+            "tunnel deployments registered"
+        );
+    }
+
     let mut app_state = AppState::new(
         &pool,
         app,
@@ -171,6 +195,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
         app_config_yaml,
+        std::sync::Arc::new(tunnel_public_keys),
     );
 
     if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await {

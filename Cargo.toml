@@ -88,6 +88,12 @@ uuid = { version = "1", features = ["v4"] }
 # Encoding
 base64 = "0.22"
 
+# Cryptography
+# pkcs8+pem: load Ed25519 keys out of PEM files (connector reads its
+# private key from a PEM mount; drua parses public keys from config).
+# rand_core: enables SigningKey::generate (used in server tunnel tests).
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+
 # Hashing
 sha2 = "0.10"
 

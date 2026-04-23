@@ -133,6 +133,21 @@ pub struct ServerConfig {
     pub secure_cookies: bool,
     #[serde(default = "default_mcp_endpoint")]
     pub mcp_endpoint: String,
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
+}
+
+/// Tunnel-deployment public keys, keyed by `deployment_id`. Value is a
+/// base64 (URL-safe, no padding) 32-byte Ed25519 public key. The
+/// matching private key lives only on the deployment side (Terraform
+/// provisions both halves in lockstep). Config-driven rather than
+/// DB-driven — deployment identity is infrastructure, not user content,
+/// and Terraform is the single source of truth for the keypair.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelConfig {
+    #[serde(default)]
+    pub deployments: std::collections::BTreeMap<String, String>,
 }
 
 fn default_port() -> u16 {
@@ -158,6 +173,7 @@ impl Default for ServerConfig {
             host: default_host(),
             secure_cookies: true,
             mcp_endpoint: default_mcp_endpoint(),
+            tunnel: TunnelConfig::default(),
         }
     }
 }
