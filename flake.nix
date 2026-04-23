@@ -453,6 +453,7 @@
             pkgs.minikube
             pkgs.kubectl
             pkgs.vendir
+            pkgs.keybase
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             fly
             pkgs.libiconv
@@ -468,6 +469,8 @@
             else
               export ENGINE_DEFAULT=docker
             fi
+
+            export KEYBASE_PATH="${pkgs.keybase}/bin/keybase"
 
             echo "drua dev shell loaded (engine: $ENGINE_DEFAULT)"
           '';

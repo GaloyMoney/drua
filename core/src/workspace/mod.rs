@@ -127,8 +127,12 @@ impl Workspaces {
         Audit::record_action_if_unset("workspace.update_keybase_config");
         Audit::record_workspace_id(id);
         let mut workspace = self.repo.find_by_id(id).await?;
-        workspace.update_keybase_config(keybase_team, keybase_channel);
-        self.repo.update(&mut workspace).await?;
+        if workspace
+            .update_keybase_config(keybase_team, keybase_channel)
+            .did_execute()
+        {
+            self.repo.update(&mut workspace).await?;
+        }
         Ok(workspace)
     }
 

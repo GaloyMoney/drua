@@ -69,13 +69,18 @@ impl Workspace {
         &mut self,
         keybase_team: Option<String>,
         keybase_channel: Option<String>,
-    ) {
+    ) -> Idempotent<()> {
+        if self.keybase_team == keybase_team && self.keybase_channel == keybase_channel {
+            return Idempotent::AlreadyApplied;
+        }
+
         self.keybase_team = keybase_team.clone();
         self.keybase_channel = keybase_channel.clone();
         self.events.push(WorkspaceEvent::KeybaseConfigUpdated {
             keybase_team,
             keybase_channel,
         });
+        Idempotent::Executed(())
     }
 
     pub(super) fn archive(&mut self) -> Idempotent<()> {

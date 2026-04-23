@@ -43,7 +43,7 @@ pub struct KeybaseConfig {
 
 impl KeybaseConfig {
     fn default_path() -> String {
-        "keybase".to_owned()
+        std::env::var("KEYBASE_PATH").unwrap_or_else(|_| "keybase".to_owned())
     }
 }
 
