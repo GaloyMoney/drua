@@ -37,14 +37,14 @@ impl LibraryConfig {
 pub struct Library {
     upstream: Upstream,
     search: SearchStore,
-    embedder: Arc<code_assistant_core::embedder::Embedder>,
+    embedder: Option<Arc<code_assistant_core::embedder::Embedder>>,
 }
 
 impl Library {
     pub async fn init(
         config: &LibraryConfig,
         pool: &sqlx::PgPool,
-        embedder: Arc<code_assistant_core::embedder::Embedder>,
+        embedder: Option<Arc<code_assistant_core::embedder::Embedder>>,
         jobs: &mut ::job::Jobs,
     ) -> Result<Self, LibraryError> {
         let upstream = Upstream::init(config.repo_url.as_deref(), config.repo_path()).await?;
@@ -110,12 +110,16 @@ impl Library {
         doc_type: Option<DocType>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, LibraryError> {
-        let query_embedding = match self.embedder.embed_query(query).await {
-            Ok(emb) => Some(emb),
-            Err(e) => {
-                tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
-                None
+        let query_embedding = if let Some(ref embedder) = self.embedder {
+            match embedder.embed_query(query).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
+                    None
+                }
             }
+        } else {
+            None
         };
         self.search
             .search(workspace_id, query, query_embedding, doc_type, limit)
@@ -123,7 +127,10 @@ impl Library {
     }
 
     fn spawn_embed(&self, fields: &SearchableFields) {
-        let embedder = self.embedder.clone();
+        let Some(ref embedder) = self.embedder else {
+            return;
+        };
+        let embedder = embedder.clone();
         let search = self.search.clone();
         let doc_id = fields.doc_id;
         let doc_type = fields.doc_type;
