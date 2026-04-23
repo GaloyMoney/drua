@@ -95,7 +95,7 @@ impl PromptExecutorConfig {
             };
 
             match api_key {
-                Some(key) if key.is_empty() => {
+                Some("") => {
                     tracing::warn!(
                         model = %model.name,
                         provider = provider_name,
