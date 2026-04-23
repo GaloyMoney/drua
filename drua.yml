@@ -29,7 +29,7 @@ agents:
     agent:
       model: moonshotai/kimi-k2
 library:
-  repo_url: "https://github.com/bodymindarts/drua-test-library"
+  repo_url: "https://github.com/galoymoney/drua-test-library"
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.
