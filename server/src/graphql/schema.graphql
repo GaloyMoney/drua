@@ -74,9 +74,6 @@ type Me {
 }
 
 type Mutation {
-	"""
-	Placeholder — will be replaced with real mutations.
-	"""
 	ping: String!
 	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
 	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
