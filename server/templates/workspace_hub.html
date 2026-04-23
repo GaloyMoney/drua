@@ -260,7 +260,6 @@
           ... on AssistantTextEvent { text }
           ... on ThinkingEvent { text }
           ... on UserMessageEvent { text }
-          ... on ToolCallEvent { name arguments }
           ... on ToolResultEvent { name isError content }
           ... on AssistantDoneEvent { turns inputTokens outputTokens durationMs costUsd }
           ... on ErrorEvent { message }
@@ -284,9 +283,6 @@
           appendMsg('msg-system', '(thinking) ' + event.text);
         } else if (t === 'UserMessageEvent') {
           // Already rendered locally
-        } else if (t === 'ToolCallEvent') {
-          const args = event.arguments ? ' ' + event.arguments : '';
-          appendMsg('msg-system', 'tool: ' + event.name + args);
         } else if (t === 'ToolResultEvent') {
           appendMsg('msg-system', (event.isError ? 'error: ' : 'ok: ') + event.name);
         } else if (t === 'AssistantDoneEvent') {
