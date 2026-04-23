@@ -258,6 +258,7 @@ impl ExecutorState {
         let model = self.models.iter().find(|m| m.name == model_name).cloned();
         match model {
             None => {
+                tracing::error!(model = %model_name, "Model not configured");
                 let _ = request
                     .response_channel
                     .send(Err(PromptError::Provider(format!(
@@ -265,6 +266,11 @@ impl ExecutorState {
                     ))));
             }
             Some(model) => {
+                tracing::info!(
+                    model = %model.name,
+                    provider = model.client.name(),
+                    "Dispatching prompt",
+                );
                 if request.prompt.max_tokens.is_none() {
                     request.prompt.max_tokens = model.default_max_tokens;
                 }
@@ -298,13 +304,16 @@ async fn evaluate_streaming(
 
     match client.send_prompt_streaming(&prompt).await {
         Ok(mut provider_rx) => {
+            tracing::debug!(provider = client.name(), "Stream started");
             while let Some(result) = provider_rx.recv().await {
                 if delta_tx.send(result).await.is_err() {
                     break;
                 }
             }
+            tracing::debug!(provider = client.name(), "Stream completed");
         }
         Err(e) => {
+            tracing::error!(provider = client.name(), error = %e, "Provider error");
             let _ = delta_tx.send(Err(e)).await;
         }
     }

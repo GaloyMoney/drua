@@ -13,19 +13,21 @@ providers:
   # - openai           -> Chat Completions API, uses OPENAI_API_KEY
   # - openai-responses -> Responses API, uses OPENAI_API_KEY
   # - openai-codex     -> Responses API over ChatGPT subscription auth
-  - name: anthropic
+  - name: openai
+    base_url: https://openrouter.ai/api
     models:
-      - name: claude-haiku-4-5-20251001
-        max_tokens_per_response: 4096
-        context_window_tokens: 200000
+      - name: moonshotai/kimi-k2
+        max_tokens_per_response: 16384
+        context_window_tokens: 131072
+        cache_ttl_seconds: 0
 agents:
   builtin_roles:
     workspace_lead:
-      model: claude-haiku-4-5-20251001
+      model: moonshotai/kimi-k2
       compaction:
         reset_time_delta_seconds: 18000
     agent:
-      model: claude-haiku-4-5-20251001
+      model: moonshotai/kimi-k2
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.
