@@ -25,7 +25,6 @@ pub enum NoteEvent {
         tags: Vec<String>,
         file_hash: GitFileHash,
     },
-    Archived {},
 }
 
 #[derive(EsEntity, Builder)]
@@ -33,16 +32,11 @@ pub enum NoteEvent {
 pub struct Note {
     pub id: NoteId,
     pub(crate) workspace_id: WorkspaceId,
-    #[builder(default)]
     pub(crate) workspace_name: String,
     pub(crate) title: String,
     pub(crate) content: String,
-    #[builder(default)]
     pub(crate) tags: Vec<String>,
-    #[builder(default)]
     pub(crate) file_hash: Option<GitFileHash>,
-    #[builder(default)]
-    pub(crate) archived: bool,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
@@ -52,7 +46,7 @@ impl Note {
         self.as_runtime_file().content()
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
+    fn as_runtime_file(&self) -> crate::library::RuntimeFile {
         let created_at = self
             .events
             .entity_first_persisted_at()
@@ -87,14 +81,6 @@ impl Note {
             tags,
             file_hash,
         });
-    }
-
-    pub fn archive(&mut self) -> Idempotent<()> {
-        idempotency_guard!(self.events.iter_all(), already_applied: NoteEvent::Archived { .. });
-
-        self.archived = true;
-        self.events.push(NoteEvent::Archived {});
-        Idempotent::Executed(())
     }
 }
 
@@ -156,9 +142,6 @@ impl TryFromEvents<NoteEvent> for Note {
                         .content(content.clone())
                         .tags(tags.clone())
                         .file_hash(Some(file_hash.clone()));
-                }
-                NoteEvent::Archived {} => {
-                    builder = builder.archived(true);
                 }
             }
         }
@@ -254,7 +237,6 @@ mod tests {
         assert_eq!(note.content, "Some content here");
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
         assert_eq!(note.workspace_name, "test");
-        assert!(!note.archived);
         assert!(note.file_hash.is_some());
     }
 
@@ -270,13 +252,5 @@ mod tests {
         assert_eq!(note.title, "Updated Title");
         assert_eq!(note.content, "Updated content");
         assert_eq!(note.tags, vec!["new-tag"]);
-    }
-
-    #[test]
-    fn note_archive() {
-        let mut note = new_note();
-        assert!(!note.archived);
-        let _ = note.archive();
-        assert!(note.archived);
     }
 }

@@ -19,7 +19,7 @@ impl std::fmt::Display for SearchResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "id: {}\ntitle: {}\n", self.doc_id, self.title)?;
         if !self.tags.is_empty() {
-            write!(f, "  tags: {}\n", self.tags.join(", "))?;
+            writeln!(f, "  tags: {}", self.tags.join(", "))?;
         }
         let preview: String = self.content.chars().take(200).collect();
         write!(f, "preview: {}", preview)
