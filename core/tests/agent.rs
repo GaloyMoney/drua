@@ -296,11 +296,12 @@ async fn send_message_dispatches_registered_tool_call() {
 
     // Expected sequence:
     //   UserMessage echo
-    //   ToolCall { name: ping }
+    //   ToolCallStart { name: ping }
+    //   ToolCallInputDelta { partial_json: "{}" }
     //   ToolResult { name: ping, is_error: false }
     //   AssistantText { text: "all done" }
     //   Done { turns: 2, input_tokens: 16, output_tokens: 6 }
-    assert_eq!(events.len(), 5, "unexpected event sequence: {events:?}");
+    assert_eq!(events.len(), 6, "unexpected event sequence: {events:?}");
 
     assert!(
         matches!(&events[0], ChatOutputEvent::UserMessage { text, .. } if text == "Call ping"),
@@ -308,11 +309,16 @@ async fn send_message_dispatches_registered_tool_call() {
         events[0]
     );
     assert!(
-        matches!(&events[1], ChatOutputEvent::ToolCall { name, .. } if name == "ping"),
-        "event[1] should be ToolCall(ping), got {:?}",
+        matches!(&events[1], ChatOutputEvent::ToolCallStart { name } if name == "ping"),
+        "event[1] should be ToolCallStart(ping), got {:?}",
         events[1]
     );
-    match &events[2] {
+    assert!(
+        matches!(&events[2], ChatOutputEvent::ToolCallInputDelta { .. }),
+        "event[2] should be ToolCallInputDelta, got {:?}",
+        events[2]
+    );
+    match &events[3] {
         ChatOutputEvent::ToolResult {
             name,
             is_error,
@@ -322,14 +328,14 @@ async fn send_message_dispatches_registered_tool_call() {
             assert!(!is_error, "ping tool should succeed");
             assert!(content.is_some(), "content should be populated");
         }
-        other => panic!("event[2] should be ToolResult, got {other:?}"),
+        other => panic!("event[3] should be ToolResult, got {other:?}"),
     }
     assert!(
-        matches!(&events[3], ChatOutputEvent::AssistantText { text } if text == "all done"),
-        "event[3] should be AssistantText, got {:?}",
-        events[3]
+        matches!(&events[4], ChatOutputEvent::AssistantText { text } if text == "all done"),
+        "event[4] should be AssistantText, got {:?}",
+        events[4]
     );
-    match &events[4] {
+    match &events[5] {
         ChatOutputEvent::AssistantDone {
             turns,
             input_tokens,
@@ -340,6 +346,6 @@ async fn send_message_dispatches_registered_tool_call() {
             assert_eq!(*input_tokens, 16);
             assert_eq!(*output_tokens, 6);
         }
-        other => panic!("event[4] should be Done, got {other:?}"),
+        other => panic!("event[5] should be Done, got {other:?}"),
     }
 }

@@ -24,12 +24,6 @@ pub struct ThinkingEvent {
 }
 
 #[derive(SimpleObject)]
-pub struct ToolCallEvent {
-    pub name: String,
-    pub arguments: Option<String>,
-}
-
-#[derive(SimpleObject)]
 pub struct TextDeltaEvent {
     pub text: String,
 }
@@ -84,7 +78,6 @@ pub enum ChatStreamEvent {
     UserMessage(UserMessageEvent),
     AssistantText(AssistantTextEvent),
     Thinking(ThinkingEvent),
-    ToolCall(ToolCallEvent),
     TextDelta(TextDeltaEvent),
     ThinkingDelta(ThinkingDeltaEvent),
     ToolCallStart(ToolCallStartEvent),
@@ -106,10 +99,6 @@ impl From<drua_core::primitives::ChatOutputEvent> for ChatStreamEvent {
                 Self::AssistantText(AssistantTextEvent { text })
             }
             ChatOutputEvent::Thinking { text } => Self::Thinking(ThinkingEvent { text }),
-            ChatOutputEvent::ToolCall { name, arguments } => Self::ToolCall(ToolCallEvent {
-                name,
-                arguments: arguments.map(|v| v.to_string()),
-            }),
             ChatOutputEvent::TextDelta { text } => Self::TextDelta(TextDeltaEvent { text }),
             ChatOutputEvent::ThinkingDelta { text } => {
                 Self::ThinkingDelta(ThinkingDeltaEvent { text })
