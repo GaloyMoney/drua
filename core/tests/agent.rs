@@ -313,9 +313,14 @@ async fn send_message_dispatches_registered_tool_call() {
         events[1]
     );
     match &events[2] {
-        ChatOutputEvent::ToolResult { name, is_error } => {
+        ChatOutputEvent::ToolResult {
+            name,
+            is_error,
+            content,
+        } => {
             assert_eq!(name, "ping");
             assert!(!is_error, "ping tool should succeed");
+            assert!(content.is_some(), "content should be populated");
         }
         other => panic!("event[2] should be ToolResult, got {other:?}"),
     }
