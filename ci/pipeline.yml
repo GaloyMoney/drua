@@ -367,7 +367,6 @@ jobs:
   plan:
   - get: repo-tunnel-connector
     trigger: true
-    passed: [check-code]
   - task: build-image
     config:
       platform: linux
