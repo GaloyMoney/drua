@@ -79,16 +79,11 @@ impl App {
             .validate()
             .map_err(|e| AppError::PromptExecutor(e.to_string()))?;
 
-        // Embedder is optional — if ONNX runtime is unavailable the server
-        // still starts; search falls back to FTS-only.
-        let embedder: Option<Arc<code_assistant_core::embedder::Embedder>> =
-            match code_assistant_core::embedder::Embedder::new() {
-                Ok(e) => Some(Arc::new(e)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "embedder unavailable — semantic search disabled");
-                    None
-                }
-            };
+        // Embedder is always initialized (used by notes; optionally by code-assistant).
+        let embedder = Arc::new(
+            code_assistant_core::embedder::Embedder::new()
+                .map_err(|e| AppError::Embedder(e.to_string()))?,
+        );
 
         let ca_db_exists = {
             let p = &config.toolsets.code_assistant.db_path;
@@ -96,20 +91,15 @@ impl App {
         };
 
         let code_assistant = if ca_db_exists {
-            if let Some(ref emb) = embedder {
-                code_assistant::init(
-                    pool,
-                    &code_assistant::CodeAssistantConfig {
-                        db_path: config.toolsets.code_assistant.db_path.clone(),
-                    },
-                    emb.clone(),
-                )
-                .map_err(|e| AppError::CodeAssistant(e.to_string()))?
-                .map(Arc::new)
-            } else {
-                tracing::warn!("code-assistant disabled — embedder unavailable");
-                None
-            }
+            code_assistant::init(
+                pool,
+                &code_assistant::CodeAssistantConfig {
+                    db_path: config.toolsets.code_assistant.db_path.clone(),
+                },
+                embedder.clone(),
+            )
+            .map_err(|e| AppError::CodeAssistant(e.to_string()))?
+            .map(Arc::new)
         } else {
             None
         };
@@ -164,7 +154,7 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::init(&config.library, pool, embedder, &mut jobs)
+        let library = Library::init(&config.library, pool, embedder.clone(), &mut jobs)
             .await
             .map_err(|e| AppError::Library(e.to_string()))?;
 
@@ -311,6 +301,8 @@ pub enum AppError {
     Agent(#[from] agent::AgentError),
     #[error("AppError - ToolSets: {0}")]
     ToolSets(#[from] ToolSetsError),
+    #[error("AppError - Embedder: {0}")]
+    Embedder(String),
     #[error("AppError - CodeAssistant: {0}")]
     CodeAssistant(String),
     #[error("AppError - GitHubApp: {0}")]
