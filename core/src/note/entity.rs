@@ -46,12 +46,15 @@ impl Note {
         self.as_runtime_file().content()
     }
 
-    fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        let created_at = self
-            .events
+    pub(crate) fn created_at(&self) -> String {
+        self.events
             .entity_first_persisted_at()
             .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn as_runtime_file(&self) -> crate::library::RuntimeFile {
+        let created_at = self.created_at();
         let updated_at = self
             .events
             .entity_last_modified_at()

@@ -100,11 +100,7 @@ impl Notes {
         let mut op = self.repo.begin_op().await?.with_db_time().await?;
         let updated_at = op.now().to_rfc3339();
 
-        let created_at = note
-            .events
-            .entity_first_persisted_at()
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
+        let created_at = note.created_at();
         let runtime_file = RuntimeFile::for_note(
             note.id,
             note.workspace_id,
