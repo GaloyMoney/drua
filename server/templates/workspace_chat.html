@@ -111,7 +111,7 @@ function appendOrStream(cls, text) {
 const AGENT_MESSAGE_SUBSCRIPTION = `subscription ($agentId: AgentId!, $prompt: String!) {
   agentSendMessage(agentId: $agentId, prompt: $prompt) {
     __typename
-    ... on TextDeltaEvent { text }
+    ... on AssistantTextDeltaEvent { text }
     ... on ThinkingDeltaEvent { text }
     ... on ToolCallStartEvent { name }
     ... on ToolCallInputDeltaEvent { partialJson }
@@ -127,7 +127,7 @@ const AGENT_MESSAGE_SUBSCRIPTION = `subscription ($agentId: AgentId!, $prompt: S
 
 function handleStreamEvent(event) {
   const t = event.__typename;
-  if (t === 'TextDeltaEvent') {
+  if (t === 'AssistantTextDeltaEvent') {
     appendOrStream('msg-assistant', event.text);
   } else if (t === 'ThinkingDeltaEvent') {
     appendOrStream('msg-system', event.text);

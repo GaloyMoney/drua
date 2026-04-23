@@ -40,6 +40,10 @@ type AssistantDoneEvent {
 	turns: Int!
 }
 
+type AssistantTextDeltaEvent {
+	text: String!
+}
+
 type AssistantTextEvent {
 	text: String!
 }
@@ -60,7 +64,7 @@ enum ChatMessageRole {
 	USER
 }
 
-union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | TextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent
+union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | AssistantTextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent
 
 type ErrorEvent {
 	message: String!
@@ -74,9 +78,6 @@ type Me {
 }
 
 type Mutation {
-	"""
-	Placeholder — will be replaced with real mutations.
-	"""
 	ping: String!
 	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
 	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
@@ -189,10 +190,6 @@ type Subscription {
 }
 
 type TextContent {
-	text: String!
-}
-
-type TextDeltaEvent {
 	text: String!
 }
 

@@ -16,7 +16,7 @@ pub enum ChatOutputEvent {
         text: String,
     },
     /// Incremental text token from a streaming assistant response.
-    TextDelta {
+    AssistantTextDelta {
         text: String,
     },
     /// Incremental thinking token from a streaming assistant response.
