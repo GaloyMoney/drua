@@ -40,6 +40,10 @@ type AssistantDoneEvent {
 	turns: Int!
 }
 
+type AssistantTextDeltaEvent {
+	text: String!
+}
+
 type AssistantTextEvent {
 	text: String!
 }
@@ -186,10 +190,6 @@ type Subscription {
 }
 
 type TextContent {
-	text: String!
-}
-
-type AssistantTextDeltaEvent {
 	text: String!
 }
 
