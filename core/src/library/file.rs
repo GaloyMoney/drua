@@ -6,6 +6,10 @@ use crate::primitives::{NoteId, WorkspaceId};
 pub struct GitFileHash(String);
 
 impl GitFileHash {
+    pub(super) fn from_sha1(hex: String) -> Self {
+        Self(hex)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -39,6 +43,12 @@ pub struct SearchableFields {
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
+}
+
+impl SearchableFields {
+    pub fn text_for_embedding(&self) -> String {
+        format!("{}\n\n{}", self.title, self.body)
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

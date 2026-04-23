@@ -56,7 +56,7 @@ impl Note {
             .unwrap_or_default()
     }
 
-    fn as_runtime_file(&self) -> crate::library::RuntimeFile {
+    pub(super) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
         let created_at = self.created_at();
         let updated_at = self
             .events

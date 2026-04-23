@@ -22,7 +22,7 @@ pub struct Notes {
 impl Notes {
     pub fn new(pool: &sqlx::PgPool, library: Library) -> Self {
         Self {
-            repo: NoteRepo::new(pool),
+            repo: NoteRepo::new(pool, library.clone()),
             library,
         }
     }
@@ -71,7 +71,6 @@ impl Notes {
             .expect("NewNote builder should not fail");
 
         let note = self.repo.create_in_op(&mut op, new_note).await?;
-        self.library.write_in_op(&mut op, &runtime_file).await?;
         op.commit().await?;
 
         Ok(note)
@@ -122,7 +121,6 @@ impl Notes {
         note.update(title, content, tags, file_hash);
 
         self.repo.update_in_op(&mut op, &mut note).await?;
-        self.library.write_in_op(&mut op, &runtime_file).await?;
         op.commit().await?;
 
         Ok(note)

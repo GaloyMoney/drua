@@ -54,6 +54,13 @@ impl JobRunner for WriteToRuntimeRunner {
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         self.upstream.pull().await?;
+
+        let new_hash = self.file.file_hash();
+        if self.upstream.file_hash_on_disk(&self.file.relative_path()).await.as_ref() == Some(&new_hash) {
+            tracing::debug!("file hash unchanged, skipping write");
+            return Ok(JobCompletion::Complete);
+        }
+
         self.upstream
             .write_file(&self.file.relative_path(), &self.file.content())
             .await?;

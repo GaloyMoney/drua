@@ -46,20 +46,20 @@ impl SearchStore {
     ) -> Result<(), LibraryError> {
         let tags_json = serde_json::to_value(&fields.tags).unwrap_or_default();
         let doc_type = fields.doc_type.as_str();
-        sqlx::query(
+        sqlx::query!(
             r#"INSERT INTO library_search_data (doc_id, doc_type, workspace_id, title_text, content_text, tags)
                VALUES ($1, $2, $3, $4, $5, $6)
                ON CONFLICT (doc_id, doc_type) DO UPDATE SET
                    title_text = EXCLUDED.title_text,
                    content_text = EXCLUDED.content_text,
                    tags = EXCLUDED.tags"#,
+            fields.doc_id,
+            doc_type,
+            fields.workspace_id,
+            &fields.title,
+            &fields.body,
+            tags_json,
         )
-        .bind(fields.doc_id)
-        .bind(doc_type)
-        .bind(fields.workspace_id)
-        .bind(&fields.title)
-        .bind(&fields.body)
-        .bind(&tags_json)
         .execute(op.as_executor())
         .await?;
         Ok(())
@@ -74,12 +74,12 @@ impl SearchStore {
         embedding: Vec<f32>,
     ) -> Result<(), LibraryError> {
         let vec = Vector::from(embedding);
-        sqlx::query(
+        sqlx::query!(
             "UPDATE library_search_data SET embedding = $1 WHERE doc_id = $2 AND doc_type = $3",
+            vec as Vector,
+            doc_id,
+            doc_type.as_str(),
         )
-        .bind(vec)
-        .bind(doc_id)
-        .bind(doc_type.as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -96,10 +96,11 @@ impl SearchStore {
         limit: usize,
     ) -> Result<Vec<SearchResult>, LibraryError> {
         let over_fetch = (limit * 3).max(10) as i64;
-        let doc_type_str = doc_type.map(|dt| dt.as_str().to_string());
+        let doc_type_filter = doc_type.map(|dt| dt.as_str().to_string());
 
         // FTS results
-        let fts_rows: Vec<FtsRow> = sqlx::query_as(
+        let fts_rows: Vec<FtsRow> = sqlx::query_as!(
+            FtsRow,
             r#"SELECT doc_id, doc_type, title_text, content_text, tags,
                       ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
                FROM library_search_data
@@ -108,18 +109,19 @@ impl SearchStore {
                  AND ($3::text IS NULL OR doc_type = $3)
                ORDER BY rank DESC
                LIMIT $4"#,
+            query,
+            workspace_id,
+            doc_type_filter.as_deref() as Option<&str>,
+            over_fetch,
         )
-        .bind(query)
-        .bind(workspace_id)
-        .bind(&doc_type_str)
-        .bind(over_fetch)
         .fetch_all(&self.pool)
         .await?;
 
         // Vector results (only if we have an embedding)
         let vec_rows: Vec<VecRow> = if let Some(emb) = query_embedding {
             let vec = Vector::from(emb);
-            sqlx::query_as(
+            sqlx::query_as!(
+                VecRow,
                 r#"SELECT doc_id, doc_type, title_text, content_text, tags,
                           embedding <=> $1 AS distance
                    FROM library_search_data
@@ -128,11 +130,11 @@ impl SearchStore {
                      AND ($3::text IS NULL OR doc_type = $3)
                    ORDER BY distance ASC
                    LIMIT $4"#,
+                vec as Vector,
+                workspace_id,
+                doc_type_filter.as_deref() as Option<&str>,
+                over_fetch,
             )
-            .bind(vec)
-            .bind(workspace_id)
-            .bind(&doc_type_str)
-            .bind(over_fetch)
             .fetch_all(&self.pool)
             .await?
         } else {
@@ -149,7 +151,6 @@ impl SearchStore {
 // Internal types & RRF
 // ---------------------------------------------------------------------------
 
-#[derive(sqlx::FromRow)]
 struct FtsRow {
     doc_id: uuid::Uuid,
     doc_type: String,
@@ -157,10 +158,9 @@ struct FtsRow {
     content_text: String,
     tags: serde_json::Value,
     #[allow(dead_code)]
-    rank: f32,
+    rank: Option<f32>,
 }
 
-#[derive(sqlx::FromRow)]
 struct VecRow {
     doc_id: uuid::Uuid,
     doc_type: String,
@@ -168,7 +168,7 @@ struct VecRow {
     content_text: String,
     tags: serde_json::Value,
     #[allow(dead_code)]
-    distance: f32,
+    distance: Option<f64>,
 }
 
 fn parse_tags(val: &serde_json::Value) -> Vec<String> {

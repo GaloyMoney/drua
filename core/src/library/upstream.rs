@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use sha1::{Digest, Sha1};
+
+use super::file::GitFileHash;
 use super::LibraryError;
 
 #[derive(Clone)]
@@ -15,6 +18,19 @@ impl Upstream {
             }
         }
         Ok(Self { repo_path })
+    }
+
+    /// Compute the git blob SHA-1 of the file on disk, or `None` if the file
+    /// doesn't exist.  Uses the same `blob <len>\0<content>` format as
+    /// `git hash-object`, matching [`RuntimeFile::file_hash`].
+    pub async fn file_hash_on_disk(&self, relative_path: &str) -> Option<GitFileHash> {
+        let full_path = self.repo_path.join(relative_path);
+        let content = tokio::fs::read(&full_path).await.ok()?;
+        let header = format!("blob {}\0", content.len());
+        let mut hasher = Sha1::new();
+        hasher.update(header.as_bytes());
+        hasher.update(&content);
+        Some(GitFileHash::from_sha1(format!("{:x}", hasher.finalize())))
     }
 
     pub async fn write_file(
