@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::client::ConcourseClient;
+use crate::client::{format_epoch, ConcourseClient};
 use crate::error::ConcourseError;
 use crate::types::BuildEventEnvelope;
 
@@ -219,10 +219,18 @@ fn process_envelope(envelope: &BuildEventEnvelope, buf: &mut BuildLogBuffer) {
         "log" => {
             if let Some(payload) = envelope.data.get("payload") {
                 if let Some(text) = payload.as_str() {
+                    let prefix = envelope
+                        .data
+                        .get("time")
+                        .and_then(|v| v.as_i64())
+                        .map(|ts| format!("[{}] ", format_epoch(ts)));
                     // Split multi-line payloads into individual lines
                     for line in text.split('\n') {
                         if !line.is_empty() {
-                            buf.lines.push(line.to_string());
+                            match &prefix {
+                                Some(p) => buf.lines.push(format!("{p}{line}")),
+                                None => buf.lines.push(line.to_string()),
+                            }
                         }
                     }
                 }

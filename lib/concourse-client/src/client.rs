@@ -289,6 +289,15 @@ impl ConcourseClient {
     }
 }
 
+/// Format a Unix epoch timestamp as `HH:MM:SS` UTC.
+pub(crate) fn format_epoch(epoch: i64) -> String {
+    let secs = epoch.rem_euclid(86400);
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
 /// Parse SSE text and extract log lines from event envelopes.
 fn extract_logs_from_sse(body: &str, out: &mut String) {
     for line in body.lines() {
@@ -307,7 +316,21 @@ fn extract_logs_from_sse(body: &str, out: &mut String) {
         }
         if let Some(payload) = envelope.data.get("payload") {
             if let Some(text) = payload.as_str() {
-                out.push_str(text);
+                // Prepend timestamp if available in the event data
+                if let Some(ts) = envelope.data.get("time").and_then(|v| v.as_i64()) {
+                    let stamp = format_epoch(ts);
+                    // Prefix each non-empty line with the timestamp
+                    for (i, line) in text.split('\n').enumerate() {
+                        if i > 0 {
+                            out.push('\n');
+                        }
+                        if !line.is_empty() {
+                            out.push_str(&format!("[{stamp}] {line}"));
+                        }
+                    }
+                } else {
+                    out.push_str(text);
+                }
             }
         }
     }
