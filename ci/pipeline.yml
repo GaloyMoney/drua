@@ -396,12 +396,13 @@ jobs:
     get_params:
       skip_download: true
 
-#! After `build-tunnel-connector-image` publishes a fresh digest, open
-#! (or force-update) a PR on GaloyMoney/galoy-charts that pins
+#! After `build-tunnel-connector-image` publishes a fresh digest, push
+#! a commit to GaloyMoney/galoy-charts:main that pins
 #! `tunnelConnector.image.digest` in `charts/galoy-deps/values.yaml`.
-#! Using a digest instead of the mutable `:edge` tag means a drua CI push
-#! does not silently roll any running connector — the bump becomes an
-#! auditable PR humans merge when convenient.
+#! Pinning a digest (instead of tracking the mutable `:edge` tag) means a
+#! drua CI push doesn't silently roll a running connector on the next
+#! kubelet restart. `rebase: true` on the put handles the race where main
+#! moves between get and push.
 - name: bump-galoy-charts-tunnel-connector-image
   serial: true
   plan:
@@ -429,29 +430,10 @@ jobs:
         path: repo/ci/tasks/with-nix-cache.sh
         args:
           - repo/ci/tasks/bump-galoy-charts-tunnel-connector.sh
-  - put: galoy-charts-bump-branch
+  - put: galoy-charts-repo
     params:
       repository: galoy-charts-repo
-      branch: bump-tunnel-connector-image-bot-branch
-      force: true
-  - task: open-pr
-    config:
-      platform: linux
-      image_resource: #@ nix_flake_image_config()
-      inputs:
-      - name: repo
-      - name: galoy-charts-repo
-      caches:
-      - path: /nix-cache
-      params:
-        GITHUB_PAT: #@ data.values.github_pat
-        BOT_BRANCH: bump-tunnel-connector-image-bot-branch
-        BASE_BRANCH: main
-        TARGET_REPO: GaloyMoney/galoy-charts
-      run:
-        path: repo/ci/tasks/with-nix-cache.sh
-        args:
-          - repo/ci/tasks/open-galoy-charts-tunnel-connector-pr.sh
+      rebase: true
 
 resource_types:
 - name: terraform
@@ -507,24 +489,13 @@ resources:
     - Cargo.toml
     - Cargo.lock
 
-#! Read-only clone of galoy-charts main. The `bump-galoy-charts-
-#! tunnel-connector-image` job uses this to build the commit that gets
-#! force-pushed to the bot branch below.
+#! galoy-charts main — clone for `bump-galoy-charts-tunnel-connector-image`
+#! to read current digest from, and push the bumped commit back to.
 - name: galoy-charts-repo
   type: git
   source:
     uri: git@github.com:GaloyMoney/galoy-charts.git
     branch: main
-    private_key: #@ data.values.github_private_key
-
-#! Write target for the bump commit. The job force-pushes here every
-#! time drua publishes a new image, and the open-pr task then opens (or
-#! re-opens) the bot PR for this branch on galoy-charts.
-- name: galoy-charts-bump-branch
-  type: git
-  source:
-    uri: git@github.com:GaloyMoney/galoy-charts.git
-    branch: bump-tunnel-connector-image-bot-branch
     private_key: #@ data.values.github_private_key
 
 - name: repo-labels
