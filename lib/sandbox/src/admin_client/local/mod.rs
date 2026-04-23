@@ -109,6 +109,7 @@ impl LocalAdminClient {
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(&self.config.sandbox_spawn_cmd)
+            .stdin(std::process::Stdio::null())
             .env("PORT", port.to_string())
             .env("WORKSPACE_ROOT", &workspace)
             .env("GITHUB_TOKEN_PATH", &github_token_path)

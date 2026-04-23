@@ -145,18 +145,25 @@ fn validate_path(path: &str) -> Result<PathBuf, String> {
     let workspace_canonical =
         std::fs::canonicalize(&workspace).map_err(|e| format!("Cannot resolve workspace: {e}"))?;
 
-    let canonical = match std::fs::canonicalize(path) {
+    // Resolve relative paths against the workspace root.
+    let abs_path = if PathBuf::from(path).is_relative() {
+        workspace.join(path)
+    } else {
+        PathBuf::from(path)
+    };
+
+    let canonical = match std::fs::canonicalize(&abs_path) {
         Ok(p) => p,
         Err(_) => {
             // File doesn't exist yet — resolve the parent and append filename
-            let p = PathBuf::from(path);
-            let parent = p
+            let parent = abs_path
                 .parent()
                 .ok_or_else(|| format!("Invalid path: no parent directory for '{path}'"))?;
             let parent_canonical = std::fs::canonicalize(parent)
                 .map_err(|e| format!("Cannot resolve parent directory: {e}"))?;
             parent_canonical.join(
-                p.file_name()
+                abs_path
+                    .file_name()
                     .ok_or_else(|| format!("Invalid path: no filename in '{path}'"))?,
             )
         }
