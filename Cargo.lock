@@ -1387,6 +1387,7 @@ dependencies = [
  "job",
  "jsonwebtoken",
  "llm",
+ "obix",
  "openai-client",
  "opentelemetry",
  "opentelemetry-http",
@@ -3225,6 +3226,38 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "url",
+]
+
+[[package]]
+name = "obix"
+version = "0.2.20"
+source = "git+https://github.com/GaloyMoney/obix.git?tag=0.2.20#620aef25647e9c0357c98120cae61a9dd51f0454"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "derive_builder",
+ "es-entity",
+ "futures",
+ "im",
+ "job",
+ "obix-macros",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "obix-macros"
+version = "0.2.20"
+source = "git+https://github.com/GaloyMoney/obix.git?tag=0.2.20#620aef25647e9c0357c98120cae61a9dd51f0454"
+dependencies = [
+ "darling 0.23.0",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -5564,6 +5597,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

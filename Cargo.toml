@@ -117,6 +117,7 @@ derive_builder = "0.20"
 
 # Job processing
 job = "0.6"
+obix = { git = "https://github.com/GaloyMoney/obix.git", tag = "0.2.20", features = ["default-tables"] }
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }

@@ -6,4 +6,6 @@ pub enum LibraryError {
     Git(String),
     #[error("LibraryError - Sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("LibraryError - Inbox: {0}")]
+    Inbox(#[from] obix::InboxError),
 }

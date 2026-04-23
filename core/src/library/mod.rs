@@ -1,17 +1,22 @@
 mod error;
 mod file;
+mod inbox;
 mod job;
 mod search;
 mod upstream;
 
 use std::sync::Arc;
 
-use self::job::PushRuntimeCommitsJobInitializer;
+use self::inbox::LibraryWriteHandler;
+use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
 pub use file::{DocType, GitFileHash, RuntimeFile, SearchableFields};
 pub use search::SearchResult;
+
+const LIBRARY_WRITE_JOB: &str = "library.write";
+const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
@@ -35,8 +40,8 @@ impl LibraryConfig {
 
 #[derive(Clone)]
 pub struct Library {
-    upstream: Upstream,
     search: SearchStore,
+    inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
 }
 
@@ -50,24 +55,23 @@ impl Library {
         let upstream = Upstream::init(config.repo_url.as_deref(), config.repo_path()).await?;
         let search = SearchStore::new(pool);
 
-        let init = PushRuntimeCommitsJobInitializer::new(upstream.clone());
-        let spawner = jobs.add_initializer(init);
-        if let Err(e) = spawner
-            .spawn_unique(::job::JobId::new(), PushRuntimeCommitsJobInitializer::cfg())
-            .await
-        {
-            tracing::error!(error = %e, "Failed to spawn push-runtime-commits job");
-        }
+        let write_init = WriteToRuntimeJobInitializer::new(upstream);
+        let write_spawner = jobs.add_initializer(write_init);
+
+        let handler = LibraryWriteHandler::new(search.clone(), embedder.clone(), write_spawner);
+        let inbox_config = obix::InboxConfig::new(::job::JobType::new(LIBRARY_WRITE_JOB));
+        let inbox = obix::Inbox::new(pool, jobs, inbox_config, handler);
 
         Ok(Self {
-            upstream,
             search,
+            inbox,
             embedder,
         })
     }
 
-    /// Upsert search data within the transaction, then write file to disk,
-    /// git-commit, and fire-and-forget embedding.
+    /// Upsert search data and persist an inbox event within the transaction.
+    /// The inbox handler will embed the document and spawn a serialized job
+    /// for git pull/write/commit/push on any node.
     #[tracing::instrument(name = "library.write_in_op", skip_all)]
     pub async fn write_in_op(
         &self,
@@ -77,26 +81,11 @@ impl Library {
         let fields = file.searchable_fields();
         self.search.upsert_in_op(op, &fields).await?;
 
-        let relative_path = file.relative_path();
-        let content = file.content();
-        let commit_message = file.commit_message();
-
-        let full_path = self.upstream.repo_path().join(&relative_path);
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| LibraryError::Io(e.to_string()))?;
-        }
-        tokio::fs::write(&full_path, &content)
-            .await
-            .map_err(|e| LibraryError::Io(e.to_string()))?;
-        tracing::info!(path = %full_path.display(), "wrote runtime file");
-
-        self.upstream
-            .add_and_commit(&relative_path, &commit_message)
+        let idempotency_key = file.file_hash().to_string();
+        let _ = self
+            .inbox
+            .persist_and_queue_job_in_op(op, idempotency_key, file)
             .await?;
-
-        self.spawn_embed(&fields);
 
         Ok(())
     }
@@ -120,25 +109,5 @@ impl Library {
         self.search
             .search(workspace_id, query, query_embedding, doc_type, limit)
             .await
-    }
-
-    fn spawn_embed(&self, fields: &SearchableFields) {
-        let embedder = self.embedder.clone();
-        let search = self.search.clone();
-        let doc_id = fields.doc_id;
-        let doc_type = fields.doc_type;
-        let text = format!("{}\n\n{}", fields.title, fields.body);
-        tokio::spawn(async move {
-            match embedder.embed_document(&text).await {
-                Ok(embedding) => {
-                    if let Err(e) = search.set_embedding(doc_id, doc_type, embedding).await {
-                        tracing::error!(%doc_id, error = %e, "failed to store embedding");
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(%doc_id, error = %e, "failed to generate embedding");
-                }
-            }
-        });
     }
 }

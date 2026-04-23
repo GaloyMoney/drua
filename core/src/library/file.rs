@@ -41,6 +41,8 @@ pub struct SearchableFields {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeFile {
     Note {
         doc_id: NoteId,
@@ -58,6 +60,7 @@ pub enum RuntimeFile {
 
 impl RuntimeFile {
     /// Build a `RuntimeFile::Note` from raw note fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn for_note(
         note_id: NoteId,
         workspace_id: WorkspaceId,

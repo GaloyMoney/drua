@@ -17,8 +17,47 @@ impl Upstream {
         Ok(Self { repo_path })
     }
 
-    pub fn repo_path(&self) -> &Path {
-        &self.repo_path
+    pub async fn write_file(
+        &self,
+        relative_path: &str,
+        content: &str,
+    ) -> Result<(), LibraryError> {
+        let full_path = self.repo_path.join(relative_path);
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| LibraryError::Io(e.to_string()))?;
+        }
+        tokio::fs::write(&full_path, content)
+            .await
+            .map_err(|e| LibraryError::Io(e.to_string()))?;
+        tracing::info!(path = %full_path.display(), "wrote runtime file");
+        Ok(())
+    }
+
+    pub async fn pull(&self) -> Result<(), LibraryError> {
+        if !self.repo_path.join(".git").exists() {
+            return Ok(());
+        }
+
+        let pull = tokio::process::Command::new("git")
+            .args(["pull", "--ff-only"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git pull: {e}")))?;
+        if !pull.status.success() {
+            let stderr = String::from_utf8_lossy(&pull.stderr);
+            // Empty remote (no commits yet) — nothing to pull, not an error.
+            if stderr.contains("no such ref was fetched") {
+                tracing::debug!("pull skipped: remote has no commits yet");
+                return Ok(());
+            }
+            return Err(LibraryError::Git(format!("git pull failed: {stderr}")));
+        }
+
+        tracing::info!("pulled latest from remote");
+        Ok(())
     }
 
     pub async fn add_and_commit(
@@ -70,19 +109,8 @@ impl Upstream {
         Ok(())
     }
 
-    pub async fn push_if_ahead(&self) -> Result<(), LibraryError> {
+    pub async fn push(&self) -> Result<(), LibraryError> {
         if !self.repo_path.join(".git").exists() {
-            return Ok(());
-        }
-
-        let status = tokio::process::Command::new("git")
-            .args(["status", "--porcelain", "-b"])
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .map_err(|e| LibraryError::Git(format!("git status: {e}")))?;
-        let stdout = String::from_utf8_lossy(&status.stdout);
-        if !stdout.contains("ahead") {
             return Ok(());
         }
 
