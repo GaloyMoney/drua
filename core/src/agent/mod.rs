@@ -923,9 +923,7 @@ async fn forward_response(
                 let _ = tx.send(ChatOutputEvent::AssistantText { text }).await;
             }
             llm::prompt::AssistantBlock::ToolUse { name, input, .. } => {
-                let _ = tx
-                    .send(ChatOutputEvent::ToolCallStart { name })
-                    .await;
+                let _ = tx.send(ChatOutputEvent::ToolCallStart { name }).await;
                 let _ = tx
                     .send(ChatOutputEvent::ToolCallInputDelta {
                         partial_json: input.to_string(),
