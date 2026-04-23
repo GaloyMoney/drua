@@ -3,6 +3,8 @@ server:
   host: 0.0.0.0
   secure_cookies: true
   mcp_endpoint: http://localhost:4200/mcp
+  tunnel:
+    deployments: {}
 oauth:
   login: github
   github_redirect_uri: ''
