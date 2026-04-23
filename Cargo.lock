@@ -1413,6 +1413,7 @@ dependencies = [
  "drua-mcp-gateway",
  "es-entity",
  "k8s-openapi",
+ "keybase-client",
  "kube",
  "oauth2",
  "opentelemetry",

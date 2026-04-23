@@ -10,6 +10,7 @@ use drua_core::prompt_executor::{
 };
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
+use drua_core::KeybaseConfig;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +35,8 @@ pub struct Config {
     pub anthropic_api_key: String,
     #[serde(skip)]
     pub openai_api_key: String,
+    #[serde(skip)]
+    pub keybase: KeybaseConfig,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -266,6 +269,17 @@ impl Config {
             if let Ok(val) = std::env::var("GITHUB_APP_PRIVATE_KEY_PATH") {
                 gh.private_key_path = val;
             }
+        }
+
+        // Keybase bot credentials from env
+        if let Ok(val) = std::env::var("KEYBASE_BOT_USERNAME") {
+            config.keybase.bot_username = Some(val);
+        }
+        if let Ok(val) = std::env::var("KEYBASE_PAPERKEY") {
+            config.keybase.paperkey = Some(val);
+        }
+        if let Ok(val) = std::env::var("KEYBASE_PATH") {
+            config.keybase.path = val;
         }
 
         Ok(config)

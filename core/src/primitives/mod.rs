@@ -58,7 +58,7 @@ impl From<AgentId> for McpCredsOwner {
 }
 
 /// Originator of a user-facing message sent to an agent session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserMessageSource {
     User {
@@ -70,5 +70,8 @@ pub enum UserMessageSource {
     },
     Agent {
         agent_id: AgentId,
+    },
+    Keybase {
+        username: String,
     },
 }

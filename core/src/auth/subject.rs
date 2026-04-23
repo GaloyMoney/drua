@@ -15,6 +15,9 @@ pub enum AuthSubject {
     /// originated from a `User` or `ExportedAgent`. Carries enough context
     /// to attribute downstream actions back to the originating user.
     AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<AuthScope>),
+    /// Authenticated via the Keybase chat bridge. Carries the Keybase
+    /// username for attribution. Bypasses authz like `User`.
+    Keybase(String),
     /// No authentication provided.
     Anonymous,
 }
@@ -26,7 +29,7 @@ impl AuthSubject {
     /// carried scope grants the action, the call succeeds.
     pub fn can(&self, verb: AuthVerb, resource: AuthResource) -> Result<(), AuthorizationError> {
         match self {
-            AuthSubject::User(_) => Ok(()),
+            AuthSubject::User(_) | AuthSubject::Keybase(_) => Ok(()),
             AuthSubject::Anonymous => Err(AuthorizationError::AuthenticationRequired),
             _ => {
                 if self.scopes().iter().any(|s| s.permits(verb, &resource)) {
@@ -44,6 +47,7 @@ impl AuthSubject {
             AuthSubject::ExportedAgent(_, _, _) => Err("ExportedAgent auth not allowed here"),
             AuthSubject::Agent(_, _, _) => Err("Agent auth not allowed here"),
             AuthSubject::AgentOnBehalfOfUser(_, _, _, _) => Err("Agent auth not allowed here"),
+            AuthSubject::Keybase(_) => Err("Keybase auth not allowed here"),
             AuthSubject::Anonymous => Err("Authentication required"),
         }
     }
@@ -56,7 +60,7 @@ impl AuthSubject {
             AuthSubject::User(user_id) => Some(*user_id),
             AuthSubject::ExportedAgent(user_id, _, _) => Some(*user_id),
             AuthSubject::AgentOnBehalfOfUser(user_id, _, _, _) => Some(*user_id),
-            AuthSubject::Agent(_, _, _) | AuthSubject::Anonymous => None,
+            AuthSubject::Agent(_, _, _) | AuthSubject::Keybase(_) | AuthSubject::Anonymous => None,
         }
     }
 
@@ -114,7 +118,7 @@ impl AuthSubject {
     /// Users (session-based) implicitly have all scopes.
     pub fn has_scope(&self, scope: &AuthScope) -> bool {
         match self {
-            AuthSubject::User(_) => true,
+            AuthSubject::User(_) | AuthSubject::Keybase(_) => true,
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
             | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes.contains(scope),
@@ -163,7 +167,7 @@ impl AuthSubject {
         // already implies full scopes (see `has_scope`). Also avoids a
         // `String` allocation on every check when the Tunnel scope is
         // unused.
-        if matches!(self, AuthSubject::User(_)) {
+        if matches!(self, AuthSubject::User(_) | AuthSubject::Keybase(_)) {
             return true;
         }
         self.scopes()
@@ -184,6 +188,9 @@ impl AuthSubject {
             AuthSubject::Agent(_, agent_id, _)
             | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => UserMessageSource::Agent {
                 agent_id: *agent_id,
+            },
+            AuthSubject::Keybase(ref username) => UserMessageSource::Keybase {
+                username: username.clone(),
             },
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
         }

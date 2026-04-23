@@ -127,6 +127,30 @@ impl KeybaseClient {
         }
     }
 
+    /// Authenticate the bot with `keybase oneshot`.
+    ///
+    /// The paperkey is passed via the `KEYBASE_PAPERKEY` environment variable
+    /// (not as a CLI argument) to avoid leaking it in `ps` output.
+    #[instrument(name = "keybase_client.login", skip_all)]
+    pub async fn login(&self, username: &str, paperkey: &str) -> Result<(), KeybaseClientError> {
+        let output = tokio::process::Command::new(&self.keybase_path)
+            .args(["oneshot", "--username", username])
+            .env("KEYBASE_PAPERKEY", paperkey)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(KeybaseClientError::Api {
+                code: output.status.code().unwrap_or(-1),
+                message: format!("keybase oneshot failed: {stderr}"),
+            });
+        }
+
+        tracing::info!("Keybase bot logged in as {username}");
+        Ok(())
+    }
+
     /// Send a message to a channel.
     #[instrument(name = "keybase_client.send_message", skip_all)]
     pub async fn send_message(

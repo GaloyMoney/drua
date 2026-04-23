@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod graphql;
+mod keybase_bridge;
 mod routes;
 pub mod server;
 mod templates;
@@ -148,10 +149,27 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         encryption: Default::default(),
         sandbox: config.sandbox.clone(),
         github_app: github_app_config,
-        keybase: Default::default(),
+        keybase: config.keybase.clone(),
     };
 
     let app = domain::App::init(&pool, app_config).await?;
+
+    // Spawn the Keybase chat bridge when credentials are configured.
+    if let (Some(bot_username), Some(paperkey)) = (
+        config.keybase.bot_username.clone(),
+        config.keybase.paperkey.clone(),
+    ) {
+        let bridge_app = app.clone();
+        let keybase_path = config.keybase.path.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                keybase_bridge::run(bridge_app, bot_username, paperkey, keybase_path).await
+            {
+                tracing::error!(error = %e, "Keybase bridge exited with error");
+            }
+        });
+    }
+
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
     let server_config = server::ServerConfig {

@@ -49,7 +49,7 @@ impl Audit {
                 Self::set_resource_id(ctx, "workspace_id", *workspace_id);
                 ctx.on_behalf_of_user_id = Some(*user_id);
             }
-            AuthSubject::Anonymous => {}
+            AuthSubject::Keybase(_) | AuthSubject::Anonymous => {}
         });
     }
 

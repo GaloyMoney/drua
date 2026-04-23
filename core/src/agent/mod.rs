@@ -556,7 +556,9 @@ impl Agents {
         // unattributed `Agent` or `AgentOnBehalfOfUser`). Anonymous is
         // rejected.
         match &subject {
-            AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
+            AuthSubject::User(_)
+            | AuthSubject::ExportedAgent(_, _, _)
+            | AuthSubject::Keybase(_) => {}
             AuthSubject::Agent(ws, _, _) | AuthSubject::AgentOnBehalfOfUser(_, ws, _, _)
                 if *ws == agent.workspace_id => {}
             _ => return Err(AgentError::Unauthorized),
@@ -609,7 +611,12 @@ impl Agents {
 
         let session_response = self
             .sessions
-            .add_user_input(id, session::TargetThread::Main, source, prompt.clone())
+            .add_user_input(
+                id,
+                session::TargetThread::Main,
+                source.clone(),
+                prompt.clone(),
+            )
             .await?;
 
         match session_response {

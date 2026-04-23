@@ -103,6 +103,14 @@ impl TopLevelTool for WhoAmI {
                         .into(),
                 );
             }
+            AuthSubject::Keybase(username) => {
+                info.insert("type".into(), "keybase".into());
+                info.insert("username".into(), username.clone().into());
+                info.insert(
+                    "note".into(),
+                    "Keybase users implicitly have all scopes".into(),
+                );
+            }
             AuthSubject::Anonymous => {
                 info.insert("type".into(), "anonymous".into());
             }

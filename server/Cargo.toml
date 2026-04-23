@@ -12,6 +12,7 @@ path = "src/bin/write_sdl.rs"
 [dependencies]
 drua-core = { path = "../core", features = ["graphql"] }
 drua-mcp-gateway = { path = "../mcp-gateway" }
+keybase-client = { workspace = true }
 sandbox = { workspace = true }
 es-entity = { workspace = true }
 anyhow = "1"
