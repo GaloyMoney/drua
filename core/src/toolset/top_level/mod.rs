@@ -104,7 +104,7 @@ pub use glob::GlobTool;
 pub use grep::Grep;
 pub use log::WorkspaceLog;
 pub use ls::Ls;
-pub use notes::{GetNote, ListNotes, SearchNotes, StoreNote};
+pub use notes::NotesTool;
 pub use read::Read;
 pub use sandbox::WorkspaceSandbox;
 pub use text_editor::TextEditor;

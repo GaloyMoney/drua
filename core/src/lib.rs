@@ -33,9 +33,8 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GetNote, GlobTool, Grep, ListNotes, Ls, Read,
-    SearchNotes, StoreNote, TextEditor, ToolSets, ToolSetsError, WorkspaceAgent, WorkspaceLog,
-    WorkspaceSandbox,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, TextEditor,
+    ToolSets, ToolSetsError, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -194,10 +193,7 @@ impl App {
 
         // Notes: workspace-scoped knowledge base with hybrid RAG search.
         let notes = Arc::new(Notes::new(pool, library.clone()));
-        toolsets.register_top_level(StoreNote::new(Arc::clone(&notes), Arc::clone(&workspaces)));
-        toolsets.register_top_level(SearchNotes::new(Arc::clone(&notes)));
-        toolsets.register_top_level(ListNotes::new(Arc::clone(&notes)));
-        toolsets.register_top_level(GetNote::new(Arc::clone(&notes)));
+        toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
 
         // Admin tools live behind progressive disclosure (search_tools →
         // describe_tool → call_tool) to declutter the top-level list_tools
