@@ -1,5 +1,5 @@
 pub mod chat;
-pub mod dashboard;
+pub mod tui;
 pub mod export;
 pub mod login;
 pub mod logout;

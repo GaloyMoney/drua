@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
 
-        Command::Tui { server } => drua_client::commands::dashboard::run(server).await,
+        Command::Tui { server } => drua_client::commands::tui::run(server).await,
         Command::Login { server } => drua_client::commands::login::run(server).await,
         Command::Status => drua_client::commands::status::run().await,
         Command::Logout => drua_client::commands::logout::run(),
