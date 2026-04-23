@@ -12,6 +12,7 @@ groups:
   - test-sandbox
   - build-edge-image
   - build-sandbox-image
+  - build-tunnel-connector-image
   - deploy-to-prod
   - train-classifier
   - build-code-assistant-index
@@ -361,6 +362,37 @@ jobs:
     get_params:
       skip_download: true
 
+- name: build-tunnel-connector-image
+  serial: true
+  plan:
+  - get: repo-tunnel-connector
+    trigger: true
+  - task: build-image
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_image_config()
+      inputs:
+      - name: repo-tunnel-connector
+        path: repo
+      outputs:
+      - name: image
+      caches:
+      - path: /nix-cache
+      run:
+        path: repo/ci/tasks/with-nix-cache.sh
+        args:
+          - sh
+          - -exc
+          - |
+            cd repo
+            nix build .#tunnel-connector-image
+            gunzip -c result > ../image/image.tar
+  - put: tunnel-connector-edge-image
+    params:
+      image: image/image.tar
+    get_params:
+      skip_download: true
+
 resource_types:
 - name: terraform
   type: registry-image
@@ -402,6 +434,18 @@ resources:
     - bats/sandbox.bats
     - bats/sandbox-helpers.bash
     - flake.nix
+
+- name: repo-tunnel-connector
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+    paths:
+    - images/tunnel-connector/
+    - flake.nix
+    - Cargo.toml
+    - Cargo.lock
 
 - name: repo-labels
   type: git
@@ -472,6 +516,14 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/sandbox"
+
+- name: tunnel-connector-edge-image
+  type: registry-image
+  source:
+    tag: edge
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+    repository: #@ data.values.gar_registry + "/tunnel-connector"
 
 - name: tf-galoy-agents-prod
   type: terraform

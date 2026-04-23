@@ -417,6 +417,17 @@
           sandbox-tool-server = self.packages.${system}.sandbox-tool-server;
         };
 
+        packages.tunnel-connector = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tunnel-connector";
+          cargoExtraArgs = "-p tunnel-connector";
+        });
+
+        packages.tunnel-connector-image = import ./images/tunnel-connector/default.nix {
+          inherit pkgs;
+          tunnel-connector = self.packages.${system}.tunnel-connector;
+        };
+
         devShells.training = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
           shellHook = ''

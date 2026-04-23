@@ -18,7 +18,7 @@ anyhow = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }

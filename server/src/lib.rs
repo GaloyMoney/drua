@@ -5,6 +5,7 @@ mod routes;
 pub mod server;
 mod templates;
 pub mod tracing_init;
+pub mod tunnel;
 
 use axum::Router;
 

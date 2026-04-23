@@ -13,6 +13,26 @@ pub struct ToolSetEntry {
     pub default_output_filter: Option<OutputFilter>,
 }
 
+/// Dynamic-registration provenance carried by a [`SearchableToolSet`].
+///
+/// Returned by [`SearchableToolSet::scope`] so that the [`super::ToolSets`]
+/// container can (a) atomically replace all toolsets owned by a particular
+/// scope and (b) reject stale cleanup calls from an evicted owner. Static
+/// toolsets (configured upstreams, Concourse, code-assistant, etc.) return
+/// `None` and are never eligible for scope-based removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolSetScope {
+    /// A tunnel-registered toolset. Two keys — `deployment_id` identifies
+    /// *which* tunnel's toolsets to atomically replace on takeover;
+    /// `session_id` identifies *which specific session* is the current
+    /// owner, so an evicted WS loop's late cleanup can be distinguished
+    /// from the live session and ignored.
+    Tunnel {
+        deployment_id: String,
+        session_id: uuid::Uuid,
+    },
+}
+
 /// A single tool exposed to the agent at the top level — e.g. `search_tools`,
 /// `describe_tool`, `call_tool`, or later built-ins like `read` / `bash`.
 ///
@@ -65,6 +85,15 @@ pub trait SearchableToolSet: Send + Sync {
     /// visible. Override to hide a toolset behind a scope or role.
     fn is_visible(&self, _subject: &AuthSubject) -> bool {
         true
+    }
+
+    /// Provenance for dynamically-registered toolsets. Static toolsets
+    /// (configured upstreams, Concourse, code-assistant) leave this at
+    /// the default `None`; tunnel-backed toolsets return `Some(..)` so
+    /// that takeover can atomically replace them and stale cleanup can
+    /// distinguish live from evicted ownership. See [`ToolSetScope`].
+    fn scope(&self) -> Option<&ToolSetScope> {
+        None
     }
 
     async fn call(

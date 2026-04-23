@@ -13,6 +13,7 @@ members = [
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",
+  "images/tunnel-connector",
 ]
 resolver = "2"
 
