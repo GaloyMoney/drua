@@ -4,7 +4,6 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::auth::AuthSubject;
-use crate::library::SearchResult;
 use crate::note::Notes;
 use crate::primitives::NoteId;
 use crate::workspace::Workspaces;
@@ -81,36 +80,6 @@ async fn resolve_workspace_name(
     Ok(ws.name)
 }
 
-fn format_note(note: &crate::note::Note) -> String {
-    let tags = if note.tags.is_empty() {
-        String::new()
-    } else {
-        format!("\ntags: {}", note.tags.join(", "))
-    };
-    format!("id: {}\ntitle: {}{}", note.id, note.title, tags)
-}
-
-fn format_search_result(r: &SearchResult) -> String {
-    let tags = if r.tags.is_empty() {
-        String::new()
-    } else {
-        format!("  tags: {}\n", r.tags.join(", "))
-    };
-    let content_preview: String = r.content.chars().take(200).collect();
-    format!(
-        "id: {}\ntitle: {}\n{}preview: {}\n",
-        r.doc_id, r.title, tags, content_preview
-    )
-}
-
-fn format_result_list(results: &[SearchResult]) -> String {
-    results
-        .iter()
-        .map(format_search_result)
-        .collect::<Vec<_>>()
-        .join("---\n")
-}
-
 // ---------------------------------------------------------------------------
 // NotesTool
 // ---------------------------------------------------------------------------
@@ -182,9 +151,7 @@ impl TopLevelTool for NotesTool {
                     "created"
                 };
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Note {}.\n{}",
-                    action,
-                    format_note(&note)
+                    "Note {action}.\n{note}"
                 ))]))
             }
 
@@ -196,8 +163,7 @@ impl TopLevelTool for NotesTool {
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "{}\n\n{}",
-                    format_note(&note),
+                    "{note}\n\n{}",
                     note.content
                 ))]))
             }
@@ -215,11 +181,14 @@ impl TopLevelTool for NotesTool {
                     )]));
                 }
 
-                // @@ how are the results formatted? how many lines are shown?
+                let text = results
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("---\n");
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Found {} note(s):\n\n{}",
+                    "Found {} note(s):\n\n{text}",
                     results.len(),
-                    format_result_list(&results)
                 ))]))
             }
 
@@ -236,10 +205,14 @@ impl TopLevelTool for NotesTool {
                     )]));
                 }
 
+                let text = results
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("---\n");
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "{} note(s):\n\n{}",
+                    "{} note(s):\n\n{text}",
                     results.len(),
-                    format_result_list(&results)
                 ))]))
             }
         }

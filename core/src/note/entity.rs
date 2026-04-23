@@ -95,7 +95,11 @@ impl Note {
 
 impl std::fmt::Display for Note {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Note: {}, title: {}", self.id, self.title)
+        write!(f, "id: {}\ntitle: {}", self.id, self.title)?;
+        if !self.tags.is_empty() {
+            write!(f, "\ntags: {}", self.tags.join(", "))?;
+        }
+        Ok(())
     }
 }
 
