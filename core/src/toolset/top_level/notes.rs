@@ -11,7 +11,7 @@ use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{parse_params, schema_for};
+use super::parse_params;
 
 // ---------------------------------------------------------------------------
 // Params
@@ -24,46 +24,72 @@ fn default_list_limit() -> usize {
     20
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum NotesParams {
-    /// Create or update a note.
     Store {
-        /// Title of the note.
         title: String,
-        /// Note content (markdown).
         content: String,
-        /// Tags for categorization.
         #[serde(default)]
         tags: Vec<String>,
-        /// Pass to update an existing note; omit to create a new one.
-        #[schemars(with = "Option<uuid::Uuid>")]
         #[serde(default)]
         note_id: Option<NoteId>,
     },
-    /// Retrieve a single note by ID.
     Get {
-        /// ID of the note to retrieve.
-        #[schemars(with = "uuid::Uuid")]
         note_id: NoteId,
     },
-    /// Hybrid keyword + semantic search.
     Search {
-        /// Search query (keywords or natural language).
         query: String,
-        /// Maximum number of results.
         #[serde(default = "default_search_limit")]
         limit: usize,
     },
-    /// List all notes, most recent first.
     List {
-        /// Maximum number of notes to return.
         #[serde(default = "default_list_limit")]
         limit: usize,
     },
 }
 
-static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<NotesParams>);
+static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "enum": ["store", "get", "search", "list"],
+                "description": "Which notes operation to perform."
+            },
+            "title": {
+                "type": "string",
+                "description": "Title of the note (store)."
+            },
+            "content": {
+                "type": "string",
+                "description": "Note content in markdown (store)."
+            },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Tags for categorization (store). Optional."
+            },
+            "note_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Note ID. Required for get; optional for store (omit to create, pass to update)."
+            },
+            "query": {
+                "type": "string",
+                "description": "Search query — keywords or natural language (search)."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of results (search default 10, list default 20)."
+            }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+    })
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
