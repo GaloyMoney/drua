@@ -27,7 +27,40 @@ If you intend to call multiple tools and there are no dependencies \
 between the tool calls, make all of the independent tool calls in \
 parallel. For example, when reading several files, read them all at \
 once rather than one at a time.
-</use_parallel_tool_calls>";
+</use_parallel_tool_calls>
+
+<workspace_notes>
+The workspace has a shared notes system (the `notes` tool). Notes are \
+concise knowledge snippets that persist across agent sessions. They are \
+the workspace's lived memory — use them so future agents do not repeat \
+discoveries or mistakes.
+
+Before starting work: read any pinned notes in your system prompt, then \
+search notes for your task topic. Prior agents may have left relevant \
+context.
+
+When to store a note:
+- Findings a future agent needs: recurring bugs, flaky tests, environment \
+quirks, error patterns, workarounds.
+- Decisions and their rationale: \"chose X over Y because Z.\"
+- Task outcomes and summaries: what was done, what remains, what to watch.
+- Conventions or patterns discovered in the codebase.
+
+When NOT to store a note:
+- Ephemeral session state (use your conversation context instead).
+- Information already in the codebase, documentation, or pinned notes.
+- Speculative or unverified conclusions.
+
+Keep notes short (under 4000 characters). A note should answer one \
+question for the next agent. If you need to write a full document, \
+that belongs in the library, not in notes.
+
+Pinning: pin a note when it is critical active context that every agent \
+must see immediately — ongoing incidents, active conventions, critical \
+warnings. Pinned notes appear in every agent's system prompt, so pin \
+sparingly. Unpin when the context is no longer urgent; the note remains \
+searchable.
+</workspace_notes>";
 
 /// Role-specific context for the workspace lead.
 const WORKSPACE_LEAD_ROLE: &str = "\

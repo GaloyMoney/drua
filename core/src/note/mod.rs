@@ -299,8 +299,17 @@ impl Notes {
     /// a hint to use the `notes search` tool.
     const PINNED_INJECTION_BUDGET: usize = 8000;
 
-    /// Build formatted pinned-notes content for system prompt injection.
-    /// Returns `None` if no pinned notes exist for the workspace.
+    /// Maximum number of non-pinned notes to include in the title/tag index.
+    const NOTE_INDEX_LIMIT: usize = 20;
+
+    /// Build workspace notes context for system prompt injection.
+    ///
+    /// Contains two sections:
+    /// 1. **Pinned notes** — full content, within the character budget.
+    /// 2. **Recent notes index** — title + tags only for non-pinned notes,
+    ///    so the agent knows what's available to search for.
+    ///
+    /// Returns `None` if the workspace has no notes at all.
     /// This is an internal method (no auth check) — called at agent creation.
     #[instrument(name = "note.pinned_context_for_workspace", skip(self))]
     pub async fn pinned_context_for_workspace(
@@ -320,43 +329,76 @@ impl Notes {
             )
             .await?;
 
-        let mut pinned: Vec<&Note> = result.entities.iter().filter(|n| n.pinned).collect();
-        if pinned.is_empty() {
+        if result.entities.is_empty() {
             return Ok(None);
         }
 
-        // Sort by most-recently-updated first (events timestamp).
-        pinned.sort_by(|a, b| {
-            let a_ts = a.events.entity_last_modified_at();
-            let b_ts = b.events.entity_last_modified_at();
-            b_ts.cmp(&a_ts)
-        });
+        let mut pinned: Vec<&Note> = result.entities.iter().filter(|n| n.pinned).collect();
+        let non_pinned: Vec<&Note> = result.entities.iter().filter(|n| !n.pinned).collect();
 
-        let mut buf = String::from("# Workspace Notes (pinned)\n\n\
-            The following notes are pinned to this workspace. \
-            Use the `notes` tool with command `search` to find additional notes.\n");
-        let mut remaining = Self::PINNED_INJECTION_BUDGET;
-        let mut included = 0;
-        let total = pinned.len();
+        let header = "# Workspace Notes\n\n\
+             Use the `notes` tool with command `search` to retrieve full content.\n";
+        let mut buf = String::from(header);
+        let mut remaining = Self::PINNED_INJECTION_BUDGET.saturating_sub(header.len());
 
-        for note in &pinned {
-            let entry = format!(
-                "\n## {}\n{}\n",
-                note.title, note.content,
-            );
-            if entry.len() > remaining {
-                break;
+        // ── Section 1: Pinned notes (full content) ──────────────────────
+        if !pinned.is_empty() {
+            // Sort by most-recently-updated first (events timestamp).
+            pinned.sort_by(|a, b| {
+                let a_ts = a.events.entity_last_modified_at();
+                let b_ts = b.events.entity_last_modified_at();
+                b_ts.cmp(&a_ts)
+            });
+
+            let section_header = "\n## Pinned\n";
+            buf.push_str(section_header);
+            remaining = remaining.saturating_sub(section_header.len());
+            let mut included = 0;
+            let total = pinned.len();
+
+            for note in &pinned {
+                let entry = format!("\n### {}\n{}\n", note.title, note.content);
+                if entry.len() > remaining {
+                    break;
+                }
+                buf.push_str(&entry);
+                remaining -= entry.len();
+                included += 1;
             }
-            buf.push_str(&entry);
-            remaining -= entry.len();
-            included += 1;
+
+            if included < total {
+                buf.push_str(&format!(
+                    "\n({} more pinned note(s) omitted — use `notes search` to find them)\n",
+                    total - included,
+                ));
+            }
         }
 
-        if included < total {
-            buf.push_str(&format!(
-                "\n({} more pinned note(s) omitted — use `notes search` to find them)\n",
-                total - included,
-            ));
+        // ── Section 2: Recent notes index (titles + tags only) ──────────
+        if !non_pinned.is_empty() && remaining > 100 {
+            let section_header = "\n## Recent notes\n\n";
+            buf.push_str(section_header);
+            remaining = remaining.saturating_sub(section_header.len());
+
+            let mut indexed = 0;
+            for note in non_pinned.iter().take(Self::NOTE_INDEX_LIMIT) {
+                let line = if note.tags.is_empty() {
+                    format!("- {}\n", note.title)
+                } else {
+                    format!("- {} [{}]\n", note.title, note.tags.join(", "))
+                };
+                if line.len() > remaining {
+                    break;
+                }
+                buf.push_str(&line);
+                remaining -= line.len();
+                indexed += 1;
+            }
+
+            let remaining_count = non_pinned.len() - indexed;
+            if remaining_count > 0 {
+                buf.push_str(&format!("- ... and {remaining_count} more\n"));
+            }
         }
 
         Ok(Some(buf))

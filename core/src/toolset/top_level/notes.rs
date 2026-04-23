@@ -135,10 +135,11 @@ impl TopLevelTool for NotesTool {
     }
 
     fn description(&self) -> &str {
-        "Workspace knowledge base. Commands: `store` (create/update a note), \
-         `get` (retrieve by ID), `search` (hybrid keyword + semantic search), \
-         `list` (most recent first), `pin` (pin to workspace context), \
-         `unpin` (remove from workspace context)."
+        "Workspace knowledge base — persistent memory shared across agents. \
+         Store findings, decisions, and task outcomes so future agents benefit. \
+         Commands: `store` (create/update), `get` (by ID), \
+         `search` (hybrid keyword + semantic), `list` (recent first), \
+         `pin` (inject into all agents' context), `unpin` (remove from context)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
