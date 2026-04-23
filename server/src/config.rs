@@ -133,6 +133,17 @@ pub struct ServerConfig {
     pub secure_cookies: bool,
     #[serde(default = "default_mcp_endpoint")]
     pub mcp_endpoint: String,
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
+}
+
+/// `deployment_id` → PEM Ed25519 public key. Config-driven; keypairs
+/// live in Terraform.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelConfig {
+    #[serde(default)]
+    pub deployments: std::collections::BTreeMap<String, String>,
 }
 
 fn default_port() -> u16 {
@@ -158,6 +169,7 @@ impl Default for ServerConfig {
             host: default_host(),
             secure_cookies: true,
             mcp_endpoint: default_mcp_endpoint(),
+            tunnel: TunnelConfig::default(),
         }
     }
 }

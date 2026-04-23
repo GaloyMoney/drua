@@ -26,20 +26,22 @@ locals {
   region               = "us-east1"
 
   github_app_private_key = fileexists("${path.module}/github-app-private-key.pem") ? file("${path.module}/github-app-private-key.pem") : ""
+
+  tunnel_deployments = fileexists("${path.module}/tunnel-deployments-public-keys.json") ? jsondecode(file("${path.module}/tunnel-deployments-public-keys.json")) : {}
 }
 
 module "postgresql" {
   source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp?ref=main"
 
-  gcp_project    = local.gcp_project
-  vpc_name       = local.vpc_name
-  instance_name  = "galoy-agents"
-  region         = local.region
-  databases      = ["galoy-agents"]
-  destroyable    = true
+  gcp_project      = local.gcp_project
+  vpc_name         = local.vpc_name
+  instance_name    = "galoy-agents"
+  region           = local.region
+  databases        = ["galoy-agents"]
+  destroyable      = true
   highly_available = false
-  tier           = "db-f1-micro"
-  replication    = false
+  tier             = "db-f1-micro"
+  replication      = false
 }
 
 resource "kubernetes_namespace" "galoy_agents" {
@@ -67,15 +69,15 @@ resource "kubernetes_secret" "galoy_agents" {
   }
 
   data = {
-    "pg-con"               = module.postgresql.creds["galoy-agents"].conn
-    "github-client-secret" = var.github_client_secret
-    "gcs-creds"            = file("${path.module}/gcs-creds.json")
-    "concourse-username"   = var.concourse_username
-    "concourse-password"   = var.concourse_password
-    "honeycomb-auth-header" = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
-    "github-auth-header"   = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
-    "lingo-auth-header"    = var.lingo_api_key
-    "anthropic-api-key"    = var.anthropic_api_key
+    "pg-con"                 = module.postgresql.creds["galoy-agents"].conn
+    "github-client-secret"   = var.github_client_secret
+    "gcs-creds"              = file("${path.module}/gcs-creds.json")
+    "concourse-username"     = var.concourse_username
+    "concourse-password"     = var.concourse_password
+    "honeycomb-auth-header"  = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
+    "github-auth-header"     = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "lingo-auth-header"      = var.lingo_api_key
+    "anthropic-api-key"      = var.anthropic_api_key
     "github-app-private-key" = local.github_app_private_key
   }
 
@@ -191,9 +193,10 @@ resource "helm_release" "galoy_agents" {
 
   values = [
     templatefile("${path.module}/prod-values.yml.tmpl", {
-      image_digest                = var.image_digest
-      sandbox_image_digest        = var.sandbox_image_digest
-      secret_checksum             = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
+      image_digest         = var.image_digest
+      sandbox_image_digest = var.sandbox_image_digest
+      secret_checksum      = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
+      tunnel_deployments   = local.tunnel_deployments
     })
   ]
 
@@ -235,12 +238,12 @@ provider "kubectl" {
 }
 
 provider "postgresql" {
-  alias    = "galoy_agents"
-  host     = module.postgresql.creds["galoy-agents"].host
-  port     = 5432
-  username = module.postgresql.admin-creds.user
-  password = module.postgresql.admin-creds.password
-  database = "galoy-agents"
+  alias     = "galoy_agents"
+  host      = module.postgresql.creds["galoy-agents"].host
+  port      = 5432
+  username  = module.postgresql.admin-creds.user
+  password  = module.postgresql.admin-creds.password
+  database  = "galoy-agents"
   superuser = false
 }
 

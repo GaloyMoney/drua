@@ -9,7 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
+chrono = "0.4"
 clap = { workspace = true }
+ed25519-dalek = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

@@ -7,6 +7,12 @@ galoyAgents:
     server:
       secureCookies: true
       mcpEndpoint: "https://dashboard.agents.galoy.io/mcp"
+      tunnel:
+        deployments:
+%{ for deployment_id, public_key in tunnel_deployments ~}
+          ${deployment_id}: |
+            ${replace(chomp(public_key), "\n", "\n            ")}
+%{ endfor ~}
     oauth:
       githubClientId: "Ov23livtQjMQ1fB0toPF"
       githubRedirectUri: "https://dashboard.agents.galoy.io/auth/github/callback"
