@@ -103,6 +103,20 @@ async fn ensure_agent(config: &mut Config, explicit_agent: Option<String>) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+
+fn fmt_tokens(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stream events
 // ---------------------------------------------------------------------------
 
@@ -119,8 +133,8 @@ struct UsageInfo {
     turns: u32,
     input_tokens: u32,
     output_tokens: u32,
-    duration_ms: Option<u32>,
-    cost_usd: Option<f64>,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
 }
 
 fn parse_stream_event(event: &serde_json::Value) -> Option<StreamEvent> {
@@ -158,26 +172,15 @@ fn parse_stream_event(event: &serde_json::Value) -> Option<StreamEvent> {
             Some(StreamEvent::Error(msg.to_string()))
         }
         "AssistantDoneEvent" => {
-            let turns = event.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let input_tokens = event
-                .get("inputTokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let output_tokens = event
-                .get("outputTokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let duration_ms = event
-                .get("durationMs")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
-            let cost_usd = event.get("costUsd").and_then(|v| v.as_f64());
+            let u64_field = |name: &str| -> u32 {
+                event.get(name).and_then(|v| v.as_u64()).unwrap_or(0) as u32
+            };
             Some(StreamEvent::Done(UsageInfo {
-                turns,
-                input_tokens,
-                output_tokens,
-                duration_ms,
-                cost_usd,
+                turns: u64_field("turns"),
+                input_tokens: u64_field("inputTokens"),
+                output_tokens: u64_field("outputTokens"),
+                cache_read_input_tokens: u64_field("cacheReadInputTokens"),
+                cache_creation_input_tokens: u64_field("cacheCreationInputTokens"),
             }))
         }
         // AssistantTextEvent, ThinkingDeltaEvent, etc. — skip
@@ -249,18 +252,25 @@ async fn stream_response(base_url: &str, token: &str, agent_id: &str, prompt: &s
                     }
                     StreamEvent::Done(usage) => {
                         if needs_newline { println!(); }
-                        let total = usage.input_tokens + usage.output_tokens;
-                        let mut parts = vec![
-                            format!("{} turn{}", usage.turns, if usage.turns != 1 { "s" } else { "" }),
-                            format!("{total} tokens"),
-                        ];
-                        if let Some(ms) = usage.duration_ms {
-                            parts.push(format!("{:.1}s", ms as f64 / 1000.0));
+                        let mut parts = Vec::new();
+                        if usage.turns > 1 {
+                            parts.push(format!("{} turns", usage.turns));
                         }
-                        if let Some(cost) = usage.cost_usd {
-                            parts.push(format!("${cost:.4}"));
+                        parts.push(format!("↑{}", fmt_tokens(usage.input_tokens)));
+                        parts.push(format!("↓{}", fmt_tokens(usage.output_tokens)));
+                        if usage.cache_read_input_tokens > 0 {
+                            parts.push(format!(
+                                "R{}",
+                                fmt_tokens(usage.cache_read_input_tokens)
+                            ));
                         }
-                        println!("\x1b[2m[{}]\x1b[0m", parts.join(" | "));
+                        if usage.cache_creation_input_tokens > 0 {
+                            parts.push(format!(
+                                "W{}",
+                                fmt_tokens(usage.cache_creation_input_tokens)
+                            ));
+                        }
+                        println!("\x1b[2m{}\x1b[0m", parts.join(" "));
                         break;
                     }
                 }

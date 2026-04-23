@@ -666,6 +666,8 @@ impl Agents {
             let mut turn: u32 = 0;
             let mut input_tokens: u32 = 0;
             let mut output_tokens: u32 = 0;
+            let mut cache_read_input_tokens: u32 = 0;
+            let mut cache_creation_input_tokens: u32 = 0;
             let mut current_model = model_name;
             loop {
                 turn += 1;
@@ -694,6 +696,8 @@ impl Agents {
 
                 input_tokens += response.usage.input_tokens;
                 output_tokens += response.usage.output_tokens;
+                cache_read_input_tokens += response.usage.cache_read_input_tokens;
+                cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
 
                 // Persist the complete response to the session.
                 let session_response = match sessions
@@ -786,6 +790,8 @@ impl Agents {
                     turns: turn,
                     input_tokens,
                     output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
                     duration_ms: None,
                     cost_usd: None,
                 })

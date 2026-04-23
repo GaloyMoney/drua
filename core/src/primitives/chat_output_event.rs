@@ -41,6 +41,8 @@ pub enum ChatOutputEvent {
         turns: u32,
         input_tokens: u32,
         output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
