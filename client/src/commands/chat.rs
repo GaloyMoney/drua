@@ -38,39 +38,59 @@ struct WorkspaceCreateResponse {
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceCreatePayload {
-    workspace: CreatedWorkspace,
+    workspace: CreatedWorkspaceNode,
 }
 
 #[derive(Debug, Deserialize)]
-struct CreatedWorkspace {
-    lead: Option<AgentIdOnly>,
+struct CreatedWorkspaceNode {
+    id: String,
 }
 
-async fn provision_workspace(client: &GraphqlClient) -> Result<String> {
-    let query = r#"
+#[derive(Debug, Deserialize)]
+struct AgentCreateResponse {
+    #[serde(rename = "agentCreate")]
+    agent_create: AgentCreatePayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentCreatePayload {
+    agent: AgentIdOnly,
+}
+
+async fn provision_chat_agent(client: &GraphqlClient) -> Result<String> {
+    // 1. Create workspace
+    let ws_query = r#"
         mutation WorkspaceCreate($input: WorkspaceCreateInput!) {
             workspaceCreate(input: $input) {
-                workspace {
-                    lead { id }
-                }
+                workspace { id }
             }
         }
     "#;
-
-    let input = serde_json::json!({
+    let ws_input = serde_json::json!({
         "name": "drua-chat",
         "description": "Auto-provisioned workspace for drua chat"
     });
-
-    let resp: WorkspaceCreateResponse = client
-        .query(query, serde_json::json!({ "input": input }))
+    let ws_resp: WorkspaceCreateResponse = client
+        .query(ws_query, serde_json::json!({ "input": ws_input }))
         .await?;
+    let workspace_id = &ws_resp.workspace_create.workspace.id;
 
-    resp.workspace_create
-        .workspace
-        .lead
-        .map(|a| a.id)
-        .ok_or_else(|| anyhow::anyhow!("workspace created but no lead agent returned"))
+    // 2. Create agent (not the lead — so we can attach sandboxes)
+    let agent_query = r#"
+        mutation AgentCreate($input: AgentCreateInput!) {
+            agentCreate(input: $input) {
+                agent { id }
+            }
+        }
+    "#;
+    let agent_input = serde_json::json!({
+        "workspaceId": workspace_id,
+        "name": "chat"
+    });
+    let agent_resp: AgentCreateResponse = client
+        .query(agent_query, serde_json::json!({ "input": agent_input }))
+        .await?;
+    Ok(agent_resp.agent_create.agent.id)
 }
 
 async fn ensure_agent(config: &mut Config, explicit_agent: Option<String>) -> Result<String> {
@@ -95,8 +115,8 @@ async fn ensure_agent(config: &mut Config, explicit_agent: Option<String>) -> Re
     }
 
     let client = GraphqlClient::new(&config.server_url, &config.auth_token);
-    eprintln!("Provisioning chat workspace...");
-    let agent_id = provision_workspace(&client).await?;
+    eprintln!("Provisioning chat agent...");
+    let agent_id = provision_chat_agent(&client).await?;
     config.chat_agent_id = Some(agent_id.clone());
     config.save()?;
     Ok(agent_id)

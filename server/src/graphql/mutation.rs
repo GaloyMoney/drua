@@ -1,6 +1,16 @@
-use async_graphql::{Context, Object};
+use async_graphql::{Context, InputObject, Object};
 
+use super::agent::Agent;
+use super::primitives::*;
 use super::workspace::*;
+
+#[derive(InputObject)]
+pub struct AgentCreateInput {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+}
+
+mutation_payload! { AgentCreatePayload, agent: Agent }
 
 pub struct Mutation;
 
@@ -8,6 +18,19 @@ pub struct Mutation;
 impl Mutation {
     async fn ping(&self) -> &str {
         "pong"
+    }
+
+    async fn agent_create(
+        &self,
+        ctx: &Context<'_>,
+        input: AgentCreateInput,
+    ) -> async_graphql::Result<AgentCreatePayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let agent = app
+            .agents()
+            .create_agent(sub, input.workspace_id, input.name, None)
+            .await?;
+        Ok(AgentCreatePayload::from(Agent::from(agent)))
     }
 
     async fn workspace_create(
