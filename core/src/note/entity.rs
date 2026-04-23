@@ -52,6 +52,11 @@ impl Note {
             .entity_first_persisted_at()
             .map(|t| t.to_rfc3339())
             .unwrap_or_default();
+        let updated_at = self
+            .events
+            .entity_last_modified_at()
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
 
         crate::library::RuntimeFile::for_note(
             self.id,
@@ -61,6 +66,7 @@ impl Note {
             &self.content,
             &self.tags,
             &created_at,
+            &updated_at,
         )
     }
 
@@ -209,6 +215,7 @@ mod tests {
             "Test Note",
             "Some content here",
             &["tag1".into(), "tag2".into()],
+            "",
             "",
         );
         rf.file_hash()

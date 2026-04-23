@@ -52,6 +52,7 @@ impl Notes {
             &content,
             &tags,
             &created_at,
+            &created_at,
         );
         let file_hash = runtime_file.file_hash();
 
@@ -96,6 +97,14 @@ impl Notes {
             AuthResource::Note(workspace_id, Some(note_id)),
         )?;
 
+        let mut op = self.repo.begin_op().await?.with_db_time().await?;
+        let updated_at = op.now().to_rfc3339();
+
+        let created_at = note
+            .events
+            .entity_first_persisted_at()
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
         let runtime_file = RuntimeFile::for_note(
             note.id,
             note.workspace_id,
@@ -103,17 +112,13 @@ impl Notes {
             &title,
             &content,
             &tags,
-            &note
-                .events
-                .entity_first_persisted_at()
-                .map(|t| t.to_rfc3339())
-                .unwrap_or_default(),
+            &created_at,
+            &updated_at,
         );
         let file_hash = runtime_file.file_hash();
 
         note.update(title, content, tags, file_hash);
 
-        let mut op = self.repo.begin_op().await?;
         self.repo.update_in_op(&mut op, &mut note).await?;
         self.library.write_in_op(&mut op, &runtime_file).await?;
         op.commit().await?;

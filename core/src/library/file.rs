@@ -50,6 +50,7 @@ pub enum RuntimeFile {
         body: String,
         tags: Vec<String>,
         created_at: String,
+        updated_at: String,
         slug: String,
         id_prefix: String,
     },
@@ -65,6 +66,7 @@ impl RuntimeFile {
         body: &str,
         tags: &[String],
         created_at: &str,
+        updated_at: &str,
     ) -> Self {
         RuntimeFile::Note {
             doc_id: note_id,
@@ -74,6 +76,7 @@ impl RuntimeFile {
             body: body.to_string(),
             tags: tags.to_vec(),
             created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
             slug: slugify(title),
             id_prefix: note_id.to_string()[..8].to_string(),
         }
@@ -128,6 +131,7 @@ impl RuntimeFile {
                 body,
                 tags,
                 created_at,
+                updated_at,
                 ..
             } => {
                 let tags_str = tags
@@ -136,8 +140,8 @@ impl RuntimeFile {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "---\nid: {}\ntags: [{}]\ncreated: {}\n---\n\n# {}\n\n{}\n",
-                    doc_id, tags_str, created_at, title, body
+                    "---\nid: {}\ntags: [{}]\ncreated: {}\nupdated: {}\n---\n\n# {}\n\n{}\n",
+                    doc_id, tags_str, created_at, updated_at, title, body
                 )
             }
         }
