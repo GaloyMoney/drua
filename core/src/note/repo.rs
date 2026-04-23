@@ -9,7 +9,10 @@ use super::entity::*;
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "Note",
-    columns(workspace_id(ty = "WorkspaceId", list_for(by(created_at)))),
+    columns(
+        workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
+        pinned(ty = "bool"),
+    ),
     delete = "soft_without_queries"
 )]
 pub struct NoteRepo {

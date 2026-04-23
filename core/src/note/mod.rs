@@ -147,6 +147,79 @@ impl Notes {
         }
     }
 
+    /// Pin a note so it appears in workspace context injection.
+    #[instrument(name = "note.pin", skip(self))]
+    pub async fn pin(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        note_id: NoteId,
+    ) -> Result<Note, NoteError> {
+        let mut note = self.repo.find_by_id(note_id).await?;
+        if note.workspace_id != workspace_id {
+            return Err(NoteError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Update,
+                resource: AuthResource::Workspace(Some(workspace_id)),
+            }));
+        }
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
+        if note.pin().did_execute() {
+            self.repo.update(&mut note).await?;
+        }
+        Ok(note)
+    }
+
+    /// Unpin a note, removing it from workspace context injection.
+    #[instrument(name = "note.unpin", skip(self))]
+    pub async fn unpin(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        note_id: NoteId,
+    ) -> Result<Note, NoteError> {
+        let mut note = self.repo.find_by_id(note_id).await?;
+        if note.workspace_id != workspace_id {
+            return Err(NoteError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Update,
+                resource: AuthResource::Workspace(Some(workspace_id)),
+            }));
+        }
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
+        if note.unpin().did_execute() {
+            self.repo.update(&mut note).await?;
+        }
+        Ok(note)
+    }
+
+    /// List pinned notes for a workspace.
+    #[instrument(name = "note.list_pinned", skip(self))]
+    pub async fn list_pinned(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<Note>, NoteError> {
+        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                workspace_id,
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result.entities.into_iter().filter(|n| n.pinned).collect())
+    }
+
     /// Retrieve a single note by id, scoped to workspace.
     #[instrument(name = "note.find_by_id", skip(self))]
     pub async fn find_by_id(

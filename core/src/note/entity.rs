@@ -25,6 +25,8 @@ pub enum NoteEvent {
         tags: Vec<String>,
         file_hash: GitFileHash,
     },
+    Pinned {},
+    Unpinned {},
 }
 
 #[derive(EsEntity, Builder)]
@@ -37,6 +39,7 @@ pub struct Note {
     pub(crate) content: String,
     pub(crate) tags: Vec<String>,
     pub(crate) file_hash: Option<GitFileHash>,
+    pub(crate) pinned: bool,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
@@ -71,6 +74,28 @@ impl Note {
             &created_at,
             &updated_at,
         )
+    }
+
+    pub fn pin(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: NoteEvent::Pinned {},
+            resets_on: NoteEvent::Unpinned { .. }
+        );
+        self.pinned = true;
+        self.events.push(NoteEvent::Pinned {});
+        Idempotent::Executed(())
+    }
+
+    pub fn unpin(&mut self) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: NoteEvent::Unpinned {},
+            resets_on: NoteEvent::Pinned { .. }
+        );
+        self.pinned = false;
+        self.events.push(NoteEvent::Unpinned {});
+        Idempotent::Executed(())
     }
 
     pub fn update(
@@ -109,6 +134,9 @@ impl From<Note> for crate::library::SearchResult {
 impl std::fmt::Display for Note {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "id: {}\ntitle: {}", self.id, self.title)?;
+        if self.pinned {
+            write!(f, "\npinned: true")?;
+        }
         if !self.tags.is_empty() {
             write!(f, "\ntags: {}", self.tags.join(", "))?;
         }
@@ -138,7 +166,8 @@ impl TryFromEvents<NoteEvent> for Note {
                         .title(title.clone())
                         .content(content.clone())
                         .tags(tags.clone())
-                        .file_hash(Some(file_hash.clone()));
+                        .file_hash(Some(file_hash.clone()))
+                        .pinned(false);
                 }
                 NoteEvent::Updated {
                     title,
@@ -151,6 +180,12 @@ impl TryFromEvents<NoteEvent> for Note {
                         .content(content.clone())
                         .tags(tags.clone())
                         .file_hash(Some(file_hash.clone()));
+                }
+                NoteEvent::Pinned {} => {
+                    builder = builder.pinned(true);
+                }
+                NoteEvent::Unpinned {} => {
+                    builder = builder.pinned(false);
                 }
             }
         }
@@ -174,6 +209,8 @@ pub struct NewNote {
     #[builder(default)]
     pub(super) tags: Vec<String>,
     pub(super) file_hash: GitFileHash,
+    #[builder(default)]
+    pub(super) pinned: bool,
 }
 
 impl NewNote {
@@ -262,5 +299,31 @@ mod tests {
         assert_eq!(note.title, "Updated Title");
         assert_eq!(note.content, "Updated content");
         assert_eq!(note.tags, vec!["new-tag"]);
+    }
+
+    #[test]
+    fn note_pin_unpin() {
+        let mut note = new_note();
+        assert!(!note.pinned);
+
+        // Pin
+        let result = note.pin();
+        assert!(matches!(result, es_entity::Idempotent::Executed(())));
+        assert!(note.pinned);
+
+        // Pin again is idempotent
+        let result = note.pin();
+        assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
+        assert!(note.pinned);
+
+        // Unpin
+        let result = note.unpin();
+        assert!(matches!(result, es_entity::Idempotent::Executed(())));
+        assert!(!note.pinned);
+
+        // Unpin again is idempotent
+        let result = note.unpin();
+        assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
+        assert!(!note.pinned);
     }
 }

@@ -47,6 +47,12 @@ enum NotesParams {
         #[serde(default = "default_list_limit")]
         limit: usize,
     },
+    Pin {
+        note_id: NoteId,
+    },
+    Unpin {
+        note_id: NoteId,
+    },
 }
 
 static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -55,7 +61,7 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["store", "get", "search", "list"],
+                "enum": ["store", "get", "search", "list", "pin", "unpin"],
                 "description": "Which notes operation to perform."
             },
             "title": {
@@ -74,7 +80,7 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "note_id": {
                 "type": "string",
                 "format": "uuid",
-                "description": "Note ID. Required for get; optional for store (omit to create, pass to update)."
+                "description": "Note ID. Required for get/pin/unpin; optional for store (omit to create, pass to update)."
             },
             "query": {
                 "type": "string",
@@ -131,7 +137,8 @@ impl TopLevelTool for NotesTool {
     fn description(&self) -> &str {
         "Workspace knowledge base. Commands: `store` (create/update a note), \
          `get` (retrieve by ID), `search` (hybrid keyword + semantic search), \
-         `list` (most recent first)."
+         `list` (most recent first), `pin` (pin to workspace context), \
+         `unpin` (remove from workspace context)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -213,6 +220,28 @@ impl TopLevelTool for NotesTool {
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Found {} note(s):\n\n{text}",
                     results.len(),
+                ))]))
+            }
+
+            NotesParams::Pin { note_id } => {
+                let note = self
+                    .notes
+                    .pin(subject, workspace_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Note pinned.\n{note}"
+                ))]))
+            }
+
+            NotesParams::Unpin { note_id } => {
+                let note = self
+                    .notes
+                    .unpin(subject, workspace_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Note unpinned.\n{note}"
                 ))]))
             }
 
