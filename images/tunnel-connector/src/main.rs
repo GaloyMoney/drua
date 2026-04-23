@@ -1,23 +1,27 @@
 //! Tunnel connector — runs in a target cluster and relays MCP tool calls
-//! from galoy-agents to local MCP servers over an outbound WebSocket.
+//! from drua to local MCP servers over an outbound WebSocket.
 //!
 //! # Usage
 //!
 //! ```text
 //! tunnel-connector \
-//!   --server-url wss://mcp.agents.galoy.io/tunnel/ws \
-//!   --auth-token <bearer-token> \
+//!   --server-url wss://dashboard.agents.galoy.io/tunnel/ws \
+//!   --private-key-file /var/run/secrets/tunnel/private_key.pem \
 //!   --deployment-id galoy-staging \
 //!   --upstreams "kubernetes=http://k8s-mcp:8080/mcp,postgres=http://pg-mcp:8000/mcp"
 //! ```
 //!
-//! The connector discovers tools from each upstream MCP server at startup,
-//! connects to galoy-agents, registers the tool catalog, and enters a
-//! relay loop. On disconnect it automatically reconnects.
+//! The connector discovers tools from each upstream MCP server at
+//! startup, signs an Ed25519 handshake header identifying itself as
+//! `deployment_id`, connects to drua, registers the tool catalog, and
+//! enters a relay loop. On disconnect it reconnects with exponential
+//! backoff + jitter.
 
 use std::collections::HashMap;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::Parser;
+use ed25519_dalek::{pkcs8::DecodePrivateKey, Signer, SigningKey};
 use futures::{SinkExt, StreamExt};
 use rmcp::{
     model::CallToolRequestParams,
@@ -73,18 +77,22 @@ struct RegisteredToolSet {
 #[derive(Parser)]
 #[command(
     name = "tunnel-connector",
-    about = "Outbound tunnel from a deployment cluster to galoy-agents"
+    about = "Outbound tunnel from a deployment cluster to drua"
 )]
 struct Cli {
-    /// galoy-agents tunnel WebSocket URL
+    /// drua tunnel WebSocket URL
     #[arg(long, env = "TUNNEL_SERVER_URL")]
     server_url: String,
 
-    /// Bearer token for authentication
-    #[arg(long, env = "TUNNEL_AUTH_TOKEN")]
-    auth_token: String,
+    /// Path to the PEM-encoded Ed25519 private key that identifies this
+    /// deployment. The matching public key must be registered on drua
+    /// under `server.tunnel.deployments.<deployment_id>`. Mounted from
+    /// a Kubernetes Secret in production.
+    #[arg(long, env = "TUNNEL_PRIVATE_KEY_FILE")]
+    private_key_file: std::path::PathBuf,
 
-    /// Deployment identifier (e.g. "galoy-staging")
+    /// Deployment identifier (e.g. "galoy-staging"). Must match the
+    /// key under `server.tunnel.deployments` in drua's config.
     #[arg(long, env = "TUNNEL_DEPLOYMENT_ID")]
     deployment_id: String,
 
@@ -108,6 +116,32 @@ fn parse_upstreams(raw: &str) -> Vec<UpstreamConfig> {
             })
         })
         .collect()
+}
+
+/// Load an Ed25519 signing key from a PKCS#8 PEM file. The companion
+/// `tls_private_key` resource in galoy-deployments emits this exact
+/// shape, so no custom format handling is needed here.
+fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
+    let pem = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(
+            "tunnel-connector: reading private key from {}: {e}",
+            path.display()
+        )
+    })?;
+    SigningKey::from_pkcs8_pem(&pem).map_err(|e| {
+        anyhow::anyhow!("tunnel-connector: private key is not PKCS#8 Ed25519 PEM: {e}")
+    })
+}
+
+/// Build the `Authorization: Tunnel <deployment_id>:<ts_ms>:<sig>` value
+/// drua's handshake verifier expects. Fresh timestamp on every call, so
+/// a reconnect after the replay window cannot reuse a previous header.
+fn sign_handshake(deployment_id: &str, signing_key: &SigningKey) -> String {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let payload = format!("{deployment_id}|{ts_ms}");
+    let sig = signing_key.sign(payload.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    format!("Tunnel {deployment_id}:{ts_ms}:{sig_b64}")
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +221,19 @@ async fn run_tunnel(
         mcp_clients.insert(upstream.name.clone(), client);
     }
 
-    // ── 2. Connect WebSocket to galoy-agents ──────────────────────────────
+    // ── 2. Connect WebSocket to drua ──────────────────────────────────────
+    // Sign a fresh handshake header per connect attempt — timestamp is
+    // in the signed payload, so drua's replay-window check naturally
+    // rejects a stolen header once it's ~60s old.
+    let signing_key = load_signing_key(&cli.private_key_file)?;
+    let authorization = sign_handshake(&cli.deployment_id, &signing_key);
+
     let parsed_url = url::Url::parse(&cli.server_url)?;
     let host = parsed_url.host_str().unwrap_or("localhost").to_string();
 
     let request = tungstenite::http::Request::builder()
         .uri(&cli.server_url)
-        .header("Authorization", format!("Bearer {}", cli.auth_token))
+        .header("Authorization", authorization)
         .header("Host", &host)
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
@@ -207,7 +247,7 @@ async fn run_tunnel(
     let (ws_stream, _response) = tokio_tungstenite::connect_async(request).await?;
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    tracing::info!(server = %cli.server_url, "connected to galoy-agents");
+    tracing::info!(server = %cli.server_url, "connected to drua");
 
     // ── 3. Send registration ──────────────────────────────────────────────
     let register_msg = TunnelMessage::Register {

@@ -5974,7 +5974,10 @@ name = "tunnel-connector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "chrono",
  "clap",
+ "ed25519-dalek",
  "futures",
  "rand 0.8.6",
  "reqwest 0.13.2",
