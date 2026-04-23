@@ -120,7 +120,7 @@ impl RuntimeFile {
     }
 
     /// Render the file content on-the-fly from structured fields.
-    pub(super) fn content(&self) -> String {
+    pub fn content(&self) -> String {
         match self {
             RuntimeFile::Note {
                 doc_id,

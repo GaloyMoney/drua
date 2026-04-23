@@ -13,6 +13,7 @@ pub enum NoteEvent {
     Initialized {
         id: NoteId,
         workspace_id: WorkspaceId,
+        workspace_name: String,
         title: String,
         content: String,
         tags: Vec<String>,
@@ -32,6 +33,8 @@ pub enum NoteEvent {
 pub struct Note {
     pub id: NoteId,
     pub workspace_id: WorkspaceId,
+    #[builder(default)]
+    pub workspace_name: String,
     pub title: String,
     pub content: String,
     #[builder(default)]
@@ -44,10 +47,7 @@ pub struct Note {
 }
 
 impl Note {
-    pub fn as_runtime_file(
-        &self,
-        workspace_name: &str,
-    ) -> crate::library::RuntimeFile {
+    pub fn as_runtime_file(&self) -> crate::library::RuntimeFile {
         let created_at = self
             .events
             .entity_first_persisted_at()
@@ -57,7 +57,7 @@ impl Note {
         crate::library::RuntimeFile::for_note(
             self.id,
             self.workspace_id,
-            workspace_name,
+            &self.workspace_name,
             &self.title,
             &self.content,
             &self.tags,
@@ -112,6 +112,7 @@ impl TryFromEvents<NoteEvent> for Note {
                 NoteEvent::Initialized {
                     id,
                     workspace_id,
+                    workspace_name,
                     title,
                     content,
                     tags,
@@ -120,6 +121,7 @@ impl TryFromEvents<NoteEvent> for Note {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
+                        .workspace_name(workspace_name.clone())
                         .title(title.clone())
                         .content(content.clone())
                         .tags(tags.clone())
@@ -154,6 +156,8 @@ pub struct NewNote {
     #[builder(setter(into))]
     pub(super) workspace_id: WorkspaceId,
     #[builder(setter(into))]
+    pub(super) workspace_name: String,
+    #[builder(setter(into))]
     pub(super) title: String,
     #[builder(setter(into))]
     pub(super) content: String,
@@ -177,6 +181,7 @@ impl IntoEvents<NoteEvent> for NewNote {
             [NoteEvent::Initialized {
                 id: self.id,
                 workspace_id: self.workspace_id,
+                workspace_name: self.workspace_name,
                 title: self.title,
                 content: self.content,
                 tags: self.tags,
@@ -196,7 +201,6 @@ mod tests {
     use super::{NewNote, Note};
 
     fn test_hash() -> GitFileHash {
-        // Use RuntimeFile machinery to compute a real hash
         let rf = crate::library::RuntimeFile::for_note(
             NoteId::new(),
             WorkspaceId::new(),
@@ -214,6 +218,7 @@ mod tests {
         let new = NewNote::builder()
             .id(id)
             .workspace_id(WorkspaceId::new())
+            .workspace_name("test")
             .title("Test Note")
             .content("Some content here")
             .tags(vec!["tag1".into(), "tag2".into()])
@@ -230,6 +235,7 @@ mod tests {
         assert_eq!(note.title, "Test Note");
         assert_eq!(note.content, "Some content here");
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
+        assert_eq!(note.workspace_name, "test");
         assert!(!note.archived);
         assert!(note.file_hash.is_some());
     }

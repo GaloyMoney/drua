@@ -162,10 +162,8 @@ impl TopLevelTool for NotesTool {
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "{note}\n\n{}",
-                    note.content
-                ))]))
+                let content = note.as_runtime_file().content();
+                Ok(CallToolResult::success(vec![Content::text(content)]))
             }
 
             NotesParams::Search { query, limit } => {

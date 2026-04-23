@@ -55,6 +55,7 @@ impl Notes {
         let new_note = NewNote::builder()
             .id(note_id)
             .workspace_id(workspace_id)
+            .workspace_name(workspace_name)
             .title(&title)
             .content(&content)
             .tags(tags)
@@ -71,13 +72,11 @@ impl Notes {
     }
 
     /// Update an existing note.
-    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "note.update", skip(self))]
     pub async fn update(
         &self,
         sub: &AuthSubject,
         workspace_id: WorkspaceId,
-        workspace_name: &str,
         note_id: NoteId,
         title: String,
         content: String,
@@ -95,19 +94,18 @@ impl Notes {
             AuthResource::Note(workspace_id, Some(note_id)),
         )?;
 
-        let created_at = note
-            .events
-            .entity_first_persisted_at()
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
         let runtime_file = RuntimeFile::for_note(
             note.id,
             note.workspace_id,
-            workspace_name,
+            &note.workspace_name,
             &title,
             &content,
             &tags,
-            &created_at,
+            &note
+                .events
+                .entity_first_persisted_at()
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default(),
         );
         let file_hash = runtime_file.file_hash();
 
@@ -136,7 +134,7 @@ impl Notes {
     ) -> Result<Note, NoteError> {
         match note_id {
             Some(id) => {
-                self.update(sub, workspace_id, workspace_name, id, title, content, tags)
+                self.update(sub, workspace_id, id, title, content, tags)
                     .await
             }
             None => {
