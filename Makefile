@@ -49,3 +49,7 @@ start: reset-deps
 dev:
 	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
 
+.PHONY: chat
+chat:
+	@cargo run -p drua-cli -- chat $(ARGS)
+
