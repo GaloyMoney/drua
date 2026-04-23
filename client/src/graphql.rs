@@ -80,7 +80,7 @@ const AGENT_MESSAGE_SUBSCRIPTION: &str = r#"
 subscription AgentMessage($agentId: AgentId!, $prompt: String!) {
   agentSendMessage(agentId: $agentId, prompt: $prompt) {
     __typename
-    ... on TextDeltaEvent { text }
+    ... on AssistantTextDeltaEvent { text }
     ... on ThinkingDeltaEvent { text }
     ... on ToolCallStartEvent { name }
     ... on ToolCallInputDeltaEvent { partialJson }

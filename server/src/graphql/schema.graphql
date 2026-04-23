@@ -60,7 +60,7 @@ enum ChatMessageRole {
 	USER
 }
 
-union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | TextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent
+union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | AssistantTextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent
 
 type ErrorEvent {
 	message: String!
@@ -192,7 +192,7 @@ type TextContent {
 	text: String!
 }
 
-type TextDeltaEvent {
+type AssistantTextDeltaEvent {
 	text: String!
 }
 

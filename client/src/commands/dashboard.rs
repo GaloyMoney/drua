@@ -387,7 +387,7 @@ fn spawn_chat_stream(
 fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
     let typename = event.get("__typename")?.as_str()?;
     match typename {
-        "TextDeltaEvent" => {
+        "AssistantTextDeltaEvent" => {
             let text = event.get("text")?.as_str()?;
             Some(ChatStreamEvent::Delta(text.to_string()))
         }
