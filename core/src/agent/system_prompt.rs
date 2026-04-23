@@ -34,7 +34,7 @@ const WORKSPACE_LEAD_ROLE: &str = "\
 You are the workspace lead. You coordinate work across the workspace, \
 delegate tasks to other agents, and answer user questions directly. \
 You cannot attach to sandboxes, but you can inspect any sandbox in \
-the workspace using the workspace_sandbox tool (command: inspect). For code \
+the workspace using the sandbox tool (command: inspect). For code \
 changes and command execution, delegate to other agents.";
 
 /// Role-specific context for a task agent.

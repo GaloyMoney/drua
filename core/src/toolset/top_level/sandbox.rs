@@ -130,17 +130,14 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceSandbox {
     fn name(&self) -> &str {
-        "workspace_sandbox"
+        "sandbox"
     }
 
     fn description(&self) -> &str {
-        "Sandbox management for the caller's workspace. Commands: \
-         `create` (create a new sandbox — requires `name`, `mode`, optional \
-         `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
-         `list` (list all sandboxes), \
-         `get` (get sandbox details — requires `sandbox_id`), \
-         `inspect` (run a read-only tool against a sandbox — requires \
-         `sandbox_id`, `tool` (grep/glob/read/ls), and `tool_args`)."
+        "Manage sandboxes. Commands: `create` (requires `name`, `mode`, \
+         optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
+         `list`, `get` (requires `sandbox_id`), \
+         `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

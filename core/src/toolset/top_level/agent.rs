@@ -91,16 +91,13 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceAgent {
     fn name(&self) -> &str {
-        "workspace_agent"
+        "agent"
     }
 
     fn description(&self) -> &str {
-        "Agent management for the caller's workspace. Commands: \
-         `create` (create a new agent — requires `name`), \
-         `list` (list all agents), \
-         `attach_sandbox` (attach a sandbox to an agent — requires `agent_id`, \
-         `sandbox_id`, optional `mode`), \
-         `detach_sandbox` (detach a sandbox — requires `agent_id`, `sandbox_id`)."
+        "Manage agents. Commands: `create` (requires `name`), `list`, \
+         `attach_sandbox` (requires `agent_id`, `sandbox_id`, optional `mode`), \
+         `detach_sandbox` (requires `agent_id`, `sandbox_id`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
