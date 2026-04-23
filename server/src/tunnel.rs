@@ -23,7 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{pkcs8::DecodePublicKey, Signature, Verifier, VerifyingKey};
 use tracing::instrument;
 
 use drua_core as domain;
@@ -38,25 +38,17 @@ use crate::AppState;
 /// Anything outside this window is rejected as a replay / stale signature.
 const HANDSHAKE_MAX_SKEW_MS: i64 = 60_000;
 
-/// Parse the `TunnelConfig.deployments` map from config (base64 strings)
-/// into pre-verified [`VerifyingKey`]s, so the handshake path does zero
-/// base64 decoding per request. Fails loudly at boot on any malformed
-/// entry — better than silently rejecting that deployment's handshakes
-/// forever.
+/// Parse the `TunnelConfig.deployments` map from config (PEM-encoded
+/// `SubjectPublicKeyInfo` strings, exactly what `tls_private_key`
+/// resources emit in galoy-deployments) into pre-verified
+/// [`VerifyingKey`]s. Done once at boot so the handshake hot path does
+/// no parsing work per request. Fails loudly on any malformed entry —
+/// better than silently rejecting that deployment's handshakes forever.
 pub fn parse_configured_keys(cfg: &TunnelConfig) -> anyhow::Result<HashMap<String, VerifyingKey>> {
     let mut out = HashMap::with_capacity(cfg.deployments.len());
-    for (deployment_id, b64) in &cfg.deployments {
-        let raw = URL_SAFE_NO_PAD.decode(b64).map_err(|e| {
-            anyhow::anyhow!("tunnel deployment '{deployment_id}': base64 decode: {e}")
-        })?;
-        let bytes: [u8; 32] = raw.try_into().map_err(|v: Vec<u8>| {
-            anyhow::anyhow!(
-                "tunnel deployment '{deployment_id}': expected 32-byte ed25519 key, got {}",
-                v.len()
-            )
-        })?;
-        let key = VerifyingKey::from_bytes(&bytes).map_err(|e| {
-            anyhow::anyhow!("tunnel deployment '{deployment_id}': invalid ed25519 key: {e}")
+    for (deployment_id, pem) in &cfg.deployments {
+        let key = VerifyingKey::from_public_key_pem(pem).map_err(|e| {
+            anyhow::anyhow!("tunnel deployment '{deployment_id}': not a valid Ed25519 SubjectPublicKeyInfo PEM: {e}")
         })?;
         out.insert(deployment_id.clone(), key);
     }
@@ -430,13 +422,19 @@ async fn handle_inbound(handle: &TunnelHandle, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::pkcs8::{spki::der::pem::LineEnding, EncodePublicKey};
     use ed25519_dalek::{Signer, SigningKey};
 
+    /// Returns the keypair along with a PEM encoding of the public half,
+    /// matching the shape `parse_configured_keys` will see in real
+    /// config (emitted by Terraform `tls_private_key`).
     fn make_key() -> (SigningKey, VerifyingKey, String) {
         let signing = SigningKey::generate(&mut rand::thread_rng());
         let verifying = signing.verifying_key();
-        let b64 = URL_SAFE_NO_PAD.encode(verifying.to_bytes());
-        (signing, verifying, b64)
+        let pem = verifying
+            .to_public_key_pem(LineEnding::LF)
+            .expect("encode public key pem");
+        (signing, verifying, pem)
     }
 
     fn sign_header(deployment_id: &str, signing: &SigningKey, ts_ms: i64) -> String {
@@ -521,6 +519,34 @@ mod tests {
                 reason: "signature verification failed"
             }
         ));
+    }
+
+    /// End-to-end for the config path: parse the same PEM the test
+    /// helper emits, and use the resulting `VerifyingKey` to check a
+    /// fresh signature. Proves the PEM → VerifyingKey hop.
+    #[test]
+    fn parse_configured_keys_round_trips_pem() {
+        let (signing, _, pem) = make_key();
+        let mut cfg = TunnelConfig::default();
+        cfg.deployments.insert("galoy-staging".to_string(), pem);
+
+        let keys = parse_configured_keys(&cfg).expect("parse");
+        assert_eq!(keys.len(), 1);
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let header = sign_header("galoy-staging", &signing, now);
+        assert!(matches!(
+            verify_handshake(&hdrs(&header), &keys),
+            HandshakeOutcome::Verified { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_configured_keys_rejects_bad_pem() {
+        let mut cfg = TunnelConfig::default();
+        cfg.deployments
+            .insert("galoy-staging".to_string(), "not a pem".to_string());
+        assert!(parse_configured_keys(&cfg).is_err());
     }
 
     #[test]
