@@ -91,7 +91,7 @@ struct WorkspaceSandboxParams {
     tool: Option<InspectTool>,
     /// Tool-specific arguments for `inspect`. grep: {pattern, path?, glob?, output_mode?, ...}. glob: {pattern, path?}. read: {path, offset?, limit?}. ls: {path, ignore?}.
     #[serde(default)]
-    arguments: Option<JsonObject>,
+    tool_args: Option<JsonObject>,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ impl TopLevelTool for WorkspaceSandbox {
          `list` (list all sandboxes), \
          `get` (get sandbox details — requires `sandbox_id`), \
          `inspect` (run a read-only tool against a sandbox — requires \
-         `sandbox_id`, `tool` (grep/glob/read/ls), and `arguments`)."
+         `sandbox_id`, `tool` (grep/glob/read/ls), and `tool_args`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -242,7 +242,7 @@ impl TopLevelTool for WorkspaceSandbox {
                 let tool = params.tool.ok_or_else(|| {
                     ToolSetsError::MissingArgument("tool is required for inspect".to_string())
                 })?;
-                let tool_args = params.arguments.unwrap_or_default();
+                let tool_args = params.tool_args.unwrap_or_default();
 
                 Audit::record_sandbox_id(sandbox_id);
 
