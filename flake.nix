@@ -469,6 +469,8 @@
               export ENGINE_DEFAULT=docker
             fi
 
+            export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
+
             echo "drua dev shell loaded (engine: $ENGINE_DEFAULT)"
           '';
         };
