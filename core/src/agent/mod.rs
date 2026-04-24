@@ -25,20 +25,6 @@ fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthS
     }
 }
 
-/// Recognise a slash-skill invocation: the entire (trimmed) prompt is
-/// `/<name>` with no whitespace inside. Returns the bare skill name
-/// (without the leading `/`). Returns `None` for anything else,
-/// including `/` alone, `/foo bar` (has args), or any prompt that
-/// doesn't start with `/`.
-fn parse_slash_skill(prompt: &str) -> Option<&str> {
-    let trimmed = prompt.trim();
-    let body = trimmed.strip_prefix('/')?;
-    if body.is_empty() || body.contains(char::is_whitespace) {
-        return None;
-    }
-    Some(body)
-}
-
 use tracing::instrument;
 
 use crate::primitives::{
@@ -599,39 +585,6 @@ impl Agents {
         let agent_subject = match subject.originating_user_id() {
             Some(user_id) => agent.auth_subject_for_user(user_id),
             None => agent.auth_subject(),
-        };
-
-        // Slash-skill expansion: when the entire prompt is `/<name>` (a
-        // single token, no args), treat it as a request to invoke a
-        // skill of that name. The skill's body is substituted as the
-        // actual prompt sent to the LLM. Lookup goes through
-        // `Skills::find_by_name`, which falls back to the agent's
-        // attached sandbox's `exported_skills` when no DB-registered
-        // skill matches. If no skill is found anywhere, send an Error
-        // event and return early — sending the literal `/foo` to the
-        // LLM is rarely what the user wanted.
-        let prompt = if let Some(skill_name) = parse_slash_skill(&prompt) {
-            match self
-                .skills
-                .find_by_name(
-                    skill_name,
-                    Some(agent.workspace_id),
-                    agent.attached_sandbox_id(),
-                )
-                .await?
-            {
-                Some(body) => String::from(body),
-                None => {
-                    let _ = tx
-                        .send(ChatOutputEvent::Error {
-                            message: format!("Unknown skill: /{skill_name}"),
-                        })
-                        .await;
-                    return Ok(rx);
-                }
-            }
-        } else {
-            prompt
         };
 
         let session_response = self
