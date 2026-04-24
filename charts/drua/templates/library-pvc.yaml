@@ -5,6 +5,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ template "galoyAgents.fullname" $ }}-library
   namespace: {{ $.Release.Namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
   labels:
     app: {{ template "galoyAgents.fullname" $ }}
 spec:
