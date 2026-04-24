@@ -106,7 +106,7 @@ impl Library {
         let file = RuntimeFile::GitKeep {
             workspace_name: workspace_name.to_string(),
         };
-        let idempotency_key = file.file_hash().to_string();
+        let idempotency_key = format!("gitkeep:{workspace_name}");
         let _ = self
             .inbox
             .persist_and_queue_job_in_op(op, idempotency_key, &file)
