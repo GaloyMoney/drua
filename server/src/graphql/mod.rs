@@ -1,13 +1,18 @@
 #[macro_use]
 pub(crate) mod macros;
 mod agent;
+mod audit;
+mod mcp_creds;
 mod mutation;
 pub(crate) mod primitives;
 mod query;
+mod sandbox;
 mod session;
+mod skill;
 mod subscription;
 mod types;
 mod workspace;
+mod workspace_secret;
 
 use std::convert::Infallible;
 

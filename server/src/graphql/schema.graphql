@@ -13,6 +13,36 @@ type Agent {
 	workspaceId: WorkspaceId!
 }
 
+input AgentAttachSandboxInput {
+	agentId: AgentId!
+	mode: SandboxAttachmentMode!
+	sandboxId: SandboxId!
+}
+
+type AgentAttachSandboxPayload {
+	agent: Agent!
+}
+
+input AgentCreateInput {
+	name: String!
+	sandboxId: SandboxId
+	sandboxMode: SandboxAttachmentMode
+	workspaceId: WorkspaceId!
+}
+
+type AgentCreatePayload {
+	agent: Agent!
+}
+
+input AgentDetachSandboxInput {
+	agentId: AgentId!
+	sandboxId: SandboxId!
+}
+
+type AgentDetachSandboxPayload {
+	agent: Agent!
+}
+
 scalar AgentId
 
 enum AgentRole {
@@ -48,6 +78,29 @@ type AssistantTextEvent {
 	text: String!
 }
 
+type AuditEntry {
+	actingAgentId: UUID
+	actingUserId: UUID
+	action: String!
+	durationMs: Int
+	entrypoint: String
+	error: Boolean
+	interactionType: String!
+	onBehalfOfUserId: UUID
+	outcome: String!
+	recordedAt: Timestamp!
+	tokensReturned: Int
+}
+
+input AuditLogQueryInput {
+	actingAgentId: AgentId
+	action: String
+	error: Boolean
+	limit: Int! = 20
+	outcome: String
+	workspaceId: WorkspaceId
+}
+
 union ChatContentBlock = TextContent | ToolUseContent | ThinkingContent | ToolResultContent | SandboxNotificationContent
 
 type ChatMessage {
@@ -70,6 +123,43 @@ type ErrorEvent {
 	message: String!
 }
 
+input McpCredentialsCreateInput {
+	name: String!
+	"""
+	The scopes to grant, as strings (e.g. "admin", "workspace_admin:<id>").
+	"""
+	scopes: [String!]!
+}
+
+"""
+Returned on create — includes the plaintext token (shown only once).
+"""
+type McpCredentialsCreatePayload {
+	mcpCreds: McpCreds!
+	"""
+	The plaintext token. Only returned once on creation.
+	"""
+	token: String!
+}
+
+input McpCredentialsRevokeInput {
+	id: McpCredsId!
+}
+
+type McpCredentialsRevokePayload {
+	mcpCreds: McpCreds!
+}
+
+type McpCreds {
+	createdAt: Timestamp!
+	id: McpCredsId!
+	name: String!
+	revoked: Boolean!
+	revokedAt: Timestamp
+}
+
+scalar McpCredsId
+
 type Me {
 	email: String
 	githubUsername: String
@@ -78,9 +168,22 @@ type Me {
 }
 
 type Mutation {
+	agentAttachSandbox(input: AgentAttachSandboxInput!): AgentAttachSandboxPayload!
+	agentCreate(input: AgentCreateInput!): AgentCreatePayload!
+	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
+	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
+	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
 	ping: String!
+	sandboxCreate(input: SandboxCreateInput!): SandboxCreatePayload!
+	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
+	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
+	skillCreate(input: SkillCreateInput!): SkillCreatePayload!
+	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
+	skillUpdate(input: SkillUpdateInput!): SkillUpdatePayload!
 	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
 	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
+	workspaceSecretCreate(input: WorkspaceSecretCreateInput!): WorkspaceSecretCreatePayload!
+	workspaceSecretDelete(input: WorkspaceSecretDeleteInput!): WorkspaceSecretDeletePayload!
 	workspaceUpdate(input: WorkspaceUpdateInput!): WorkspaceUpdatePayload!
 }
 
@@ -113,6 +216,10 @@ type Query {
 	agent(id: AgentId!): Agent
 	appConfig: Yaml!
 	"""
+	Query audit log entries.
+	"""
+	auditLog(input: AuditLogQueryInput!): [AuditEntry!]!
+	"""
 	Export a thread as Pi-compatible JSONL (v3 format).
 	
 	When `thread_id` is omitted the current main thread is exported.
@@ -123,8 +230,34 @@ type Query {
 	"""
 	me: Me
 	ping: String!
+	"""
+	Look up a single sandbox by ID.
+	"""
+	sandbox(id: SandboxId!): Sandbox
 	workspace(id: WorkspaceId!): Workspace
 	workspaces(after: String, first: Int!): WorkspaceConnection!
+}
+
+type Sandbox {
+	"""
+	Agents currently attached to this sandbox.
+	"""
+	attachedAgents: [SandboxAgentAttachment!]!
+	cpu: String!
+	createdAt: Timestamp!
+	diskSize: String!
+	id: SandboxId!
+	lastError: String
+	memory: String!
+	mountPath: String!
+	name: String!
+	state: SandboxStateEnum!
+	workspaceId: WorkspaceId!
+}
+
+type SandboxAgentAttachment {
+	agentId: AgentId!
+	mode: SandboxAttachmentMode!
 }
 
 type SandboxAttachment {
@@ -136,6 +269,26 @@ type SandboxAttachment {
 enum SandboxAttachmentMode {
 	READ
 	WRITE
+}
+
+input SandboxCreateInput {
+	branch: String
+	cpu: String! = "500m"
+	diskSize: String! = "10Gi"
+	memory: String! = "512Mi"
+	mode: SandboxCreateMode!
+	name: String!
+	repoUrl: String
+	workspaceId: WorkspaceId!
+}
+
+enum SandboxCreateMode {
+	REPO
+	SCRATCH
+}
+
+type SandboxCreatePayload {
+	sandbox: Sandbox!
 }
 
 scalar SandboxId
@@ -153,6 +306,35 @@ type SandboxNotificationContent {
 enum SandboxNotificationOperation {
 	ATTACH
 	DETACH
+}
+
+input SandboxRestartInput {
+	id: SandboxId!
+}
+
+type SandboxRestartPayload {
+	sandbox: Sandbox!
+}
+
+enum SandboxStateEnum {
+	ERRORED
+	INITIALIZING
+	PROVISIONING
+	READY
+	SUSPENDED
+}
+
+input SandboxSuspendInput {
+	id: SandboxId!
+}
+
+type SandboxSuspendPayload {
+	sandbox: Sandbox!
+}
+
+enum SecretTypeEnum {
+	ENV_VAR
+	FILE
 }
 
 type ServiceEvent {
@@ -181,6 +363,47 @@ type SessionThread {
 }
 
 scalar SessionThreadId
+
+type Skill {
+	body: String!
+	createdAt: Timestamp!
+	description: String!
+	id: SkillId!
+	name: String!
+	workspaceId: WorkspaceId!
+}
+
+input SkillCreateInput {
+	body: String!
+	description: String!
+	name: String!
+	workspaceId: WorkspaceId!
+}
+
+type SkillCreatePayload {
+	skill: Skill!
+}
+
+input SkillDeleteInput {
+	id: SkillId!
+}
+
+type SkillDeletePayload {
+	deletedId: SkillId!
+}
+
+scalar SkillId
+
+input SkillUpdateInput {
+	body: String
+	description: String
+	id: SkillId!
+	name: String
+}
+
+type SkillUpdatePayload {
+	skill: Skill!
+}
 
 type Subscription {
 	"""
@@ -297,7 +520,23 @@ type Workspace {
 	The workspace lead agent.
 	"""
 	lead: Agent!
+	"""
+	MCP credentials owned by the current user.
+	"""
+	mcpCredentials: [McpCreds!]!
 	name: String!
+	"""
+	All sandboxes in this workspace.
+	"""
+	sandboxes: [Sandbox!]!
+	"""
+	All secrets in this workspace (metadata only — values are never exposed via GraphQL).
+	"""
+	secrets: [WorkspaceSecret!]!
+	"""
+	All skills in this workspace.
+	"""
+	skills: [Skill!]!
 }
 
 type WorkspaceConnection {
@@ -347,6 +586,35 @@ type WorkspaceEdge {
 }
 
 scalar WorkspaceId
+
+type WorkspaceSecret {
+	createdAt: Timestamp!
+	id: WorkspaceSecretId!
+	name: String!
+	secretType: SecretTypeEnum!
+	workspaceId: WorkspaceId!
+}
+
+input WorkspaceSecretCreateInput {
+	name: String!
+	secretType: SecretTypeEnum!
+	value: String!
+	workspaceId: WorkspaceId!
+}
+
+type WorkspaceSecretCreatePayload {
+	workspaceSecret: WorkspaceSecret!
+}
+
+input WorkspaceSecretDeleteInput {
+	id: WorkspaceSecretId!
+}
+
+type WorkspaceSecretDeletePayload {
+	deletedId: WorkspaceSecretId!
+}
+
+scalar WorkspaceSecretId
 
 input WorkspaceUpdateInput {
 	description: String

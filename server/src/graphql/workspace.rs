@@ -3,7 +3,11 @@ use std::sync::Arc;
 use async_graphql::{ComplexObject, Context, InputObject, SimpleObject};
 
 use super::agent::Agent;
+use super::mcp_creds::McpCreds;
 use super::primitives::*;
+use super::sandbox::Sandbox;
+use super::skill::Skill;
+use super::workspace_secret::WorkspaceSecret;
 
 use drua_core::workspace::Workspace as DomainWorkspace;
 
@@ -41,6 +45,46 @@ impl Workspace {
         let lead_id = self.entity.lead_agent_id;
         agents.sort_by_key(|a| if a.id == lead_id { 0 } else { 1 });
         Ok(agents.into_iter().map(Agent::from).collect())
+    }
+
+    /// All sandboxes in this workspace.
+    async fn sandboxes(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Sandbox>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let sandboxes = app
+            .sandboxes()
+            .list_for_workspace(sub, self.entity.id)
+            .await?;
+        Ok(sandboxes.into_iter().map(Sandbox::from).collect())
+    }
+
+    /// All skills in this workspace.
+    async fn skills(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Skill>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let skills = app
+            .skills()
+            .list_by_workspace_id(sub, self.entity.id)
+            .await?;
+        Ok(skills.into_iter().map(Skill::from).collect())
+    }
+
+    /// All secrets in this workspace (metadata only — values are never exposed via GraphQL).
+    async fn secrets(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<WorkspaceSecret>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let secrets = app
+            .workspace_secrets()
+            .list_by_workspace(sub, self.entity.id)
+            .await?;
+        Ok(secrets.into_iter().map(WorkspaceSecret::from).collect())
+    }
+
+    /// MCP credentials owned by the current user.
+    async fn mcp_credentials(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<McpCreds>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let user_id = sub
+            .originating_user_id()
+            .ok_or_else(|| async_graphql::Error::new("Authentication required"))?;
+        let creds = app.mcp_creds().list_all_for_user(sub, user_id).await?;
+        Ok(creds.into_iter().map(McpCreds::from).collect())
     }
 }
 
