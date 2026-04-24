@@ -181,6 +181,7 @@
           export TERM="''${TERM:-dumb}"
           export REPO_ROOT="$(pwd)"
           export DRUA_BIN="${drua}/bin/drua"
+          export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
           # Point bats/sandbox-helpers.bash at the nix-built binary so
           # setup_file doesn't fall back to `cargo run` (which fetches
           # + compiles the crate in CI and blows past the bats timeout).
