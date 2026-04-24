@@ -14,7 +14,9 @@ impl Upstream {
     pub async fn init(repo_url: Option<&str>, repo_path: PathBuf) -> Result<Self, LibraryError> {
         if let Some(url) = repo_url {
             if !repo_path.join(".git").exists() {
-                clone(url, &repo_path).await?;
+                if let Err(e) = clone(url, &repo_path).await {
+                    tracing::warn!(error = %e, url, "library git clone failed — upstream sync disabled");
+                }
             }
         }
         Ok(Self { repo_path })
