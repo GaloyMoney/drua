@@ -66,6 +66,9 @@ pub enum RuntimeFile {
         slug: String,
         id_prefix: String,
     },
+    GitKeep {
+        workspace_name: String,
+    },
 }
 
 impl RuntimeFile {
@@ -95,13 +98,7 @@ impl RuntimeFile {
         }
     }
 
-    pub fn doc_type(&self) -> DocType {
-        match self {
-            RuntimeFile::Note { .. } => DocType::Note,
-        }
-    }
-
-    pub fn searchable_fields(&self) -> SearchableFields {
+    pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
             RuntimeFile::Note {
                 doc_id,
@@ -110,14 +107,15 @@ impl RuntimeFile {
                 body,
                 tags,
                 ..
-            } => SearchableFields {
+            } => Some(SearchableFields {
                 doc_id: uuid::Uuid::from(*doc_id),
                 doc_type: DocType::Note,
                 workspace_id: uuid::Uuid::from(*workspace_id),
                 title: title.clone(),
                 body: body.clone(),
                 tags: tags.clone(),
-            },
+            }),
+            RuntimeFile::GitKeep { .. } => None,
         }
     }
 
@@ -132,6 +130,9 @@ impl RuntimeFile {
                 "runtime/workspaces/{}/notes/{}-{}.md",
                 workspace_name, slug, id_prefix
             ),
+            RuntimeFile::GitKeep { workspace_name } => {
+                format!("runtime/workspaces/{}/notes/.gitkeep", workspace_name)
+            }
         }
     }
 
@@ -157,6 +158,7 @@ impl RuntimeFile {
                     doc_id, tags_str, created_at, updated_at, title, body
                 )
             }
+            RuntimeFile::GitKeep { .. } => String::new(),
         }
     }
 
@@ -165,6 +167,9 @@ impl RuntimeFile {
             RuntimeFile::Note {
                 slug, id_prefix, ..
             } => format!("note: {}-{}", slug, id_prefix),
+            RuntimeFile::GitKeep { workspace_name } => {
+                format!("workspace: scaffold {}", workspace_name)
+            }
         }
     }
 
