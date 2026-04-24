@@ -2,6 +2,10 @@ use super::{error::AuthorizationError, AuthResource, AuthScope, AuthVerb};
 use crate::primitives::{AgentId, McpCredsId, SandboxId, UserId, UserMessageSource, WorkspaceId};
 
 /// Unified authentication subject resolved from session or bearer token.
+///
+/// Workspace identity for agent variants is carried inside the scopes
+/// vec as [`AuthScope::WorkspaceMember`] — use [`Self::workspace_id`]
+/// to extract it.
 #[derive(Debug, Clone)]
 pub enum AuthSubject {
     /// Authenticated via session cookie (human user in browser).
@@ -9,12 +13,16 @@ pub enum AuthSubject {
     /// Authenticated via bearer token issued to a user (exported agent credential).
     ExportedAgent(UserId, McpCredsId, Vec<AuthScope>),
     /// Agent acting within its workspace without user attribution.
-    Agent(WorkspaceId, AgentId, Vec<AuthScope>),
+    /// Workspace identity is encoded as a [`AuthScope::WorkspaceMember`]
+    /// scope in the scopes vec.
+    Agent(AgentId, Vec<AuthScope>),
     /// Agent acting within its workspace on behalf of a known user — used
     /// when the agent's tool calls are triggered by a request that itself
     /// originated from a `User` or `ExportedAgent`. Carries enough context
     /// to attribute downstream actions back to the originating user.
-    AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<AuthScope>),
+    /// Workspace identity is encoded as a [`AuthScope::WorkspaceMember`]
+    /// scope in the scopes vec.
+    AgentOnBehalfOfUser(UserId, AgentId, Vec<AuthScope>),
     /// No authentication provided.
     Anonymous,
 }
@@ -42,8 +50,8 @@ impl AuthSubject {
         match self {
             AuthSubject::User(user_id) => Ok(*user_id),
             AuthSubject::ExportedAgent(_, _, _) => Err("ExportedAgent auth not allowed here"),
-            AuthSubject::Agent(_, _, _) => Err("Agent auth not allowed here"),
-            AuthSubject::AgentOnBehalfOfUser(_, _, _, _) => Err("Agent auth not allowed here"),
+            AuthSubject::Agent(_, _) => Err("Agent auth not allowed here"),
+            AuthSubject::AgentOnBehalfOfUser(_, _, _) => Err("Agent auth not allowed here"),
             AuthSubject::Anonymous => Err("Authentication required"),
         }
     }
@@ -55,25 +63,27 @@ impl AuthSubject {
         match self {
             AuthSubject::User(user_id) => Some(*user_id),
             AuthSubject::ExportedAgent(user_id, _, _) => Some(*user_id),
-            AuthSubject::AgentOnBehalfOfUser(user_id, _, _, _) => Some(*user_id),
-            AuthSubject::Agent(_, _, _) | AuthSubject::Anonymous => None,
+            AuthSubject::AgentOnBehalfOfUser(user_id, _, _) => Some(*user_id),
+            AuthSubject::Agent(_, _) | AuthSubject::Anonymous => None,
         }
     }
 
     /// Return the workspace this subject is acting within, if any.
+    ///
+    /// Derives the workspace from the subject's scopes — specifically
+    /// [`AuthScope::WorkspaceMember`] or [`AuthScope::WorkspaceAdmin`].
     pub fn workspace_id(&self) -> Option<WorkspaceId> {
-        match self {
-            AuthSubject::Agent(workspace_id, _, _) => Some(*workspace_id),
-            AuthSubject::AgentOnBehalfOfUser(_, workspace_id, _, _) => Some(*workspace_id),
+        self.scopes().iter().find_map(|s| match s {
+            AuthScope::WorkspaceMember(ws) | AuthScope::WorkspaceAdmin(ws) => Some(*ws),
             _ => None,
-        }
+        })
     }
 
     /// Return the agent that is acting, if any.
     pub fn acting_agent_id(&self) -> Option<AgentId> {
         match self {
-            AuthSubject::Agent(_, agent_id, _) => Some(*agent_id),
-            AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => Some(*agent_id),
+            AuthSubject::Agent(agent_id, _) => Some(*agent_id),
+            AuthSubject::AgentOnBehalfOfUser(_, agent_id, _) => Some(*agent_id),
             _ => None,
         }
     }
@@ -82,8 +92,8 @@ impl AuthSubject {
     pub fn scopes(&self) -> &[AuthScope] {
         match self {
             AuthSubject::ExportedAgent(_, _, scopes)
-            | AuthSubject::Agent(_, _, scopes)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes,
+            | AuthSubject::Agent(_, scopes)
+            | AuthSubject::AgentOnBehalfOfUser(_, _, scopes) => scopes,
             _ => &[],
         }
     }
@@ -116,8 +126,8 @@ impl AuthSubject {
         match self {
             AuthSubject::User(_) => true,
             AuthSubject::ExportedAgent(_, _, scopes)
-            | AuthSubject::Agent(_, _, scopes)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes.contains(scope),
+            | AuthSubject::Agent(_, scopes)
+            | AuthSubject::AgentOnBehalfOfUser(_, _, scopes) => scopes.contains(scope),
             AuthSubject::Anonymous => false,
         }
     }
@@ -128,7 +138,7 @@ impl AuthSubject {
     pub fn is_agent(&self) -> bool {
         matches!(
             self,
-            AuthSubject::Agent(_, _, _) | AuthSubject::AgentOnBehalfOfUser(_, _, _, _)
+            AuthSubject::Agent(_, _) | AuthSubject::AgentOnBehalfOfUser(_, _, _)
         )
     }
 
@@ -162,10 +172,11 @@ impl AuthSubject {
                 user_id: *user_id,
                 creds_id: *creds_id,
             },
-            AuthSubject::Agent(_, agent_id, _)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => UserMessageSource::Agent {
-                agent_id: *agent_id,
-            },
+            AuthSubject::Agent(agent_id, _) | AuthSubject::AgentOnBehalfOfUser(_, agent_id, _) => {
+                UserMessageSource::Agent {
+                    agent_id: *agent_id,
+                }
+            }
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
         }
     }

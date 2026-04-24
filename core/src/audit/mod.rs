@@ -40,13 +40,17 @@ impl Audit {
             AuthSubject::ExportedAgent(user_id, _, _) => {
                 ctx.acting_user_id = Some(*user_id);
             }
-            AuthSubject::Agent(workspace_id, agent_id, _) => {
-                Self::set_resource_id(ctx, "workspace_id", *workspace_id);
+            AuthSubject::Agent(agent_id, _) => {
+                if let Some(workspace_id) = auth.workspace_id() {
+                    Self::set_resource_id(ctx, "workspace_id", workspace_id);
+                }
                 ctx.acting_agent_id = Some(*agent_id);
             }
-            AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, _) => {
+            AuthSubject::AgentOnBehalfOfUser(user_id, agent_id, _) => {
                 ctx.acting_agent_id = Some(*agent_id);
-                Self::set_resource_id(ctx, "workspace_id", *workspace_id);
+                if let Some(workspace_id) = auth.workspace_id() {
+                    Self::set_resource_id(ctx, "workspace_id", workspace_id);
+                }
                 ctx.on_behalf_of_user_id = Some(*user_id);
             }
             AuthSubject::Anonymous => {}

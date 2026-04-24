@@ -29,6 +29,12 @@ pub enum AuthScope {
     /// Read-only access — the agent may invoke sandbox tools that
     /// don't modify state. Granted on a `Read` attach.
     SandboxRead(SandboxId),
+    /// Workspace membership — the subject belongs to this workspace.
+    /// Granted to every agent in the workspace; carries the workspace
+    /// identity so [`super::AuthSubject::workspace_id`] can derive it
+    /// from scopes alone. Grants `Read` on workspace-scoped resources
+    /// (agents, sandboxes, audit log, etc.) within its workspace.
+    WorkspaceMember(WorkspaceId),
     /// An externally-defined scope string. Grants access only to
     /// [`AuthResource::External`] resources whose name matches.
     External(String),
@@ -44,6 +50,12 @@ impl AuthScope {
             // WorkspaceAdmin grants any verb on any resource within its workspace.
             AuthScope::WorkspaceAdmin(ws) => {
                 resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
+            }
+
+            // WorkspaceMember grants Read on resources in its workspace.
+            AuthScope::WorkspaceMember(ws) => {
+                verb == AuthVerb::Read
+                    && resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
             }
 
             // SandboxUse grants Use and Read on the matching sandbox
@@ -82,6 +94,7 @@ impl fmt::Display for AuthScope {
         match self {
             AuthScope::Admin => f.write_str("admin"),
             AuthScope::WorkspaceAdmin(id) => write!(f, "ws:{id}:admin"),
+            AuthScope::WorkspaceMember(id) => write!(f, "ws:{id}:member"),
             AuthScope::SandboxUse(id) => write!(f, "sandbox:{id}:use"),
             AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
             AuthScope::External(s) => f.write_str(s),
@@ -97,11 +110,16 @@ impl FromStr for AuthScope {
             return Ok(AuthScope::Admin);
         }
 
-        // Parse "ws:{uuid}:admin"
+        // Parse "ws:{uuid}:admin" and "ws:{uuid}:member"
         if let Some(rest) = s.strip_prefix("ws:") {
             if let Some(uuid_str) = rest.strip_suffix(":admin") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::WorkspaceAdmin(WorkspaceId::from(uuid)));
+                }
+            }
+            if let Some(uuid_str) = rest.strip_suffix(":member") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::WorkspaceMember(WorkspaceId::from(uuid)));
                 }
             }
         }
@@ -188,6 +206,7 @@ mod tests {
         let variants = vec![
             AuthScope::Admin,
             AuthScope::WorkspaceAdmin(ws_id),
+            AuthScope::WorkspaceMember(ws_id),
             AuthScope::SandboxUse(sb_id),
             AuthScope::SandboxRead(sb_id),
             AuthScope::External("custom:thing".to_owned()),
@@ -272,6 +291,24 @@ mod tests {
     }
 
     #[test]
+    fn from_str_workspace_member() {
+        let ws_id = test_workspace_id();
+        let member: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
+            .parse()
+            .unwrap();
+        assert_eq!(member, AuthScope::WorkspaceMember(ws_id));
+    }
+
+    #[test]
+    fn display_workspace_member() {
+        let ws_id = test_workspace_id();
+        assert_eq!(
+            AuthScope::WorkspaceMember(ws_id).to_string(),
+            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
+        );
+    }
+
+    #[test]
     fn from_str_unknown_falls_back_to_external() {
         let scope: AuthScope = "read".parse().unwrap();
         assert_eq!(scope, AuthScope::External("read".to_owned()));
@@ -310,6 +347,10 @@ mod tests {
             (
                 AuthScope::WorkspaceAdmin(ws_id),
                 r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin""#,
+            ),
+            (
+                AuthScope::WorkspaceMember(ws_id),
+                r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member""#,
             ),
             (AuthScope::External("custom".to_owned()), r#""custom""#),
         ];

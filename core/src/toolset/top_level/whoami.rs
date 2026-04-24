@@ -76,9 +76,11 @@ impl TopLevelTool for WhoAmI {
                         .into(),
                 );
             }
-            AuthSubject::Agent(workspace_id, agent_id, scopes) => {
+            AuthSubject::Agent(agent_id, scopes) => {
                 info.insert("type".into(), "agent".into());
-                info.insert("workspace_id".into(), workspace_id.to_string().into());
+                if let Some(workspace_id) = subject.workspace_id() {
+                    info.insert("workspace_id".into(), workspace_id.to_string().into());
+                }
                 info.insert("agent_id".into(), agent_id.to_string().into());
                 info.insert(
                     "scopes".into(),
@@ -89,10 +91,12 @@ impl TopLevelTool for WhoAmI {
                         .into(),
                 );
             }
-            AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, scopes) => {
+            AuthSubject::AgentOnBehalfOfUser(user_id, agent_id, scopes) => {
                 info.insert("type".into(), "agent_on_behalf_of_user".into());
                 info.insert("user_id".into(), user_id.to_string().into());
-                info.insert("workspace_id".into(), workspace_id.to_string().into());
+                if let Some(workspace_id) = subject.workspace_id() {
+                    info.insert("workspace_id".into(), workspace_id.to_string().into());
+                }
                 info.insert("agent_id".into(), agent_id.to_string().into());
                 info.insert(
                     "scopes".into(),

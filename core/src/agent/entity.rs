@@ -73,7 +73,14 @@ pub struct Agent {
 
 impl Agent {
     fn scopes_vec(&self) -> Vec<AuthScope> {
-        self.authz_scopes.iter().cloned().collect()
+        let mut scopes: Vec<AuthScope> = self.authz_scopes.iter().cloned().collect();
+        // Always inject WorkspaceMember so workspace_id() can derive
+        // the workspace from scopes alone.
+        let ws_member = AuthScope::WorkspaceMember(self.workspace_id);
+        if !scopes.contains(&ws_member) {
+            scopes.push(ws_member);
+        }
+        scopes
     }
 
     /// The id of the sandbox this agent is currently attached to, if any.
@@ -84,17 +91,18 @@ impl Agent {
         self.attached_sandbox.map(|(id, _)| id)
     }
 
-    /// The auth subject this agent acts as when invoking tools — its own
-    /// workspace + id, carrying the scopes persisted on the `Initialized`
-    /// event. Use when no originating user can be attributed.
+    /// The auth subject this agent acts as when invoking tools — carrying
+    /// the scopes persisted on the `Initialized` event plus an injected
+    /// [`AuthScope::WorkspaceMember`] for workspace identity.
+    /// Use when no originating user can be attributed.
     pub fn auth_subject(&self) -> AuthSubject {
-        AuthSubject::Agent(self.workspace_id, self.id, self.scopes_vec())
+        AuthSubject::Agent(self.id, self.scopes_vec())
     }
 
     /// Same as [`Self::auth_subject`] but tagged with the user that triggered
     /// the agent's work, so downstream actions can be attributed back to them.
     pub fn auth_subject_for_user(&self, user_id: UserId) -> AuthSubject {
-        AuthSubject::AgentOnBehalfOfUser(user_id, self.workspace_id, self.id, self.scopes_vec())
+        AuthSubject::AgentOnBehalfOfUser(user_id, self.id, self.scopes_vec())
     }
 
     /// Apply a batch of scope additions/removals as a single

@@ -1770,8 +1770,8 @@ async fn api_agent_secrets(
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
     // Only allow Agent auth (SA token from sandbox pods)
-    let (workspace_id, jwt_agent_id) = match &auth {
-        AuthSubject::Agent(workspace_id, agent_id, _) => (*workspace_id, *agent_id),
+    let (workspace_id, jwt_agent_id) = match (&auth, auth.workspace_id()) {
+        (AuthSubject::Agent(agent_id, _), Some(workspace_id)) => (workspace_id, *agent_id),
         _ => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 
