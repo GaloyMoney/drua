@@ -38,6 +38,13 @@ impl Upstream {
     ) -> Result<Self, LibraryError> {
         if let Some(url) = repo_url {
             if !repo_path.join(".git").exists() {
+                // Clean up any leftover files from a previous failed clone
+                // so `git clone` doesn't fail with "directory not empty".
+                if repo_path.exists() {
+                    if let Err(e) = tokio::fs::remove_dir_all(&repo_path).await {
+                        tracing::warn!(error = %e, "failed to clean stale library dir");
+                    }
+                }
                 let token = Self::fresh_token(&github_app).await;
                 if let Err(e) = clone(url, &repo_path, token.as_deref()).await {
                     tracing::warn!(error = %e, url, "library git clone failed — upstream sync disabled");
