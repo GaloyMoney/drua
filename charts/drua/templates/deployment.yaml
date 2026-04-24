@@ -116,6 +116,12 @@ spec:
         - name: code-assistant-data
           mountPath: /data/code-assistant
         {{- end }}
+        {{- with .Values.galoyAgents.config.library }}
+        {{- with .dataDir }}
+        - name: library-data
+          mountPath: {{ . }}
+        {{- end }}
+        {{- end }}
         {{- if .Values.galoyAgents.config.githubApp.enabled }}
         - name: github-app-key
           mountPath: /secrets/github-app
@@ -184,6 +190,13 @@ spec:
       {{- if .Values.galoyAgents.codeAssistant.indexHash }}
       - name: code-assistant-data
         emptyDir: {}
+      {{- end }}
+      {{- with .Values.galoyAgents.config.library }}
+      {{- with .dataDir }}
+      - name: library-data
+        persistentVolumeClaim:
+          claimName: {{ template "galoyAgents.fullname" $ }}-library
+      {{- end }}
       {{- end }}
       {{- if .Values.galoyAgents.config.githubApp.enabled }}
       - name: github-app-key

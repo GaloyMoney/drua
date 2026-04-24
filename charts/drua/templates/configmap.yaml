@@ -130,6 +130,15 @@ data:
             - "resources_get"
       {{- end }}
       {{- end }}
+    {{- with .Values.galoyAgents.config.library }}
+    library:
+      {{- with .dataDir }}
+      data_dir: {{ . | quote }}
+      {{- end }}
+      {{- with .repoUrl }}
+      repo_url: {{ . | quote }}
+      {{- end }}
+    {{- end }}
     {{- if .Values.galoyAgents.config.githubApp.enabled }}
     github_app:
       client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}
