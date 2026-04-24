@@ -44,22 +44,6 @@ impl Skills {
         &self.sandboxes
     }
 
-    #[instrument(name = "skill.create", skip_all)]
-    pub async fn create(&self, _sub: &AuthSubject, new: NewSkill) -> Result<Skill, SkillError> {
-        let skill = self.repo.create(new).await?;
-        Ok(skill)
-    }
-
-    #[instrument(name = "skill.create_in_op", skip_all)]
-    pub async fn create_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        new: NewSkill,
-    ) -> Result<Skill, SkillError> {
-        let skill = self.repo.create_in_op(op, new).await?;
-        Ok(skill)
-    }
-
     #[instrument(name = "skill.find_by_id", skip_all)]
     pub async fn find_by_id(&self, _sub: &AuthSubject, id: SkillId) -> Result<Skill, SkillError> {
         let skill = self.repo.find_by_id(id).await?;
@@ -387,30 +371,6 @@ impl Skills {
             self.repo.create_in_op(op, new).await?;
             tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
-        Ok(())
-    }
-
-    #[instrument(name = "skill.update", skip_all)]
-    pub async fn update(&self, _sub: &AuthSubject, skill: &mut Skill) -> Result<(), SkillError> {
-        self.repo.update(skill).await?;
-        Ok(())
-    }
-
-    #[instrument(name = "skill.delete", skip_all)]
-    pub async fn delete(&self, _sub: &AuthSubject, id: SkillId) -> Result<(), SkillError> {
-        let skill = self.repo.find_by_id(id).await?;
-        self.repo.delete(skill).await?;
-        Ok(())
-    }
-
-    #[instrument(name = "skill.delete_in_op", skip_all)]
-    pub async fn delete_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        id: SkillId,
-    ) -> Result<(), SkillError> {
-        let skill = self.repo.find_by_id(id).await?;
-        self.repo.delete_in_op(op, skill).await?;
         Ok(())
     }
 }

@@ -104,7 +104,7 @@
 <p><small>Reusable prompt templates that agents can invoke.</small></p>
 
 {% if skills.is_empty() %}
-<p><em>No skills configured yet.</em></p>
+<p><em>No skills synced yet. Add skill files to the library repo to see them here.</em></p>
 {% else %}
 <figure>
   <table>
@@ -127,6 +127,4 @@
   </table>
 </figure>
 {% endif %}
-
-<a href="/workspaces/{{ workspace.id }}/skills/new" role="button">New Skill</a>
 {% endblock %}

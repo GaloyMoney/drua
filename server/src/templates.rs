@@ -150,16 +150,8 @@ pub struct WorkspaceSkillsPageTemplate {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_skill_new.html")]
-pub struct WorkspaceSkillNewTemplate {
-    pub workspace: WorkspaceView,
-    pub lead_agent: Option<AgentView>,
-    pub agents: Vec<AgentView>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "workspace_skill_edit.html")]
-pub struct WorkspaceSkillEditTemplate {
+#[template(path = "workspace_skill_detail.html")]
+pub struct WorkspaceSkillDetailTemplate {
     pub workspace: WorkspaceView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
