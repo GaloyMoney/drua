@@ -7,6 +7,8 @@ mod upstream;
 
 use std::sync::Arc;
 
+use crate::github_app::GitHubAppTokenProvider;
+
 use self::inbox::LibraryWriteHandler;
 use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
@@ -51,8 +53,10 @@ impl Library {
         pool: &sqlx::PgPool,
         embedder: Arc<code_assistant_core::embedder::Embedder>,
         jobs: &mut ::job::Jobs,
+        github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
-        let upstream = Upstream::init(config.repo_url.as_deref(), config.repo_path()).await?;
+        let upstream =
+            Upstream::init(config.repo_url.as_deref(), config.repo_path(), github_app).await?;
         let search = SearchStore::new(pool);
 
         let write_init = WriteToRuntimeJobInitializer::new(upstream);

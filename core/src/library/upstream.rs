@@ -1,32 +1,69 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
+
+use crate::github_app::GitHubAppTokenProvider;
 
 use super::file::GitFileHash;
 use super::LibraryError;
 
 /// Build a `git` command that never prompts for credentials.
-fn git_cmd() -> tokio::process::Command {
+/// When a token is provided, injects it via a one-shot credential helper.
+fn git_cmd(token: Option<&str>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(token) = token {
+        cmd.args([
+            "-c",
+            &format!(
+                "credential.helper=!f() {{ echo username=x-access-token; echo password={token}; }}; f"
+            ),
+        ]);
+    }
     cmd
 }
 
 #[derive(Clone)]
 pub(super) struct Upstream {
     repo_path: PathBuf,
+    github_app: Option<Arc<GitHubAppTokenProvider>>,
 }
 
 impl Upstream {
-    pub async fn init(repo_url: Option<&str>, repo_path: PathBuf) -> Result<Self, LibraryError> {
+    pub async fn init(
+        repo_url: Option<&str>,
+        repo_path: PathBuf,
+        github_app: Option<Arc<GitHubAppTokenProvider>>,
+    ) -> Result<Self, LibraryError> {
         if let Some(url) = repo_url {
             if !repo_path.join(".git").exists() {
-                if let Err(e) = clone(url, &repo_path).await {
+                let token = Self::fresh_token(&github_app).await;
+                if let Err(e) = clone(url, &repo_path, token.as_deref()).await {
                     tracing::warn!(error = %e, url, "library git clone failed — upstream sync disabled");
                 }
             }
         }
-        Ok(Self { repo_path })
+        Ok(Self {
+            repo_path,
+            github_app,
+        })
+    }
+
+    /// Generate a fresh GitHub App installation token, or `None` if no app is configured.
+    async fn fresh_token(
+        github_app: &Option<Arc<GitHubAppTokenProvider>>,
+    ) -> Option<String> {
+        match github_app.as_ref() {
+            Some(provider) => match provider.generate_token().await {
+                Ok(t) => Some(t.token),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to generate GitHub App token for library git ops");
+                    None
+                }
+            },
+            None => None,
+        }
     }
 
     /// Compute the git blob SHA-1 of the file on disk, or `None` if the file
@@ -61,7 +98,8 @@ impl Upstream {
             return Ok(());
         }
 
-        let pull = git_cmd()
+        let token = Self::fresh_token(&self.github_app).await;
+        let pull = git_cmd(token.as_deref())
             .args(["pull", "--ff-only"])
             .current_dir(&self.repo_path)
             .output()
@@ -135,7 +173,8 @@ impl Upstream {
             return Ok(());
         }
 
-        let push = git_cmd()
+        let token = Self::fresh_token(&self.github_app).await;
+        let push = git_cmd(token.as_deref())
             .args(["push"])
             .current_dir(&self.repo_path)
             .output()
@@ -153,9 +192,9 @@ impl Upstream {
     }
 }
 
-async fn clone(repo_url: &str, repo_path: &Path) -> Result<(), LibraryError> {
+async fn clone(repo_url: &str, repo_path: &Path, token: Option<&str>) -> Result<(), LibraryError> {
     tracing::info!(url = %repo_url, path = %repo_path.display(), "cloning library repo");
-    let output = git_cmd()
+    let output = git_cmd(token)
         .args(["clone", repo_url, &repo_path.to_string_lossy()])
         .output()
         .await

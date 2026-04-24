@@ -154,9 +154,10 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::init(&config.library, pool, embedder.clone(), &mut jobs)
-            .await
-            .map_err(|e| AppError::Library(e.to_string()))?;
+        let library =
+            Library::init(&config.library, pool, embedder.clone(), &mut jobs, github_app.clone())
+                .await
+                .map_err(|e| AppError::Library(e.to_string()))?;
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
         let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes)));
