@@ -11,10 +11,9 @@ use tracing::instrument;
 use drua_core as domain;
 
 use domain::auth::AuthSubject;
-use domain::mcp_creds::token::generate_token;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{AgentId, McpCredsId, SandboxId, SkillId, UserId, WorkspaceSecretId};
-use domain::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+use domain::primitives::{AgentId, SandboxId, SkillId, UserId};
+use domain::sandbox::{SandboxAgentMode, SandboxMode};
 
 use crate::templates::*;
 use crate::AppState;
@@ -29,8 +28,6 @@ pub fn router() -> Router<AppState> {
         .route("/", get(index))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/mcp-creds", get(mcp_creds_list))
-        .route("/mcp-creds/create", post(create_mcp_creds))
-        .route("/mcp-creds/{id}/revoke", post(revoke_mcp_creds))
         .route("/audit", get(audit_page))
         .route("/audit/entries", get(audit_entries))
         .route("/code-assistant", get(code_assistant_dashboard))
@@ -48,55 +45,23 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/{id}", get(workspace_detail))
         .route("/workspaces/{id}", post(workspace_update))
         .route("/workspaces/{id}/delete", post(workspace_delete))
-        .route("/workspaces/{id}/secrets", post(workspace_secret_create))
         .route("/workspaces/{id}/secrets/list", get(workspace_secrets_list))
-        .route(
-            "/workspaces/{id}/secrets/{secret_id}/delete",
-            post(workspace_secret_delete),
-        )
         .route("/workspaces/{id}/skills", get(workspace_skills_page))
         .route("/workspaces/{id}/skills/new", get(workspace_skill_new))
-        .route("/workspaces/{id}/skills", post(workspace_skill_create))
         .route(
             "/workspaces/{id}/skills/{skill_id}",
             get(workspace_skill_edit),
         )
-        .route(
-            "/workspaces/{id}/skills/{skill_id}",
-            post(workspace_skill_update),
-        )
-        .route(
-            "/workspaces/{id}/skills/{skill_id}/delete",
-            post(workspace_skill_delete),
-        )
         .route("/workspaces/{id}/sandboxes", get(workspace_sandboxes_page))
         .route("/workspaces/{id}/sandboxes/new", get(workspace_sandbox_new))
-        .route("/workspaces/{id}/sandboxes", post(workspace_sandbox_create))
         .route(
             "/workspaces/{id}/sandboxes/{sandbox_id}",
             get(workspace_sandbox_detail),
         )
-        .route(
-            "/workspaces/{id}/sandboxes/{sandbox_id}/suspend",
-            post(workspace_sandbox_suspend),
-        )
-        .route(
-            "/workspaces/{id}/sandboxes/{sandbox_id}/restart",
-            post(workspace_sandbox_restart),
-        )
         .route("/workspaces/{id}/agents/new", get(workspace_agent_new))
-        .route("/workspaces/{id}/agents", post(workspace_agent_create))
         .route(
             "/workspaces/{id}/agents/{agent_id}",
             get(workspace_agent_detail),
-        )
-        .route(
-            "/workspaces/{id}/agents/{agent_id}/attach_sandbox",
-            post(workspace_agent_attach_sandbox),
-        )
-        .route(
-            "/workspaces/{id}/agents/{agent_id}/detach_sandbox",
-            post(workspace_agent_detach_sandbox),
         )
 }
 
@@ -156,90 +121,6 @@ async fn dashboard(State(state): State<AppState>, session: Session) -> Response 
         mcp_creds: mcp_creds.iter().map(mcp_creds_to_view).collect(),
     }
     .into_response()
-}
-
-#[derive(serde::Deserialize)]
-pub struct CreateMcpCredsForm {
-    name: String,
-    #[serde(default)]
-    admin: Option<String>,
-}
-
-fn build_mcp_config(mcp_endpoint: &str, token: &str) -> (String, String) {
-    let server_config = serde_json::json!({
-        "type": "http",
-        "url": mcp_endpoint,
-        "headers": {
-            "Authorization": format!("Bearer {token}")
-        }
-    });
-    let mcp_json = serde_json::json!({
-        "drua": &server_config
-    })
-    .to_string();
-    let cli_command = format!("claude mcp add-json --scope user drua '{}'", server_config);
-    (mcp_json, cli_command)
-}
-
-#[instrument(name = "web.create_mcp_creds", skip_all)]
-async fn create_mcp_creds(
-    State(state): State<AppState>,
-    session: Session,
-    Form(form): Form<CreateMcpCredsForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-
-    let (raw_token, token_hash) = generate_token();
-
-    let sub = AuthSubject::User(user_id);
-    let scopes: Vec<domain::primitives::AuthScope> = if form.admin.as_deref() == Some("true") {
-        vec![domain::primitives::AuthScope::Admin]
-    } else {
-        vec![]
-    };
-
-    match state
-        .app
-        .mcp_creds()
-        .create_for_user(&sub, user_id, &form.name, token_hash, scopes)
-        .await
-    {
-        Ok(_) => {
-            let (mcp_json, cli_command) = build_mcp_config(&state.mcp_endpoint, &raw_token);
-            McpCredsCreatedTemplate {
-                creds_name: form.name,
-                mcp_json,
-                cli_command,
-            }
-            .into_response()
-        }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-#[instrument(name = "web.revoke_mcp_creds", skip_all)]
-async fn revoke_mcp_creds(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-
-    let sub = AuthSubject::User(user_id);
-    let creds_id = McpCredsId::from(id);
-    match state.app.mcp_creds().revoke(&sub, user_id, creds_id).await {
-        Ok(creds) => McpCredsRowTemplate {
-            creds: mcp_creds_to_view(&creds),
-        }
-        .into_response(),
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
 }
 
 #[instrument(name = "web.mcp_creds_list", skip_all)]
@@ -756,92 +637,6 @@ async fn workspace_secrets_list(
     }
 }
 
-#[derive(Deserialize)]
-struct CreateSecretForm {
-    name: String,
-    secret_type: String,
-    value: String,
-}
-
-#[instrument(name = "web.workspace_secret_create", skip_all)]
-async fn workspace_secret_create(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    Form(form): Form<CreateSecretForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let secret_type: domain::workspace_secret::SecretType = match form.secret_type.parse() {
-        Ok(t) => t,
-        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
-    };
-
-    if let Err(e) = state
-        .app
-        .workspace_secrets()
-        .create(&sub, workspace_id, &form.name, secret_type, &form.value)
-        .await
-    {
-        tracing::error!(error = %e, "Failed to create workspace secret");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    // Return updated list
-    match state
-        .app
-        .workspace_secrets()
-        .list_by_workspace(&sub, workspace_id)
-        .await
-    {
-        Ok(secrets) => WorkspaceSecretsListTemplate {
-            secrets: secrets.iter().map(secret_to_view).collect(),
-        }
-        .into_response(),
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-#[instrument(name = "web.workspace_secret_delete", skip_all)]
-async fn workspace_secret_delete(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, secret_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let secret_id = WorkspaceSecretId::from(secret_id);
-
-    if let Err(e) = state.app.workspace_secrets().delete(&sub, secret_id).await {
-        tracing::error!(error = %e, "Failed to delete workspace secret");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    // Return updated list
-    match state
-        .app
-        .workspace_secrets()
-        .list_by_workspace(&sub, workspace_id)
-        .await
-    {
-        Ok(secrets) => WorkspaceSecretsListTemplate {
-            secrets: secrets.iter().map(secret_to_view).collect(),
-        }
-        .into_response(),
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Workspace Skills
 // ---------------------------------------------------------------------------
@@ -921,43 +716,6 @@ async fn workspace_skill_new(
     .into_response()
 }
 
-#[derive(Deserialize)]
-struct CreateSkillForm {
-    name: String,
-    description: String,
-    body: String,
-}
-
-#[instrument(name = "web.workspace_skill_create", skip_all)]
-async fn workspace_skill_create(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    Form(form): Form<CreateSkillForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let new_skill = domain::skill::NewSkill::builder()
-        .workspace_id(workspace_id)
-        .name(form.name)
-        .description(form.description)
-        .body(form.body)
-        .build()
-        .expect("Could not build new skill");
-
-    if let Err(e) = state.app.skills().create(&sub, new_skill).await {
-        tracing::error!(error = %e, "Failed to create skill");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/skills")).into_response()
-}
-
 #[instrument(name = "web.workspace_skill_edit", skip_all)]
 async fn workspace_skill_edit(
     State(state): State<AppState>,
@@ -991,67 +749,6 @@ async fn workspace_skill_edit(
         skill: skill_to_view(&skill),
     }
     .into_response()
-}
-
-#[derive(Deserialize)]
-struct UpdateSkillForm {
-    name: String,
-    description: String,
-    body: String,
-}
-
-#[instrument(name = "web.workspace_skill_update", skip_all)]
-async fn workspace_skill_update(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-    Form(form): Form<UpdateSkillForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let skill_id = SkillId::from(skill_id);
-    let mut skill = match state.app.skills().find_by_id(&sub, skill_id).await {
-        Ok(s) => s,
-        Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
-    };
-
-    if skill
-        .update(Some(form.name), Some(form.description), Some(form.body))
-        .did_execute()
-    {
-        if let Err(e) = state.app.skills().update(&sub, &mut skill).await {
-            tracing::error!(error = %e, "Failed to update skill");
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/skills")).into_response()
-}
-
-#[instrument(name = "web.workspace_skill_delete", skip_all)]
-async fn workspace_skill_delete(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let skill_id = SkillId::from(skill_id);
-
-    if let Err(e) = state.app.skills().delete(&sub, skill_id).await {
-        tracing::error!(error = %e, "Failed to delete skill");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/skills")).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,85 +900,6 @@ async fn workspace_sandbox_new(
     .into_response()
 }
 
-#[derive(Deserialize)]
-struct CreateSandboxForm {
-    name: String,
-    mode: String,
-    #[serde(default)]
-    repo_url: Option<String>,
-    #[serde(default)]
-    branch: Option<String>,
-    cpu: String,
-    memory: String,
-    disk_size: String,
-}
-
-#[instrument(name = "web.workspace_sandbox_create", skip_all)]
-async fn workspace_sandbox_create(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    Form(form): Form<CreateSandboxForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-
-    let mode = match form.mode.as_str() {
-        "scratch" => SandboxMode::Scratch,
-        "repo" => {
-            let repo_url = form
-                .repo_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            match repo_url {
-                Some(repo_url) => {
-                    let branch = form
-                        .branch
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string);
-                    SandboxMode::Repo { repo_url, branch }
-                }
-                None => {
-                    tracing::warn!("repo mode requires a non-empty repo_url");
-                    return Redirect::to(&format!("/workspaces/{id}/sandboxes/new"))
-                        .into_response();
-                }
-            }
-        }
-        other => {
-            tracing::warn!(mode = %other, "unknown sandbox mode");
-            return Redirect::to(&format!("/workspaces/{id}/sandboxes/new")).into_response();
-        }
-    };
-
-    let specs = SandboxSpecs {
-        cpu: form.cpu,
-        memory: form.memory,
-        disk_size: form.disk_size,
-    };
-
-    if let Err(e) = state
-        .app
-        .sandboxes()
-        .create(&sub, workspace_id, form.name, specs, mode)
-        .await
-    {
-        tracing::error!(error = %e, "Failed to create sandbox");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/sandboxes")).into_response()
-}
-
 #[instrument(name = "web.workspace_sandbox_detail", skip_all)]
 async fn workspace_sandbox_detail(
     State(state): State<AppState>,
@@ -1317,50 +935,8 @@ async fn workspace_sandbox_detail(
     .into_response()
 }
 
-#[instrument(name = "web.workspace_sandbox_suspend", skip_all)]
-async fn workspace_sandbox_suspend(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let sandbox_id = SandboxId::from(sandbox_id);
-    if let Err(e) = state.app.sandboxes().suspend(&sub, sandbox_id).await {
-        tracing::error!(error = %e, "Failed to suspend sandbox");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/sandboxes/{sandbox_id}")).into_response()
-}
-
-#[instrument(name = "web.workspace_sandbox_restart", skip_all)]
-async fn workspace_sandbox_restart(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let sandbox_id = SandboxId::from(sandbox_id);
-    if let Err(e) = state.app.sandboxes().restart(&sub, sandbox_id).await {
-        tracing::error!(error = %e, "Failed to restart sandbox");
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/sandboxes/{sandbox_id}")).into_response()
-}
-
 // ---------------------------------------------------------------------------
-// Workspace Agents (create form)
+// Workspace Agents
 // ---------------------------------------------------------------------------
 
 #[instrument(name = "web.workspace_agent_new", skip_all)]
@@ -1404,64 +980,6 @@ async fn workspace_agent_new(
         sandbox_options,
     }
     .into_response()
-}
-
-#[derive(Deserialize)]
-struct CreateAgentForm {
-    name: String,
-    /// Empty string when no sandbox selected; parsed as UUID otherwise.
-    #[serde(default)]
-    sandbox_id: Option<String>,
-    #[serde(default)]
-    attach_mode: Option<String>,
-}
-
-#[instrument(name = "web.workspace_agent_create", skip_all)]
-async fn workspace_agent_create(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    Form(form): Form<CreateAgentForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-
-    // Pair sandbox_id + attach_mode into Some((id, mode)) only when both are
-    // present and valid; otherwise treat as "no attachment".
-    let attach = form
-        .sandbox_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|sb| sb.parse::<uuid::Uuid>().ok())
-        .map(SandboxId::from)
-        .map(|sb| {
-            let mode = match form.attach_mode.as_deref().unwrap_or("read") {
-                "write" => SandboxAgentMode::Write,
-                _ => SandboxAgentMode::Read,
-            };
-            (sb, mode)
-        });
-
-    match state
-        .app
-        .agents()
-        .create_agent(&sub, workspace_id, form.name, attach)
-        .await
-    {
-        Ok(agent) => {
-            Redirect::to(&format!("/workspaces/{id}/chat?agent={}", agent.id)).into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create agent");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
 }
 
 fn role_label(role: domain::agent::AgentRole) -> &'static str {
@@ -1559,100 +1077,6 @@ async fn workspace_agent_detail(
         error: query.error,
     }
     .into_response()
-}
-
-/// Build `/workspaces/{id}/agents/{agent_id}?error=<encoded>` so the
-/// detail page can render a flash banner explaining why the last
-/// attach/detach failed.
-fn agent_detail_redirect_with_error(
-    workspace_id: uuid::Uuid,
-    agent_id: AgentId,
-    msg: &str,
-) -> Response {
-    let query: String = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("error", msg)
-        .finish();
-    Redirect::to(&format!(
-        "/workspaces/{workspace_id}/agents/{agent_id}?{query}"
-    ))
-    .into_response()
-}
-
-#[derive(Deserialize)]
-struct AttachSandboxForm {
-    sandbox_id: String,
-    mode: String,
-}
-
-#[instrument(name = "web.workspace_agent_attach_sandbox", skip_all)]
-async fn workspace_agent_attach_sandbox(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-    Form(form): Form<AttachSandboxForm>,
-) -> Response {
-    let Some(user_id) = extract_user_id(&session).await else {
-        return Redirect::to("/").into_response();
-    };
-    let subject = AuthSubject::User(user_id);
-
-    let agent_id = AgentId::from(agent_id);
-    let Ok(sandbox_uuid) = form.sandbox_id.parse::<uuid::Uuid>() else {
-        tracing::warn!(raw = %form.sandbox_id, "invalid sandbox_id in attach form");
-        return Redirect::to(&format!("/workspaces/{id}/agents/{agent_id}")).into_response();
-    };
-    let sandbox_id = SandboxId::from(sandbox_uuid);
-    let mode = match form.mode.as_str() {
-        "write" => SandboxAgentMode::Write,
-        _ => SandboxAgentMode::Read,
-    };
-
-    if let Err(e) = state
-        .app
-        .agents()
-        .attach_sandbox(&subject, agent_id, sandbox_id, mode)
-        .await
-    {
-        tracing::warn!(error = %e, "attach_sandbox failed");
-        return agent_detail_redirect_with_error(id, agent_id, &e.to_string());
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/agents/{agent_id}")).into_response()
-}
-
-#[instrument(name = "web.workspace_agent_detach_sandbox", skip_all)]
-async fn workspace_agent_detach_sandbox(
-    State(state): State<AppState>,
-    session: Session,
-    Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> Response {
-    let Some(user_id) = extract_user_id(&session).await else {
-        return Redirect::to("/").into_response();
-    };
-    let subject = AuthSubject::User(user_id);
-
-    let agent_id = AgentId::from(agent_id);
-    // The handler needs the sandbox_id; fetch the agent to look it up.
-    let sandbox_id = match state.app.agents().find_by_id(&subject, agent_id).await {
-        Ok(a) => a.attached_sandbox.map(|(sbx, _)| sbx),
-        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
-    };
-    let Some(sandbox_id) = sandbox_id else {
-        // Already detached; nothing to do.
-        return Redirect::to(&format!("/workspaces/{id}/agents/{agent_id}")).into_response();
-    };
-
-    if let Err(e) = state
-        .app
-        .agents()
-        .detach_sandbox(&subject, agent_id, sandbox_id)
-        .await
-    {
-        tracing::warn!(error = %e, "detach_sandbox failed");
-        return agent_detail_redirect_with_error(id, agent_id, &e.to_string());
-    }
-
-    Redirect::to(&format!("/workspaces/{id}/agents/{agent_id}")).into_response()
 }
 
 // ---------------------------------------------------------------------------
