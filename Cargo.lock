@@ -1388,6 +1388,7 @@ dependencies = [
  "jsonwebtoken",
  "llm",
  "obix",
+ "obix-macros",
  "openai-client",
  "opentelemetry",
  "opentelemetry-http",

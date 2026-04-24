@@ -3,6 +3,7 @@ mod file;
 mod inbox;
 mod job;
 mod search;
+mod tables;
 mod upstream;
 
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use self::inbox::LibraryWriteHandler;
 use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
+use self::tables::LibraryMailboxTables;
 use self::upstream::Upstream;
 pub use error::LibraryError;
 pub use file::{DocType, GitFileHash, RuntimeFile, SearchableFields};
@@ -41,7 +43,7 @@ impl LibraryConfig {
 #[derive(Clone)]
 pub struct Library {
     search: SearchStore,
-    inbox: obix::Inbox,
+    inbox: obix::Inbox<LibraryMailboxTables>,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
 }
 
