@@ -5,6 +5,13 @@ use sha1::{Digest, Sha1};
 use super::file::GitFileHash;
 use super::LibraryError;
 
+/// Build a `git` command that never prompts for credentials.
+fn git_cmd() -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
 #[derive(Clone)]
 pub(super) struct Upstream {
     repo_path: PathBuf,
@@ -54,7 +61,7 @@ impl Upstream {
             return Ok(());
         }
 
-        let pull = tokio::process::Command::new("git")
+        let pull = git_cmd()
             .args(["pull", "--ff-only"])
             .current_dir(&self.repo_path)
             .output()
@@ -128,7 +135,7 @@ impl Upstream {
             return Ok(());
         }
 
-        let push = tokio::process::Command::new("git")
+        let push = git_cmd()
             .args(["push"])
             .current_dir(&self.repo_path)
             .output()
@@ -148,7 +155,7 @@ impl Upstream {
 
 async fn clone(repo_url: &str, repo_path: &Path) -> Result<(), LibraryError> {
     tracing::info!(url = %repo_url, path = %repo_path.display(), "cloning library repo");
-    let output = tokio::process::Command::new("git")
+    let output = git_cmd()
         .args(["clone", repo_url, &repo_path.to_string_lossy()])
         .output()
         .await
