@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE skills SET workspace_id = $2, name = $3, deleted = TRUE WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f411dfd2bb560e1fa14d0807e31d4b5f92336db349aa3bf07b41ff3ce4b62f9e"
+}

@@ -99,6 +99,35 @@ impl core::fmt::Display for Skill {
     }
 }
 
+/// A resolved skill body ready for argument interpolation.
+pub struct SkillBody(String);
+
+impl SkillBody {
+    pub(crate) fn new(body: String) -> Self {
+        Self(body)
+    }
+
+    /// Substitute `$ARGUMENTS` in the skill body with the provided arguments.
+    /// If the body doesn't contain `$ARGUMENTS` and arguments is non-empty,
+    /// appends `ARGUMENTS: <value>` to the end.
+    pub fn interpolate(self, arguments: Option<&str>) -> String {
+        let args = arguments.unwrap_or_default();
+        if self.0.contains("$ARGUMENTS") {
+            self.0.replace("$ARGUMENTS", args)
+        } else if !args.is_empty() {
+            format!("{}\n\nARGUMENTS: {args}", self.0)
+        } else {
+            self.0
+        }
+    }
+}
+
+impl From<SkillBody> for String {
+    fn from(sb: SkillBody) -> Self {
+        sb.0
+    }
+}
+
 impl TryFromEvents<SkillEvent> for Skill {
     fn try_from_events(events: EntityEvents<SkillEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = SkillBuilder::default();

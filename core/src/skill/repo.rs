@@ -10,7 +10,10 @@ use super::entity::*;
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "Skill",
-    columns(workspace_id(ty = "Option<WorkspaceId>", list_for(by(created_at)))),
+    columns(
+        workspace_id(ty = "Option<WorkspaceId>", list_for(by(created_at))),
+        name(ty = "String", list_for(by(created_at)))
+    ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "crate::library::LibraryError")
 )]
@@ -28,46 +31,18 @@ impl SkillRepo {
         }
     }
 
-    /// Fetch all skills matching `name` visible to the given workspace:
-    /// workspace-scoped (if `workspace_id` is `Some`) **and** global.
-    /// Returns up to two results; callers pick the winner in memory.
-    pub async fn list_for_name(
-        &self,
-        workspace_id: Option<WorkspaceId>,
-        name: &str,
-    ) -> Result<Vec<Skill>, SkillFindError> {
-        let ws_id = workspace_id.map(uuid::Uuid::from);
-        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT id FROM skills \
-             WHERE (workspace_id = $1 OR workspace_id IS NULL) \
-             AND name = $2 AND deleted = FALSE",
-        )
-        .bind(ws_id)
-        .bind(name)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(SkillFindError::from)?;
-
-        let mut skills = Vec::with_capacity(rows.len());
-        for (id,) in rows {
-            skills.push(self.find_by_id(SkillId::from(id)).await?);
-        }
-        Ok(skills)
-    }
-
-    /// List all global skills (no workspace).
+    /// List all global skills (workspace_id IS NULL).
+    ///
+    /// Cannot use `list_for_workspace_id_by_created_at(None)` because the
+    /// macro generates `COALESCE(workspace_id = $1, $1 IS NULL)` which
+    /// matches ALL rows when `$1` is NULL, not just NULL workspace_id rows.
     pub async fn list_global(&self) -> Result<Vec<Skill>, SkillFindError> {
-        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT id FROM skills WHERE workspace_id IS NULL AND deleted = FALSE ORDER BY created_at ASC",
+        let (skills, _) = es_query!(
+            "SELECT id, created_at FROM skills WHERE workspace_id IS NULL AND deleted = FALSE ORDER BY created_at ASC LIMIT $1",
+            100i64
         )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(SkillFindError::from)?;
-
-        let mut skills = Vec::with_capacity(rows.len());
-        for (id,) in rows {
-            skills.push(self.find_by_id(SkillId::from(id)).await?);
-        }
+        .fetch_n(&self.pool, 100)
+        .await?;
         Ok(skills)
     }
 

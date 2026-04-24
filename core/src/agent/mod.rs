@@ -620,7 +620,7 @@ impl Agents {
                 )
                 .await?
             {
-                Some(body) => body,
+                Some(body) => String::from(body),
                 None => {
                     let _ = tx
                         .send(ChatOutputEvent::Error {

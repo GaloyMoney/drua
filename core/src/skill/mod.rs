@@ -79,16 +79,27 @@ impl Skills {
         name: &str,
         workspace_id: Option<WorkspaceId>,
         sandbox_id: Option<SandboxId>,
-    ) -> Result<Option<String>, SkillError> {
+    ) -> Result<Option<SkillBody>, SkillError> {
         // Single query fetches both workspace-scoped and global matches.
-        // Workspace-scoped wins over global when both exist.
-        let candidates = self.repo.list_for_name(workspace_id, name).await?;
-        let best = candidates
-            .iter()
-            .find(|s| s.workspace_id.is_some())
-            .or_else(|| candidates.first());
+        // Workspace-scoped (matching the caller's workspace) wins over global.
+        let query = es_entity::PaginatedQueryArgs {
+            first: 10,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_name_by_created_at(
+                name.to_string(),
+                query,
+                es_entity::ListDirection::Ascending,
+            )
+            .await?;
+        let candidates = result.entities;
+        let best = workspace_id
+            .and_then(|ws_id| candidates.iter().find(|s| s.workspace_id == Some(ws_id)))
+            .or_else(|| candidates.iter().find(|s| s.workspace_id.is_none()));
         if let Some(skill) = best {
-            return Ok(Some(skill.body.clone()));
+            return Ok(Some(SkillBody::new(skill.body.clone())));
         }
 
         // Sandbox fallback
@@ -100,7 +111,7 @@ impl Skills {
                 .await
                 .map_err(|e| SkillError::SandboxLookup(e.to_string()))?;
             if let Some(body) = sandbox.and_then(|s| s.find_skill(name)) {
-                return Ok(Some(body));
+                return Ok(Some(SkillBody::new(body)));
             }
         }
 
@@ -123,7 +134,7 @@ impl Skills {
         arguments: Option<&str>,
     ) -> Result<Option<String>, SkillError> {
         let body = self.find_by_name(name, workspace_id, sandbox_id).await?;
-        Ok(body.map(|b| substitute_arguments(&b, arguments)))
+        Ok(body.map(|b| b.interpolate(arguments)))
     }
 
     /// List workspace-scoped skills (public, with auth check).
@@ -197,6 +208,8 @@ impl Skills {
             .library
             .as_ref()
             .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
+        // Library search already includes global skills (sentinel nil UUID)
+        // alongside workspace-scoped results — see SearchStore::search().
         library
             .search(
                 uuid::Uuid::from(workspace_id),
@@ -303,49 +316,37 @@ impl Skills {
     }
 }
 
-/// Substitute `$ARGUMENTS` in the skill body with the provided arguments.
-/// If the body doesn't contain `$ARGUMENTS` and arguments is non-empty,
-/// appends `ARGUMENTS: <value>` to the end.
-fn substitute_arguments(body: &str, arguments: Option<&str>) -> String {
-    let args = arguments.unwrap_or_default();
-    if body.contains("$ARGUMENTS") {
-        body.replace("$ARGUMENTS", args)
-    } else if !args.is_empty() {
-        format!("{body}\n\nARGUMENTS: {args}")
-    } else {
-        body.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn substitute_replaces_arguments_placeholder() {
-        let body = "Deploy $ARGUMENTS to production.";
-        let result = substitute_arguments(body, Some("staging"));
-        assert_eq!(result, "Deploy staging to production.");
+    fn interpolate_replaces_arguments_placeholder() {
+        let body = SkillBody::new("Deploy $ARGUMENTS to production.".to_string());
+        assert_eq!(
+            body.interpolate(Some("staging")),
+            "Deploy staging to production."
+        );
     }
 
     #[test]
-    fn substitute_appends_when_no_placeholder() {
-        let body = "Run the deploy process.";
-        let result = substitute_arguments(body, Some("staging"));
-        assert_eq!(result, "Run the deploy process.\n\nARGUMENTS: staging");
+    fn interpolate_appends_when_no_placeholder() {
+        let body = SkillBody::new("Run the deploy process.".to_string());
+        assert_eq!(
+            body.interpolate(Some("staging")),
+            "Run the deploy process.\n\nARGUMENTS: staging"
+        );
     }
 
     #[test]
-    fn substitute_noop_when_no_args_and_no_placeholder() {
-        let body = "Run the deploy process.";
-        let result = substitute_arguments(body, None);
-        assert_eq!(result, "Run the deploy process.");
+    fn interpolate_noop_when_no_args_and_no_placeholder() {
+        let body = SkillBody::new("Run the deploy process.".to_string());
+        assert_eq!(body.interpolate(None), "Run the deploy process.");
     }
 
     #[test]
-    fn substitute_replaces_multiple_occurrences() {
-        let body = "First: $ARGUMENTS, second: $ARGUMENTS";
-        let result = substitute_arguments(body, Some("val"));
-        assert_eq!(result, "First: val, second: val");
+    fn interpolate_replaces_multiple_occurrences() {
+        let body = SkillBody::new("First: $ARGUMENTS, second: $ARGUMENTS".to_string());
+        assert_eq!(body.interpolate(Some("val")), "First: val, second: val");
     }
 }
