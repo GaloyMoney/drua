@@ -613,7 +613,11 @@ impl Agents {
         let prompt = if let Some(skill_name) = parse_slash_skill(&prompt) {
             match self
                 .skills
-                .find_by_name(skill_name, agent.attached_sandbox_id())
+                .find_by_name(
+                    skill_name,
+                    Some(agent.workspace_id),
+                    agent.attached_sandbox_id(),
+                )
                 .await?
             {
                 Some(body) => body,

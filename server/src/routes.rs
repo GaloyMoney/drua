@@ -538,7 +538,7 @@ async fn workspace_secrets_list(
 fn skill_to_view(s: &domain::skill::Skill) -> SkillView {
     SkillView {
         id: s.id.to_string(),
-        workspace_id: s.workspace_id.to_string(),
+        workspace_id: s.workspace_id.map(|id| id.to_string()).unwrap_or_default(),
         name: s.name.clone(),
         description: s.description.clone(),
         body: s.body.clone(),

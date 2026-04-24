@@ -70,8 +70,8 @@ pub enum RuntimeFile {
     },
     Skill {
         doc_id: SkillId,
-        workspace_id: WorkspaceId,
-        workspace_name: String,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<String>,
         name: String,
         description: String,
         body: String,
@@ -116,8 +116,8 @@ impl RuntimeFile {
     #[allow(clippy::too_many_arguments)]
     pub fn for_skill(
         skill_id: SkillId,
-        workspace_id: WorkspaceId,
-        workspace_name: &str,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<&str>,
         name: &str,
         description: &str,
         body: &str,
@@ -127,7 +127,7 @@ impl RuntimeFile {
         RuntimeFile::Skill {
             doc_id: skill_id,
             workspace_id,
-            workspace_name: workspace_name.to_string(),
+            workspace_name: workspace_name.map(|s| s.to_string()),
             name: name.to_string(),
             description: description.to_string(),
             body: body.to_string(),
@@ -164,7 +164,9 @@ impl RuntimeFile {
             } => Some(SearchableFields {
                 doc_id: uuid::Uuid::from(*doc_id),
                 doc_type: DocType::Skill,
-                workspace_id: uuid::Uuid::from(*workspace_id),
+                workspace_id: workspace_id
+                    .map(uuid::Uuid::from)
+                    .unwrap_or(uuid::Uuid::nil()),
                 title: name.clone(),
                 body: description.clone(),
                 tags: Vec::new(),
@@ -189,10 +191,10 @@ impl RuntimeFile {
                 slug,
                 id_prefix,
                 ..
-            } => format!(
-                "runtime/workspaces/{}/skills/{}-{}.md",
-                workspace_name, slug, id_prefix
-            ),
+            } => match workspace_name {
+                Some(ws) => format!("runtime/workspaces/{}/skills/{}-{}.md", ws, slug, id_prefix),
+                None => format!("runtime/skills/{}-{}.md", slug, id_prefix),
+            },
             RuntimeFile::GitKeep { workspace_name } => {
                 format!("runtime/workspaces/{}/notes/.gitkeep", workspace_name)
             }

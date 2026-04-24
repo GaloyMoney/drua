@@ -98,13 +98,14 @@ impl SearchStore {
         let over_fetch = (limit * 3).max(10) as i64;
         let doc_type_filter = doc_type.map(|dt| dt.as_str().to_string());
 
-        // FTS results
+        // FTS results — include both workspace-scoped and global (nil UUID) documents.
+        let global_id = uuid::Uuid::nil();
         let fts_rows: Vec<FtsRow> = sqlx::query_as!(
             FtsRow,
             r#"SELECT doc_id, doc_type, title_text, content_text, tags,
                       ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
                FROM library_search_data
-               WHERE workspace_id = $2
+               WHERE workspace_id IN ($2, $5)
                  AND search_tsv @@ plainto_tsquery('english', $1)
                  AND ($3::text IS NULL OR doc_type = $3)
                ORDER BY rank DESC
@@ -113,11 +114,12 @@ impl SearchStore {
             workspace_id,
             doc_type_filter.as_deref() as Option<&str>,
             over_fetch,
+            global_id,
         )
         .fetch_all(&self.pool)
         .await?;
 
-        // Vector results (only if we have an embedding)
+        // Vector results (only if we have an embedding) — include global documents.
         let vec_rows: Vec<VecRow> = if let Some(emb) = query_embedding {
             let vec = Vector::from(emb);
             sqlx::query_as!(
@@ -125,7 +127,7 @@ impl SearchStore {
                 r#"SELECT doc_id, doc_type, title_text, content_text, tags,
                           embedding <=> $1 AS distance
                    FROM library_search_data
-                   WHERE workspace_id = $2
+                   WHERE workspace_id IN ($2, $5)
                      AND embedding IS NOT NULL
                      AND ($3::text IS NULL OR doc_type = $3)
                    ORDER BY distance ASC
@@ -134,6 +136,7 @@ impl SearchStore {
                 workspace_id,
                 doc_type_filter.as_deref() as Option<&str>,
                 over_fetch,
+                global_id,
             )
             .fetch_all(&self.pool)
             .await?

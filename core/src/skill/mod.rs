@@ -65,34 +65,36 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Resolve a skill by name and return its body, falling back to the
-    /// optionally-supplied sandbox's exported skills when there's no
-    /// match in the repo.
+    /// Resolve a skill by name and return its body.
     ///
-    /// Lookup order:
-    /// 1. `repo.maybe_find_by_name(name)` — workspace-scoped registered skills
-    ///    (see the `idx_skills_workspace_name` unique index in the migration).
-    /// 2. If `sandbox_id` is `Some`, load the sandbox and scan its
-    ///    `exported_skills` (populated by `/initialize` from the cloned
-    ///    repo's `.claude/commands/*.md`) for a matching `name`.
+    /// Lookup order (workspace skill shadows global):
+    /// 1. Workspace-scoped skill (if `workspace_id` is `Some`)
+    /// 2. Global skill (`workspace_id IS NULL`)
+    /// 3. Sandbox exported skill (if `sandbox_id` is `Some`)
     ///
-    /// Returns `Ok(None)` when neither source matches; returns errors
-    /// only on actual repo / sandbox-lookup failures.
+    /// Returns `Ok(None)` when no source matches.
     #[instrument(name = "skill.find_by_name", skip_all, fields(name = %name, sandbox_id))]
     pub async fn find_by_name(
         &self,
         name: &str,
+        workspace_id: Option<WorkspaceId>,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<String>, SkillError> {
-        if let Some(skill) = self.repo.maybe_find_by_name(name.to_string()).await? {
+        // 1. Workspace-scoped lookup
+        if let Some(ws_id) = workspace_id {
+            if let Some(skill) = self.repo.find_by_name_in_workspace(ws_id, name).await? {
+                return Ok(Some(skill.body));
+            }
+        }
+
+        // 2. Global lookup
+        if let Some(skill) = self.repo.find_by_name_global(name).await? {
             return Ok(Some(skill.body));
         }
 
+        // 3. Sandbox fallback
         if let Some(sandbox_id) = sandbox_id {
             tracing::Span::current().record("sandbox_id", sandbox_id.to_string());
-            // `maybe_find_by_id` returns `None` for a missing sandbox —
-            // skill lookup treats that as "no fallback available" rather
-            // than an error.
             let sandbox = self
                 .sandboxes
                 .maybe_find_by_id(sandbox_id)
@@ -106,6 +108,7 @@ impl Skills {
         Ok(None)
     }
 
+    /// List workspace-scoped skills (public, with auth check).
     #[instrument(name = "skill.list_by_workspace_id", skip_all)]
     pub async fn list_by_workspace_id(
         &self,
@@ -119,7 +122,7 @@ impl Skills {
         let result = self
             .repo
             .list_for_workspace_id_by_created_at(
-                workspace_id,
+                Some(workspace_id),
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -127,7 +130,7 @@ impl Skills {
         Ok(result.entities)
     }
 
-    /// List skills for a workspace (internal, no auth check).
+    /// List skills visible to a workspace: workspace-scoped + global.
     /// Used by system prompt builder and skills context injection.
     #[instrument(name = "skill.list_for_workspace", skip(self))]
     async fn list_for_workspace(
@@ -138,18 +141,33 @@ impl Skills {
             first: 100,
             after: None,
         };
-        let result = self
+        let ws_result = self
             .repo
             .list_for_workspace_id_by_created_at(
-                workspace_id,
+                Some(workspace_id),
                 query,
                 es_entity::ListDirection::Ascending,
             )
             .await?;
-        Ok(result.entities)
+        let global_skills = self.repo.list_global().await?;
+
+        // Merge: workspace skills first, then globals (dedup by name,
+        // workspace wins).
+        let mut seen_names = std::collections::HashSet::new();
+        let mut merged = Vec::new();
+        for skill in ws_result.entities {
+            seen_names.insert(skill.name.clone());
+            merged.push(skill);
+        }
+        for skill in global_skills {
+            if !seen_names.contains(&skill.name) {
+                merged.push(skill);
+            }
+        }
+        Ok(merged)
     }
 
-    /// Hybrid search across workspace skills via the library index.
+    /// Hybrid search across workspace + global skills via the library index.
     #[instrument(name = "skill.search", skip(self))]
     pub async fn search(
         &self,
@@ -172,11 +190,11 @@ impl Skills {
             .map_err(SkillError::from)
     }
 
-    /// Build workspace skills context for system prompt injection.
+    /// Build skills context for system prompt injection.
     ///
-    /// Returns a `<workspace_skills>` block listing available skills with
-    /// their descriptions, truncated to fit the character budget.
-    /// Returns `None` if the workspace has no skills.
+    /// Returns an `<available_skills>` block listing workspace + global skills
+    /// with their descriptions, truncated to fit the character budget.
+    /// Returns `None` if there are no skills.
     #[instrument(name = "skill.skills_context_for_workspace", skip(self))]
     pub async fn skills_context_for_workspace(
         &self,
@@ -188,12 +206,12 @@ impl Skills {
             return Ok(None);
         }
 
-        let header = "<workspace_skills>\n\
-             The following skills are available in this workspace. Use the \
+        let header = "<available_skills>\n\
+             The following skills are available. Use the \
              `use_skill` tool to invoke them when relevant to the user's request.\n\
              When the user types /name, always invoke that skill via use_skill.\n\
              Use `use_skill` with action \"search\" to discover skills by topic.\n\n";
-        let footer = "</workspace_skills>";
+        let footer = "</available_skills>";
 
         let mut buf = String::from(header);
         let mut remaining = SKILLS_CONTEXT_BUDGET
@@ -201,6 +219,11 @@ impl Skills {
             .saturating_sub(footer.len());
 
         for skill in skills.iter().take(SKILLS_CONTEXT_MAX) {
+            let scope = if skill.workspace_id.is_some() {
+                ""
+            } else {
+                " [global]"
+            };
             let desc: String = skill
                 .description
                 .chars()
@@ -211,7 +234,7 @@ impl Skills {
             } else {
                 desc
             };
-            let line = format!("- {} — {}\n", skill.name, truncated);
+            let line = format!("- {}{} — {}\n", skill.name, scope, truncated);
             if line.len() > remaining {
                 buf.push_str("- ... (more skills available — use search to find them)\n");
                 break;

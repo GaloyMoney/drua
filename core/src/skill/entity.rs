@@ -11,9 +11,8 @@ use crate::primitives::*;
 pub enum SkillEvent {
     Initialized {
         id: SkillId,
-        workspace_id: WorkspaceId,
-        #[serde(default)]
-        workspace_name: String,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<String>,
         name: String,
         description: String,
         body: String,
@@ -29,9 +28,10 @@ pub enum SkillEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Skill {
     pub id: SkillId,
-    pub workspace_id: WorkspaceId,
     #[builder(default)]
-    pub workspace_name: String,
+    pub workspace_id: Option<WorkspaceId>,
+    #[builder(default)]
+    pub workspace_name: Option<String>,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -60,7 +60,7 @@ impl Skill {
         crate::library::RuntimeFile::for_skill(
             self.id,
             self.workspace_id,
-            &self.workspace_name,
+            self.workspace_name.as_deref(),
             &self.name,
             &self.description,
             &self.body,
@@ -121,6 +121,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .description(description.clone())
                         .body(body.clone());
                 }
+
                 SkillEvent::Updated {
                     name,
                     description,
@@ -148,10 +149,10 @@ impl TryFromEvents<SkillEvent> for Skill {
 pub struct NewSkill {
     #[builder(setter(into))]
     pub(super) id: SkillId,
-    #[builder(setter(into))]
-    pub(super) workspace_id: WorkspaceId,
-    #[builder(setter(into))]
-    pub(super) workspace_name: String,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) workspace_id: Option<WorkspaceId>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) workspace_name: Option<String>,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
@@ -173,7 +174,7 @@ impl IntoEvents<SkillEvent> for NewSkill {
             [SkillEvent::Initialized {
                 id: self.id,
                 workspace_id: self.workspace_id,
-                workspace_name: self.workspace_name,
+                workspace_name: self.workspace_name.clone(),
                 name: self.name,
                 description: self.description,
                 body: self.body,

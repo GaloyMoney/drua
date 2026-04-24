@@ -10,10 +10,7 @@ use super::entity::*;
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "Skill",
-    columns(
-        workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
-        name(ty = "String")
-    ),
+    columns(workspace_id(ty = "Option<WorkspaceId>", list_for(by(created_at)))),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "crate::library::LibraryError")
 )]
@@ -31,10 +28,63 @@ impl SkillRepo {
         }
     }
 
+    /// Find a workspace-scoped skill by name.
+    pub async fn find_by_name_in_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Option<Skill>, SkillFindError> {
+        let ws_id = uuid::Uuid::from(workspace_id);
+        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM skills WHERE workspace_id = $1 AND name = $2 AND deleted = FALSE",
+        )
+        .bind(ws_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(SkillFindError::from)?;
+
+        match row {
+            Some((id,)) => Ok(Some(self.find_by_id(SkillId::from(id)).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Find a global (unscoped) skill by name.
+    pub async fn find_by_name_global(&self, name: &str) -> Result<Option<Skill>, SkillFindError> {
+        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM skills WHERE workspace_id IS NULL AND name = $1 AND deleted = FALSE",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(SkillFindError::from)?;
+
+        match row {
+            Some((id,)) => Ok(Some(self.find_by_id(SkillId::from(id)).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List all global skills (no workspace).
+    pub async fn list_global(&self) -> Result<Vec<Skill>, SkillFindError> {
+        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM skills WHERE workspace_id IS NULL AND deleted = FALSE ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(SkillFindError::from)?;
+
+        let mut skills = Vec::with_capacity(rows.len());
+        for (id,) in rows {
+            skills.push(self.find_by_id(SkillId::from(id)).await?);
+        }
+        Ok(skills)
+    }
+
     /// Post-persist hook: sync skill content to the git-backed library.
     /// Only fires on content changes (Initialized/Updated).
-    /// Skips legacy entities that lack a workspace_name and skips when
-    /// no library is configured (e.g. in tests).
+    /// Skips when no library is configured (e.g. in tests).
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,
@@ -45,9 +95,6 @@ impl SkillRepo {
             Some(lib) => lib,
             None => return Ok(()),
         };
-        if entity.workspace_name.is_empty() {
-            return Ok(());
-        }
         let needs_sync = new_events.any(|persisted| {
             matches!(
                 &persisted.event,

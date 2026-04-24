@@ -128,10 +128,11 @@ impl TopLevelTool for UseSkillTool {
 
         match params {
             UseSkillParams::Invoke { name, arguments } => {
+                let workspace_id = subject.workspace_id();
                 let sandbox_id = subject.readable_sandbox_id();
                 let body = self
                     .skills
-                    .find_by_name(&name, sandbox_id)
+                    .find_by_name(&name, workspace_id, sandbox_id)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 
