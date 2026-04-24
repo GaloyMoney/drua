@@ -667,6 +667,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         .map(|sk| ExportedSkillView {
             name: sk.name.clone(),
             content: sk.content.clone(),
+            description: sk.description.clone(),
         })
         .collect();
 

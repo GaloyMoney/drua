@@ -223,17 +223,53 @@ impl Skills {
 
     /// Build skills context for system prompt injection.
     ///
-    /// Returns an `<available_skills>` block listing workspace + global skills
-    /// with their descriptions, truncated to fit the character budget.
+    /// Returns an `<available_skills>` block listing workspace + global +
+    /// sandbox-exported skills with their descriptions, truncated to fit the
+    /// character budget. DB skills shadow sandbox skills of the same name.
     /// Returns `None` if there are no skills.
     #[instrument(name = "skill.skills_context_for_workspace", skip(self))]
     pub async fn skills_context_for_workspace(
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Option<String>, SkillError> {
-        let skills = self.list_for_workspace(workspace_id).await?;
+        let db_skills = self.list_for_workspace(workspace_id).await?;
 
-        if skills.is_empty() {
+        // Collect sandbox-exported skills, dedup against DB skills.
+        let sandbox_skills = match self
+            .sandboxes
+            .exported_skills_for_workspace(workspace_id)
+            .await
+        {
+            Ok(skills) => skills,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to fetch sandbox exported skills");
+                Vec::new()
+            }
+        };
+
+        // Build a unified listing: (name, scope_tag, description)
+        let mut seen_names = std::collections::HashSet::new();
+        let mut entries: Vec<(&str, &str, String)> = Vec::new();
+
+        for skill in &db_skills {
+            seen_names.insert(skill.name.as_str());
+            let scope = if skill.workspace_id.is_some() {
+                ""
+            } else {
+                " [global]"
+            };
+            entries.push((&skill.name, scope, skill.description.clone()));
+        }
+        for skill in &sandbox_skills {
+            if seen_names.contains(skill.name.as_str()) {
+                continue;
+            }
+            seen_names.insert(&skill.name);
+            let desc = skill.description.clone().unwrap_or_default();
+            entries.push((&skill.name, " [sandbox]", desc));
+        }
+
+        if entries.is_empty() {
             return Ok(None);
         }
 
@@ -249,23 +285,14 @@ impl Skills {
             .saturating_sub(header.len())
             .saturating_sub(footer.len());
 
-        for skill in skills.iter().take(SKILLS_CONTEXT_MAX) {
-            let scope = if skill.workspace_id.is_some() {
-                ""
-            } else {
-                " [global]"
-            };
-            let desc: String = skill
-                .description
-                .chars()
-                .take(MAX_DESCRIPTION_LEN)
-                .collect();
-            let truncated = if desc.len() < skill.description.len() {
+        for (name, scope, description) in entries.iter().take(SKILLS_CONTEXT_MAX) {
+            let desc: String = description.chars().take(MAX_DESCRIPTION_LEN).collect();
+            let truncated = if desc.len() < description.len() {
                 format!("{desc}...")
             } else {
                 desc
             };
-            let line = format!("- {}{} — {}\n", skill.name, scope, truncated);
+            let line = format!("- {name}{scope} — {truncated}\n");
             if line.len() > remaining {
                 buf.push_str("- ... (more skills available — use search to find them)\n");
                 break;

@@ -178,6 +178,7 @@ pub struct ExportedFileView {
 pub struct ExportedSkillView {
     pub name: String,
     pub content: String,
+    pub description: Option<String>,
 }
 
 #[allow(dead_code)]

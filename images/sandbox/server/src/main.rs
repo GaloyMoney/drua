@@ -59,6 +59,8 @@ struct ExportedFile {
 struct ExportedSkill {
     name: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -796,10 +798,12 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
                 continue;
             };
             let skill_file = path.join("SKILL.md");
-            if let Ok(content) = tokio::fs::read_to_string(&skill_file).await {
+            if let Ok(raw) = tokio::fs::read_to_string(&skill_file).await {
+                let (description, content) = parse_skill_frontmatter(&raw);
                 skills.push(ExportedSkill {
                     name: name.to_string(),
                     content,
+                    description,
                 });
             }
         }
@@ -824,6 +828,7 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
                 skills.push(ExportedSkill {
                     name: name.to_string(),
                     content,
+                    description: None,
                 });
             }
         }
@@ -831,6 +836,47 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
 
     skills.sort_by_key(|a| a.name.clone());
     skills
+}
+
+/// Parse YAML-style frontmatter from a SKILL.md file.
+///
+/// Extracts the `description` field from a `---` delimited frontmatter block.
+/// Returns `(description, body_without_frontmatter)`. If there is no
+/// frontmatter, returns `(None, original_content)`.
+fn parse_skill_frontmatter(raw: &str) -> (Option<String>, String) {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with("---") {
+        return (None, raw.to_string());
+    }
+    // Skip the opening `---` line
+    let after_open = match trimmed.strip_prefix("---") {
+        Some(rest) => rest.trim_start_matches('-'),
+        None => return (None, raw.to_string()),
+    };
+    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
+
+    // Find the closing `---`
+    let Some(end_idx) = after_open.find("\n---") else {
+        return (None, raw.to_string());
+    };
+
+    let frontmatter = &after_open[..end_idx];
+    let body_start = end_idx + 4; // skip "\n---"
+    let body = after_open[body_start..]
+        .trim_start_matches(['-', '\n'])
+        .to_string();
+
+    // Simple key: value parsing for `description`
+    let description = frontmatter
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("description:")
+                .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
+        })
+        .filter(|d| !d.is_empty());
+
+    (description, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,6 +1381,67 @@ mod tests {
         assert_eq!(skills[1].content, "from skills", "skills/ layout wins");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn scan_skills_parses_frontmatter_description() {
+        let dir = std::env::temp_dir().join("sandbox-test-skills-fm");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let skills_dir = dir.join(".claude").join("skills");
+        tokio::fs::create_dir_all(skills_dir.join("deploy"))
+            .await
+            .unwrap();
+
+        let skill_md =
+            "---\ndescription: Deploy the app to production\n---\n\nRun deploy steps here.";
+        tokio::fs::write(skills_dir.join("deploy").join("SKILL.md"), skill_md)
+            .await
+            .unwrap();
+
+        let skills = scan_skills(&dir).await;
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "deploy");
+        assert_eq!(skills[0].content, "Run deploy steps here.");
+        assert_eq!(
+            skills[0].description.as_deref(),
+            Some("Deploy the app to production")
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── parse_skill_frontmatter ──────────────────────────────────
+
+    #[test]
+    fn parse_frontmatter_extracts_description() {
+        let raw = "---\ndescription: Deploy to prod\ntags: [ci]\n---\n\nBody here.";
+        let (desc, body) = parse_skill_frontmatter(raw);
+        assert_eq!(desc.as_deref(), Some("Deploy to prod"));
+        assert_eq!(body, "Body here.");
+    }
+
+    #[test]
+    fn parse_frontmatter_handles_quoted_description() {
+        let raw = "---\ndescription: \"Run code review\"\n---\n\nReview body.";
+        let (desc, body) = parse_skill_frontmatter(raw);
+        assert_eq!(desc.as_deref(), Some("Run code review"));
+        assert_eq!(body, "Review body.");
+    }
+
+    #[test]
+    fn parse_frontmatter_returns_none_when_absent() {
+        let raw = "Just the body, no frontmatter.";
+        let (desc, body) = parse_skill_frontmatter(raw);
+        assert!(desc.is_none());
+        assert_eq!(body, raw);
+    }
+
+    #[test]
+    fn parse_frontmatter_returns_none_when_no_description() {
+        let raw = "---\ntags: [ci]\n---\n\nBody.";
+        let (desc, body) = parse_skill_frontmatter(raw);
+        assert!(desc.is_none());
+        assert_eq!(body, "Body.");
     }
 
     // ── write_github_token ─────────────────────────────────────────
