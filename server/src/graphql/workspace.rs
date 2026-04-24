@@ -66,7 +66,6 @@ mutation_payload! { WorkspaceCreatePayload, workspace: Workspace }
 #[derive(InputObject)]
 pub struct WorkspaceUpdateInput {
     pub id: WorkspaceId,
-    pub name: String,
     pub description: Option<String>,
 }
 

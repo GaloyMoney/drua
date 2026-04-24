@@ -30,6 +30,8 @@ pub enum ToolSetsError {
     Workspace(String),
     #[error("ToolSetsError - Tunnel: {0}")]
     Tunnel(String),
+    #[error("ToolSetsError - Note: {0}")]
+    Note(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

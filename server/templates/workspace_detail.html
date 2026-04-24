@@ -103,7 +103,7 @@
 <form method="post" action="/workspaces/{{ workspace.id }}">
   <label>
     Name
-    <input type="text" name="name" required value="{{ workspace.name }}">
+    <input type="text" value="{{ workspace.name }}" disabled>
   </label>
   <label>
     Description

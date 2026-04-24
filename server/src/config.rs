@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::config::{AuthConfig, LoginMethod};
 use drua_core::agent::{AgentsConfig, ModelDefaults};
+use drua_core::library::LibraryConfig;
 use drua_core::prompt_executor::{
     ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
 };
@@ -30,6 +31,8 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub github_app: Option<GitHubAppCliConfig>,
+    #[serde(default)]
+    pub library: LibraryConfig,
     #[serde(skip)]
     pub anthropic_api_key: String,
     #[serde(skip)]

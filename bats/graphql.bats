@@ -65,10 +65,10 @@ teardown_file() {
   [[ "$output" == *'"name":"test-ws"'* ]]
   [[ "$output" == *'"hasNextPage"'* ]]
 
-  # Update workspace
-  run graphql_query "mutation { workspaceUpdate(input: { id: \"$ws_id\", name: \"renamed-ws\", description: \"updated\" }) { workspace { name description } } }" "$AGENT_TOKEN"
+  # Update workspace (name is immutable, only description can be changed)
+  run graphql_query "mutation { workspaceUpdate(input: { id: \"$ws_id\", description: \"updated\" }) { workspace { name description } } }" "$AGENT_TOKEN"
   echo "$output"
-  [[ "$output" == *'"name":"renamed-ws"'* ]]
+  [[ "$output" == *'"name":"test-ws"'* ]]
   [[ "$output" == *'"description":"updated"'* ]]
 
   # Delete workspace

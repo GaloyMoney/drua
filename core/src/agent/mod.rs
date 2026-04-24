@@ -9,6 +9,7 @@ mod system_prompt;
 use std::sync::Arc;
 
 use crate::audit::Audit;
+use crate::note::Notes;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
@@ -57,6 +58,7 @@ pub struct Agents {
     sessions: Sessions,
     sandboxes: Arc<Sandboxes>,
     skills: Arc<Skills>,
+    notes: Option<Arc<Notes>>,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -70,12 +72,14 @@ impl Agents {
         prompt_requests: llm::PromptRequestChannel,
         sandboxes: Arc<Sandboxes>,
         skills: Arc<Skills>,
+        notes: Option<Arc<Notes>>,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
             sessions: Sessions::new(pool),
             sandboxes,
             skills,
+            notes,
             config,
             toolsets,
             prompt_requests,
@@ -250,12 +254,22 @@ impl Agents {
             .top_level_tools(&agent_subject)
             .map(|t| session::message::ToolDefinition::from(llm::prompt::Tool::from(t.as_ref())))
             .collect();
-        let system_blocks = system_prompt::system_blocks_for_role(
+        let mut system_blocks = system_prompt::system_blocks_for_role(
             agent_role,
             &self.toolsets,
             &agent_subject,
             &agent.workspace_name,
         );
+
+        // Inject pinned workspace notes into the system prompt.
+        if let Some(notes) = &self.notes {
+            if let Ok(Some(pinned_content)) = notes.pinned_context_for_workspace(workspace_id).await
+            {
+                system_blocks.push(session::message::SystemBlock::Text {
+                    text: pinned_content,
+                });
+            }
+        }
 
         let session_model_defaults = ModelDefaults {
             model: role_config.model,

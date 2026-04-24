@@ -29,4 +29,7 @@ sandbox:
     sandbox_spawn_cmd: cargo run -q -p sandbox-tool-server --
     local_repo_root: .
 github_app: null
+library:
+  data_dir: null
+  repo_url: null
 

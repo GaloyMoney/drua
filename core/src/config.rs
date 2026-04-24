@@ -3,6 +3,7 @@ use serde::Deserialize;
 use crate::agent::AgentsConfig;
 use crate::encryption::EncryptionKey;
 use crate::github_app::GitHubAppConfig;
+use crate::library::LibraryConfig;
 use crate::prompt_executor::PromptExecutorConfig;
 use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
@@ -23,6 +24,8 @@ pub struct AppConfig {
     /// When set, sandbox agents receive a `github-token` file secret.
     #[serde(default)]
     pub github_app: Option<GitHubAppConfig>,
+    #[serde(default)]
+    pub library: LibraryConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

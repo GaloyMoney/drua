@@ -5,7 +5,9 @@ pub mod code_assistant;
 mod config;
 pub mod encryption;
 pub mod github_app;
+pub mod library;
 pub mod mcp_creds;
+pub mod note;
 pub mod primitives;
 pub mod prompt_executor;
 pub mod sandbox;
@@ -24,13 +26,15 @@ use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
+use library::Library;
 use mcp_creds::McpCredentials;
+use note::Notes;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, Read, TextEditor, ToolSets,
-    ToolSetsError, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, TextEditor,
+    ToolSets, ToolSetsError, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -54,6 +58,9 @@ pub struct App {
     /// previous tunnel when a new connector registers the same
     /// `deployment_id`. See [`tunnel::TunnelRegistry`].
     tunnels: Arc<tunnel::TunnelRegistry>,
+    library: Library,
+    notes: Arc<Notes>,
+    jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task stays alive for the lifetime of
     /// `App`; dropped on shutdown which aborts the task.
     _prompt_executor: Arc<PromptExecutor>,
@@ -72,27 +79,24 @@ impl App {
             .validate()
             .map_err(|e| AppError::PromptExecutor(e.to_string()))?;
 
+        // Embedder is always initialized (used by notes; optionally by code-assistant).
+        let embedder = Arc::new(
+            code_assistant_core::embedder::Embedder::new()
+                .map_err(|e| AppError::Embedder(e.to_string()))?,
+        );
+
         let ca_db_exists = {
             let p = &config.toolsets.code_assistant.db_path;
             !p.is_empty() && std::path::Path::new(p).exists()
         };
 
-        let embedder = if ca_db_exists {
-            Some(Arc::new(
-                code_assistant_core::embedder::Embedder::new()
-                    .map_err(|e| AppError::Embedder(e.to_string()))?,
-            ))
-        } else {
-            None
-        };
-
-        let code_assistant = if let Some(ref emb) = embedder {
+        let code_assistant = if ca_db_exists {
             code_assistant::init(
                 pool,
                 &code_assistant::CodeAssistantConfig {
                     db_path: config.toolsets.code_assistant.db_path.clone(),
                 },
-                emb.clone(),
+                embedder.clone(),
             )
             .map_err(|e| AppError::CodeAssistant(e.to_string()))?
             .map(Arc::new)
@@ -143,6 +147,17 @@ impl App {
             }
         };
 
+        let job_config = job::JobSvcConfig::builder()
+            .pool(pool.clone())
+            .build()
+            .expect("Failed to build JobSvcConfig");
+        let mut jobs = job::Jobs::init(job_config)
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
+        let library = Library::init(&config.library, pool, embedder.clone(), &mut jobs)
+            .await
+            .map_err(|e| AppError::Library(e.to_string()))?;
+
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
         let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes)));
 
@@ -158,6 +173,10 @@ impl App {
         toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
+        // Notes service created before Agents so pinned notes can be
+        // injected into agent system prompts at creation time.
+        let notes = Arc::new(Notes::new(pool, library.clone()));
+
         let agents = Arc::new(Agents::new(
             pool,
             config.agents,
@@ -165,6 +184,7 @@ impl App {
             prompt_tx,
             Arc::clone(&sandboxes),
             Arc::clone(&skills),
+            Some(Arc::clone(&notes)),
         ));
 
         // Register consolidated workspace-scoped management tools.
@@ -175,6 +195,7 @@ impl App {
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
+        toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
 
         // Admin tools live behind progressive disclosure (search_tools →
         // describe_tool → call_tool) to declutter the top-level list_tools
@@ -185,6 +206,11 @@ impl App {
             Arc::clone(&audit),
             Arc::clone(&workspaces),
         ));
+
+        jobs.start_poll()
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
+        let jobs = Arc::new(jobs);
 
         Ok(Self {
             users: Arc::new(Users::new(pool)),
@@ -199,6 +225,9 @@ impl App {
             sandboxes,
             github_app,
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
+            library,
+            notes,
+            jobs,
             _prompt_executor: prompt_executor,
         })
     }
@@ -250,6 +279,22 @@ impl App {
     pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
         &self.tunnels
     }
+
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    pub fn notes(&self) -> &Notes {
+        &self.notes
+    }
+
+    /// Gracefully shut down background jobs (e.g. push-runtime-commits).
+    /// Call this on SIGTERM / ctrl-c before exiting.
+    pub async fn shutdown(&self) {
+        if let Err(e) = self.jobs.shutdown().await {
+            tracing::error!(error = %e, "job shutdown failed");
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -268,4 +313,8 @@ pub enum AppError {
     PromptExecutor(String),
     #[error("AppError - Sandbox: {0}")]
     Sandbox(#[from] sandbox::error::SandboxError),
+    #[error("AppError - Job: {0}")]
+    Job(String),
+    #[error("AppError - Library: {0}")]
+    Library(String),
 }

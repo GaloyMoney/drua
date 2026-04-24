@@ -95,6 +95,7 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 
 # Hashing
+sha1 = "0.10"
 sha2 = "0.10"
 
 # Tokenization
@@ -113,6 +114,10 @@ url = "2"
 # Event sourcing
 es-entity = "0.10"
 derive_builder = "0.20"
+
+# Job processing
+job = "0.6"
+obix = "0.2"
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
