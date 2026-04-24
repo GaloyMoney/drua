@@ -1,8 +1,8 @@
 use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
-    Extension, Form, Json, Router,
+    routing::get,
+    Extension, Json, Router,
 };
 use serde::Deserialize;
 use tower_sessions::Session;
@@ -41,10 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces", get(workspaces_page))
         .route("/workspaces/new", get(workspace_new))
         .route("/workspaces/sidebar", get(workspace_sidebar_list))
-        .route("/workspaces", post(workspace_create))
         .route("/workspaces/{id}", get(workspace_detail))
-        .route("/workspaces/{id}", post(workspace_update))
-        .route("/workspaces/{id}/delete", post(workspace_delete))
         .route("/workspaces/{id}/secrets/list", get(workspace_secrets_list))
         .route("/workspaces/{id}/skills", get(workspace_skills_page))
         .route("/workspaces/{id}/skills/new", get(workspace_skill_new))
@@ -462,44 +459,6 @@ async fn workspace_new(session: Session) -> Response {
     WorkspaceNewTemplate {}.into_response()
 }
 
-#[derive(serde::Deserialize)]
-pub struct WorkspaceCreateForm {
-    name: String,
-    description: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-pub struct WorkspaceUpdateForm {
-    description: Option<String>,
-}
-
-#[instrument(name = "web.workspace_create", skip_all)]
-async fn workspace_create(
-    State(state): State<AppState>,
-    session: Session,
-    Form(form): Form<WorkspaceCreateForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-
-    let sub = AuthSubject::User(user_id);
-    let description = form.description.filter(|d| !d.is_empty());
-    match state
-        .app
-        .workspaces()
-        .create(&sub, &form.name, description)
-        .await
-    {
-        Ok(ws) => Redirect::to(&format!("/workspaces/{}/chat", ws.id)).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create workspace");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
 #[instrument(name = "web.workspace_detail", skip_all)]
 async fn workspace_detail(
     State(state): State<AppState>,
@@ -526,71 +485,6 @@ async fn workspace_detail(
         agents: agent_views,
     }
     .into_response()
-}
-
-#[instrument(name = "web.workspace_update", skip_all)]
-async fn workspace_update(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    Form(form): Form<WorkspaceUpdateForm>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-
-    let sub = AuthSubject::User(user_id);
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let description = form.description.filter(|d| !d.is_empty());
-    match state
-        .app
-        .workspaces()
-        .update(&sub, workspace_id, description)
-        .await
-    {
-        Ok(_) => Redirect::to(&format!("/workspaces/{id}")).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to update workspace");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-#[instrument(name = "web.workspace_delete", skip_all)]
-async fn workspace_delete(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-
-    let sub = AuthSubject::User(user_id);
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    match state.app.workspaces().delete(&sub, workspace_id).await {
-        Ok(_) => {
-            // If called via HTMX, redirect client-side using HX-Redirect
-            if headers.contains_key("hx-request") {
-                return (
-                    [(
-                        axum::http::header::HeaderName::from_static("hx-redirect"),
-                        "/workspaces".parse::<axum::http::HeaderValue>().unwrap(),
-                    )],
-                    "",
-                )
-                    .into_response();
-            }
-            Redirect::to("/workspaces").into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to delete workspace");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
