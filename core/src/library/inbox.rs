@@ -33,7 +33,10 @@ impl InboxHandler for LibraryWriteHandler {
         let file: super::RuntimeFile = event.payload()?;
 
         let fields = file.searchable_fields();
-        let embedding = self.embedder.embed_document(&fields.text_for_embedding()).await?;
+        let embedding = self
+            .embedder
+            .embed_document(&fields.text_for_embedding())
+            .await?;
         self.search
             .set_embedding(fields.doc_id, fields.doc_type, embedding)
             .await?;

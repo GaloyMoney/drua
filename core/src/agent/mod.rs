@@ -263,8 +263,7 @@ impl Agents {
 
         // Inject pinned workspace notes into the system prompt.
         if let Some(notes) = &self.notes {
-            if let Ok(Some(pinned_content)) =
-                notes.pinned_context_for_workspace(workspace_id).await
+            if let Ok(Some(pinned_content)) = notes.pinned_context_for_workspace(workspace_id).await
             {
                 system_blocks.push(session::message::SystemBlock::Text {
                     text: pinned_content,

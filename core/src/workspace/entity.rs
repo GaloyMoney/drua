@@ -50,8 +50,7 @@ impl Workspace {
 
     pub(super) fn update(&mut self, description: Option<String>) {
         self.description = description.clone();
-        self.events
-            .push(WorkspaceEvent::Updated { description });
+        self.events.push(WorkspaceEvent::Updated { description });
     }
 
     pub(super) fn archive(&mut self) -> Idempotent<()> {

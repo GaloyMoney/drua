@@ -56,7 +56,13 @@ impl JobRunner for WriteToRuntimeRunner {
         self.upstream.pull().await?;
 
         let new_hash = self.file.file_hash();
-        if self.upstream.file_hash_on_disk(&self.file.relative_path()).await.as_ref() == Some(&new_hash) {
+        if self
+            .upstream
+            .file_hash_on_disk(&self.file.relative_path())
+            .await
+            .as_ref()
+            == Some(&new_hash)
+        {
             tracing::debug!("file hash unchanged, skipping write");
             return Ok(JobCompletion::Complete);
         }

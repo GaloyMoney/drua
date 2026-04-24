@@ -33,11 +33,7 @@ impl Upstream {
         Some(GitFileHash::from_sha1(format!("{:x}", hasher.finalize())))
     }
 
-    pub async fn write_file(
-        &self,
-        relative_path: &str,
-        content: &str,
-    ) -> Result<(), LibraryError> {
+    pub async fn write_file(&self, relative_path: &str, content: &str) -> Result<(), LibraryError> {
         let full_path = self.repo_path.join(relative_path);
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent)
