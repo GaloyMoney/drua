@@ -38,6 +38,17 @@ enum SandboxCommand {
     Inspect,
 }
 
+impl SandboxCommand {
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::Create => "sandbox.create",
+            Self::List => "sandbox.list",
+            Self::Get => "sandbox.get",
+            Self::Inspect => "sandbox.inspect",
+        }
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SandboxCreateMode {
@@ -155,6 +166,8 @@ impl TopLevelTool for WorkspaceSandbox {
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: WorkspaceSandboxParams = parse_params(arguments)?;
+
+        Audit::record_action(params.command.audit_action());
 
         match params.command {
             SandboxCommand::Create => {

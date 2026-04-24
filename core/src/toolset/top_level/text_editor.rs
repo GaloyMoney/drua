@@ -142,6 +142,7 @@ impl TopLevelTool for TextEditor {
                 .readable_sandbox_id()
                 .ok_or(ToolSetsError::Unauthorized)?
         };
+        Audit::record_action("text_editor");
         Audit::record_sandbox_id(sandbox_id);
 
         let client = if command_is_mutating(command) {

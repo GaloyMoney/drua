@@ -79,6 +79,7 @@ impl TopLevelTool for Read {
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
+        Audit::record_action("read");
         Audit::record_sandbox_id(sandbox_id);
         let params: ReadParams = parse_params(arguments)?;
 

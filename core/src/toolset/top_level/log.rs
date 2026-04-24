@@ -125,6 +125,7 @@ impl TopLevelTool for WorkspaceLog {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        Audit::record_action("audit.query");
         let params: AuditLogParams = parse_params(arguments)?;
 
         let mut query = params.into_query();

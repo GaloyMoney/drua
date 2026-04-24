@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::library::SearchResult;
 use crate::note::Notes;
@@ -53,6 +54,25 @@ enum NotesParams {
     Unpin {
         note_id: NoteId,
     },
+}
+
+impl NotesParams {
+    fn command_name(&self) -> &'static str {
+        match self {
+            Self::Store { note_id, .. } => {
+                if note_id.is_some() {
+                    "update"
+                } else {
+                    "create"
+                }
+            }
+            Self::Get { .. } => "get",
+            Self::Search { .. } => "search",
+            Self::List { .. } => "list",
+            Self::Pin { .. } => "pin",
+            Self::Unpin { .. } => "unpin",
+        }
+    }
 }
 
 static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -157,6 +177,8 @@ impl TopLevelTool for NotesTool {
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: NotesParams = parse_params(arguments)?;
+
+        Audit::record_action(format!("notes.{}", params.command_name()));
 
         match params {
             NotesParams::Store {

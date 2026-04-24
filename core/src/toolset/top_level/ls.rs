@@ -76,6 +76,7 @@ impl TopLevelTool for Ls {
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
+        Audit::record_action("ls");
         Audit::record_sandbox_id(sandbox_id);
         let params: LsParams = parse_params(arguments)?;
 

@@ -13,6 +13,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::agent::{Agent, AgentRole, Agents};
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::{AgentId, SandboxId};
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
@@ -52,6 +53,17 @@ enum WorkspaceAgentCommand {
     AttachSandbox,
     /// Detach a sandbox from an agent.
     DetachSandbox,
+}
+
+impl WorkspaceAgentCommand {
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::Create => "agent.create",
+            Self::List => "agent.list",
+            Self::AttachSandbox => "agent.attach_sandbox",
+            Self::DetachSandbox => "agent.detach_sandbox",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +127,8 @@ impl TopLevelTool for WorkspaceAgent {
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: WorkspaceAgentParams = parse_params(arguments)?;
+
+        Audit::record_action(params.command.audit_action());
 
         match params.command {
             WorkspaceAgentCommand::Create => {

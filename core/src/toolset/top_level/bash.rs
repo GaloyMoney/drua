@@ -101,6 +101,7 @@ impl TopLevelTool for Bash {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let sandbox_id = sandbox_use_id(subject).ok_or(ToolSetsError::Unauthorized)?;
+        Audit::record_action("bash");
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self
