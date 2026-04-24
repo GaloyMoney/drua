@@ -67,12 +67,24 @@ impl JobRunner for WriteToRuntimeRunner {
             return Ok(JobCompletion::Complete);
         }
 
+        let canonical_path = self.file.relative_path();
         self.upstream
-            .write_file(&self.file.relative_path(), &self.file.content())
+            .write_file(&canonical_path, &self.file.content())
             .await?;
-        self.upstream
-            .add_and_commit(&self.file.relative_path(), &self.file.commit_message())
-            .await?;
+
+        // If the file was imported with a non-canonical name, remove the original.
+        let original = self.file.original_path();
+        let needs_rename = original.is_some_and(|p| p != canonical_path);
+        if let Some(old_path) = original.filter(|_| needs_rename) {
+            self.upstream.remove_file(old_path).await?;
+            self.upstream
+                .commit_paths(&[&canonical_path, old_path], &self.file.commit_message())
+                .await?;
+        } else {
+            self.upstream
+                .add_and_commit(&canonical_path, &self.file.commit_message())
+                .await?;
+        }
         self.upstream.push().await?;
 
         Ok(JobCompletion::Complete)

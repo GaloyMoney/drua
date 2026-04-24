@@ -19,6 +19,9 @@ pub enum SkillEvent {
         body: String,
         #[serde(default)]
         file_hash: Option<GitFileHash>,
+        /// Original file path before canonicalisation (reverse-sync only).
+        #[serde(default)]
+        original_path: Option<String>,
     },
     Updated {
         name: Option<String>,
@@ -42,6 +45,8 @@ pub struct Skill {
     pub body: String,
     #[builder(default)]
     pub(crate) file_hash: Option<GitFileHash>,
+    #[builder(default)]
+    pub(crate) original_path: Option<String>,
     events: EntityEvents<SkillEvent>,
 }
 
@@ -64,7 +69,7 @@ impl Skill {
             .map(|t| t.to_rfc3339())
             .unwrap_or_default();
 
-        crate::library::RuntimeFile::for_skill(
+        crate::library::RuntimeFile::for_skill_with_original_path(
             self.id,
             self.workspace_id,
             self.workspace_name.as_deref(),
@@ -73,6 +78,7 @@ impl Skill {
             &self.body,
             &created_at,
             &updated_at,
+            self.original_path.clone(),
         )
     }
 
@@ -344,6 +350,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                     description,
                     body,
                     file_hash,
+                    original_path,
                 } => {
                     builder = builder
                         .id(*id)
@@ -352,7 +359,8 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
-                        .file_hash(file_hash.clone());
+                        .file_hash(file_hash.clone())
+                        .original_path(original_path.clone());
                 }
 
                 SkillEvent::Updated {
@@ -398,6 +406,8 @@ pub struct NewSkill {
     pub(super) body: String,
     #[builder(default)]
     pub(super) file_hash: Option<GitFileHash>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) original_path: Option<String>,
 }
 
 impl NewSkill {
@@ -418,6 +428,7 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 description: self.description,
                 body: self.body,
                 file_hash: self.file_hash,
+                original_path: self.original_path,
             }],
         )
     }

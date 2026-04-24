@@ -321,9 +321,9 @@ impl Skills {
 
     /// Upsert a skill from a library file within an existing transaction.
     ///
-    /// Returns `Some(RuntimeFile)` when a new entity was created — the caller
-    /// can use this to rewrite the original file with canonical frontmatter.
-    /// Returns `None` when the entity was skipped or updated in-place.
+    /// When `original_path` is provided the entity stores it so the
+    /// `WriteToRuntime` job can remove the old file after writing the
+    /// canonical one.
     #[instrument(name = "skill.upsert_from_library_in_op", skip_all)]
     pub(crate) async fn upsert_from_library_in_op(
         &self,
@@ -331,7 +331,8 @@ impl Skills {
         file: &RuntimeFile,
         workspace_id: Option<WorkspaceId>,
         file_hash: GitFileHash,
-    ) -> Result<Option<RuntimeFile>, SkillError> {
+        original_path: Option<String>,
+    ) -> Result<(), SkillError> {
         let (doc_id, name, description, body, workspace_name) = match file {
             RuntimeFile::Skill {
                 doc_id,
@@ -341,51 +342,49 @@ impl Skills {
                 workspace_name,
                 ..
             } => (*doc_id, name, description, body, workspace_name.clone()),
-            _ => return Ok(None),
+            _ => return Ok(()),
         };
 
-        match self.repo.find_by_id(doc_id).await {
-            Ok(mut existing) => {
-                if existing.file_hash.as_ref() == Some(&file_hash) {
-                    tracing::debug!(id = %doc_id, "skill file_hash unchanged, skipping");
-                    return Ok(None);
-                }
-                if existing
-                    .update(
-                        Some(name.clone()),
-                        Some(description.clone()),
-                        Some(body.clone()),
-                        Some(file_hash),
-                    )
-                    .did_execute()
-                {
-                    self.repo.update_in_op(op, &mut existing).await?;
-                }
-                tracing::info!(id = %doc_id, name = %name, "updated skill from library");
-                Ok(None)
+        if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
+            if existing.file_hash.as_ref() == Some(&file_hash) {
+                tracing::debug!(id = %doc_id, "skill file_hash unchanged, skipping");
+                return Ok(());
             }
-            Err(e) if e.was_not_found() => {
-                let mut builder = NewSkill::builder()
-                    .id(doc_id)
-                    .name(name.clone())
-                    .description(description.clone())
-                    .body(body.clone())
-                    .file_hash(Some(file_hash));
-                if let Some(ws_id) = workspace_id {
-                    builder = builder.workspace_id(ws_id);
-                }
-                if let Some(ws_name) = workspace_name {
-                    builder = builder.workspace_name(ws_name);
-                }
-                let new = builder
-                    .build()
-                    .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
-                let skill = self.repo.create_in_op(op, new).await?;
-                tracing::info!(id = %doc_id, name = %name, "created skill from library");
-                Ok(Some(skill.as_runtime_file()))
+            if existing
+                .update(
+                    Some(name.clone()),
+                    Some(description.clone()),
+                    Some(body.clone()),
+                    Some(file_hash),
+                )
+                .did_execute()
+            {
+                self.repo.update_in_op(op, &mut existing).await?;
             }
-            Err(e) => Err(e.into()),
+            tracing::info!(id = %doc_id, name = %name, "updated skill from library");
+        } else {
+            let mut builder = NewSkill::builder()
+                .id(doc_id)
+                .name(name.clone())
+                .description(description.clone())
+                .body(body.clone())
+                .file_hash(Some(file_hash));
+            if let Some(ws_id) = workspace_id {
+                builder = builder.workspace_id(ws_id);
+            }
+            if let Some(ws_name) = workspace_name {
+                builder = builder.workspace_name(ws_name);
+            }
+            if let Some(path) = original_path {
+                builder = builder.original_path(path);
+            }
+            let new = builder
+                .build()
+                .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+            self.repo.create_in_op(op, new).await?;
+            tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
+        Ok(())
     }
 
     #[instrument(name = "skill.update", skip_all)]

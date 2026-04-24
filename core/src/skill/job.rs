@@ -108,14 +108,6 @@ impl JobRunner for SyncSkillsFromLibraryRunner {
     }
 }
 
-/// Holds the result of a single upsert so we can trigger rewrites after
-/// the transaction commits.
-struct UpsertResult {
-    original_path: String,
-    canonical_file: Option<RuntimeFile>,
-    needs_rewrite: bool,
-}
-
 impl SyncSkillsFromLibraryRunner {
     async fn sync_once(
         &self,
@@ -142,78 +134,70 @@ impl SyncSkillsFromLibraryRunner {
         );
 
         // Resolve workspace IDs outside the transaction (read-only lookups).
+        // Dedup by workspace_name to avoid repeated DB queries for the same workspace.
+        let mut ws_cache: std::collections::HashMap<
+            String,
+            Option<crate::primitives::WorkspaceId>,
+        > = std::collections::HashMap::new();
         let mut resolved: Vec<(&SkillFileChange, Option<crate::primitives::WorkspaceId>)> =
             Vec::with_capacity(changes.files.len());
         for change in &changes.files {
-            let ws_id = self.resolve_workspace_id(&change.file).await;
+            let ws_id = match Self::workspace_name(&change.file) {
+                Some(name) => match ws_cache.get(name) {
+                    Some(cached) => *cached,
+                    None => {
+                        let id = self.resolve_workspace_id(name).await;
+                        ws_cache.insert(name.to_string(), id);
+                        id
+                    }
+                },
+                None => None,
+            };
             resolved.push((change, ws_id));
         }
 
         // Batch upsert all skills in a single transaction.
+        // For files that need renaming (needs_rewrite), pass original_path
+        // so the entity's post-persist hook propagates it through the
+        // WriteToRuntime pipeline which handles the rename on disk.
         let mut op = self.skills.begin_op().await?;
-        let mut results = Vec::with_capacity(resolved.len());
         for (change, ws_id) in &resolved {
             let file_hash = change.file.file_hash();
-            match self
+            let original_path = if change.needs_rewrite {
+                Some(change.original_path.clone())
+            } else {
+                None
+            };
+            if let Err(e) = self
                 .skills
-                .upsert_from_library_in_op(&mut op, &change.file, *ws_id, file_hash)
+                .upsert_from_library_in_op(&mut op, &change.file, *ws_id, file_hash, original_path)
                 .await
             {
-                Ok(canonical_file) => {
-                    results.push(UpsertResult {
-                        original_path: change.original_path.clone(),
-                        canonical_file,
-                        needs_rewrite: change.needs_rewrite,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to upsert skill from library, skipping");
-                }
+                tracing::warn!(error = %e, "failed to upsert skill from library, skipping");
             }
         }
         op.commit().await?;
 
         // Update state after the upserts committed successfully.
-        // This is safe even though it's a separate transaction: if we crash
-        // before persisting state, the next cycle re-processes the same files
-        // and the idempotent upsert (file_hash check) skips them.
+        // Safe even though it's a separate transaction: if we crash before
+        // persisting state, the next cycle re-processes the same files and
+        // the idempotent upsert (file_hash check) skips them.
         state.last_sync_commit = Some(changes.head_commit);
         current_job.update_execution_state(&state).await?;
-
-        // Rewrite files that lacked proper frontmatter (outside the DB
-        // transaction — these are git operations).
-        for result in results {
-            if result.needs_rewrite {
-                if let Some(canonical_file) = result.canonical_file {
-                    if let Err(e) = self
-                        .library
-                        .rewrite_skill_file(&result.original_path, &canonical_file)
-                        .await
-                    {
-                        tracing::warn!(
-                            path = %result.original_path,
-                            error = %e,
-                            "failed to rewrite skill file with frontmatter"
-                        );
-                    }
-                }
-            }
-        }
 
         Ok(())
     }
 
-    /// Resolve workspace_id from the RuntimeFile's workspace_name field.
-    async fn resolve_workspace_id(
-        &self,
-        file: &RuntimeFile,
-    ) -> Option<crate::primitives::WorkspaceId> {
-        let ws_name = match file {
+    /// Extract workspace_name from a RuntimeFile.
+    fn workspace_name(file: &RuntimeFile) -> Option<&str> {
+        match file {
             RuntimeFile::Skill { workspace_name, .. } => workspace_name.as_deref(),
             _ => None,
-        };
+        }
+    }
 
-        let ws_name = ws_name?;
+    /// Resolve workspace_id from a workspace name.
+    async fn resolve_workspace_id(&self, ws_name: &str) -> Option<crate::primitives::WorkspaceId> {
         match self.workspaces.find_by_name(ws_name).await {
             Ok(Some(ws)) => Some(ws.id),
             Ok(None) => {

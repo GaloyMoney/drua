@@ -79,6 +79,11 @@ pub enum RuntimeFile {
         updated_at: String,
         slug: String,
         id_prefix: String,
+        /// When set, the original file path on disk before canonicalisation.
+        /// The `WriteToRuntime` job will remove this path if it differs from
+        /// the canonical `relative_path()`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_path: Option<String>,
     },
     GitKeep {
         workspace_name: String,
@@ -124,6 +129,33 @@ impl RuntimeFile {
         created_at: &str,
         updated_at: &str,
     ) -> Self {
+        Self::for_skill_with_original_path(
+            skill_id,
+            workspace_id,
+            workspace_name,
+            name,
+            description,
+            body,
+            created_at,
+            updated_at,
+            None,
+        )
+    }
+
+    /// Build a `RuntimeFile::Skill` with an optional `original_path` for
+    /// files that need renaming on disk.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_skill_with_original_path(
+        skill_id: SkillId,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<&str>,
+        name: &str,
+        description: &str,
+        body: &str,
+        created_at: &str,
+        updated_at: &str,
+        original_path: Option<String>,
+    ) -> Self {
         RuntimeFile::Skill {
             doc_id: skill_id,
             workspace_id,
@@ -135,6 +167,7 @@ impl RuntimeFile {
             updated_at: updated_at.to_string(),
             slug: slugify(name),
             id_prefix: skill_id.to_string()[..8].to_string(),
+            original_path,
         }
     }
 
@@ -255,6 +288,14 @@ impl RuntimeFile {
         }
     }
 
+    /// The original file path before canonicalisation, if set.
+    pub(super) fn original_path(&self) -> Option<&str> {
+        match self {
+            RuntimeFile::Skill { original_path, .. } => original_path.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Compute the git blob SHA-1 hash for the file content, identical to
     /// what `git hash-object` would produce.
     pub fn file_hash(&self) -> GitFileHash {
@@ -351,6 +392,7 @@ fn parse_with_frontmatter(
             updated_at,
             slug,
             id_prefix,
+            original_path: None,
         },
         needs_rewrite,
     })
@@ -379,6 +421,7 @@ fn parse_without_frontmatter(
             updated_at: String::new(),
             slug,
             id_prefix,
+            original_path: None,
         },
         needs_rewrite: true,
     })

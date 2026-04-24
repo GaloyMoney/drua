@@ -215,38 +215,4 @@ impl Library {
             .search(workspace_id, query, query_embedding, doc_type, limit)
             .await
     }
-
-    /// Rewrite a skill file that was added without proper frontmatter.
-    ///
-    /// Writes the canonical content (with id, timestamps) to the canonical
-    /// path, removes the original file if its path differs, then commits and
-    /// pushes.
-    #[tracing::instrument(name = "library.rewrite_skill_file", skip(self, file))]
-    pub async fn rewrite_skill_file(
-        &self,
-        original_path: &str,
-        file: &RuntimeFile,
-    ) -> Result<(), LibraryError> {
-        self.upstream.pull().await?;
-
-        let canonical_path = file.relative_path();
-        self.upstream
-            .write_file(&canonical_path, &file.content())
-            .await?;
-
-        let needs_remove = original_path != canonical_path;
-        if needs_remove {
-            self.upstream.remove_file(original_path).await?;
-        }
-
-        let mut paths: Vec<&str> = vec![&canonical_path];
-        if needs_remove {
-            paths.push(original_path);
-        }
-        let message = format!("rewrite: {}", file.commit_message());
-        self.upstream.commit_paths(&paths, &message).await?;
-        self.upstream.push().await?;
-
-        Ok(())
-    }
 }
