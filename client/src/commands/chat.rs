@@ -164,7 +164,7 @@ struct UsageInfo {
 fn parse_stream_event(event: &serde_json::Value) -> Option<StreamEvent> {
     let typename = event.get("__typename")?.as_str()?;
     match typename {
-        "TextDeltaEvent" => {
+        "AssistantTextDeltaEvent" => {
             let text = event.get("text")?.as_str()?;
             Some(StreamEvent::Delta(text.to_string()))
         }
