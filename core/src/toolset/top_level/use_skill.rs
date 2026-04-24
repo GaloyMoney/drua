@@ -67,24 +67,6 @@ static USE_SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 // ---------------------------------------------------------------------------
-// $ARGUMENTS substitution
-// ---------------------------------------------------------------------------
-
-/// Substitute `$ARGUMENTS` in the skill body with the provided arguments.
-/// If the body doesn't contain `$ARGUMENTS` and arguments is non-empty,
-/// appends `ARGUMENTS: <value>` to the end.
-fn substitute_arguments(body: &str, arguments: Option<&str>) -> String {
-    let args = arguments.unwrap_or_default();
-    if body.contains("$ARGUMENTS") {
-        body.replace("$ARGUMENTS", args)
-    } else if !args.is_empty() {
-        format!("{body}\n\nARGUMENTS: {args}")
-    } else {
-        body.to_string()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // UseSkillTool
 // ---------------------------------------------------------------------------
 
@@ -130,17 +112,14 @@ impl TopLevelTool for UseSkillTool {
             UseSkillParams::Invoke { name, arguments } => {
                 let workspace_id = subject.workspace_id();
                 let sandbox_id = subject.readable_sandbox_id();
-                let body = self
+                let rendered = self
                     .skills
-                    .find_by_name(&name, workspace_id, sandbox_id)
+                    .interpolate_skill(&name, workspace_id, sandbox_id, arguments.as_deref())
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 
-                match body {
-                    Some(body) => {
-                        let rendered = substitute_arguments(&body, arguments.as_deref());
-                        Ok(CallToolResult::success(vec![Content::text(rendered)]))
-                    }
+                match rendered {
+                    Some(body) => Ok(CallToolResult::success(vec![Content::text(body)])),
                     None => Ok(CallToolResult::error(vec![Content::text(format!(
                         "Unknown skill: {name}"
                     ))])),
@@ -186,38 +165,5 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}...")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn substitute_replaces_arguments_placeholder() {
-        let body = "Deploy $ARGUMENTS to production.";
-        let result = substitute_arguments(body, Some("staging"));
-        assert_eq!(result, "Deploy staging to production.");
-    }
-
-    #[test]
-    fn substitute_appends_when_no_placeholder() {
-        let body = "Run the deploy process.";
-        let result = substitute_arguments(body, Some("staging"));
-        assert_eq!(result, "Run the deploy process.\n\nARGUMENTS: staging");
-    }
-
-    #[test]
-    fn substitute_noop_when_no_args_and_no_placeholder() {
-        let body = "Run the deploy process.";
-        let result = substitute_arguments(body, None);
-        assert_eq!(result, "Run the deploy process.");
-    }
-
-    #[test]
-    fn substitute_replaces_multiple_occurrences() {
-        let body = "First: $ARGUMENTS, second: $ARGUMENTS";
-        let result = substitute_arguments(body, Some("val"));
-        assert_eq!(result, "First: val, second: val");
     }
 }

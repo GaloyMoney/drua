@@ -80,19 +80,18 @@ impl Skills {
         workspace_id: Option<WorkspaceId>,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<String>, SkillError> {
-        // 1. Workspace-scoped lookup
-        if let Some(ws_id) = workspace_id {
-            if let Some(skill) = self.repo.find_by_name_in_workspace(ws_id, name).await? {
-                return Ok(Some(skill.body));
-            }
+        // Single query fetches both workspace-scoped and global matches.
+        // Workspace-scoped wins over global when both exist.
+        let candidates = self.repo.list_for_name(workspace_id, name).await?;
+        let best = candidates
+            .iter()
+            .find(|s| s.workspace_id.is_some())
+            .or_else(|| candidates.first());
+        if let Some(skill) = best {
+            return Ok(Some(skill.body.clone()));
         }
 
-        // 2. Global lookup
-        if let Some(skill) = self.repo.find_by_name_global(name).await? {
-            return Ok(Some(skill.body));
-        }
-
-        // 3. Sandbox fallback
+        // Sandbox fallback
         if let Some(sandbox_id) = sandbox_id {
             tracing::Span::current().record("sandbox_id", sandbox_id.to_string());
             let sandbox = self
@@ -106,6 +105,25 @@ impl Skills {
         }
 
         Ok(None)
+    }
+
+    /// Resolve a skill by name and perform `$ARGUMENTS` substitution.
+    ///
+    /// Combines [`find_by_name`](Self::find_by_name) with argument interpolation:
+    /// - If the body contains `$ARGUMENTS`, all occurrences are replaced.
+    /// - Otherwise, if arguments are provided they are appended.
+    ///
+    /// Returns `Ok(None)` when no skill matches.
+    #[instrument(name = "skill.interpolate_skill", skip_all, fields(name = %name))]
+    pub async fn interpolate_skill(
+        &self,
+        name: &str,
+        workspace_id: Option<WorkspaceId>,
+        sandbox_id: Option<SandboxId>,
+        arguments: Option<&str>,
+    ) -> Result<Option<String>, SkillError> {
+        let body = self.find_by_name(name, workspace_id, sandbox_id).await?;
+        Ok(body.map(|b| substitute_arguments(&b, arguments)))
     }
 
     /// List workspace-scoped skills (public, with auth check).
@@ -282,5 +300,52 @@ impl Skills {
             sandboxes,
             library: None,
         }
+    }
+}
+
+/// Substitute `$ARGUMENTS` in the skill body with the provided arguments.
+/// If the body doesn't contain `$ARGUMENTS` and arguments is non-empty,
+/// appends `ARGUMENTS: <value>` to the end.
+fn substitute_arguments(body: &str, arguments: Option<&str>) -> String {
+    let args = arguments.unwrap_or_default();
+    if body.contains("$ARGUMENTS") {
+        body.replace("$ARGUMENTS", args)
+    } else if !args.is_empty() {
+        format!("{body}\n\nARGUMENTS: {args}")
+    } else {
+        body.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitute_replaces_arguments_placeholder() {
+        let body = "Deploy $ARGUMENTS to production.";
+        let result = substitute_arguments(body, Some("staging"));
+        assert_eq!(result, "Deploy staging to production.");
+    }
+
+    #[test]
+    fn substitute_appends_when_no_placeholder() {
+        let body = "Run the deploy process.";
+        let result = substitute_arguments(body, Some("staging"));
+        assert_eq!(result, "Run the deploy process.\n\nARGUMENTS: staging");
+    }
+
+    #[test]
+    fn substitute_noop_when_no_args_and_no_placeholder() {
+        let body = "Run the deploy process.";
+        let result = substitute_arguments(body, None);
+        assert_eq!(result, "Run the deploy process.");
+    }
+
+    #[test]
+    fn substitute_replaces_multiple_occurrences() {
+        let body = "First: $ARGUMENTS, second: $ARGUMENTS";
+        let result = substitute_arguments(body, Some("val"));
+        assert_eq!(result, "First: val, second: val");
     }
 }

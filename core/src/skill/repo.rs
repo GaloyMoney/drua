@@ -28,42 +28,31 @@ impl SkillRepo {
         }
     }
 
-    /// Find a workspace-scoped skill by name.
-    pub async fn find_by_name_in_workspace(
+    /// Fetch all skills matching `name` visible to the given workspace:
+    /// workspace-scoped (if `workspace_id` is `Some`) **and** global.
+    /// Returns up to two results; callers pick the winner in memory.
+    pub async fn list_for_name(
         &self,
-        workspace_id: WorkspaceId,
+        workspace_id: Option<WorkspaceId>,
         name: &str,
-    ) -> Result<Option<Skill>, SkillFindError> {
-        let ws_id = uuid::Uuid::from(workspace_id);
-        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT id FROM skills WHERE workspace_id = $1 AND name = $2 AND deleted = FALSE",
+    ) -> Result<Vec<Skill>, SkillFindError> {
+        let ws_id = workspace_id.map(uuid::Uuid::from);
+        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM skills \
+             WHERE (workspace_id = $1 OR workspace_id IS NULL) \
+             AND name = $2 AND deleted = FALSE",
         )
         .bind(ws_id)
         .bind(name)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(SkillFindError::from)?;
 
-        match row {
-            Some((id,)) => Ok(Some(self.find_by_id(SkillId::from(id)).await?)),
-            None => Ok(None),
+        let mut skills = Vec::with_capacity(rows.len());
+        for (id,) in rows {
+            skills.push(self.find_by_id(SkillId::from(id)).await?);
         }
-    }
-
-    /// Find a global (unscoped) skill by name.
-    pub async fn find_by_name_global(&self, name: &str) -> Result<Option<Skill>, SkillFindError> {
-        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT id FROM skills WHERE workspace_id IS NULL AND name = $1 AND deleted = FALSE",
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(SkillFindError::from)?;
-
-        match row {
-            Some((id,)) => Ok(Some(self.find_by_id(SkillId::from(id)).await?)),
-            None => Ok(None),
-        }
+        Ok(skills)
     }
 
     /// List all global skills (no workspace).
