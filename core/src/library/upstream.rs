@@ -64,6 +64,16 @@ impl Upstream {
         }
     }
 
+    fn require_git_repo(&self) -> Result<(), LibraryError> {
+        if !self.repo_path.join(".git").exists() {
+            return Err(LibraryError::Git(format!(
+                "no .git directory at {} — clone may have failed on startup",
+                self.repo_path.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Compute the git blob SHA-1 of the file on disk, or `None` if the file
     /// doesn't exist.  Uses the same `blob <len>\0<content>` format as
     /// `git hash-object`, matching [`RuntimeFile::file_hash`].
@@ -92,9 +102,7 @@ impl Upstream {
     }
 
     pub async fn pull(&self) -> Result<(), LibraryError> {
-        if !self.repo_path.join(".git").exists() {
-            return Ok(());
-        }
+        self.require_git_repo()?;
 
         let token = Self::fresh_token(&self.github_app).await;
         let pull = git_cmd(token.as_deref())
@@ -122,9 +130,7 @@ impl Upstream {
         relative_path: &str,
         message: &str,
     ) -> Result<(), LibraryError> {
-        if !self.repo_path.join(".git").exists() {
-            return Ok(());
-        }
+        self.require_git_repo()?;
 
         let add = tokio::process::Command::new("git")
             .args(["add", "--", relative_path])
@@ -167,9 +173,7 @@ impl Upstream {
     }
 
     pub async fn push(&self) -> Result<(), LibraryError> {
-        if !self.repo_path.join(".git").exists() {
-            return Ok(());
-        }
+        self.require_git_repo()?;
 
         let token = Self::fresh_token(&self.github_app).await;
         let push = git_cmd(token.as_deref())
