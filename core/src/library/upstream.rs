@@ -51,9 +51,7 @@ impl Upstream {
     }
 
     /// Generate a fresh GitHub App installation token, or `None` if no app is configured.
-    async fn fresh_token(
-        github_app: &Option<Arc<GitHubAppTokenProvider>>,
-    ) -> Option<String> {
+    async fn fresh_token(github_app: &Option<Arc<GitHubAppTokenProvider>>) -> Option<String> {
         match github_app.as_ref() {
             Some(provider) => match provider.generate_token().await {
                 Ok(t) => Some(t.token),
