@@ -15,8 +15,7 @@ use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
 pub use file::{
-    parse_skill_markdown, workspace_name_from_skill_path, DocType, GitFileHash, ParsedSkillFile,
-    RuntimeFile, SearchableFields,
+    parse_skill_markdown, DocType, GitFileHash, ParsedSkillFile, RuntimeFile, SearchableFields,
 };
 pub use search::SearchResult;
 
@@ -45,11 +44,9 @@ impl LibraryConfig {
 
 /// A single changed skill file with metadata for the sync job.
 pub struct SkillFileChange {
-    /// Parsed skill file.
+    /// Parsed skill file. When `needs_rewrite` is true the file's
+    /// `original_path` field is set to the on-disk path.
     pub file: RuntimeFile,
-    /// Original path of the file in the git repo. May differ from
-    /// `file.relative_path()` when the file was added without an id.
-    pub original_path: String,
     /// When `true`, the file on disk lacks proper frontmatter and should be
     /// rewritten with canonical headers after entity creation.
     pub needs_rewrite: bool,
@@ -174,18 +171,11 @@ impl Library {
 
         let mut files = Vec::with_capacity(changed.len());
         for (path, content) in &changed {
-            let ws_name = file::workspace_name_from_skill_path(path);
-            // workspace_id is not known here — the caller resolves it from
-            // the workspace name. Pass None and let the sync job fill it in.
-            match file::parse_skill_markdown(content, None, ws_name) {
-                Some(mut parsed) => {
-                    if parsed.needs_rewrite {
-                        parsed.file.set_original_path(path.clone());
-                    }
+            match file::parse_skill_markdown(content, path) {
+                Some(parsed) => {
                     files.push(SkillFileChange {
-                        file: parsed.file,
-                        original_path: path.clone(),
                         needs_rewrite: parsed.needs_rewrite,
+                        file: parsed.file,
                     });
                 }
                 None => {

@@ -89,6 +89,7 @@ impl Skill {
         body: Option<String>,
         file_hash: Option<GitFileHash>,
     ) -> Idempotent<()> {
+        // @@ actually check idempotency (based on file hash)
         if let Some(ref n) = name {
             self.name = n.clone();
         }

@@ -325,6 +325,11 @@ pub struct ParsedSkillFile {
 
 /// Parse a skill markdown file back into a `RuntimeFile::Skill` variant.
 ///
+/// `path` is the file's relative path in the library repo (e.g.
+/// `runtime/skills/my-skill-abcd1234.md`). The function derives
+/// `workspace_name` from the path and, when the file needs rewriting,
+/// stores the path as `original_path` on the `RuntimeFile`.
+///
 /// Handles three formats:
 /// 1. **Full frontmatter** (as produced by `RuntimeFile::Skill::content()`) —
 ///    `id:`, `created:`, `updated:` present. `needs_rewrite = false`.
@@ -333,28 +338,27 @@ pub struct ParsedSkillFile {
 /// 3. **No frontmatter** — human-authored file starting with `# Name`.
 ///    Generates a new `SkillId`. `needs_rewrite = true`.
 ///
-/// `workspace_id` and `workspace_name` are resolved by the caller from the
-/// file path — they are not encoded in the markdown itself.
-///
 /// Returns `None` only if the content has no recognisable `# heading`.
-pub fn parse_skill_markdown(
-    content: &str,
-    workspace_id: Option<WorkspaceId>,
-    workspace_name: Option<String>,
-) -> Option<ParsedSkillFile> {
+pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile> {
+    let workspace_name = workspace_name_from_skill_path(path);
     let content = content.trim();
 
-    if content.starts_with("---") {
-        parse_with_frontmatter(content, workspace_id, workspace_name)
+    let mut parsed = if content.starts_with("---") {
+        parse_with_frontmatter(content, workspace_name)?
     } else {
-        parse_without_frontmatter(content, workspace_id, workspace_name)
+        parse_without_frontmatter(content, workspace_name)?
+    };
+
+    if parsed.needs_rewrite {
+        parsed.file.set_original_path(path.to_string());
     }
+
+    Some(parsed)
 }
 
 /// Parse a skill file that has frontmatter (starts with `---`).
 fn parse_with_frontmatter(
     content: &str,
-    workspace_id: Option<WorkspaceId>,
     workspace_name: Option<String>,
 ) -> Option<ParsedSkillFile> {
     let rest = content.strip_prefix("---")?;
@@ -390,7 +394,7 @@ fn parse_with_frontmatter(
     Some(ParsedSkillFile {
         file: RuntimeFile::Skill {
             doc_id: skill_id,
-            workspace_id,
+            workspace_id: None,
             workspace_name,
             name,
             description,
@@ -408,7 +412,6 @@ fn parse_with_frontmatter(
 /// Parse a skill file with no frontmatter (human-authored).
 fn parse_without_frontmatter(
     content: &str,
-    workspace_id: Option<WorkspaceId>,
     workspace_name: Option<String>,
 ) -> Option<ParsedSkillFile> {
     let (name, description, body) = parse_heading_and_body(content)?;
@@ -419,7 +422,7 @@ fn parse_without_frontmatter(
     Some(ParsedSkillFile {
         file: RuntimeFile::Skill {
             doc_id: skill_id,
-            workspace_id,
+            workspace_id: None,
             workspace_name,
             name,
             description,
@@ -491,10 +494,10 @@ mod tests {
     #[test]
     fn parse_skill_markdown_roundtrip() {
         let skill_id = SkillId::new();
-        let ws_id = WorkspaceId::new();
+        let id_prefix = &skill_id.to_string()[..8];
         let original = RuntimeFile::for_skill(
             skill_id,
-            Some(ws_id),
+            Some(WorkspaceId::new()),
             Some("my-workspace"),
             "Deploy Script",
             "Deploys the app to production",
@@ -504,30 +507,30 @@ mod tests {
         );
 
         let content = original.content();
-        let parsed = parse_skill_markdown(&content, Some(ws_id), Some("my-workspace".into()))
-            .expect("should parse");
+        let path = format!("runtime/workspaces/my-workspace/skills/deploy-script-{id_prefix}.md");
+        let parsed = parse_skill_markdown(&content, &path).expect("should parse");
         assert!(!parsed.needs_rewrite);
 
         match parsed.file {
             RuntimeFile::Skill {
                 doc_id,
-                workspace_id,
                 workspace_name,
                 name,
                 description,
                 body,
                 created_at,
                 updated_at,
+                original_path,
                 ..
             } => {
                 assert_eq!(doc_id, skill_id);
-                assert_eq!(workspace_id, Some(ws_id));
                 assert_eq!(workspace_name.as_deref(), Some("my-workspace"));
                 assert_eq!(name, "Deploy Script");
                 assert_eq!(description, "Deploys the app to production");
                 assert_eq!(body, "#!/bin/bash\necho deploy");
                 assert_eq!(created_at, "2025-01-01T00:00:00Z");
                 assert_eq!(updated_at, "2025-06-01T00:00:00Z");
+                assert!(original_path.is_none());
             }
             _ => panic!("expected Skill variant"),
         }
@@ -536,6 +539,7 @@ mod tests {
     #[test]
     fn parse_skill_markdown_global() {
         let skill_id = SkillId::new();
+        let id_prefix = &skill_id.to_string()[..8];
         let original = RuntimeFile::for_skill(
             skill_id,
             None,
@@ -548,18 +552,21 @@ mod tests {
         );
 
         let content = original.content();
-        let parsed = parse_skill_markdown(&content, None, None).expect("should parse global skill");
+        let path = format!("runtime/skills/global-skill-{id_prefix}.md");
+        let parsed = parse_skill_markdown(&content, &path).expect("should parse global skill");
         assert!(!parsed.needs_rewrite);
 
         match parsed.file {
             RuntimeFile::Skill {
                 doc_id,
                 workspace_id,
+                workspace_name,
                 name,
                 ..
             } => {
                 assert_eq!(doc_id, skill_id);
                 assert_eq!(workspace_id, None);
+                assert_eq!(workspace_name, None);
                 assert_eq!(name, "Global Skill");
             }
             _ => panic!("expected Skill variant"),
@@ -568,15 +575,17 @@ mod tests {
 
     #[test]
     fn parse_skill_markdown_returns_none_for_bad_input() {
+        let path = "runtime/skills/test.md";
         // No heading at all
-        assert!(parse_skill_markdown("not markdown", None, None).is_none());
+        assert!(parse_skill_markdown("not markdown", path).is_none());
         // Frontmatter with bad UUID
-        assert!(parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", None, None).is_none());
+        assert!(parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", path).is_none());
     }
 
     #[test]
     fn parse_skill_hash_matches_original() {
         let skill_id = SkillId::new();
+        let id_prefix = &skill_id.to_string()[..8];
         let original = RuntimeFile::for_skill(
             skill_id,
             None,
@@ -590,7 +599,8 @@ mod tests {
         let original_hash = original.file_hash();
 
         let content = original.content();
-        let parsed = parse_skill_markdown(&content, None, None).unwrap();
+        let path = format!("runtime/skills/test-{id_prefix}.md");
+        let parsed = parse_skill_markdown(&content, &path).unwrap();
         let parsed_hash = parsed.file.file_hash();
 
         assert_eq!(original_hash, parsed_hash);
@@ -599,7 +609,8 @@ mod tests {
     #[test]
     fn parse_skill_markdown_without_frontmatter() {
         let content = "# My Cool Skill\n\nDoes something useful\n\n---\n\nThe body template";
-        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        let path = "runtime/skills/my-cool-skill.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
 
         match &parsed.file {
@@ -607,11 +618,13 @@ mod tests {
                 name,
                 description,
                 body,
+                original_path,
                 ..
             } => {
                 assert_eq!(name, "My Cool Skill");
                 assert_eq!(description, "Does something useful");
                 assert_eq!(body, "The body template");
+                assert_eq!(original_path.as_deref(), Some(path));
             }
             _ => panic!("expected Skill variant"),
         }
@@ -620,7 +633,8 @@ mod tests {
     #[test]
     fn parse_skill_markdown_without_frontmatter_no_body() {
         let content = "# Simple Skill\n\nJust a description, no body";
-        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        let path = "runtime/skills/simple-skill.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
 
         match &parsed.file {
@@ -641,12 +655,20 @@ mod tests {
     #[test]
     fn parse_skill_markdown_frontmatter_without_id() {
         let content = "---\ncreated: 2025-01-01\nupdated: 2025-06-01\n---\n\n# My Skill\n\nDescription\n\n---\n\nBody";
-        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        let path = "runtime/workspaces/team/skills/my-skill.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
 
         match &parsed.file {
-            RuntimeFile::Skill { name, .. } => {
+            RuntimeFile::Skill {
+                name,
+                workspace_name,
+                original_path,
+                ..
+            } => {
                 assert_eq!(name, "My Skill");
+                assert_eq!(workspace_name.as_deref(), Some("team"));
+                assert_eq!(original_path.as_deref(), Some(path));
             }
             _ => panic!("expected Skill variant"),
         }
@@ -655,7 +677,8 @@ mod tests {
     #[test]
     fn parse_skill_markdown_empty_frontmatter_generates_id() {
         let content = "---\n---\n\n# Name\n\nDesc";
-        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        let path = "runtime/skills/name.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
 
         match &parsed.file {

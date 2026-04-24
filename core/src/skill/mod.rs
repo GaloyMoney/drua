@@ -362,6 +362,8 @@ impl Skills {
                     Some(name.clone()),
                     Some(description.clone()),
                     Some(body.clone()),
+                    // @@ i don't think file_hash should be an Optional arg... we can use it to
+                    // check idempotency
                     Some(file_hash),
                 )
                 .did_execute()
@@ -382,6 +384,8 @@ impl Skills {
             if let Some(ws_name) = workspace_name {
                 builder = builder.workspace_name(ws_name);
             }
+            // @@ should be mandatory when its a new file
+            // should error when its not set
             if let Some(path) = original_path {
                 builder = builder.original_path(path);
             }
