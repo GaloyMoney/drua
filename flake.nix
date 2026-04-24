@@ -397,6 +397,7 @@
             drua
             pkgs.cacert
             pkgs.onnxruntime
+            pkgs.git
           ];
           config = {
             Cmd = [ "${drua}/bin/drua" "server" ];
