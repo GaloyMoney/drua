@@ -116,7 +116,7 @@ galoyAgents:
     anthropicApiKey: ""
     annotations:
   codeAssistant:
-    indexHash: "2e1440d7e8de358e249bb553c9dac792165de31260640d25ec00dd5d9fd99322"
+    indexHash: "51066be1f673482861d8207a743226f6d84d60588304b6e9c5789429b70c08ab"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
