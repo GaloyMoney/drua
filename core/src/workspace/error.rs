@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::agent::AgentError;
 use crate::auth::error::AuthorizationError;
+use crate::library::LibraryError;
 
 use super::repo::{
     WorkspaceCreateError, WorkspaceFindError, WorkspaceModifyError, WorkspaceQueryError,
@@ -23,4 +24,6 @@ pub enum WorkspaceError {
     Query(#[from] WorkspaceQueryError),
     #[error("WorkspaceError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
+    #[error("WorkspaceError - Library: {0}")]
+    Library(#[from] LibraryError),
 }

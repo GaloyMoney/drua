@@ -78,8 +78,9 @@ impl Library {
         op: &mut impl es_entity::AtomicOperation,
         file: &RuntimeFile,
     ) -> Result<(), LibraryError> {
-        let fields = file.searchable_fields();
-        self.search.upsert_in_op(op, &fields).await?;
+        if let Some(fields) = file.searchable_fields() {
+            self.search.upsert_in_op(op, &fields).await?;
+        }
 
         let idempotency_key = file.file_hash().to_string();
         let _ = self
@@ -87,6 +88,25 @@ impl Library {
             .persist_and_queue_job_in_op(op, idempotency_key, file)
             .await?;
 
+        Ok(())
+    }
+
+    /// Queue a `.gitkeep` file for a new workspace so the folder structure
+    /// is committed to the library repo.
+    #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
+    pub async fn sync_workspace_folder_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        workspace_name: &str,
+    ) -> Result<(), LibraryError> {
+        let file = RuntimeFile::GitKeep {
+            workspace_name: workspace_name.to_string(),
+        };
+        let idempotency_key = file.file_hash().to_string();
+        let _ = self
+            .inbox
+            .persist_and_queue_job_in_op(op, idempotency_key, &file)
+            .await?;
         Ok(())
     }
 

@@ -194,7 +194,7 @@ impl App {
         ));
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
-        let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents)));
+        let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents), library.clone()));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
 
         // Admin tools live behind progressive disclosure (search_tools →

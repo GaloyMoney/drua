@@ -15,18 +15,24 @@ use repo::*;
 
 use crate::agent::Agents;
 use crate::audit::Audit;
+use crate::library::Library;
 use crate::primitives::*;
 
 #[derive(Clone)]
 pub struct Workspaces {
     repo: WorkspaceRepo,
     agents: Arc<Agents>,
+    library: Library,
 }
 
 impl Workspaces {
-    pub fn new(pool: &sqlx::PgPool, agents: Arc<Agents>) -> Self {
+    pub fn new(pool: &sqlx::PgPool, agents: Arc<Agents>, library: Library) -> Self {
         let repo = WorkspaceRepo::new(pool);
-        Self { repo, agents }
+        Self {
+            repo,
+            agents,
+            library,
+        }
     }
 
     #[instrument(name = "domain.workspace.create", skip(self))]
@@ -51,6 +57,10 @@ impl Workspaces {
 
         self.agents
             .create_workspace_lead_in_op(&mut op, lead_agent_id, workspace_id, "lead", &name)
+            .await?;
+
+        self.library
+            .sync_workspace_folder_in_op(&mut op, &name)
             .await?;
 
         op.commit().await?;
