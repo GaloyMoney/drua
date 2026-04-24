@@ -141,6 +141,7 @@
           export REPO_ROOT="$(pwd)"
           export PG_CON="postgres://user:password@localhost:5432/drua"
           export DATABASE_URL="$PG_CON"
+          export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
           export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
 
           cleanup() {

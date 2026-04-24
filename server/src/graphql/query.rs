@@ -4,7 +4,9 @@ use async_graphql::{
 };
 
 use super::agent::Agent;
+use super::audit::{AuditEntry, AuditLogQueryInput};
 use super::primitives::*;
+use super::sandbox::Sandbox;
 use super::workspace::Workspace;
 use super::AppConfigYaml;
 
@@ -102,5 +104,43 @@ impl Query {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let jsonl = app.agents().export_thread(sub, agent_id, thread_id).await?;
         Ok(jsonl)
+    }
+
+    // ── Sandbox ─────────────────────────────────────────────────────────
+
+    /// Look up a single sandbox by ID.
+    async fn sandbox(
+        &self,
+        ctx: &Context<'_>,
+        id: SandboxId,
+    ) -> async_graphql::Result<Option<Sandbox>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        match app.sandboxes().find_by_id(sub, id).await {
+            Ok(sb) => Ok(Some(Sandbox::from(sb))),
+            Err(drua_core::sandbox::SandboxError::Find(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ── Audit Log ───────────────────────────────────────────────────────
+
+    /// Query audit log entries.
+    async fn audit_log(
+        &self,
+        ctx: &Context<'_>,
+        input: AuditLogQueryInput,
+    ) -> async_graphql::Result<Vec<AuditEntry>> {
+        let (app, _sub) = app_and_sub_from_ctx!(ctx);
+        let query = drua_core::audit::AuditLogQuery {
+            workspace_id: input.workspace_id,
+            acting_agent_id: input.acting_agent_id,
+            action: input.action,
+            outcome: input.outcome,
+            error: input.error,
+            limit: input.limit.clamp(1, 100) as i64,
+            ..Default::default()
+        };
+        let entries = app.audit().find(&query).await?;
+        Ok(entries.into_iter().map(AuditEntry::from).collect())
     }
 }

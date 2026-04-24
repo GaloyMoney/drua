@@ -102,7 +102,9 @@
 <a href="/workspaces/{{ workspace.id }}/sandboxes" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Sandboxes</a>
 <h2>New Sandbox</h2>
 
-<form method="post" action="/workspaces/{{ workspace.id }}/sandboxes">
+<form data-gql-mutation="mutation($input: SandboxCreateInput!) { sandboxCreate(input: $input) { sandbox { id } } }"
+      data-gql-build="buildSandboxCreate"
+      data-gql-redirect="/workspaces/{{ workspace.id }}/sandboxes">
   <label>
     Name
     <input type="text" name="name" required placeholder="my-sandbox">
@@ -111,8 +113,8 @@
   <label>
     Mode
     <select name="mode" required>
-      <option value="scratch">Scratch — empty workspace</option>
-      <option value="repo">Repo — clone a git repository</option>
+      <option value="SCRATCH">Scratch — empty workspace</option>
+      <option value="REPO">Repo — clone a git repository</option>
     </select>
   </label>
 
@@ -146,4 +148,21 @@
     <a href="/workspaces/{{ workspace.id }}/sandboxes" role="button" class="outline">Cancel</a>
   </div>
 </form>
+<script>
+  function buildSandboxCreate(fd) {
+    const input = {
+      workspaceId: "{{ workspace.id }}",
+      name: fd.get('name'),
+      mode: fd.get('mode'),
+      cpu: fd.get('cpu'),
+      memory: fd.get('memory'),
+      diskSize: fd.get('disk_size'),
+    };
+    const repoUrl = (fd.get('repo_url') || '').trim();
+    if (repoUrl) input.repoUrl = repoUrl;
+    const branch = (fd.get('branch') || '').trim();
+    if (branch) input.branch = branch;
+    return input;
+  }
+</script>
 {% endblock %}

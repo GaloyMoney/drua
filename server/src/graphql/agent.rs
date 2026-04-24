@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_graphql::{ComplexObject, Context, Enum, SimpleObject};
+use async_graphql::{ComplexObject, Context, Enum, InputObject, SimpleObject};
 
 use super::primitives::*;
 
@@ -96,3 +96,41 @@ impl From<DomainAgentRole> for AgentRole {
         }
     }
 }
+
+impl From<SandboxAttachmentMode> for SandboxAgentMode {
+    fn from(mode: SandboxAttachmentMode) -> Self {
+        match mode {
+            SandboxAttachmentMode::Read => Self::Read,
+            SandboxAttachmentMode::Write => Self::Write,
+        }
+    }
+}
+
+// ── Mutation inputs & payloads ──────────────────────────────────────────
+
+#[derive(InputObject)]
+pub struct AgentCreateInput {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub sandbox_id: Option<SandboxId>,
+    pub sandbox_mode: Option<SandboxAttachmentMode>,
+}
+
+mutation_payload! { AgentCreatePayload, agent: Agent }
+
+#[derive(InputObject)]
+pub struct AgentAttachSandboxInput {
+    pub agent_id: AgentId,
+    pub sandbox_id: SandboxId,
+    pub mode: SandboxAttachmentMode,
+}
+
+mutation_payload! { AgentAttachSandboxPayload, agent: Agent }
+
+#[derive(InputObject)]
+pub struct AgentDetachSandboxInput {
+    pub agent_id: AgentId,
+    pub sandbox_id: SandboxId,
+}
+
+mutation_payload! { AgentDetachSandboxPayload, agent: Agent }

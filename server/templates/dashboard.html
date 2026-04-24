@@ -9,7 +9,7 @@
 
 <section>
   <h2>Create MCP Credentials</h2>
-  <form hx-post="/mcp-creds/create" hx-target="#creds-result" hx-swap="innerHTML">
+  <form id="create-creds-form">
     <label>
       Name
       <input type="text" name="name" required placeholder="my-creds">
@@ -21,6 +21,33 @@
     <button type="submit">Create Credentials</button>
   </form>
   <div id="creds-result"></div>
+  <script>
+    document.getElementById('create-creds-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const scopes = fd.get('admin') === 'true' ? ['admin'] : [];
+      const result = await gqlMutate(
+        `mutation($input: McpCredentialsCreateInput!) { mcpCredentialsCreate(input: $input) { mcpCreds { id name } token } }`,
+        { input: { name: fd.get('name'), scopes } }
+      );
+      if (result.errors) { alert(result.errors.map(e => e.message).join('\n')); return; }
+      const { token, mcpCreds } = result.data.mcpCredentialsCreate;
+      const mcp_endpoint = window.location.origin + '/mcp';
+      const serverConfig = JSON.stringify({type:"http",url:mcp_endpoint,headers:{Authorization:"Bearer "+token}});
+      const cliCmd = `claude mcp add-json --scope user drua '${serverConfig}'`;
+      document.getElementById('creds-result').innerHTML = `
+        <h3>MCP Credentials Created: ${mcpCreds.name}</h3>
+        <p class="token-warning">This configuration will not be shown again. Copy it now.</p>
+        <p><strong>Claude Code CLI:</strong></p>
+        <div class="token-box"><code>${cliCmd}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>
+        <p><strong>MCP JSON:</strong></p>
+        <div class="token-box"><code>${JSON.stringify({drua:JSON.parse(serverConfig)})}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>
+      `;
+      // Refresh the credentials list
+      const listHtml = await fetch('/dashboard/mcp-creds').then(r => r.text());
+      document.getElementById('creds-list').innerHTML = new DOMParser().parseFromString(listHtml, 'text/html').querySelector('tbody')?.innerHTML || '';
+    });
+  </script>
 </section>
 
 <section>

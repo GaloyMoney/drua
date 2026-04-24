@@ -132,20 +132,21 @@
      is suspended or errored; Suspend is offered when it's ready.
      Mid-flight states (provisioning / initializing) get no button. #}
   {% if sandbox.state == "suspended" || sandbox.state == "errored" %}
-  <form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/restart" style="margin: 0;">
-    <button type="submit" style="margin: 0;">Restart Sandbox</button>
-  </form>
+  <button
+    data-gql-mutation="mutation($input: SandboxRestartInput!) { sandboxRestart(input: $input) { sandbox { id } } }"
+    data-gql-input='{"id":"{{ sandbox.id }}"}'
+    data-gql-reload="true"
+    style="margin: 0;"
+  >Restart Sandbox</button>
   {% else if sandbox.state == "ready" %}
-  <form method="post" action="/workspaces/{{ workspace.id }}/sandboxes/{{ sandbox.id }}/suspend" style="margin: 0;">
-    <button
-      type="submit"
-      onclick="return confirm('Suspend this sandbox? The underlying pod/process will be deleted; workspace state is retained.')"
-      class="secondary outline"
-      style="margin: 0;"
-    >
-      Suspend Sandbox
-    </button>
-  </form>
+  <button
+    data-gql-mutation="mutation($input: SandboxSuspendInput!) { sandboxSuspend(input: $input) { sandbox { id } } }"
+    data-gql-input='{"id":"{{ sandbox.id }}"}'
+    data-gql-confirm="Suspend this sandbox? The underlying pod/process will be deleted; workspace state is retained."
+    data-gql-reload="true"
+    class="secondary outline"
+    style="margin: 0;"
+  >Suspend Sandbox</button>
   {% endif %}
 </div>
 

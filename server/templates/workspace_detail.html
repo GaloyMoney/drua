@@ -100,7 +100,9 @@
 {% block content %}
 <h2>Workspace Settings</h2>
 
-<form method="post" action="/workspaces/{{ workspace.id }}">
+<form data-gql-mutation="mutation($input: WorkspaceUpdateInput!) { workspaceUpdate(input: $input) { workspace { id } } }"
+      data-gql-build="buildWorkspaceUpdate"
+      data-gql-reload="true">
   <label>
     Name
     <input type="text" value="{{ workspace.name }}" disabled>
@@ -114,6 +116,12 @@
     <a href="/workspaces/{{ workspace.id }}/chat" role="button" class="outline">Back to Chat</a>
   </div>
 </form>
+<script>
+  function buildWorkspaceUpdate(fd) {
+    const desc = fd.get('description');
+    return { id: "{{ workspace.id }}", name: "{{ workspace.name }}", description: desc || null };
+  }
+</script>
 
 <hr>
 
@@ -129,10 +137,10 @@
 
 <details>
   <summary>Add Secret</summary>
-  <form hx-post="/workspaces/{{ workspace.id }}/secrets"
-        hx-target="#secrets-list"
-        hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) this.reset()">
+  <form data-gql-mutation="mutation($input: WorkspaceSecretCreateInput!) { workspaceSecretCreate(input: $input) { workspaceSecret { id } } }"
+        data-gql-build="buildSecretCreate"
+        data-gql-target="#secrets-list"
+        data-gql-refresh-url="/workspaces/{{ workspace.id }}/secrets/list">
     <label>
       Name
       <input type="text" name="name" required placeholder="e.g. GITHUB_TOKEN" pattern="[A-Za-z_][A-Za-z0-9_]*">
@@ -140,8 +148,8 @@
     <label>
       Type
       <select name="secret_type" required>
-        <option value="env_var">Environment Variable</option>
-        <option value="file">File (/run/secrets/&lt;name&gt;)</option>
+        <option value="ENV_VAR">Environment Variable</option>
+        <option value="FILE">File (/run/secrets/&lt;name&gt;)</option>
       </select>
     </label>
     <label>
@@ -150,6 +158,11 @@
     </label>
     <button type="submit">Add Secret</button>
   </form>
+  <script>
+    function buildSecretCreate(fd) {
+      return { workspaceId: "{{ workspace.id }}", name: fd.get('name'), secretType: fd.get('secret_type'), value: fd.get('value') };
+    }
+  </script>
 </details>
 
 <hr>
@@ -157,8 +170,10 @@
   <summary>Danger Zone</summary>
   <p>Deleting a workspace will archive it and revoke MCP credentials for all its agents.</p>
   <button
-    hx-post="/workspaces/{{ workspace.id }}/delete"
-    hx-confirm="Are you sure you want to delete this workspace? This will revoke all agent credentials."
+    data-gql-mutation="mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"
+    data-gql-input='{"id":"{{ workspace.id }}"}'
+    data-gql-confirm="Are you sure you want to delete this workspace? This will revoke all agent credentials."
+    data-gql-redirect="/workspaces"
     class="secondary outline"
     style="color: var(--pico-color-red-500, #c62828);"
   >
