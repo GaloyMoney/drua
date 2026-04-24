@@ -34,7 +34,7 @@ pub struct LibraryConfig {
 impl LibraryConfig {
     pub fn repo_path(&self) -> std::path::PathBuf {
         match &self.data_dir {
-            Some(d) => std::path::PathBuf::from(d),
+            Some(d) => std::path::PathBuf::from(d).join("repo"),
             None => std::path::PathBuf::from(".library"),
         }
     }
