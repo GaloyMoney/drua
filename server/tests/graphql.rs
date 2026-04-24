@@ -5,6 +5,8 @@
 /// expected shapes. They hit a real Postgres database — run via:
 ///
 ///   DATABASE_URL=postgres://user:password@localhost:5432/drua cargo nextest run -p drua-server
+use std::collections::HashMap;
+
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
 async fn pool() -> sqlx::PgPool {
@@ -16,19 +18,52 @@ fn test_sub() -> drua_core::auth::AuthSubject {
     drua_core::auth::AuthSubject::User(drua_core::primitives::UserId::new())
 }
 
-/// Build a minimal GraphQL schema with a live App injected.
+/// Build a minimal App suitable for GraphQL integration tests.
 ///
-/// Because `App::init` requires external services (prompt executor, etc.),
-/// we skip it and wire the domain services we need manually. For the
-/// integration test we use the `schema(None)` path and inject services
-/// into the request data directly — the resolvers pull `App` from context
-/// via `data_unchecked`, so we just need a real `App` handle.
-///
-/// Since App::init is complex (needs LLM keys, etc.), we instead test by
-/// inserting directly into the DB and querying through the GraphQL layer.
-/// For mutation tests that don't need the full App, we use domain services
-/// directly and verify via queries.
-#[allow(dead_code)]
+/// Uses default configs with the minimum required agent role setup.
+/// No real LLM keys needed — prompt executor boots with empty models.
+async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
+    use drua_core::agent::{AgentsConfig, ModelDefaults, RoleConfig};
+
+    let model_name = "test-model".to_string();
+    let mut builtin_roles = HashMap::new();
+    for role in [
+        drua_core::agent::AgentRole::WorkspaceLead,
+        drua_core::agent::AgentRole::Agent,
+    ] {
+        builtin_roles.insert(
+            role,
+            RoleConfig {
+                model: model_name.clone(),
+                compaction: Default::default(),
+            },
+        );
+    }
+    let mut models = HashMap::new();
+    models.insert(
+        model_name.clone(),
+        ModelDefaults {
+            model: model_name,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+            ..Default::default()
+        },
+    );
+
+    let config = drua_core::AppConfig {
+        agents: AgentsConfig {
+            builtin_roles,
+            models,
+        },
+        ..Default::default()
+    };
+
+    drua_core::App::init(pool, config)
+        .await
+        .expect("init test app")
+}
+
+/// Execute a GraphQL query/mutation against a schema with App + AuthSubject injected.
 async fn execute_graphql(
     schema: &drua_server::graphql::AgentsSchema,
     app: &drua_core::App,
@@ -55,21 +90,19 @@ async fn execute_graphql(
     serde_json::to_value(&response).unwrap()
 }
 
-/// Helper: create a workspace through the domain layer and return its id.
-async fn create_workspace(pool: &sqlx::PgPool) -> drua_core::primitives::WorkspaceId {
-    let id = drua_core::primitives::WorkspaceId::new();
-    sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES ($1, $2, NOW())")
-        .bind(id)
-        .bind(format!("test-ws-{}", uuid::Uuid::from(id)))
-        .execute(pool)
-        .await
-        .expect("insert workspace");
-    id
+/// Helper: assert no GraphQL errors in the response and return the data object.
+fn assert_no_errors(result: &serde_json::Value) -> &serde_json::Value {
+    if let Some(errors) = result.get("errors") {
+        panic!(
+            "GraphQL errors: {}",
+            serde_json::to_string_pretty(errors).unwrap()
+        );
+    }
+    result.get("data").expect("response should have 'data'")
 }
 
-// ─── Workspace CRUD tests ───────────────────────────────────────────────────
+// ─── Baseline tests ─────────────────────────────────────────────────────────
 
-/// Verify that the schema builds and the ping query works (baseline sanity check).
 #[tokio::test]
 async fn ping_query_works() {
     let schema = drua_server::graphql::schema(None);
@@ -80,7 +113,6 @@ async fn ping_query_works() {
     assert_eq!(json["data"]["ping"], "pong");
 }
 
-/// Verify that the ping mutation works.
 #[tokio::test]
 async fn ping_mutation_works() {
     let schema = drua_server::graphql::schema(None);
@@ -91,103 +123,424 @@ async fn ping_mutation_works() {
     assert_eq!(json["data"]["ping"], "pong");
 }
 
-// ─── Skill CRUD tests (domain-level, verifying GraphQL types compile) ───────
+// ─── Workspace mutation tests ───────────────────────────────────────────────
 
-/// Verify the skill GraphQL types work by creating through domain and reading back.
 #[tokio::test]
-async fn skill_create_domain_roundtrip() {
+async fn workspace_create_update_delete_via_graphql() {
     let pool = pool().await;
-    let ws_id = create_workspace(&pool).await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
     let sub = test_sub();
 
-    let sandboxes = std::sync::Arc::new(
-        drua_core::sandbox::Sandboxes::init(
-            &pool,
-            drua_core::sandbox::SandboxConfig::default(),
-            None,
-        )
-        .await
-        .expect("init sandboxes"),
+    // Create
+    let ws_name = format!("gql-ws-test-{}", uuid::Uuid::new_v4());
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceCreateInput!) {
+            workspaceCreate(input: $input) { workspace { id name description } }
+        }"#,
+        serde_json::json!({ "input": { "name": ws_name, "description": "test workspace" } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let ws = &data["workspaceCreate"]["workspace"];
+    assert_eq!(ws["name"], ws_name);
+    assert_eq!(ws["description"], "test workspace");
+    let ws_id = ws["id"].as_str().unwrap().to_string();
+
+    // Update
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceUpdateInput!) {
+            workspaceUpdate(input: $input) { workspace { id name description } }
+        }"#,
+        serde_json::json!({ "input": { "id": ws_id, "description": "updated" } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert_eq!(
+        data["workspaceUpdate"]["workspace"]["description"],
+        "updated"
     );
-    let skills = drua_core::skill::Skills::new(&pool, sandboxes);
-
-    let new = drua_core::skill::NewSkill::builder()
-        .workspace_id(ws_id)
-        .name("test-skill")
-        .description("A test skill")
-        .body("Do the thing")
-        .build()
-        .unwrap();
-
-    let skill = skills.create(&sub, new).await.expect("create skill");
-    assert_eq!(skill.name, "test-skill");
-    assert_eq!(skill.description, "A test skill");
-    assert_eq!(skill.body, "Do the thing");
-    assert_eq!(skill.workspace_id, ws_id);
-
-    // Verify list
-    let listed = skills
-        .list_by_workspace_id(&sub, ws_id)
-        .await
-        .expect("list skills");
-    assert!(listed.iter().any(|s| s.id == skill.id));
-
-    // Verify update
-    let mut skill = skills.find_by_id(&sub, skill.id).await.expect("find skill");
-    let _ = skill.update(Some("updated-name".into()), None, None);
-    skills.update(&sub, &mut skill).await.expect("update skill");
-    assert_eq!(skill.name, "updated-name");
-
-    // Verify delete
-    skills.delete(&sub, skill.id).await.expect("delete skill");
-    let listed = skills
-        .list_by_workspace_id(&sub, ws_id)
-        .await
-        .expect("list after delete");
-    assert!(!listed.iter().any(|s| s.id == skill.id));
-}
-
-// ─── Workspace Secret tests ────────────────────────────────────────────────
-
-#[tokio::test]
-async fn workspace_secret_create_and_list_domain_roundtrip() {
-    let pool = pool().await;
-    let ws_id = create_workspace(&pool).await;
-    let sub = test_sub();
-
-    let key = drua_core::encryption::EncryptionKey::new([42u8; 32]);
-    let secrets = drua_core::workspace_secret::WorkspaceSecrets::new(&pool, key);
-
-    let secret = secrets
-        .create(
-            &sub,
-            ws_id,
-            "GQL_TEST_KEY",
-            drua_core::workspace_secret::SecretType::EnvVar,
-            "secret-value",
-        )
-        .await
-        .expect("create secret");
-    assert_eq!(secret.name, "GQL_TEST_KEY");
-
-    let listed = secrets
-        .list_by_workspace(&sub, ws_id)
-        .await
-        .expect("list secrets");
-    assert!(listed.iter().any(|s| s.id == secret.id));
 
     // Delete
-    secrets.delete(&sub, secret.id).await.expect("delete");
-    let listed = secrets
-        .list_by_workspace(&sub, ws_id)
-        .await
-        .expect("list after delete");
-    assert!(!listed.iter().any(|s| s.id == secret.id));
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceDeleteInput!) {
+            workspaceDelete(input: $input) { workspace { id } }
+        }"#,
+        serde_json::json!({ "input": { "id": ws_id } }),
+    )
+    .await;
+    assert_no_errors(&result);
+
+    // Verify workspace is gone
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: WorkspaceId!) { workspace(id: $id) { id } }"#,
+        serde_json::json!({ "id": ws_id }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert!(
+        data["workspace"].is_null(),
+        "deleted workspace should return null"
+    );
 }
 
-// ─── Schema introspection tests ──────────────────────────────────────────
+// ─── Skill mutation tests ───────────────────────────────────────────────────
 
-/// Verify the schema exposes all new mutation fields.
+#[tokio::test]
+async fn skill_create_update_delete_via_graphql() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    // Create workspace first
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceCreateInput!) {
+            workspaceCreate(input: $input) { workspace { id } }
+        }"#,
+        serde_json::json!({ "input": { "name": format!("skill-test-ws-{}", uuid::Uuid::new_v4()) } }),
+    )
+    .await;
+    let ws_id = assert_no_errors(&result)["workspaceCreate"]["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create skill
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: SkillCreateInput!) {
+            skillCreate(input: $input) { skill { id name description body workspaceId } }
+        }"#,
+        serde_json::json!({ "input": {
+            "workspaceId": ws_id,
+            "name": "test-skill",
+            "description": "A skill for testing",
+            "body": "Do the thing"
+        }}),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let skill = &data["skillCreate"]["skill"];
+    assert_eq!(skill["name"], "test-skill");
+    assert_eq!(skill["description"], "A skill for testing");
+    assert_eq!(skill["body"], "Do the thing");
+    let skill_id = skill["id"].as_str().unwrap().to_string();
+
+    // Update skill
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: SkillUpdateInput!) {
+            skillUpdate(input: $input) { skill { id name description body } }
+        }"#,
+        serde_json::json!({ "input": {
+            "id": skill_id,
+            "name": "updated-skill",
+            "body": "Updated body"
+        }}),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert_eq!(data["skillUpdate"]["skill"]["name"], "updated-skill");
+    assert_eq!(data["skillUpdate"]["skill"]["body"], "Updated body");
+
+    // Verify skill appears in workspace skills list
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: WorkspaceId!) { workspace(id: $id) { skills { id name } } }"#,
+        serde_json::json!({ "id": ws_id }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let skills = data["workspace"]["skills"].as_array().unwrap();
+    assert!(skills.iter().any(|s| s["id"].as_str() == Some(&skill_id)));
+
+    // Delete skill
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: SkillDeleteInput!) {
+            skillDelete(input: $input) { deletedId }
+        }"#,
+        serde_json::json!({ "input": { "id": skill_id } }),
+    )
+    .await;
+    assert_no_errors(&result);
+
+    // Verify skill is gone from workspace
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: WorkspaceId!) { workspace(id: $id) { skills { id } } }"#,
+        serde_json::json!({ "id": ws_id }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let skills = data["workspace"]["skills"].as_array().unwrap();
+    assert!(!skills.iter().any(|s| s["id"].as_str() == Some(&skill_id)));
+
+    // Cleanup
+    let _ = execute_graphql(
+        &schema, &app, &sub,
+        r#"mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"#,
+        serde_json::json!({ "input": { "id": ws_id } }),
+    ).await;
+}
+
+// ─── Workspace Secret mutation tests ────────────────────────────────────────
+
+#[tokio::test]
+async fn workspace_secret_create_delete_via_graphql() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    // Create workspace
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceCreateInput!) {
+            workspaceCreate(input: $input) { workspace { id } }
+        }"#,
+        serde_json::json!({ "input": { "name": format!("secret-test-ws-{}", uuid::Uuid::new_v4()) } }),
+    )
+    .await;
+    let ws_id = assert_no_errors(&result)["workspaceCreate"]["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create secret
+    let result = execute_graphql(
+        &schema, &app, &sub,
+        r#"mutation($input: WorkspaceSecretCreateInput!) {
+            workspaceSecretCreate(input: $input) { workspaceSecret { id name secretType workspaceId } }
+        }"#,
+        serde_json::json!({ "input": {
+            "workspaceId": ws_id,
+            "name": "TEST_API_KEY",
+            "secretType": "ENV_VAR",
+            "value": "sk-secret-123"
+        }}),
+    ).await;
+    let data = assert_no_errors(&result);
+    let secret = &data["workspaceSecretCreate"]["workspaceSecret"];
+    assert_eq!(secret["name"], "TEST_API_KEY");
+    assert_eq!(secret["secretType"], "ENV_VAR");
+    let secret_id = secret["id"].as_str().unwrap().to_string();
+
+    // Verify secret appears in workspace secrets list
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: WorkspaceId!) { workspace(id: $id) { secrets { id name secretType } } }"#,
+        serde_json::json!({ "id": ws_id }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let secrets = data["workspace"]["secrets"].as_array().unwrap();
+    assert!(secrets.iter().any(|s| s["name"] == "TEST_API_KEY"));
+    // Ensure no 'value' field is exposed
+    assert!(secrets.iter().all(|s| s.get("value").is_none()));
+
+    // Delete secret
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceSecretDeleteInput!) {
+            workspaceSecretDelete(input: $input) { deletedId }
+        }"#,
+        serde_json::json!({ "input": { "id": secret_id } }),
+    )
+    .await;
+    assert_no_errors(&result);
+
+    // Verify secret is gone
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: WorkspaceId!) { workspace(id: $id) { secrets { id } } }"#,
+        serde_json::json!({ "id": ws_id }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let secrets = data["workspace"]["secrets"].as_array().unwrap();
+    assert!(!secrets.iter().any(|s| s["id"].as_str() == Some(&secret_id)));
+
+    // Cleanup
+    let _ = execute_graphql(
+        &schema, &app, &sub,
+        r#"mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"#,
+        serde_json::json!({ "input": { "id": ws_id } }),
+    ).await;
+}
+
+// ─── MCP Credentials mutation tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn mcp_credentials_create_revoke_via_graphql() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    // Create credentials
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: McpCredentialsCreateInput!) {
+            mcpCredentialsCreate(input: $input) { mcpCreds { id name revoked } token }
+        }"#,
+        serde_json::json!({ "input": { "name": "test-creds", "scopes": [] } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let payload = &data["mcpCredentialsCreate"];
+    assert_eq!(payload["mcpCreds"]["name"], "test-creds");
+    assert_eq!(payload["mcpCreds"]["revoked"], false);
+    assert!(
+        payload["token"].as_str().unwrap().len() > 10,
+        "token should be non-trivial"
+    );
+    let creds_id = payload["mcpCreds"]["id"].as_str().unwrap().to_string();
+
+    // Revoke credentials
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: McpCredentialsRevokeInput!) {
+            mcpCredentialsRevoke(input: $input) { mcpCreds { id revoked revokedAt } }
+        }"#,
+        serde_json::json!({ "input": { "id": creds_id } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let creds = &data["mcpCredentialsRevoke"]["mcpCreds"];
+    assert_eq!(creds["revoked"], true);
+    assert!(
+        creds["revokedAt"].as_str().is_some(),
+        "revokedAt should be set"
+    );
+}
+
+// ─── Agent mutation tests ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn agent_create_via_graphql() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    // Create workspace
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkspaceCreateInput!) {
+            workspaceCreate(input: $input) { workspace { id } }
+        }"#,
+        serde_json::json!({ "input": { "name": format!("agent-test-ws-{}", uuid::Uuid::new_v4()) } }),
+    )
+    .await;
+    let ws_id = assert_no_errors(&result)["workspaceCreate"]["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create agent
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: AgentCreateInput!) {
+            agentCreate(input: $input) { agent { id name role workspaceId } }
+        }"#,
+        serde_json::json!({ "input": { "workspaceId": ws_id, "name": "research" } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let agent = &data["agentCreate"]["agent"];
+    assert_eq!(agent["name"], "research");
+    assert_eq!(agent["role"], "AGENT");
+    assert_eq!(agent["workspaceId"], ws_id);
+
+    // Verify agent appears in workspace agents list
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: WorkspaceId!) { workspace(id: $id) { agents { id name role } } }"#,
+        serde_json::json!({ "id": ws_id }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let agents = data["workspace"]["agents"].as_array().unwrap();
+    assert!(agents.iter().any(|a| a["name"] == "research"));
+    // Lead should be first
+    assert_eq!(agents[0]["role"], "WORKSPACE_LEAD");
+
+    // Cleanup
+    let _ = execute_graphql(
+        &schema, &app, &sub,
+        r#"mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"#,
+        serde_json::json!({ "input": { "id": ws_id } }),
+    ).await;
+}
+
+// ─── Sandbox query test ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sandbox_query_returns_null_for_missing() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($id: SandboxId!) { sandbox(id: $id) { id } }"#,
+        serde_json::json!({ "id": "00000000-0000-0000-0000-000000000000" }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert!(data["sandbox"].is_null());
+}
+
+// ─── Schema introspection tests ─────────────────────────────────────────────
+
 #[tokio::test]
 async fn schema_has_expected_mutations() {
     let schema = drua_server::graphql::schema(None);
@@ -231,7 +584,6 @@ async fn schema_has_expected_mutations() {
     }
 }
 
-/// Verify the schema exposes all new query fields.
 #[tokio::test]
 async fn schema_has_expected_queries() {
     let schema = drua_server::graphql::schema(None);
@@ -257,7 +609,6 @@ async fn schema_has_expected_queries() {
     }
 }
 
-/// Verify the Workspace type exposes sandboxes, skills, secrets, and mcpCredentials.
 #[tokio::test]
 async fn schema_workspace_has_new_fields() {
     let schema = drua_server::graphql::schema(None);
@@ -283,7 +634,6 @@ async fn schema_workspace_has_new_fields() {
     }
 }
 
-/// Verify the Sandbox type has expected fields.
 #[tokio::test]
 async fn schema_sandbox_type_has_expected_fields() {
     let schema = drua_server::graphql::schema(None);
@@ -321,7 +671,6 @@ async fn schema_sandbox_type_has_expected_fields() {
     }
 }
 
-/// Verify the Skill type has expected fields.
 #[tokio::test]
 async fn schema_skill_type_has_expected_fields() {
     let schema = drua_server::graphql::schema(None);
@@ -354,7 +703,6 @@ async fn schema_skill_type_has_expected_fields() {
     }
 }
 
-/// Verify the WorkspaceSecret type has expected fields (no value exposed!).
 #[tokio::test]
 async fn schema_workspace_secret_type_has_expected_fields() {
     let schema = drua_server::graphql::schema(None);
@@ -378,19 +726,16 @@ async fn schema_workspace_secret_type_has_expected_fields() {
             "Missing workspace secret field: {name}. Available: {fields:?}"
         );
     }
-
-    // Ensure the plaintext value is NOT exposed
     assert!(
         !fields.contains(&"value".to_string()),
-        "WorkspaceSecret should NOT expose 'value' field"
+        "should NOT expose 'value'"
     );
     assert!(
         !fields.contains(&"encryptedValue".to_string()),
-        "WorkspaceSecret should NOT expose 'encryptedValue' field"
+        "should NOT expose 'encryptedValue'"
     );
 }
 
-/// Verify the AuditEntry type has expected fields.
 #[tokio::test]
 async fn schema_audit_entry_type_has_expected_fields() {
     let schema = drua_server::graphql::schema(None);
@@ -425,7 +770,6 @@ async fn schema_audit_entry_type_has_expected_fields() {
     }
 }
 
-/// Verify the McpCreds type has expected fields.
 #[tokio::test]
 async fn schema_mcp_creds_type_has_expected_fields() {
     let schema = drua_server::graphql::schema(None);
