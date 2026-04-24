@@ -60,10 +60,7 @@ async fn create_workspace(pool: &sqlx::PgPool) -> drua_core::primitives::Workspa
     let id = drua_core::primitives::WorkspaceId::new();
     sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES ($1, $2, NOW())")
         .bind(id)
-        .bind(format!(
-            "test-ws-{}",
-            uuid::Uuid::from(id).to_string().split('-').next().unwrap()
-        ))
+        .bind(format!("test-ws-{}", uuid::Uuid::from(id)))
         .execute(pool)
         .await
         .expect("insert workspace");
