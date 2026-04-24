@@ -107,17 +107,40 @@ impl SkillBody {
         Self(body)
     }
 
-    /// Substitute `$ARGUMENTS` in the skill body with the provided arguments.
-    /// If the body doesn't contain `$ARGUMENTS` and arguments is non-empty,
-    /// appends `ARGUMENTS: <value>` to the end.
+    /// Substitute placeholders in the skill body with the provided arguments.
+    ///
+    /// - `$ARGUMENTS` — replaced with the full argument string.
+    /// - `$0`, `$1`, `$2`, … — replaced with positional arguments parsed
+    ///   via shell-style splitting (double/single quotes respected).
+    ///
+    /// If the body contains neither `$ARGUMENTS` nor any matching `$N`
+    /// placeholder and arguments are non-empty, appends
+    /// `ARGUMENTS: <value>` to the end.
     pub fn interpolate(self, arguments: Option<&str>) -> String {
         let args = arguments.unwrap_or_default();
-        if self.0.contains("$ARGUMENTS") {
-            self.0.replace("$ARGUMENTS", args)
-        } else if !args.is_empty() {
-            format!("{}\n\nARGUMENTS: {args}", self.0)
+        let positional = shell_split(args);
+
+        let mut result = self.0;
+        let mut had_substitution = false;
+
+        if result.contains("$ARGUMENTS") {
+            result = result.replace("$ARGUMENTS", args);
+            had_substitution = true;
+        }
+
+        // Replace $N from highest index down so $10 isn't eaten by $1.
+        for i in (0..positional.len()).rev() {
+            let placeholder = format!("${i}");
+            if result.contains(&placeholder) {
+                result = result.replace(&placeholder, &positional[i]);
+                had_substitution = true;
+            }
+        }
+
+        if !had_substitution && !args.is_empty() {
+            format!("{result}\n\nARGUMENTS: {args}")
         } else {
-            self.0
+            result
         }
     }
 }
@@ -125,6 +148,173 @@ impl SkillBody {
 impl From<SkillBody> for String {
     fn from(sb: SkillBody) -> Self {
         sb.0
+    }
+}
+
+/// Shell-style argument splitting with double and single quote support.
+///
+/// - Double quotes: content preserved literally, backslash escapes the
+///   next character (`\"` → `"`).
+/// - Single quotes: content preserved literally, no escaping.
+/// - Unquoted whitespace delimits arguments.
+fn shell_split(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => loop {
+                match chars.next() {
+                    Some('\\') => {
+                        if let Some(next) = chars.next() {
+                            current.push(next);
+                        }
+                    }
+                    Some('"') | None => break,
+                    Some(c) => current.push(c),
+                }
+            },
+            '\'' => loop {
+                match chars.next() {
+                    Some('\'') | None => break,
+                    Some(c) => current.push(c),
+                }
+            },
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- shell_split ---------------------------------------------------------
+
+    #[test]
+    fn shell_split_simple() {
+        assert_eq!(shell_split("staging prod"), vec!["staging", "prod"]);
+    }
+
+    #[test]
+    fn shell_split_double_quotes() {
+        assert_eq!(
+            shell_split(r#""hello world" foo"#),
+            vec!["hello world", "foo"]
+        );
+    }
+
+    #[test]
+    fn shell_split_single_quotes() {
+        assert_eq!(shell_split("'hello world' foo"), vec!["hello world", "foo"]);
+    }
+
+    #[test]
+    fn shell_split_escaped_quote() {
+        assert_eq!(
+            shell_split(r#""say \"hi\"" bar"#),
+            vec![r#"say "hi""#, "bar"]
+        );
+    }
+
+    #[test]
+    fn shell_split_empty() {
+        assert!(shell_split("").is_empty());
+        assert!(shell_split("   ").is_empty());
+    }
+
+    #[test]
+    fn shell_split_mixed_quotes() {
+        assert_eq!(
+            shell_split(r#"plain "double quoted" 'single quoted'"#),
+            vec!["plain", "double quoted", "single quoted"]
+        );
+    }
+
+    // -- SkillBody::interpolate ----------------------------------------------
+
+    #[test]
+    fn interpolate_replaces_arguments_placeholder() {
+        let body = SkillBody::new("Deploy $ARGUMENTS to production.".into());
+        assert_eq!(
+            body.interpolate(Some("staging")),
+            "Deploy staging to production."
+        );
+    }
+
+    #[test]
+    fn interpolate_appends_when_no_placeholder() {
+        let body = SkillBody::new("Run the deploy process.".into());
+        assert_eq!(
+            body.interpolate(Some("staging")),
+            "Run the deploy process.\n\nARGUMENTS: staging"
+        );
+    }
+
+    #[test]
+    fn interpolate_noop_when_no_args_and_no_placeholder() {
+        let body = SkillBody::new("Run the deploy process.".into());
+        assert_eq!(body.interpolate(None), "Run the deploy process.");
+    }
+
+    #[test]
+    fn interpolate_replaces_multiple_arguments_occurrences() {
+        let body = SkillBody::new("First: $ARGUMENTS, second: $ARGUMENTS".into());
+        assert_eq!(body.interpolate(Some("val")), "First: val, second: val");
+    }
+
+    #[test]
+    fn interpolate_positional_params() {
+        let body = SkillBody::new("Deploy $0 to $1.".into());
+        assert_eq!(
+            body.interpolate(Some("myapp production")),
+            "Deploy myapp to production."
+        );
+    }
+
+    #[test]
+    fn interpolate_positional_with_quotes() {
+        let body = SkillBody::new("Say $0 to $1.".into());
+        assert_eq!(
+            body.interpolate(Some(r#""hello world" bob"#)),
+            "Say hello world to bob."
+        );
+    }
+
+    #[test]
+    fn interpolate_mixed_arguments_and_positional() {
+        let body = SkillBody::new("All: $ARGUMENTS, first: $0, second: $1.".into());
+        assert_eq!(
+            body.interpolate(Some("foo bar")),
+            "All: foo bar, first: foo, second: bar."
+        );
+    }
+
+    #[test]
+    fn interpolate_unmatched_positional_left_as_is() {
+        let body = SkillBody::new("$0 and $1 and $2.".into());
+        assert_eq!(
+            body.interpolate(Some("only-one")),
+            "only-one and $1 and $2."
+        );
+    }
+
+    #[test]
+    fn interpolate_high_positional_index() {
+        let args = "a b c d e f g h i j k";
+        let result = SkillBody::new("$0 $1 $10".into()).interpolate(Some(args));
+        assert_eq!(result, "a b k");
     }
 }
 

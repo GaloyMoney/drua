@@ -315,38 +315,3 @@ impl Skills {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn interpolate_replaces_arguments_placeholder() {
-        let body = SkillBody::new("Deploy $ARGUMENTS to production.".to_string());
-        assert_eq!(
-            body.interpolate(Some("staging")),
-            "Deploy staging to production."
-        );
-    }
-
-    #[test]
-    fn interpolate_appends_when_no_placeholder() {
-        let body = SkillBody::new("Run the deploy process.".to_string());
-        assert_eq!(
-            body.interpolate(Some("staging")),
-            "Run the deploy process.\n\nARGUMENTS: staging"
-        );
-    }
-
-    #[test]
-    fn interpolate_noop_when_no_args_and_no_placeholder() {
-        let body = SkillBody::new("Run the deploy process.".to_string());
-        assert_eq!(body.interpolate(None), "Run the deploy process.");
-    }
-
-    #[test]
-    fn interpolate_replaces_multiple_occurrences() {
-        let body = SkillBody::new("First: $ARGUMENTS, second: $ARGUMENTS".to_string());
-        assert_eq!(body.interpolate(Some("val")), "First: val, second: val");
-    }
-}
