@@ -87,6 +87,8 @@ pub enum RuntimeFile {
     },
     GitKeep {
         workspace_name: String,
+        /// Subdirectory under the workspace folder (e.g. `"notes"`, `"skills"`).
+        subdir: String,
     },
 }
 
@@ -228,8 +230,11 @@ impl RuntimeFile {
                 Some(ws) => format!("runtime/workspaces/{}/skills/{}-{}.md", ws, slug, id_prefix),
                 None => format!("runtime/skills/{}-{}.md", slug, id_prefix),
             },
-            RuntimeFile::GitKeep { workspace_name } => {
-                format!("runtime/workspaces/{}/notes/.gitkeep", workspace_name)
+            RuntimeFile::GitKeep {
+                workspace_name,
+                subdir,
+            } => {
+                format!("runtime/workspaces/{workspace_name}/{subdir}/.gitkeep")
             }
         }
     }
@@ -282,8 +287,11 @@ impl RuntimeFile {
             RuntimeFile::Skill {
                 slug, id_prefix, ..
             } => format!("skill: {}-{}", slug, id_prefix),
-            RuntimeFile::GitKeep { workspace_name } => {
-                format!("workspace: scaffold {}", workspace_name)
+            RuntimeFile::GitKeep {
+                workspace_name,
+                subdir,
+            } => {
+                format!("workspace: scaffold {workspace_name}/{subdir}")
             }
         }
     }

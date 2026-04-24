@@ -138,6 +138,7 @@ pub struct SkillView {
     pub description: String,
     pub body: String,
     pub created_at: String,
+    pub is_global: bool,
 }
 
 #[derive(Template, WebTemplate)]
@@ -147,6 +148,7 @@ pub struct WorkspaceSkillsPageTemplate {
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub skills: Vec<SkillView>,
+    pub library_repo_url: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]

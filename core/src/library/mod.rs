@@ -117,22 +117,25 @@ impl Library {
         Ok(())
     }
 
-    /// Queue a `.gitkeep` file for a new workspace so the folder structure
-    /// is committed to the library repo.
+    /// Queue `.gitkeep` files for a new workspace so the folder structure
+    /// (notes/ and skills/) is committed to the library repo.
     #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
     pub async fn sync_workspace_folder_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
         workspace_name: &str,
     ) -> Result<(), LibraryError> {
-        let file = RuntimeFile::GitKeep {
-            workspace_name: workspace_name.to_string(),
-        };
-        let idempotency_key = format!("gitkeep:{workspace_name}");
-        let _ = self
-            .inbox
-            .persist_and_queue_job_in_op(op, idempotency_key, &file)
-            .await?;
+        for subdir in ["notes", "skills"] {
+            let file = RuntimeFile::GitKeep {
+                workspace_name: workspace_name.to_string(),
+                subdir: subdir.to_string(),
+            };
+            let idempotency_key = format!("gitkeep:{workspace_name}:{subdir}");
+            let _ = self
+                .inbox
+                .persist_and_queue_job_in_op(op, idempotency_key, &file)
+                .await?;
+        }
         Ok(())
     }
 

@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::auth::error::AuthorizationError;
+
 use super::repo::{SkillCreateError, SkillFindError, SkillModifyError, SkillQueryError};
 
 #[derive(Error, Debug)]
@@ -20,4 +22,6 @@ pub enum SkillError {
     BuildEntity(String),
     #[error("SkillError - Library: {0}")]
     Library(#[from] crate::library::LibraryError),
+    #[error("SkillError - Authorization: {0}")]
+    Authorization(#[from] AuthorizationError),
 }

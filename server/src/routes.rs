@@ -542,6 +542,7 @@ fn skill_to_view(s: &domain::skill::Skill) -> SkillView {
         description: s.description.clone(),
         body: s.body.clone(),
         created_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+        is_global: s.workspace_id.is_none(),
     }
 }
 
@@ -568,7 +569,7 @@ async fn workspace_skills_page(
     let skills = state
         .app
         .skills()
-        .list_by_workspace_id(&sub, workspace_id)
+        .list_for_workspace(&sub, workspace_id)
         .await
         .unwrap_or_default();
 
@@ -577,6 +578,7 @@ async fn workspace_skills_page(
         lead_agent,
         agents: agent_views,
         skills: skills.iter().map(skill_to_view).collect(),
+        library_repo_url: state.library_repo_url.clone(),
     }
     .into_response()
 }
@@ -600,7 +602,12 @@ async fn workspace_skill_detail(
     };
 
     let skill_id = SkillId::from(skill_id);
-    let skill = match state.app.skills().find_by_id(&sub, skill_id).await {
+    let skill = match state
+        .app
+        .skills()
+        .find_by_id(&sub, skill_id, workspace_id)
+        .await
+    {
         Ok(s) => s,
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
     };

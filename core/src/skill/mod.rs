@@ -45,7 +45,13 @@ impl Skills {
     }
 
     #[instrument(name = "skill.find_by_id", skip_all)]
-    pub async fn find_by_id(&self, _sub: &AuthSubject, id: SkillId) -> Result<Skill, SkillError> {
+    pub async fn find_by_id(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        workspace_id: WorkspaceId,
+    ) -> Result<Skill, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, Some(id)))?;
         let skill = self.repo.find_by_id(id).await?;
         Ok(skill)
     }
@@ -126,9 +132,10 @@ impl Skills {
     #[instrument(name = "skill.list_by_workspace_id", skip_all)]
     pub async fn list_by_workspace_id(
         &self,
-        _sub: &AuthSubject,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Skill>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
@@ -145,9 +152,19 @@ impl Skills {
     }
 
     /// List skills visible to a workspace: workspace-scoped + global.
-    /// Used by system prompt builder and skills context injection.
-    #[instrument(name = "skill.list_for_workspace", skip(self))]
-    async fn list_for_workspace(
+    /// Used by the web UI and other authenticated contexts.
+    #[instrument(name = "skill.list_for_workspace", skip(self, sub))]
+    pub async fn list_for_workspace(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<Skill>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
+        self.list_for_workspace_inner(workspace_id).await
+    }
+
+    /// Shared listing logic — merges workspace-scoped + global skills.
+    async fn list_for_workspace_inner(
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Skill>, SkillError> {
@@ -217,7 +234,7 @@ impl Skills {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Option<String>, SkillError> {
-        let db_skills = self.list_for_workspace(workspace_id).await?;
+        let db_skills = self.list_for_workspace_inner(workspace_id).await?;
 
         // Collect sandbox-exported skills, dedup against DB skills.
         let sandbox_skills = match self

@@ -110,7 +110,7 @@
 
 {% block content %}
 <a href="/workspaces/{{ workspace.id }}/skills" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Skills</a>
-<h2>{{ skill.name }}</h2>
+<h2>{{ skill.name }}{% if skill.is_global %} <mark style="font-size: 0.75rem; padding: 0.1rem 0.4rem; vertical-align: middle;">global</mark>{% endif %}</h2>
 
 <p>{{ skill.description }}</p>
 

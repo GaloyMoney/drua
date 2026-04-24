@@ -33,9 +33,10 @@ impl SkillRepo {
 
     /// List all global skills (workspace_id IS NULL).
     ///
-    /// Cannot use `list_for_workspace_id_by_created_at(None)` because the
-    /// macro generates `COALESCE(workspace_id = $1, $1 IS NULL)` which
-    /// matches ALL rows when `$1` is NULL, not just NULL workspace_id rows.
+    /// Uses a raw query because es-entity 0.10.34's generated
+    /// `list_for_workspace_id_by_created_at(None)` matches ALL rows when the
+    /// parameter is NULL. Fixed in es-entity 0.10.35 but blocked on the `job`
+    /// crate being rebuilt against 0.10.35.
     pub async fn list_global(&self) -> Result<Vec<Skill>, SkillFindError> {
         let (skills, _) = es_query!(
             "SELECT id, created_at FROM skills WHERE workspace_id IS NULL AND deleted = FALSE ORDER BY created_at ASC LIMIT $1",
