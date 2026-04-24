@@ -353,18 +353,12 @@ impl Skills {
         };
 
         if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
-            if existing.file_hash.as_ref() == Some(&file_hash) {
-                tracing::debug!(id = %doc_id, "skill file_hash unchanged, skipping");
-                return Ok(());
-            }
             if existing
                 .update(
                     Some(name.clone()),
                     Some(description.clone()),
                     Some(body.clone()),
-                    // @@ i don't think file_hash should be an Optional arg... we can use it to
-                    // check idempotency
-                    Some(file_hash),
+                    file_hash,
                 )
                 .did_execute()
             {
@@ -384,11 +378,9 @@ impl Skills {
             if let Some(ws_name) = workspace_name {
                 builder = builder.workspace_name(ws_name);
             }
-            // @@ should be mandatory when its a new file
-            // should error when its not set
-            if let Some(path) = original_path {
-                builder = builder.original_path(path);
-            }
+            builder = builder.original_path(original_path.ok_or_else(|| {
+                SkillError::BuildEntity("original_path required for library import".into())
+            })?);
             let new = builder
                 .build()
                 .map_err(|e| SkillError::BuildEntity(e.to_string()))?;

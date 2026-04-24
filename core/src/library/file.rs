@@ -2,7 +2,7 @@ use sha1::{Digest, Sha1};
 
 use crate::primitives::{NoteId, SkillId, WorkspaceId};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileHash(String);
 
 impl GitFileHash {
@@ -327,8 +327,8 @@ pub struct ParsedSkillFile {
 ///
 /// `path` is the file's relative path in the library repo (e.g.
 /// `runtime/skills/my-skill-abcd1234.md`). The function derives
-/// `workspace_name` from the path and, when the file needs rewriting,
-/// stores the path as `original_path` on the `RuntimeFile`.
+/// `workspace_name` from the path and always stores `path` as
+/// `original_path` on the returned `RuntimeFile`.
 ///
 /// Handles three formats:
 /// 1. **Full frontmatter** (as produced by `RuntimeFile::Skill::content()`) —
@@ -349,9 +349,7 @@ pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile
         parse_without_frontmatter(content, workspace_name)?
     };
 
-    if parsed.needs_rewrite {
-        parsed.file.set_original_path(path.to_string());
-    }
+    parsed.file.set_original_path(path.to_string());
 
     Some(parsed)
 }
@@ -530,7 +528,7 @@ mod tests {
                 assert_eq!(body, "#!/bin/bash\necho deploy");
                 assert_eq!(created_at, "2025-01-01T00:00:00Z");
                 assert_eq!(updated_at, "2025-06-01T00:00:00Z");
-                assert!(original_path.is_none());
+                assert_eq!(original_path.as_deref(), Some(path.as_str()));
             }
             _ => panic!("expected Skill variant"),
         }

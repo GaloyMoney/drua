@@ -44,7 +44,7 @@ pub struct Skill {
     pub description: String,
     pub body: String,
     #[builder(default)]
-    pub(crate) file_hash: Option<GitFileHash>,
+    pub(crate) file_hash: GitFileHash,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     events: EntityEvents<SkillEvent>,
@@ -87,9 +87,11 @@ impl Skill {
         name: Option<String>,
         description: Option<String>,
         body: Option<String>,
-        file_hash: Option<GitFileHash>,
+        file_hash: GitFileHash,
     ) -> Idempotent<()> {
-        // @@ actually check idempotency (based on file hash)
+        if self.file_hash == file_hash {
+            return Idempotent::AlreadyApplied;
+        }
         if let Some(ref n) = name {
             self.name = n.clone();
         }
@@ -99,14 +101,12 @@ impl Skill {
         if let Some(ref b) = body {
             self.body = b.clone();
         }
-        if let Some(ref h) = file_hash {
-            self.file_hash = Some(h.clone());
-        }
+        self.file_hash = file_hash.clone();
         self.events.push(SkillEvent::Updated {
             name,
             description,
             body,
-            file_hash,
+            file_hash: Some(file_hash),
         });
         Idempotent::Executed(())
     }
@@ -360,7 +360,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
-                        .file_hash(file_hash.clone())
+                        .file_hash(file_hash.clone().unwrap_or_default())
                         .original_path(original_path.clone());
                 }
 
@@ -380,7 +380,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                         builder = builder.body(body.clone());
                     }
                     if let Some(file_hash) = file_hash {
-                        builder = builder.file_hash(Some(file_hash.clone()));
+                        builder = builder.file_hash(file_hash.clone());
                     }
                 }
             }
