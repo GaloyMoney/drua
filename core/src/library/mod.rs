@@ -178,11 +178,16 @@ impl Library {
             // workspace_id is not known here — the caller resolves it from
             // the workspace name. Pass None and let the sync job fill it in.
             match file::parse_skill_markdown(content, None, ws_name) {
-                Some(parsed) => files.push(SkillFileChange {
-                    file: parsed.file,
-                    original_path: path.clone(),
-                    needs_rewrite: parsed.needs_rewrite,
-                }),
+                Some(mut parsed) => {
+                    if parsed.needs_rewrite {
+                        parsed.file.set_original_path(path.clone());
+                    }
+                    files.push(SkillFileChange {
+                        file: parsed.file,
+                        original_path: path.clone(),
+                        needs_rewrite: parsed.needs_rewrite,
+                    });
+                }
                 None => {
                     tracing::warn!(path = %path, "failed to parse skill markdown, skipping");
                 }

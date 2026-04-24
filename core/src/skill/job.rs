@@ -157,20 +157,15 @@ impl SyncSkillsFromLibraryRunner {
         }
 
         // Batch upsert all skills in a single transaction.
-        // For files that need renaming (needs_rewrite), pass original_path
-        // so the entity's post-persist hook propagates it through the
-        // WriteToRuntime pipeline which handles the rename on disk.
+        // Batch upsert — original_path is already set on the RuntimeFile
+        // for files that need renaming. The post-persist hook propagates it
+        // through the WriteToRuntime pipeline which handles the rename.
         let mut op = self.skills.begin_op().await?;
         for (change, ws_id) in &resolved {
             let file_hash = change.file.file_hash();
-            let original_path = if change.needs_rewrite {
-                Some(change.original_path.clone())
-            } else {
-                None
-            };
             if let Err(e) = self
                 .skills
-                .upsert_from_library_in_op(&mut op, &change.file, *ws_id, file_hash, original_path)
+                .upsert_from_library_in_op(&mut op, &change.file, *ws_id, file_hash)
                 .await
             {
                 tracing::warn!(error = %e, "failed to upsert skill from library, skipping");

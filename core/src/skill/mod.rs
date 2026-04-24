@@ -321,7 +321,7 @@ impl Skills {
 
     /// Upsert a skill from a library file within an existing transaction.
     ///
-    /// When `original_path` is provided the entity stores it so the
+    /// When the file carries an `original_path` the entity stores it so the
     /// `WriteToRuntime` job can remove the old file after writing the
     /// canonical one.
     #[instrument(name = "skill.upsert_from_library_in_op", skip_all)]
@@ -331,17 +331,24 @@ impl Skills {
         file: &RuntimeFile,
         workspace_id: Option<WorkspaceId>,
         file_hash: GitFileHash,
-        original_path: Option<String>,
     ) -> Result<(), SkillError> {
-        let (doc_id, name, description, body, workspace_name) = match file {
+        let (doc_id, name, description, body, workspace_name, original_path) = match file {
             RuntimeFile::Skill {
                 doc_id,
                 name,
                 description,
                 body,
                 workspace_name,
+                original_path,
                 ..
-            } => (*doc_id, name, description, body, workspace_name.clone()),
+            } => (
+                *doc_id,
+                name,
+                description,
+                body,
+                workspace_name.clone(),
+                original_path.clone(),
+            ),
             _ => return Ok(()),
         };
 

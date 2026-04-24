@@ -289,10 +289,17 @@ impl RuntimeFile {
     }
 
     /// The original file path before canonicalisation, if set.
-    pub(super) fn original_path(&self) -> Option<&str> {
+    pub(crate) fn original_path(&self) -> Option<&str> {
         match self {
             RuntimeFile::Skill { original_path, .. } => original_path.as_deref(),
             _ => None,
+        }
+    }
+
+    /// Set the original file path (for files that need renaming after import).
+    pub(crate) fn set_original_path(&mut self, path: String) {
+        if let RuntimeFile::Skill { original_path, .. } = self {
+            *original_path = Some(path);
         }
     }
 
