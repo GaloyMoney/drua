@@ -14,6 +14,8 @@ pub enum SkillError {
     Query(#[from] SkillQueryError),
     #[error("SkillError - SandboxLookup: {0}")]
     SandboxLookup(String),
+    #[error("SkillError - BuildEntity: {0}")]
+    BuildEntity(String),
     #[error("SkillError - Library: {0}")]
     Library(#[from] crate::library::LibraryError),
 }

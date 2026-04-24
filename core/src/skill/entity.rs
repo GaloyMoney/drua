@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use crate::library::GitFileHash;
 use crate::primitives::*;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -16,11 +17,15 @@ pub enum SkillEvent {
         name: String,
         description: String,
         body: String,
+        #[serde(default)]
+        file_hash: Option<GitFileHash>,
     },
     Updated {
         name: Option<String>,
         description: Option<String>,
         body: Option<String>,
+        #[serde(default)]
+        file_hash: Option<GitFileHash>,
     },
 }
 
@@ -35,6 +40,8 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
+    #[builder(default)]
+    pub(crate) file_hash: Option<GitFileHash>,
     events: EntityEvents<SkillEvent>,
 }
 
@@ -74,6 +81,7 @@ impl Skill {
         name: Option<String>,
         description: Option<String>,
         body: Option<String>,
+        file_hash: Option<GitFileHash>,
     ) -> Idempotent<()> {
         if let Some(ref n) = name {
             self.name = n.clone();
@@ -84,10 +92,14 @@ impl Skill {
         if let Some(ref b) = body {
             self.body = b.clone();
         }
+        if let Some(ref h) = file_hash {
+            self.file_hash = Some(h.clone());
+        }
         self.events.push(SkillEvent::Updated {
             name,
             description,
             body,
+            file_hash,
         });
         Idempotent::Executed(())
     }
@@ -331,6 +343,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                     name,
                     description,
                     body,
+                    file_hash,
                 } => {
                     builder = builder
                         .id(*id)
@@ -338,13 +351,15 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .workspace_name(workspace_name.clone())
                         .name(name.clone())
                         .description(description.clone())
-                        .body(body.clone());
+                        .body(body.clone())
+                        .file_hash(file_hash.clone());
                 }
 
                 SkillEvent::Updated {
                     name,
                     description,
                     body,
+                    file_hash,
                 } => {
                     if let Some(name) = name {
                         builder = builder.name(name.clone());
@@ -354,6 +369,9 @@ impl TryFromEvents<SkillEvent> for Skill {
                     }
                     if let Some(body) = body {
                         builder = builder.body(body.clone());
+                    }
+                    if let Some(file_hash) = file_hash {
+                        builder = builder.file_hash(Some(file_hash.clone()));
                     }
                 }
             }
@@ -378,6 +396,8 @@ pub struct NewSkill {
     pub(super) description: String,
     #[builder(setter(into))]
     pub(super) body: String,
+    #[builder(default)]
+    pub(super) file_hash: Option<GitFileHash>,
 }
 
 impl NewSkill {
@@ -397,6 +417,7 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 name: self.name,
                 description: self.description,
                 body: self.body,
+                file_hash: self.file_hash,
             }],
         )
     }

@@ -173,6 +173,19 @@ impl Workspaces {
     }
 }
 
+impl Workspaces {
+    /// Look up a workspace by name (internal, no auth check).
+    /// Returns `Ok(None)` when no workspace matches.
+    #[instrument(name = "domain.workspace.find_by_name", skip(self))]
+    pub(crate) async fn find_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<Workspace>, WorkspaceError> {
+        let all = self.repo.list_all().await?;
+        Ok(all.into_iter().find(|ws| ws.name == name))
+    }
+}
+
 fn build_new_workspace(
     lead_agent_id: AgentId,
     name: impl Into<String>,

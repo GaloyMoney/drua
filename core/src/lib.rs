@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod agent;
 pub mod audit;
 pub mod auth;
@@ -213,6 +215,22 @@ impl App {
             Arc::clone(&audit),
             Arc::clone(&workspaces),
         ));
+
+        // Reverse-sync: poll the library repo for skill files added/modified
+        // via git and upsert them into the DB.
+        {
+            use skill::job::{SyncSkillsFromLibraryConfig, SyncSkillsFromLibraryJobInitializer};
+            let sync_init = SyncSkillsFromLibraryJobInitializer::new(
+                library.clone(),
+                skills.as_ref().clone(),
+                workspaces.as_ref().clone(),
+            );
+            let sync_spawner = jobs.add_initializer(sync_init);
+            sync_spawner
+                .spawn_unique(job::JobId::new(), SyncSkillsFromLibraryConfig {})
+                .await
+                .map_err(|e| AppError::Job(e.to_string()))?;
+        }
 
         jobs.start_poll()
             .await

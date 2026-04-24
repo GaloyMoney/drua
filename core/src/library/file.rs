@@ -267,6 +267,94 @@ impl RuntimeFile {
     }
 }
 
+/// Parse a skill markdown file (as produced by `RuntimeFile::Skill::content()`)
+/// back into a `RuntimeFile::Skill` variant.
+///
+/// `workspace_id` and `workspace_name` are resolved by the caller from the
+/// file path — they are not encoded in the markdown itself.
+///
+/// Returns `None` if the content cannot be parsed (missing frontmatter, id, etc.).
+pub fn parse_skill_markdown(
+    content: &str,
+    workspace_id: Option<WorkspaceId>,
+    workspace_name: Option<String>,
+) -> Option<RuntimeFile> {
+    // 1. Extract frontmatter between --- delimiters
+    let content = content.trim();
+    let rest = content.strip_prefix("---")?;
+    let (frontmatter, after_fm) = rest.split_once("\n---")?;
+
+    // 2. Parse frontmatter fields
+    let mut id_str = None;
+    let mut created_at = String::new();
+    let mut updated_at = String::new();
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("id:") {
+            id_str = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("created:") {
+            created_at = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("updated:") {
+            updated_at = val.trim().to_string();
+        }
+    }
+
+    let id_str = id_str?;
+    let skill_id: SkillId = id_str.parse::<uuid::Uuid>().ok()?.into();
+
+    // 3. After frontmatter: expect `\n\n# {name}\n\n{description}\n\n---\n\n{body}\n`
+    let after_fm = after_fm.trim_start_matches('\n');
+
+    // Extract name from `# heading`
+    let name_line = after_fm.lines().next()?;
+    let name = name_line.strip_prefix("# ")?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    // Everything after the heading line
+    let after_name = &after_fm[name_line.len()..].trim_start_matches('\n');
+
+    // Split on the body separator `---`
+    let (description, body) = if let Some((desc, bod)) = after_name.split_once("\n---\n") {
+        (desc.trim().to_string(), bod.trim().to_string())
+    } else {
+        // No body separator — treat everything as description
+        (after_name.trim().to_string(), String::new())
+    };
+
+    let slug = slugify(&name);
+    let id_prefix = skill_id.to_string()[..8].to_string();
+
+    Some(RuntimeFile::Skill {
+        doc_id: skill_id,
+        workspace_id,
+        workspace_name,
+        name,
+        description,
+        body,
+        created_at,
+        updated_at,
+        slug,
+        id_prefix,
+    })
+}
+
+/// Extract the workspace name from a skill file's relative path.
+///
+/// - `runtime/workspaces/{ws_name}/skills/*.md` → `Some(ws_name)`
+/// - `runtime/skills/*.md` → `None` (global skill)
+pub fn workspace_name_from_skill_path(relative_path: &str) -> Option<String> {
+    let parts: Vec<&str> = relative_path.split('/').collect();
+    // runtime/workspaces/{ws_name}/skills/{file}.md
+    if parts.len() >= 5 && parts[0] == "runtime" && parts[1] == "workspaces" && parts[3] == "skills"
+    {
+        Some(parts[2].to_string())
+    } else {
+        None
+    }
+}
+
 fn slugify(title: &str) -> String {
     title
         .to_lowercase()
@@ -277,4 +365,129 @@ fn slugify(title: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_skill_markdown_roundtrip() {
+        let skill_id = SkillId::new();
+        let ws_id = WorkspaceId::new();
+        let original = RuntimeFile::for_skill(
+            skill_id,
+            Some(ws_id),
+            Some("my-workspace"),
+            "Deploy Script",
+            "Deploys the app to production",
+            "#!/bin/bash\necho deploy",
+            "2025-01-01T00:00:00Z",
+            "2025-06-01T00:00:00Z",
+        );
+
+        let content = original.content();
+        let parsed = parse_skill_markdown(&content, Some(ws_id), Some("my-workspace".into()))
+            .expect("should parse");
+
+        match parsed {
+            RuntimeFile::Skill {
+                doc_id,
+                workspace_id,
+                workspace_name,
+                name,
+                description,
+                body,
+                created_at,
+                updated_at,
+                ..
+            } => {
+                assert_eq!(doc_id, skill_id);
+                assert_eq!(workspace_id, Some(ws_id));
+                assert_eq!(workspace_name.as_deref(), Some("my-workspace"));
+                assert_eq!(name, "Deploy Script");
+                assert_eq!(description, "Deploys the app to production");
+                assert_eq!(body, "#!/bin/bash\necho deploy");
+                assert_eq!(created_at, "2025-01-01T00:00:00Z");
+                assert_eq!(updated_at, "2025-06-01T00:00:00Z");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_markdown_global() {
+        let skill_id = SkillId::new();
+        let original = RuntimeFile::for_skill(
+            skill_id,
+            None,
+            None,
+            "Global Skill",
+            "A global skill",
+            "body content",
+            "",
+            "",
+        );
+
+        let content = original.content();
+        let parsed = parse_skill_markdown(&content, None, None).expect("should parse global skill");
+
+        match parsed {
+            RuntimeFile::Skill {
+                doc_id,
+                workspace_id,
+                name,
+                ..
+            } => {
+                assert_eq!(doc_id, skill_id);
+                assert_eq!(workspace_id, None);
+                assert_eq!(name, "Global Skill");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_markdown_returns_none_for_bad_input() {
+        assert!(parse_skill_markdown("not markdown", None, None).is_none());
+        assert!(parse_skill_markdown("---\n---\n\n# Name\n", None, None).is_none());
+        assert!(parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", None, None).is_none());
+    }
+
+    #[test]
+    fn parse_skill_hash_matches_original() {
+        let skill_id = SkillId::new();
+        let original = RuntimeFile::for_skill(
+            skill_id,
+            None,
+            None,
+            "Test",
+            "desc",
+            "body",
+            "2025-01-01T00:00:00Z",
+            "2025-01-01T00:00:00Z",
+        );
+        let original_hash = original.file_hash();
+
+        let content = original.content();
+        let parsed = parse_skill_markdown(&content, None, None).unwrap();
+        let parsed_hash = parsed.file_hash();
+
+        assert_eq!(original_hash, parsed_hash);
+    }
+
+    #[test]
+    fn workspace_name_from_skill_path_workspace_scoped() {
+        let path = "runtime/workspaces/my-ws/skills/deploy-script-abc12345.md";
+        assert_eq!(
+            workspace_name_from_skill_path(path),
+            Some("my-ws".to_string())
+        );
+    }
+
+    #[test]
+    fn workspace_name_from_skill_path_global() {
+        let path = "runtime/skills/deploy-script-abc12345.md";
+        assert_eq!(workspace_name_from_skill_path(path), None);
+    }
 }

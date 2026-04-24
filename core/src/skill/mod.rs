@@ -1,12 +1,13 @@
 mod entity;
 pub mod error;
+pub(crate) mod job;
 pub(crate) mod repo;
 
 use std::sync::Arc;
 
 use tracing::instrument;
 
-use crate::library::{DocType, Library, SearchResult};
+use crate::library::{DocType, GitFileHash, Library, RuntimeFile, SearchResult};
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 pub use entity::*;
@@ -303,6 +304,78 @@ impl Skills {
 
         buf.push_str(footer);
         Ok(Some(buf))
+    }
+
+    /// Upsert a skill from a library git file (reverse sync).
+    ///
+    /// - If the skill already exists and its `file_hash` matches → skip.
+    /// - If it exists and the hash differs → update name/description/body.
+    /// - If it doesn't exist → create a new entity.
+    ///
+    /// The post-persist hook fires `library.write_in_op()` (embedding +
+    /// WriteToRuntime), but the WriteToRuntime runner will see the file hash
+    /// on disk already matches and skip the write.
+    #[instrument(name = "skill.upsert_from_library", skip_all)]
+    pub(crate) async fn upsert_from_library(
+        &self,
+        file: &RuntimeFile,
+        workspace_id: Option<WorkspaceId>,
+        file_hash: GitFileHash,
+    ) -> Result<(), SkillError> {
+        let (doc_id, name, description, body, workspace_name) = match file {
+            RuntimeFile::Skill {
+                doc_id,
+                name,
+                description,
+                body,
+                workspace_name,
+                ..
+            } => (*doc_id, name, description, body, workspace_name.clone()),
+            _ => return Ok(()),
+        };
+
+        match self.repo.find_by_id(doc_id).await {
+            Ok(mut existing) => {
+                if existing.file_hash.as_ref() == Some(&file_hash) {
+                    tracing::debug!(id = %doc_id, "skill file_hash unchanged, skipping");
+                    return Ok(());
+                }
+                if existing
+                    .update(
+                        Some(name.clone()),
+                        Some(description.clone()),
+                        Some(body.clone()),
+                        Some(file_hash),
+                    )
+                    .did_execute()
+                {
+                    self.repo.update(&mut existing).await?;
+                }
+                tracing::info!(id = %doc_id, name = %name, "updated skill from library");
+            }
+            Err(e) if e.was_not_found() => {
+                let mut builder = NewSkill::builder()
+                    .id(doc_id)
+                    .name(name.clone())
+                    .description(description.clone())
+                    .body(body.clone())
+                    .file_hash(Some(file_hash));
+                if let Some(ws_id) = workspace_id {
+                    builder = builder.workspace_id(ws_id);
+                }
+                if let Some(ws_name) = workspace_name {
+                    builder = builder.workspace_name(ws_name);
+                }
+                let new = builder
+                    .build()
+                    .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+                self.repo.create(new).await?;
+                tracing::info!(id = %doc_id, name = %name, "created skill from library");
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        Ok(())
     }
 
     #[instrument(name = "skill.update", skip_all)]

@@ -14,7 +14,10 @@ use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
-pub use file::{DocType, GitFileHash, RuntimeFile, SearchableFields};
+pub use file::{
+    parse_skill_markdown, workspace_name_from_skill_path, DocType, GitFileHash, RuntimeFile,
+    SearchableFields,
+};
 pub use search::SearchResult;
 
 const LIBRARY_WRITE_JOB: &str = "library.write";
@@ -40,11 +43,20 @@ impl LibraryConfig {
     }
 }
 
+/// Skill files detected as new or changed since the last sync.
+pub struct SkillChanges {
+    /// The HEAD commit hash after pulling.
+    pub head_commit: String,
+    /// Parsed `RuntimeFile::Skill` variants for each changed file.
+    pub files: Vec<RuntimeFile>,
+}
+
 #[derive(Clone)]
 pub struct Library {
     search: SearchStore,
     inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
+    upstream: Upstream,
 }
 
 impl Library {
@@ -59,7 +71,7 @@ impl Library {
             Upstream::init(config.repo_url.as_deref(), config.repo_path(), github_app).await?;
         let search = SearchStore::new(pool);
 
-        let write_init = WriteToRuntimeJobInitializer::new(upstream);
+        let write_init = WriteToRuntimeJobInitializer::new(upstream.clone());
         let write_spawner = jobs.add_initializer(write_init);
 
         let handler = LibraryWriteHandler::new(search.clone(), embedder.clone(), write_spawner);
@@ -70,6 +82,7 @@ impl Library {
             search,
             inbox,
             embedder,
+            upstream,
         })
     }
 
@@ -112,6 +125,59 @@ impl Library {
             .persist_and_queue_job_in_op(op, idempotency_key, &file)
             .await?;
         Ok(())
+    }
+
+    /// Pull the library repo and find skill files that changed since
+    /// `last_sync_commit`. Returns parsed `RuntimeFile::Skill` variants.
+    ///
+    /// On first run (`last_sync_commit` is `None`), returns all skill files.
+    /// Returns an empty `files` vec when HEAD hasn't moved.
+    #[tracing::instrument(name = "library.find_new_skills", skip(self))]
+    pub async fn find_new_skills(
+        &self,
+        last_sync_commit: Option<&str>,
+    ) -> Result<SkillChanges, LibraryError> {
+        self.upstream.pull().await?;
+
+        let head = self.upstream.head_commit_hash().await?;
+        let head = match head {
+            Some(h) => h,
+            None => {
+                tracing::debug!("no commits in library repo");
+                return Ok(SkillChanges {
+                    head_commit: String::new(),
+                    files: Vec::new(),
+                });
+            }
+        };
+
+        if last_sync_commit == Some(head.as_str()) {
+            return Ok(SkillChanges {
+                head_commit: head,
+                files: Vec::new(),
+            });
+        }
+
+        let changed = self.upstream.changed_skill_files(last_sync_commit).await?;
+
+        let mut files = Vec::with_capacity(changed.len());
+        for (path, content) in &changed {
+            let ws_name = file::workspace_name_from_skill_path(path);
+            // workspace_id is not known here — the caller resolves it from
+            // the workspace name. Pass None and let the sync job fill it in.
+            let parsed = file::parse_skill_markdown(content, None, ws_name);
+            match parsed {
+                Some(f) => files.push(f),
+                None => {
+                    tracing::warn!(path = %path, "failed to parse skill markdown, skipping");
+                }
+            }
+        }
+
+        Ok(SkillChanges {
+            head_commit: head,
+            files,
+        })
     }
 
     /// Hybrid search across library documents.
