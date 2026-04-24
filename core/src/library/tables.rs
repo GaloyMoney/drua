@@ -8,5 +8,4 @@
 /// No `tbl_prefix` attribute → queries use the default (unprefixed) table
 /// names, identical to `obix::DefaultMailboxTables`.
 #[derive(Clone, obix_macros::MailboxTables)]
-#[obix(crate = "obix")]
 pub(super) struct LibraryMailboxTables;
