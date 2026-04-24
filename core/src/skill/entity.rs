@@ -12,6 +12,8 @@ pub enum SkillEvent {
     Initialized {
         id: SkillId,
         workspace_id: WorkspaceId,
+        #[serde(default)]
+        workspace_name: String,
         name: String,
         description: String,
         body: String,
@@ -28,6 +30,8 @@ pub enum SkillEvent {
 pub struct Skill {
     pub id: SkillId,
     pub workspace_id: WorkspaceId,
+    #[builder(default)]
+    pub workspace_name: String,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -39,6 +43,30 @@ impl Skill {
         self.events
             .entity_first_persisted_at()
             .expect("entity_first_persisted_at not found")
+    }
+
+    pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
+        let created_at = self
+            .events
+            .entity_first_persisted_at()
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        let updated_at = self
+            .events
+            .entity_last_modified_at()
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+
+        crate::library::RuntimeFile::for_skill(
+            self.id,
+            self.workspace_id,
+            &self.workspace_name,
+            &self.name,
+            &self.description,
+            &self.body,
+            &created_at,
+            &updated_at,
+        )
     }
 
     pub fn update(
@@ -80,6 +108,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                 SkillEvent::Initialized {
                     id,
                     workspace_id,
+                    workspace_name,
                     name,
                     description,
                     body,
@@ -87,6 +116,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
+                        .workspace_name(workspace_name.clone())
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone());
@@ -121,6 +151,8 @@ pub struct NewSkill {
     #[builder(setter(into))]
     pub(super) workspace_id: WorkspaceId,
     #[builder(setter(into))]
+    pub(super) workspace_name: String,
+    #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
     pub(super) description: String,
@@ -141,6 +173,7 @@ impl IntoEvents<SkillEvent> for NewSkill {
             [SkillEvent::Initialized {
                 id: self.id,
                 workspace_id: self.workspace_id,
+                workspace_name: self.workspace_name,
                 name: self.name,
                 description: self.description,
                 body: self.body,

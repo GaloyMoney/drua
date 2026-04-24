@@ -32,6 +32,8 @@ pub enum ToolSetsError {
     Tunnel(String),
     #[error("ToolSetsError - Note: {0}")]
     Note(String),
+    #[error("ToolSetsError - Skill: {0}")]
+    Skill(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

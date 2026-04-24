@@ -34,7 +34,7 @@ use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, TextEditor,
-    ToolSets, ToolSetsError, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
+    ToolSets, ToolSetsError, UseSkillTool, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 use user::Users;
 use workspace::Workspaces;
@@ -165,7 +165,7 @@ impl App {
         .map_err(|e| AppError::Library(e.to_string()))?;
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
-        let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes)));
+        let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes), library.clone()));
 
         // Sandbox-backed tools (Bash, TextEditor) need the sandboxes
         // service to resolve the running pod for an attached agent —
@@ -202,6 +202,7 @@ impl App {
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents), library.clone()));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
+        toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills), library.clone()));
 
         // Admin tools live behind progressive disclosure (search_tools →
         // describe_tool → call_tool) to declutter the top-level list_tools

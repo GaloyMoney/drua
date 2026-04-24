@@ -271,6 +271,15 @@ impl Agents {
             }
         }
 
+        // Inject workspace skills listing into the system prompt.
+        if let Ok(Some(skills_content)) =
+            self.skills.skills_context_for_workspace(workspace_id).await
+        {
+            system_blocks.push(session::message::SystemBlock::Text {
+                text: skills_content,
+            });
+        }
+
         let session_model_defaults = ModelDefaults {
             model: role_config.model,
             ..model_defaults.clone()

@@ -184,6 +184,7 @@ fn parse_tags(val: &serde_json::Value) -> Vec<String> {
 fn parse_doc_type(s: &str) -> DocType {
     match s {
         "note" => DocType::Note,
+        "skill" => DocType::Skill,
         _ => DocType::Note, // fallback
     }
 }

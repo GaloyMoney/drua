@@ -6,22 +6,37 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
+use crate::library::{DocType, Library, SearchResult};
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 pub use entity::*;
 pub use error::*;
 use repo::*;
 
+/// Maximum number of skills to include in the system prompt listing.
+const SKILLS_CONTEXT_MAX: usize = 30;
+
+/// Maximum characters for the skill context block.
+const SKILLS_CONTEXT_BUDGET: usize = 4000;
+
+/// Maximum characters per skill description in the listing.
+const MAX_DESCRIPTION_LEN: usize = 200;
+
 #[derive(Clone)]
 pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
+    library: Option<Library>,
 }
 
 impl Skills {
-    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>) -> Self {
-        let repo = SkillRepo::new(pool);
-        Self { repo, sandboxes }
+    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>, library: Library) -> Self {
+        let repo = SkillRepo::new(pool, library.clone());
+        Self {
+            repo,
+            sandboxes,
+            library: Some(library),
+        }
     }
 
     pub fn sandboxes(&self) -> &Sandboxes {
@@ -112,6 +127,103 @@ impl Skills {
         Ok(result.entities)
     }
 
+    /// List skills for a workspace (internal, no auth check).
+    /// Used by system prompt builder and skills context injection.
+    #[instrument(name = "skill.list_for_workspace", skip(self))]
+    async fn list_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<Skill>, SkillError> {
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                workspace_id,
+                query,
+                es_entity::ListDirection::Ascending,
+            )
+            .await?;
+        Ok(result.entities)
+    }
+
+    /// Hybrid search across workspace skills via the library index.
+    #[instrument(name = "skill.search", skip(self))]
+    pub async fn search(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, SkillError> {
+        let library = self
+            .library
+            .as_ref()
+            .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
+        library
+            .search(
+                uuid::Uuid::from(workspace_id),
+                query,
+                Some(DocType::Skill),
+                limit,
+            )
+            .await
+            .map_err(SkillError::from)
+    }
+
+    /// Build workspace skills context for system prompt injection.
+    ///
+    /// Returns a `<workspace_skills>` block listing available skills with
+    /// their descriptions, truncated to fit the character budget.
+    /// Returns `None` if the workspace has no skills.
+    #[instrument(name = "skill.skills_context_for_workspace", skip(self))]
+    pub async fn skills_context_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<String>, SkillError> {
+        let skills = self.list_for_workspace(workspace_id).await?;
+
+        if skills.is_empty() {
+            return Ok(None);
+        }
+
+        let header = "<workspace_skills>\n\
+             The following skills are available in this workspace. Use the \
+             `use_skill` tool to invoke them when relevant to the user's request.\n\
+             When the user types /name, always invoke that skill via use_skill.\n\
+             Use `use_skill` with action \"search\" to discover skills by topic.\n\n";
+        let footer = "</workspace_skills>";
+
+        let mut buf = String::from(header);
+        let mut remaining = SKILLS_CONTEXT_BUDGET
+            .saturating_sub(header.len())
+            .saturating_sub(footer.len());
+
+        for skill in skills.iter().take(SKILLS_CONTEXT_MAX) {
+            let desc: String = skill
+                .description
+                .chars()
+                .take(MAX_DESCRIPTION_LEN)
+                .collect();
+            let truncated = if desc.len() < skill.description.len() {
+                format!("{desc}...")
+            } else {
+                desc
+            };
+            let line = format!("- {} — {}\n", skill.name, truncated);
+            if line.len() > remaining {
+                buf.push_str("- ... (more skills available — use search to find them)\n");
+                break;
+            }
+            buf.push_str(&line);
+            remaining -= line.len();
+        }
+
+        buf.push_str(footer);
+        Ok(Some(buf))
+    }
+
     #[instrument(name = "skill.update", skip_all)]
     pub async fn update(&self, _sub: &AuthSubject, skill: &mut Skill) -> Result<(), SkillError> {
         self.repo.update(skill).await?;
@@ -134,5 +246,18 @@ impl Skills {
         let skill = self.repo.find_by_id(id).await?;
         self.repo.delete_in_op(op, skill).await?;
         Ok(())
+    }
+}
+
+impl Skills {
+    /// Constructor without library sync — for tests or contexts where
+    /// git-backed persistence is not needed.
+    pub fn new_without_library(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>) -> Self {
+        let repo = SkillRepo::new_without_library(pool);
+        Self {
+            repo,
+            sandboxes,
+            library: None,
+        }
     }
 }

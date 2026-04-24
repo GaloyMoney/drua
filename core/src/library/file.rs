@@ -1,6 +1,6 @@
 use sha1::{Digest, Sha1};
 
-use crate::primitives::{NoteId, WorkspaceId};
+use crate::primitives::{NoteId, SkillId, WorkspaceId};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileHash(String);
@@ -25,12 +25,14 @@ impl std::fmt::Display for GitFileHash {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
     Note,
+    Skill,
 }
 
 impl DocType {
     pub fn as_str(&self) -> &'static str {
         match self {
             DocType::Note => "note",
+            DocType::Skill => "skill",
         }
     }
 }
@@ -61,6 +63,18 @@ pub enum RuntimeFile {
         title: String,
         body: String,
         tags: Vec<String>,
+        created_at: String,
+        updated_at: String,
+        slug: String,
+        id_prefix: String,
+    },
+    Skill {
+        doc_id: SkillId,
+        workspace_id: WorkspaceId,
+        workspace_name: String,
+        name: String,
+        description: String,
+        body: String,
         created_at: String,
         updated_at: String,
         slug: String,
@@ -98,6 +112,32 @@ impl RuntimeFile {
         }
     }
 
+    /// Build a `RuntimeFile::Skill` from raw skill fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_skill(
+        skill_id: SkillId,
+        workspace_id: WorkspaceId,
+        workspace_name: &str,
+        name: &str,
+        description: &str,
+        body: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) -> Self {
+        RuntimeFile::Skill {
+            doc_id: skill_id,
+            workspace_id,
+            workspace_name: workspace_name.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            body: body.to_string(),
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
+            slug: slugify(name),
+            id_prefix: skill_id.to_string()[..8].to_string(),
+        }
+    }
+
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
             RuntimeFile::Note {
@@ -115,6 +155,20 @@ impl RuntimeFile {
                 body: body.clone(),
                 tags: tags.clone(),
             }),
+            RuntimeFile::Skill {
+                doc_id,
+                workspace_id,
+                name,
+                description,
+                ..
+            } => Some(SearchableFields {
+                doc_id: uuid::Uuid::from(*doc_id),
+                doc_type: DocType::Skill,
+                workspace_id: uuid::Uuid::from(*workspace_id),
+                title: name.clone(),
+                body: description.clone(),
+                tags: Vec::new(),
+            }),
             RuntimeFile::GitKeep { .. } => None,
         }
     }
@@ -128,6 +182,15 @@ impl RuntimeFile {
                 ..
             } => format!(
                 "runtime/workspaces/{}/notes/{}-{}.md",
+                workspace_name, slug, id_prefix
+            ),
+            RuntimeFile::Skill {
+                workspace_name,
+                slug,
+                id_prefix,
+                ..
+            } => format!(
+                "runtime/workspaces/{}/skills/{}-{}.md",
                 workspace_name, slug, id_prefix
             ),
             RuntimeFile::GitKeep { workspace_name } => {
@@ -158,6 +221,20 @@ impl RuntimeFile {
                     doc_id, tags_str, created_at, updated_at, title, body
                 )
             }
+            RuntimeFile::Skill {
+                doc_id,
+                name,
+                description,
+                body,
+                created_at,
+                updated_at,
+                ..
+            } => {
+                format!(
+                    "---\nid: {}\ncreated: {}\nupdated: {}\n---\n\n# {}\n\n{}\n\n---\n\n{}\n",
+                    doc_id, created_at, updated_at, name, description, body
+                )
+            }
             RuntimeFile::GitKeep { .. } => String::new(),
         }
     }
@@ -167,6 +244,9 @@ impl RuntimeFile {
             RuntimeFile::Note {
                 slug, id_prefix, ..
             } => format!("note: {}-{}", slug, id_prefix),
+            RuntimeFile::Skill {
+                slug, id_prefix, ..
+            } => format!("skill: {}-{}", slug, id_prefix),
             RuntimeFile::GitKeep { workspace_name } => {
                 format!("workspace: scaffold {}", workspace_name)
             }
