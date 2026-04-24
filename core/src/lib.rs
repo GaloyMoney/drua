@@ -227,7 +227,12 @@ impl App {
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
-                .spawn_unique(job::JobId::new(), SyncSkillsFromLibraryConfig {})
+                .spawn_unique(
+                    job::JobId::new(),
+                    SyncSkillsFromLibraryConfig {
+                        sync_interval_secs: 60,
+                    },
+                )
                 .await
                 .map_err(|e| AppError::Job(e.to_string()))?;
         }

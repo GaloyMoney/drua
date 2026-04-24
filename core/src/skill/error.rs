@@ -12,6 +12,8 @@ pub enum SkillError {
     Find(#[from] SkillFindError),
     #[error("SkillError - Query: {0}")]
     Query(#[from] SkillQueryError),
+    #[error("SkillError - Sqlx: {0}")]
+    Sqlx(#[from] sqlx::Error),
     #[error("SkillError - SandboxLookup: {0}")]
     SandboxLookup(String),
     #[error("SkillError - BuildEntity: {0}")]

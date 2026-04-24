@@ -181,8 +181,7 @@ impl Workspaces {
         &self,
         name: &str,
     ) -> Result<Option<Workspace>, WorkspaceError> {
-        let all = self.repo.list_all().await?;
-        Ok(all.into_iter().find(|ws| ws.name == name))
+        Ok(self.repo.maybe_find_by_name(name).await?)
     }
 }
 

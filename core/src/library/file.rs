@@ -267,24 +267,51 @@ impl RuntimeFile {
     }
 }
 
-/// Parse a skill markdown file (as produced by `RuntimeFile::Skill::content()`)
-/// back into a `RuntimeFile::Skill` variant.
+/// Result of parsing a skill markdown file.
+pub struct ParsedSkillFile {
+    pub file: RuntimeFile,
+    /// When `true` the file on disk lacks proper frontmatter (or an `id:` field)
+    /// and should be rewritten with canonical headers after entity creation.
+    pub needs_rewrite: bool,
+}
+
+/// Parse a skill markdown file back into a `RuntimeFile::Skill` variant.
+///
+/// Handles three formats:
+/// 1. **Full frontmatter** (as produced by `RuntimeFile::Skill::content()`) —
+///    `id:`, `created:`, `updated:` present. `needs_rewrite = false`.
+/// 2. **Frontmatter without `id:`** — timestamps may be present but no id.
+///    Generates a new `SkillId`. `needs_rewrite = true`.
+/// 3. **No frontmatter** — human-authored file starting with `# Name`.
+///    Generates a new `SkillId`. `needs_rewrite = true`.
 ///
 /// `workspace_id` and `workspace_name` are resolved by the caller from the
 /// file path — they are not encoded in the markdown itself.
 ///
-/// Returns `None` if the content cannot be parsed (missing frontmatter, id, etc.).
+/// Returns `None` only if the content has no recognisable `# heading`.
 pub fn parse_skill_markdown(
     content: &str,
     workspace_id: Option<WorkspaceId>,
     workspace_name: Option<String>,
-) -> Option<RuntimeFile> {
-    // 1. Extract frontmatter between --- delimiters
+) -> Option<ParsedSkillFile> {
     let content = content.trim();
+
+    if content.starts_with("---") {
+        parse_with_frontmatter(content, workspace_id, workspace_name)
+    } else {
+        parse_without_frontmatter(content, workspace_id, workspace_name)
+    }
+}
+
+/// Parse a skill file that has frontmatter (starts with `---`).
+fn parse_with_frontmatter(
+    content: &str,
+    workspace_id: Option<WorkspaceId>,
+    workspace_name: Option<String>,
+) -> Option<ParsedSkillFile> {
     let rest = content.strip_prefix("---")?;
     let (frontmatter, after_fm) = rest.split_once("\n---")?;
 
-    // 2. Parse frontmatter fields
     let mut id_str = None;
     let mut created_at = String::new();
     let mut updated_at = String::new();
@@ -299,45 +326,85 @@ pub fn parse_skill_markdown(
         }
     }
 
-    let id_str = id_str?;
-    let skill_id: SkillId = id_str.parse::<uuid::Uuid>().ok()?.into();
+    let (skill_id, needs_rewrite) = match id_str {
+        Some(ref s) => {
+            let uuid = s.parse::<uuid::Uuid>().ok()?;
+            (SkillId::from(uuid), false)
+        }
+        None => (SkillId::new(), true),
+    };
 
-    // 3. After frontmatter: expect `\n\n# {name}\n\n{description}\n\n---\n\n{body}\n`
-    let after_fm = after_fm.trim_start_matches('\n');
+    let (name, description, body) = parse_heading_and_body(after_fm)?;
 
-    // Extract name from `# heading`
-    let name_line = after_fm.lines().next()?;
+    let slug = slugify(&name);
+    let id_prefix = skill_id.to_string()[..8].to_string();
+
+    Some(ParsedSkillFile {
+        file: RuntimeFile::Skill {
+            doc_id: skill_id,
+            workspace_id,
+            workspace_name,
+            name,
+            description,
+            body,
+            created_at,
+            updated_at,
+            slug,
+            id_prefix,
+        },
+        needs_rewrite,
+    })
+}
+
+/// Parse a skill file with no frontmatter (human-authored).
+fn parse_without_frontmatter(
+    content: &str,
+    workspace_id: Option<WorkspaceId>,
+    workspace_name: Option<String>,
+) -> Option<ParsedSkillFile> {
+    let (name, description, body) = parse_heading_and_body(content)?;
+    let skill_id = SkillId::new();
+    let slug = slugify(&name);
+    let id_prefix = skill_id.to_string()[..8].to_string();
+
+    Some(ParsedSkillFile {
+        file: RuntimeFile::Skill {
+            doc_id: skill_id,
+            workspace_id,
+            workspace_name,
+            name,
+            description,
+            body,
+            created_at: String::new(),
+            updated_at: String::new(),
+            slug,
+            id_prefix,
+        },
+        needs_rewrite: true,
+    })
+}
+
+/// Extract `(name, description, body)` from content after any frontmatter.
+///
+/// Expects `# Name` heading, optional description, optional `---` body separator.
+fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
+    let content = content.trim_start_matches('\n');
+
+    let name_line = content.lines().next()?;
     let name = name_line.strip_prefix("# ")?.trim().to_string();
     if name.is_empty() {
         return None;
     }
 
-    // Everything after the heading line
-    let after_name = &after_fm[name_line.len()..].trim_start_matches('\n');
+    let after_name = &content[name_line.len()..].trim_start_matches('\n');
 
-    // Split on the body separator `---`
     let (description, body) = if let Some((desc, bod)) = after_name.split_once("\n---\n") {
         (desc.trim().to_string(), bod.trim().to_string())
     } else {
-        // No body separator — treat everything as description
         (after_name.trim().to_string(), String::new())
     };
 
-    let slug = slugify(&name);
-    let id_prefix = skill_id.to_string()[..8].to_string();
-
-    Some(RuntimeFile::Skill {
-        doc_id: skill_id,
-        workspace_id,
-        workspace_name,
-        name,
-        description,
-        body,
-        created_at,
-        updated_at,
-        slug,
-        id_prefix,
-    })
+    Some((name, description, body))
 }
 
 /// Extract the workspace name from a skill file's relative path.
@@ -389,8 +456,9 @@ mod tests {
         let content = original.content();
         let parsed = parse_skill_markdown(&content, Some(ws_id), Some("my-workspace".into()))
             .expect("should parse");
+        assert!(!parsed.needs_rewrite);
 
-        match parsed {
+        match parsed.file {
             RuntimeFile::Skill {
                 doc_id,
                 workspace_id,
@@ -431,8 +499,9 @@ mod tests {
 
         let content = original.content();
         let parsed = parse_skill_markdown(&content, None, None).expect("should parse global skill");
+        assert!(!parsed.needs_rewrite);
 
-        match parsed {
+        match parsed.file {
             RuntimeFile::Skill {
                 doc_id,
                 workspace_id,
@@ -449,8 +518,9 @@ mod tests {
 
     #[test]
     fn parse_skill_markdown_returns_none_for_bad_input() {
+        // No heading at all
         assert!(parse_skill_markdown("not markdown", None, None).is_none());
-        assert!(parse_skill_markdown("---\n---\n\n# Name\n", None, None).is_none());
+        // Frontmatter with bad UUID
         assert!(parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", None, None).is_none());
     }
 
@@ -471,9 +541,79 @@ mod tests {
 
         let content = original.content();
         let parsed = parse_skill_markdown(&content, None, None).unwrap();
-        let parsed_hash = parsed.file_hash();
+        let parsed_hash = parsed.file.file_hash();
 
         assert_eq!(original_hash, parsed_hash);
+    }
+
+    #[test]
+    fn parse_skill_markdown_without_frontmatter() {
+        let content = "# My Cool Skill\n\nDoes something useful\n\n---\n\nThe body template";
+        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        assert!(parsed.needs_rewrite);
+
+        match &parsed.file {
+            RuntimeFile::Skill {
+                name,
+                description,
+                body,
+                ..
+            } => {
+                assert_eq!(name, "My Cool Skill");
+                assert_eq!(description, "Does something useful");
+                assert_eq!(body, "The body template");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_markdown_without_frontmatter_no_body() {
+        let content = "# Simple Skill\n\nJust a description, no body";
+        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        assert!(parsed.needs_rewrite);
+
+        match &parsed.file {
+            RuntimeFile::Skill {
+                name,
+                description,
+                body,
+                ..
+            } => {
+                assert_eq!(name, "Simple Skill");
+                assert_eq!(description, "Just a description, no body");
+                assert!(body.is_empty());
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_markdown_frontmatter_without_id() {
+        let content = "---\ncreated: 2025-01-01\nupdated: 2025-06-01\n---\n\n# My Skill\n\nDescription\n\n---\n\nBody";
+        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        assert!(parsed.needs_rewrite);
+
+        match &parsed.file {
+            RuntimeFile::Skill { name, .. } => {
+                assert_eq!(name, "My Skill");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_markdown_empty_frontmatter_generates_id() {
+        let content = "---\n---\n\n# Name\n\nDesc";
+        let parsed = parse_skill_markdown(content, None, None).expect("should parse");
+        assert!(parsed.needs_rewrite);
+
+        match &parsed.file {
+            RuntimeFile::Skill { name, .. } => {
+                assert_eq!(name, "Name");
+            }
+            _ => panic!("expected Skill variant"),
+        }
     }
 
     #[test]

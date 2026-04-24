@@ -315,13 +315,23 @@ impl Skills {
     /// The post-persist hook fires `library.write_in_op()` (embedding +
     /// WriteToRuntime), but the WriteToRuntime runner will see the file hash
     /// on disk already matches and skip the write.
-    #[instrument(name = "skill.upsert_from_library", skip_all)]
-    pub(crate) async fn upsert_from_library(
+    pub(crate) async fn begin_op(&self) -> Result<es_entity::DbOp<'_>, SkillError> {
+        Ok(self.repo.begin_op().await?)
+    }
+
+    /// Upsert a skill from a library file within an existing transaction.
+    ///
+    /// Returns `Some(RuntimeFile)` when a new entity was created — the caller
+    /// can use this to rewrite the original file with canonical frontmatter.
+    /// Returns `None` when the entity was skipped or updated in-place.
+    #[instrument(name = "skill.upsert_from_library_in_op", skip_all)]
+    pub(crate) async fn upsert_from_library_in_op(
         &self,
+        op: &mut es_entity::DbOp<'_>,
         file: &RuntimeFile,
         workspace_id: Option<WorkspaceId>,
         file_hash: GitFileHash,
-    ) -> Result<(), SkillError> {
+    ) -> Result<Option<RuntimeFile>, SkillError> {
         let (doc_id, name, description, body, workspace_name) = match file {
             RuntimeFile::Skill {
                 doc_id,
@@ -331,14 +341,14 @@ impl Skills {
                 workspace_name,
                 ..
             } => (*doc_id, name, description, body, workspace_name.clone()),
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
 
         match self.repo.find_by_id(doc_id).await {
             Ok(mut existing) => {
                 if existing.file_hash.as_ref() == Some(&file_hash) {
                     tracing::debug!(id = %doc_id, "skill file_hash unchanged, skipping");
-                    return Ok(());
+                    return Ok(None);
                 }
                 if existing
                     .update(
@@ -349,9 +359,10 @@ impl Skills {
                     )
                     .did_execute()
                 {
-                    self.repo.update(&mut existing).await?;
+                    self.repo.update_in_op(op, &mut existing).await?;
                 }
                 tracing::info!(id = %doc_id, name = %name, "updated skill from library");
+                Ok(None)
             }
             Err(e) if e.was_not_found() => {
                 let mut builder = NewSkill::builder()
@@ -369,13 +380,12 @@ impl Skills {
                 let new = builder
                     .build()
                     .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
-                self.repo.create(new).await?;
+                let skill = self.repo.create_in_op(op, new).await?;
                 tracing::info!(id = %doc_id, name = %name, "created skill from library");
+                Ok(Some(skill.as_runtime_file()))
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => Err(e.into()),
         }
-
-        Ok(())
     }
 
     #[instrument(name = "skill.update", skip_all)]

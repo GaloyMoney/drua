@@ -108,6 +108,64 @@ impl Upstream {
         Ok(())
     }
 
+    pub async fn remove_file(&self, relative_path: &str) -> Result<(), LibraryError> {
+        let full_path = self.repo_path.join(relative_path);
+        if full_path.exists() {
+            tokio::fs::remove_file(&full_path)
+                .await
+                .map_err(|e| LibraryError::Io(e.to_string()))?;
+            tracing::info!(path = %full_path.display(), "removed runtime file");
+        }
+        Ok(())
+    }
+
+    /// Stage multiple paths and commit. Handles both new files and deletions
+    /// (a deleted file that is staged records the removal).
+    pub async fn commit_paths(&self, paths: &[&str], message: &str) -> Result<(), LibraryError> {
+        self.require_git_repo()?;
+
+        let mut add_args = vec!["add", "--"];
+        for path in paths {
+            add_args.push(path);
+        }
+        let add = tokio::process::Command::new("git")
+            .args(&add_args)
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git add: {e}")))?;
+        if !add.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            )));
+        }
+
+        let commit = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=drua",
+                "-c",
+                "user.email=drua@galoy.io",
+                "commit",
+                "-m",
+                message,
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            // Allow "nothing to commit" — the file may already match.
+            if !stderr.contains("nothing to commit") {
+                return Err(LibraryError::Git(format!("git commit failed: {stderr}")));
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn pull(&self) -> Result<(), LibraryError> {
         self.require_git_repo()?;
 
