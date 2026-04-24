@@ -831,6 +831,13 @@ async fn ensure_authenticated(server: Option<String>) -> Result<(Config, Graphql
         println!("Session expired — starting login flow…");
         println!();
     } else {
+        // Try dev auto-login before falling back to interactive login
+        if let Ok(config) = Config::load_or_dev_login(server.clone()).await {
+            let client = GraphqlClient::new(&config.server_url, &config.auth_token);
+            if let Ok(user_name) = fetch_user_name(&client).await {
+                return Ok((config, client, user_name));
+            }
+        }
         println!("Not logged in — starting login flow…");
         println!();
     }

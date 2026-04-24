@@ -13,6 +13,15 @@ type Agent {
 	workspaceId: WorkspaceId!
 }
 
+input AgentCreateInput {
+	name: String!
+	workspaceId: WorkspaceId!
+}
+
+type AgentCreatePayload {
+	agent: Agent!
+}
+
 scalar AgentId
 
 enum AgentRole {
@@ -33,6 +42,8 @@ type AgentSession {
 }
 
 type AssistantDoneEvent {
+	cacheCreationInputTokens: Int!
+	cacheReadInputTokens: Int!
 	costUsd: Float
 	durationMs: Int
 	inputTokens: Int!
@@ -78,6 +89,7 @@ type Me {
 }
 
 type Mutation {
+	agentCreate(input: AgentCreateInput!): AgentCreatePayload!
 	ping: String!
 	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
 	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!

@@ -44,3 +44,14 @@ integration-tests: reset-deps
 
 start: reset-deps
 	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
+
+.PHONY: dev
+dev:
+	@$(COMPOSE_CMD) up -d --quiet-pull 2>/dev/null || true
+	@until $(COMPOSE_CMD) exec postgres pg_isready -U user -d drua > /dev/null 2>&1; do sleep 1; done
+	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
+
+.PHONY: chat
+chat:
+	@cargo run -p drua-cli -- chat $(ARGS)
+

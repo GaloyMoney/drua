@@ -34,6 +34,7 @@ pub fn auth_router() -> Router<AppState> {
         .route("/auth/github", get(oauth::github_redirect))
         .route("/auth/github/callback", get(oauth::github_callback))
         .route("/auth/dev", post(dev_login))
+        .route("/auth/dev-token", post(dev_token))
         .route("/auth/logout", get(logout))
         .route("/auth/cli-login", get(cli_login))
 }
@@ -194,6 +195,49 @@ async fn dev_login(
         .flatten()
         .unwrap_or_else(|| "/".to_string());
     Ok(axum::response::Redirect::to(&redirect_to))
+}
+
+/// Programmatic dev-login: creates a dev user and returns a CLI token as JSON.
+/// Used by `drua chat` to skip the browser-based login flow in dev mode.
+#[instrument(name = "web.auth.dev_token", skip_all)]
+async fn dev_token(
+    State(state): State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, AuthError> {
+    if state.login != crate::auth::config::LoginMethod::Dev {
+        return Err(AuthError::OAuth("Dev login is not enabled".into()));
+    }
+
+    let dev_github_id = "dev-local";
+    let user = match state.app.users().find_by_github_id(dev_github_id).await? {
+        Some(user) => user,
+        None => {
+            state
+                .app
+                .users()
+                .create_from_github_login(
+                    dev_github_id.to_string(),
+                    Some("dev@localhost".to_string()),
+                    Some("Dev User".to_string()),
+                    Some("dev-user".to_string()),
+                )
+                .await?
+        }
+    };
+
+    let mut record = Record {
+        id: Id::default(),
+        data: Default::default(),
+        expiry_date: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+    };
+    record.data.insert(
+        "user_id".to_string(),
+        serde_json::to_value(user.id).unwrap(),
+    );
+    state.session_store.create(&mut record).await?;
+
+    Ok(axum::Json(
+        serde_json::json!({ "token": record.id.to_string() }),
+    ))
 }
 
 #[instrument(name = "web.auth.logout", skip_all)]

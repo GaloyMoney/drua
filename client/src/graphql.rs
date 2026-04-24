@@ -88,7 +88,7 @@ subscription AgentMessage($agentId: AgentId!, $prompt: String!) {
     ... on ThinkingEvent { text }
     ... on UserMessageEvent { text }
     ... on ToolResultEvent { name isError content }
-    ... on AssistantDoneEvent { turns inputTokens outputTokens durationMs costUsd }
+    ... on AssistantDoneEvent { turns inputTokens outputTokens cacheReadInputTokens cacheCreationInputTokens durationMs costUsd }
     ... on ErrorEvent { message }
     ... on ServiceEvent { message }
   }

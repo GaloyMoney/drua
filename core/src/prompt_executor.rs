@@ -65,105 +65,61 @@ impl PromptExecutorConfig {
     /// upstream.
     pub fn validate(&self) -> Result<(), PromptExecutorConfigError> {
         for model in &self.models {
-            match &model.provider {
-                Provider::Anthropic { api_key, .. } if api_key.is_empty() => {
-                    tracing::warn!(
-                        model = %model.name,
-                        "Anthropic credential is empty — agent prompts will fail until ANTHROPIC_API_KEY is set",
-                    );
-                }
-                Provider::Anthropic { api_key, base_url } => {
-                    let preview = masked_preview(api_key);
-                    if base_url.is_some() {
-                        tracing::info!(
-                            model = %model.name,
-                            key_preview = %preview,
-                            base_url = %base_url.as_deref().unwrap_or("default"),
-                            "Anthropic credential loaded (custom endpoint — key prefix validation skipped)"
-                        );
-                    } else if !api_key.starts_with("sk-ant-") {
-                        tracing::warn!(
-                            model = %model.name,
-                            key_preview = %preview,
-                            key_len = api_key.len(),
-                            "Anthropic credential does not start with `sk-ant-` — this will most likely 401 at the Messages API",
-                        );
-                    } else {
-                        tracing::info!(
-                            model = %model.name,
-                            key_preview = %preview,
-                            "Anthropic credential loaded"
-                        );
-                    }
-                }
-                Provider::OpenAi { api_key, .. } if api_key.is_empty() => {
-                    tracing::warn!(
-                        model = %model.name,
-                        "OpenAI credential is empty — agent prompts will fail until OPENAI_API_KEY is set",
-                    );
-                }
-                Provider::OpenAi { api_key, base_url } => {
-                    let preview = masked_preview(api_key);
-                    if base_url.is_some() {
-                        tracing::info!(
-                            model = %model.name,
-                            key_preview = %preview,
-                            base_url = %base_url.as_deref().unwrap_or("default"),
-                            "OpenAI credential loaded (custom endpoint — key prefix validation skipped)"
-                        );
-                    } else if !api_key.starts_with("sk-") {
-                        tracing::warn!(
-                            model = %model.name,
-                            key_preview = %preview,
-                            key_len = api_key.len(),
-                            "OpenAI credential does not start with `sk-` — this will most likely 401 at the Chat Completions API",
-                        );
-                    } else {
-                        tracing::info!(
-                            model = %model.name,
-                            key_preview = %preview,
-                            "OpenAI credential loaded"
-                        );
-                    }
-                }
+            let (provider_name, api_key, endpoint) = match &model.provider {
+                Provider::Anthropic { api_key, base_url } => (
+                    "anthropic",
+                    Some(api_key.as_str()),
+                    resolve_endpoint(base_url, "https://api.anthropic.com", "/v1/messages"),
+                ),
+                Provider::OpenAi { api_key, base_url } => (
+                    "openai",
+                    Some(api_key.as_str()),
+                    resolve_endpoint(base_url, "https://api.openai.com", "/v1/chat/completions"),
+                ),
                 Provider::OpenAiResponses { auth, base_url } => match auth {
-                    OpenAiResponsesAuth::ApiKey { api_key } if api_key.is_empty() => {
-                        tracing::warn!(
-                            model = %model.name,
-                            "OpenAI Responses credential is empty — agent prompts will fail until OPENAI_API_KEY is set",
-                        );
-                    }
-                    OpenAiResponsesAuth::ApiKey { api_key } => {
-                        let preview = masked_preview(api_key);
-                        if base_url.is_some() {
-                            tracing::info!(
-                                model = %model.name,
-                                key_preview = %preview,
-                                base_url = %base_url.as_deref().unwrap_or("default"),
-                                "OpenAI Responses credential loaded (custom endpoint — key prefix validation skipped)"
-                            );
-                        } else if !api_key.starts_with("sk-") {
-                            tracing::warn!(
-                                model = %model.name,
-                                key_preview = %preview,
-                                key_len = api_key.len(),
-                                "OpenAI Responses credential does not start with `sk-` — this will most likely 401 at the Responses API",
-                            );
-                        } else {
-                            tracing::info!(
-                                model = %model.name,
-                                key_preview = %preview,
-                                "OpenAI Responses credential loaded"
-                            );
-                        }
-                    }
-                    OpenAiResponsesAuth::Subscription => {
-                        tracing::info!(
-                            model = %model.name,
-                            "OpenAI subscription credential will be resolved from OPENAI_CODEX_ACCESS_TOKEN or ~/.codex/auth.json at request time",
-                        );
-                    }
+                    OpenAiResponsesAuth::ApiKey { api_key } => (
+                        "openai-responses",
+                        Some(api_key.as_str()),
+                        resolve_endpoint(base_url, "https://api.openai.com", "/v1/responses"),
+                    ),
+                    OpenAiResponsesAuth::Subscription => (
+                        "openai-codex",
+                        None,
+                        resolve_endpoint(
+                            base_url,
+                            "https://chatgpt.com",
+                            "/backend-api/codex/responses",
+                        ),
+                    ),
                 },
+            };
+
+            match api_key {
+                Some("") => {
+                    tracing::warn!(
+                        model = %model.name,
+                        provider = provider_name,
+                        endpoint = %endpoint,
+                        "Credential is empty — prompts will fail",
+                    );
+                }
+                Some(key) => {
+                    tracing::info!(
+                        model = %model.name,
+                        provider = provider_name,
+                        endpoint = %endpoint,
+                        key = %masked_preview(key),
+                        "Model ready",
+                    );
+                }
+                None => {
+                    tracing::info!(
+                        model = %model.name,
+                        provider = provider_name,
+                        endpoint = %endpoint,
+                        "Model ready (credential resolved at request time)",
+                    );
+                }
             }
         }
         Ok(())
@@ -172,6 +128,14 @@ impl PromptExecutorConfig {
 
 /// First 7 + last 4 chars, everything else masked. Enough to spot
 /// copy/paste errors without spilling secrets into logs.
+fn resolve_endpoint(base_url: &Option<String>, default_base: &str, api_path: &str) -> String {
+    let base = base_url
+        .as_deref()
+        .unwrap_or(default_base)
+        .trim_end_matches('/');
+    format!("{base}{api_path}")
+}
+
 fn masked_preview(s: &str) -> String {
     if s.len() <= 12 {
         "***".to_string()
