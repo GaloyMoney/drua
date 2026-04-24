@@ -186,6 +186,32 @@ resource "postgresql_extension" "vector" {
   depends_on = [module.postgresql]
 }
 
+resource "kubernetes_persistent_volume_claim" "library" {
+  metadata {
+    name      = "galoy-agents-library"
+    namespace = local.namespace
+  }
+
+  spec {
+    access_modes       = ["ReadWriteOnce"]
+    storage_class_name = "standard-rwo"
+
+    resources {
+      requests = {
+        storage = "1Gi"
+      }
+    }
+  }
+
+  wait_until_bound = false
+
+  depends_on = [kubernetes_namespace.galoy_agents]
+
+  lifecycle {
+    ignore_changes = [spec]
+  }
+}
+
 resource "helm_release" "galoy_agents" {
   name      = "galoy-agents"
   chart     = "${path.module}/chart"
@@ -211,6 +237,7 @@ resource "helm_release" "galoy_agents" {
     kubectl_manifest.sandbox_controller,
     kubectl_manifest.sandbox_extensions,
     postgresql_extension.vector,
+    kubernetes_persistent_volume_claim.library,
   ]
 }
 
