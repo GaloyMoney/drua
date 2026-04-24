@@ -145,22 +145,33 @@
   <a href="/workspaces/{{ workspace.id }}/sandboxes/{{ sb.id }}"><strong>{{ sb.name }}</strong></a>
   in <code>{{ sb.mode }}</code> mode <small>(sandbox state: <code>{{ sb.state }}</code>)</small>.
 </p>
-<form method="post" action="/workspaces/{{ workspace.id }}/agents/{{ agent.id }}/detach_sandbox">
-  <button
-    type="submit"
-    onclick="return confirm('Detach this sandbox from the agent? The sandbox itself is not deleted.')"
-    class="secondary outline"
-  >
-    Detach Sandbox
-  </button>
-</form>
+<button
+  id="detach-btn"
+  data-gql-confirm="Detach this sandbox from the agent? The sandbox itself is not deleted."
+  class="secondary outline"
+>
+  Detach Sandbox
+</button>
+<script>
+  document.getElementById('detach-btn').addEventListener('click', async () => {
+    if (!confirm('Detach this sandbox from the agent? The sandbox itself is not deleted.')) return;
+    const result = await gqlMutate(
+      `mutation($input: AgentDetachSandboxInput!) { agentDetachSandbox(input: $input) { agent { id } } }`,
+      { input: { agentId: "{{ agent.id }}", sandboxId: "{{ sb.id }}" } }
+    );
+    if (result.errors) { alert(result.errors.map(e => e.message).join('\n')); return; }
+    window.location.reload();
+  });
+</script>
 
 {% when None %}
 {% if sandbox_options.is_empty() %}
 <p><em>No sandboxes in this workspace yet — <a href="/workspaces/{{ workspace.id }}/sandboxes/new">create one</a> first.</em></p>
 {% else %}
 <p><small>The agent can hold at most one sandbox at a time. Write mode is exclusive; Read mode is shared.</small></p>
-<form method="post" action="/workspaces/{{ workspace.id }}/agents/{{ agent.id }}/attach_sandbox">
+<form data-gql-mutation="mutation($input: AgentAttachSandboxInput!) { agentAttachSandbox(input: $input) { agent { id } } }"
+      data-gql-build="buildAttachSandbox"
+      data-gql-reload="true">
   <label>
     Sandbox
     <select name="sandbox_id" required>
@@ -172,12 +183,17 @@
   <label>
     Mode
     <select name="mode" required>
-      <option value="read">Read — shared, multiple agents allowed</option>
-      <option value="write">Write — exclusive, one agent at a time</option>
+      <option value="READ">Read — shared, multiple agents allowed</option>
+      <option value="WRITE">Write — exclusive, one agent at a time</option>
     </select>
   </label>
   <button type="submit">Attach Sandbox</button>
 </form>
+<script>
+  function buildAttachSandbox(fd) {
+    return { agentId: "{{ agent.id }}", sandboxId: fd.get('sandbox_id'), mode: fd.get('mode') };
+  }
+</script>
 {% endif %}
 {% endmatch %}
 {% endif %}

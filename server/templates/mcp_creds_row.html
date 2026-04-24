@@ -11,10 +11,10 @@
   <td>
     {% if !creds.is_revoked %}
     <button
-      hx-post="/mcp-creds/{{ creds.id }}/revoke"
-      hx-target="#creds-{{ creds.id }}"
-      hx-swap="outerHTML"
-      hx-confirm="Are you sure you want to revoke these credentials?"
+      data-gql-mutation="mutation($input: McpCredentialsRevokeInput!) { mcpCredentialsRevoke(input: $input) { mcpCreds { id } } }"
+      data-gql-input='{"id":"{{ creds.id }}"}'
+      data-gql-confirm="Are you sure you want to revoke these credentials?"
+      data-gql-reload="true"
       class="secondary outline"
       style="padding: 0.25rem 0.5rem; margin: 0;"
     >

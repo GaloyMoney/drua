@@ -106,7 +106,9 @@
 <a href="/workspaces/{{ workspace.id }}" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to {{ workspace.name }}</a>
 <h2>New Agent</h2>
 
-<form method="post" action="/workspaces/{{ workspace.id }}/agents">
+<form data-gql-mutation="mutation($input: AgentCreateInput!) { agentCreate(input: $input) { agent { id } } }"
+      data-gql-build="buildAgentCreate"
+      data-gql-redirect="/workspaces/{{ workspace.id }}/chat?agent={id}">
   <label>
     Name
     <input type="text" name="name" required placeholder="research">
@@ -126,8 +128,8 @@
     <label>
       Mode <small>(only used when a sandbox is selected)</small>
       <select name="attach_mode">
-        <option value="read">Read — shared, multiple agents allowed</option>
-        <option value="write">Write — exclusive, one agent at a time</option>
+        <option value="READ">Read — shared, multiple agents allowed</option>
+        <option value="WRITE">Write — exclusive, one agent at a time</option>
       </select>
     </label>
   </fieldset>
@@ -137,4 +139,15 @@
     <a href="/workspaces/{{ workspace.id }}" role="button" class="outline">Cancel</a>
   </div>
 </form>
+<script>
+  function buildAgentCreate(fd) {
+    const input = { workspaceId: "{{ workspace.id }}", name: fd.get('name') };
+    const sbId = (fd.get('sandbox_id') || '').trim();
+    if (sbId) {
+      input.sandboxId = sbId;
+      input.sandboxMode = fd.get('attach_mode') || 'READ';
+    }
+    return input;
+  }
+</script>
 {% endblock %}

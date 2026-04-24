@@ -103,7 +103,9 @@
 <a href="/workspaces/{{ workspace.id }}/skills" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Skills</a>
 <h2>New Skill</h2>
 
-<form method="post" action="/workspaces/{{ workspace.id }}/skills">
+<form data-gql-mutation="mutation($input: SkillCreateInput!) { skillCreate(input: $input) { skill { id } } }"
+      data-gql-build="buildSkillCreate"
+      data-gql-redirect="/workspaces/{{ workspace.id }}/skills">
   <label>
     Name
     <input type="text" name="name" required placeholder="e.g. code-review">
@@ -121,4 +123,9 @@
     <a href="/workspaces/{{ workspace.id }}/skills" role="button" class="outline">Cancel</a>
   </div>
 </form>
+<script>
+  function buildSkillCreate(fd) {
+    return { workspaceId: "{{ workspace.id }}", name: fd.get('name'), description: fd.get('description') || '', body: fd.get('body') };
+  }
+</script>
 {% endblock %}

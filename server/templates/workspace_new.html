@@ -5,7 +5,9 @@
 {% block content %}
 <h2>New Workspace</h2>
 
-<form method="post" action="/workspaces">
+<form data-gql-mutation="mutation($input: WorkspaceCreateInput!) { workspaceCreate(input: $input) { workspace { id } } }"
+      data-gql-build="buildWorkspaceCreate"
+      data-gql-redirect="/workspaces/{id}/chat">
   <label>
     Name
     <input type="text" name="name" required placeholder="e.g. platform-team">
@@ -20,4 +22,10 @@
     <a href="/workspaces" role="button" class="outline">Cancel</a>
   </div>
 </form>
+<script>
+  function buildWorkspaceCreate(fd) {
+    const desc = fd.get('description');
+    return { name: fd.get('name'), description: desc || null };
+  }
+</script>
 {% endblock %}

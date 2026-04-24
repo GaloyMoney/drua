@@ -82,6 +82,122 @@
       color: var(--pico-del-color);
     }
   </style>
+  <script>
+    // Shared GraphQL mutation helper used by all forms.
+    // Returns the parsed JSON response (with data/errors).
+    async function gqlMutate(query, variables) {
+      const res = await fetch('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables }),
+      });
+      return res.json();
+    }
+
+    // Wire a <form data-gql-mutation="..."> to submit via GraphQL.
+    //
+    //   data-gql-mutation   — the GraphQL mutation string (with $input variable)
+    //   data-gql-build      — name of a global JS function that builds the
+    //                          mutation input object from the FormData
+    //   data-gql-redirect   — URL to redirect to on success (template vars
+    //                          like {id} are replaced from the response)
+    //   data-gql-reload     — if "true", reload the current page on success
+    //   data-gql-target     — CSS selector; on success, replace innerHTML with
+    //                          a GET to data-gql-refresh-url
+    //   data-gql-refresh-url — URL to GET for refreshing the target element
+    //   data-gql-confirm    — confirmation message (skips if user cancels)
+    //
+    document.addEventListener('submit', async function(e) {
+      const form = e.target;
+      if (!form.dataset.gqlMutation) return;
+      e.preventDefault();
+
+      if (form.dataset.gqlConfirm && !confirm(form.dataset.gqlConfirm)) return;
+
+      const fd = new FormData(form);
+      const buildFn = window[form.dataset.gqlBuild];
+      const input = buildFn ? buildFn(fd) : Object.fromEntries(fd);
+
+      const result = await gqlMutate(form.dataset.gqlMutation, { input });
+
+      if (result.errors) {
+        alert(result.errors.map(e => e.message).join('\n'));
+        return;
+      }
+
+      if (form.dataset.gqlRedirect) {
+        let url = form.dataset.gqlRedirect;
+        // Replace {fieldName} placeholders from the response data
+        const data = result.data;
+        if (data) {
+          const payload = Object.values(data)[0];
+          if (payload) {
+            const entity = Object.values(payload)[0];
+            if (entity && typeof entity === 'object') {
+              url = url.replace(/\{(\w+)\}/g, (_, k) => entity[k] || '');
+            }
+          }
+        }
+        window.location.href = url;
+        return;
+      }
+
+      if (form.dataset.gqlReload === 'true') {
+        window.location.reload();
+        return;
+      }
+
+      if (form.dataset.gqlTarget && form.dataset.gqlRefreshUrl) {
+        const target = document.querySelector(form.dataset.gqlTarget);
+        if (target) {
+          const html = await fetch(form.dataset.gqlRefreshUrl).then(r => r.text());
+          target.innerHTML = html;
+          form.reset();
+        }
+        return;
+      }
+    });
+
+    // Wire <button data-gql-mutation="..."> (non-form buttons like delete/revoke).
+    document.addEventListener('click', async function(e) {
+      const btn = e.target.closest('[data-gql-mutation]');
+      if (!btn || btn.tagName === 'FORM') return;
+      if (btn.closest('form[data-gql-mutation]')) return; // handled by form submit
+
+      if (btn.dataset.gqlConfirm && !confirm(btn.dataset.gqlConfirm)) return;
+
+      const input = JSON.parse(btn.dataset.gqlInput || '{}');
+      const result = await gqlMutate(btn.dataset.gqlMutation, { input });
+
+      if (result.errors) {
+        alert(result.errors.map(e => e.message).join('\n'));
+        return;
+      }
+
+      if (btn.dataset.gqlRedirect) {
+        window.location.href = btn.dataset.gqlRedirect;
+        return;
+      }
+      if (btn.dataset.gqlReload === 'true') {
+        window.location.reload();
+        return;
+      }
+      if (btn.dataset.gqlTarget && btn.dataset.gqlRefreshUrl) {
+        const target = document.querySelector(btn.dataset.gqlTarget);
+        if (target) {
+          const html = await fetch(btn.dataset.gqlRefreshUrl).then(r => r.text());
+          target.innerHTML = html;
+        }
+        return;
+      }
+      // For HTMX-style row replacement
+      if (btn.dataset.gqlRemove) {
+        const el = document.querySelector(btn.dataset.gqlRemove);
+        if (el) el.remove();
+        return;
+      }
+    });
+  </script>
   {% block head %}{% endblock %}
 </head>
 <body>

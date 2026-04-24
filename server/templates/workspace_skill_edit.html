@@ -103,7 +103,9 @@
 <a href="/workspaces/{{ workspace.id }}/skills" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Skills</a>
 <h2>Edit Skill</h2>
 
-<form method="post" action="/workspaces/{{ workspace.id }}/skills/{{ skill.id }}">
+<form data-gql-mutation="mutation($input: SkillUpdateInput!) { skillUpdate(input: $input) { skill { id } } }"
+      data-gql-build="buildSkillUpdate"
+      data-gql-redirect="/workspaces/{{ workspace.id }}/skills">
   <label>
     Name
     <input type="text" name="name" required value="{{ skill.name }}">
@@ -121,20 +123,25 @@
     <a href="/workspaces/{{ workspace.id }}/skills" role="button" class="outline">Cancel</a>
   </div>
 </form>
+<script>
+  function buildSkillUpdate(fd) {
+    return { id: "{{ skill.id }}", name: fd.get('name'), description: fd.get('description'), body: fd.get('body') };
+  }
+</script>
 
 <hr>
 <details>
   <summary>Danger Zone</summary>
-  <form method="post" action="/workspaces/{{ workspace.id }}/skills/{{ skill.id }}/delete" style="display: inline;">
-    <button
-      type="submit"
-      onclick="return confirm('Are you sure you want to delete this skill?')"
-      class="secondary outline"
-      style="color: var(--pico-color-red-500, #c62828);"
-    >
-      Delete Skill
-    </button>
-  </form>
+  <button
+    data-gql-mutation="mutation($input: SkillDeleteInput!) { skillDelete(input: $input) { deletedId } }"
+    data-gql-input='{"id":"{{ skill.id }}"}'
+    data-gql-confirm="Are you sure you want to delete this skill?"
+    data-gql-redirect="/workspaces/{{ workspace.id }}/skills"
+    class="secondary outline"
+    style="color: var(--pico-color-red-500, #c62828);"
+  >
+    Delete Skill
+  </button>
 </details>
 
 <footer>
