@@ -347,6 +347,15 @@ pub async fn run(server: Option<String>, agent_id: Option<String>) -> Result<()>
     eprintln!("Agent: {agent_id}");
     eprintln!("Type /exit to quit, Ctrl-C to interrupt.\n");
 
+    // Spawn a background task that exits the process on Ctrl-C.
+    // tokio::signal::ctrl_c() in a select! doesn't reliably interrupt
+    // blocking stdin reads on macOS, so we exit directly instead.
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        println!();
+        std::process::exit(0);
+    });
+
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
@@ -354,18 +363,9 @@ pub async fn run(server: Option<String>, agent_id: Option<String>) -> Result<()>
         print!("> ");
         std::io::stdout().flush().ok();
 
-        let line = tokio::select! {
-            result = lines.next_line() => {
-                match result {
-                    Ok(Some(line)) => line,
-                    Ok(None) => break,        // EOF
-                    Err(_) => break,           // stdin error (e.g. EINTR from Ctrl-C)
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!();
-                break;
-            }
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            _ => break,
         };
 
         let input = line.trim();
