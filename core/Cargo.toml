@@ -23,7 +23,6 @@ derive_builder = "0.20"
 es-entity = "0.10"
 job = { workspace = true }
 obix = { workspace = true }
-obix-macros = { workspace = true }
 futures = { workspace = true }
 hex = "0.4"
 http = "1"

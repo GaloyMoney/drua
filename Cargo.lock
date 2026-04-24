@@ -1388,7 +1388,6 @@ dependencies = [
  "jsonwebtoken",
  "llm",
  "obix",
- "obix-macros",
  "openai-client",
  "opentelemetry",
  "opentelemetry-http",
@@ -3231,8 +3230,9 @@ dependencies = [
 
 [[package]]
 name = "obix"
-version = "0.2.20"
-source = "git+https://github.com/GaloyMoney/obix.git?tag=0.2.20#620aef25647e9c0357c98120cae61a9dd51f0454"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9636988303b5047a23459277f4513586804d4bd9dafde5408b90b6bc946c19aa"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3248,12 +3248,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
 name = "obix-macros"
-version = "0.2.20"
-source = "git+https://github.com/GaloyMoney/obix.git?tag=0.2.20#620aef25647e9c0357c98120cae61a9dd51f0454"
+version = "0.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4967967f98d84dccfed3a60735e11eca0e8b8e7c7559b84390184b581dc47d05"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
