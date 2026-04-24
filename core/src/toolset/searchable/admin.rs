@@ -1,9 +1,9 @@
 //! `AdminToolSet` — admin-only tools exposed exclusively through the
 //! searchable catalog (`search_tools` → `describe_tool` → `call_tool`).
 //!
-//! All tool implementations live here; there are no corresponding top-level
-//! tool structs. Each tool is keyed by its short catalog name (without the
-//! `admin_` prefix) and dispatched in [`AdminToolSet::call`].
+//! Consolidated into 4 tools with command discriminators:
+//! `agent`, `sandbox`, `log`, `workspace`.
+//! Prefixed as `drua_admin_agent`, `drua_admin_sandbox`, etc.
 
 use std::sync::{Arc, LazyLock};
 
@@ -22,7 +22,7 @@ use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
 
 // ---------------------------------------------------------------------------
-// Helpers — parse params / derive schema
+// Helpers
 // ---------------------------------------------------------------------------
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -68,55 +68,57 @@ fn deserialize_liberal_i64<'de, D: serde::Deserializer<'de>>(
 }
 
 // ===========================================================================
-// Param structs
+// Param structs — consolidated with command discriminators
 // ===========================================================================
 
 // -- agent ------------------------------------------------------------------
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct CreateAgentParams {
-    /// Workspace to create the agent in.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
-    /// Display name for the new agent.
-    name: String,
+#[serde(rename_all = "snake_case")]
+enum AgentCommand {
+    /// Create a new agent in a workspace.
+    Create,
+    /// List all agents in a workspace.
+    List,
+    /// Attach a sandbox to an agent.
+    AttachSandbox,
+    /// Detach a sandbox from an agent.
+    DetachSandbox,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct AttachSandboxParams {
-    /// ID of the agent to attach the sandbox to.
-    #[schemars(with = "uuid::Uuid")]
-    agent_id: AgentId,
-    /// ID of the sandbox to attach.
-    #[schemars(with = "uuid::Uuid")]
-    sandbox_id: SandboxId,
-    /// Attach mode. Defaults to 'read'.
-    #[serde(default = "default_agent_mode")]
-    mode: SandboxAgentMode,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct DetachSandboxParams {
-    /// ID of the agent to detach the sandbox from.
-    #[schemars(with = "uuid::Uuid")]
-    agent_id: AgentId,
-    /// ID of the sandbox to detach.
-    #[schemars(with = "uuid::Uuid")]
-    sandbox_id: SandboxId,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct ListAgentsParams {
-    /// Workspace to list agents for.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
-}
-
-fn default_agent_mode() -> SandboxAgentMode {
-    SandboxAgentMode::Read
+struct AgentParams {
+    /// Which agent operation to perform.
+    command: AgentCommand,
+    /// Workspace ID (required for `create` and `list`).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    workspace_id: Option<WorkspaceId>,
+    /// Display name for the new agent (required for `create`).
+    name: Option<String>,
+    /// ID of the agent (required for `attach_sandbox` and `detach_sandbox`).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    agent_id: Option<AgentId>,
+    /// ID of the sandbox (required for `attach_sandbox` and `detach_sandbox`).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    sandbox_id: Option<SandboxId>,
+    /// Attach mode — 'read' or 'use'. Defaults to 'read'. Only for `attach_sandbox`.
+    mode: Option<SandboxAgentMode>,
 }
 
 // -- sandbox ----------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SandboxCommand {
+    /// Create a new sandbox in a workspace.
+    Create,
+    /// List all sandboxes in a workspace.
+    List,
+    /// Get sandbox details by ID.
+    Get,
+    /// Run a read-only tool (grep, glob, read, ls) against a sandbox.
+    Inspect,
+}
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -126,89 +128,6 @@ enum SandboxCreateMode {
     /// Clone a repository.
     Repo,
 }
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct CreateSandboxInner {
-    /// Display name for the new sandbox.
-    name: String,
-    /// Sandbox mode. 'scratch' for empty workspace, 'repo' to clone a repository.
-    mode: SandboxCreateMode,
-    /// Repository URL to clone (required when mode is 'repo').
-    repo_url: Option<String>,
-    /// Git branch to check out after cloning (optional, defaults to the repo's default branch). Only used when mode is 'repo'.
-    branch: Option<String>,
-    /// CPU resource spec (e.g. '500m'). Defaults to '500m'.
-    #[serde(default = "default_cpu")]
-    cpu: String,
-    /// Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'.
-    #[serde(default = "default_memory")]
-    memory: String,
-    /// Disk size spec (e.g. '10Gi'). Defaults to '10Gi'.
-    #[serde(default = "default_disk_size")]
-    disk_size: String,
-}
-
-impl CreateSandboxInner {
-    fn into_args(self) -> Result<(String, SandboxSpecs, SandboxMode), ToolSetsError> {
-        let mode = match self.mode {
-            SandboxCreateMode::Repo => {
-                let repo_url = self.repo_url.ok_or_else(|| {
-                    ToolSetsError::InvalidArgument(
-                        "repo_url is required when mode is 'repo'".to_string(),
-                    )
-                })?;
-                SandboxMode::Repo {
-                    repo_url,
-                    branch: self.branch,
-                }
-            }
-            SandboxCreateMode::Scratch => SandboxMode::Scratch,
-        };
-
-        let specs = SandboxSpecs {
-            cpu: self.cpu,
-            memory: self.memory,
-            disk_size: self.disk_size,
-        };
-
-        Ok((self.name, specs, mode))
-    }
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct CreateSandboxParams {
-    /// Workspace to create the sandbox in.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
-    #[serde(flatten)]
-    inner: CreateSandboxInner,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct ListSandboxesParams {
-    /// Workspace to list sandboxes for.
-    #[schemars(with = "uuid::Uuid")]
-    workspace_id: WorkspaceId,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct GetSandboxParams {
-    /// ID of the sandbox to retrieve.
-    #[schemars(with = "uuid::Uuid")]
-    sandbox_id: SandboxId,
-}
-
-fn default_cpu() -> String {
-    "500m".to_string()
-}
-fn default_memory() -> String {
-    "512Mi".to_string()
-}
-fn default_disk_size() -> String {
-    "10Gi".to_string()
-}
-
-// -- inspect ----------------------------------------------------------------
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -224,21 +143,46 @@ enum InspectTool {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct InspectSandboxParams {
-    /// ID of the sandbox to inspect.
-    #[schemars(with = "uuid::Uuid")]
-    sandbox_id: SandboxId,
-    /// Read-only tool to run against the sandbox.
-    tool: InspectTool,
-    /// Tool-specific arguments passed through to the sandbox. grep: {pattern, path?, glob?, output_mode?, ...}. glob: {pattern, path?}. read: {path, offset?, limit?}. ls: {path, ignore?}.
+struct SandboxParams {
+    /// Which sandbox operation to perform.
+    command: SandboxCommand,
+
+    // -- create / list fields --
+    /// Workspace ID (required for `create` and `list`).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    workspace_id: Option<WorkspaceId>,
+    /// Display name for the new sandbox (required for `create`).
+    name: Option<String>,
+    /// Sandbox mode: 'scratch' or 'repo' (required for `create`).
+    mode: Option<SandboxCreateMode>,
+    /// Repository URL to clone (required when mode is 'repo').
+    repo_url: Option<String>,
+    /// Git branch to check out after cloning (optional).
+    branch: Option<String>,
+    /// CPU resource spec (e.g. '500m'). Defaults to '500m'.
+    cpu: Option<String>,
+    /// Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'.
+    memory: Option<String>,
+    /// Disk size spec (e.g. '10Gi'). Defaults to '10Gi'.
+    disk_size: Option<String>,
+
+    // -- get / inspect fields --
+    /// ID of the sandbox (required for `get` and `inspect`).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    sandbox_id: Option<SandboxId>,
+
+    // -- inspect fields --
+    /// Read-only tool to run against the sandbox (required for `inspect`): grep, glob, read, ls.
+    tool: Option<InspectTool>,
+    /// Tool-specific arguments for `inspect`. grep: {pattern, path?, glob?, output_mode?, ...}. glob: {pattern, path?}. read: {path, offset?, limit?}. ls: {path, ignore?}.
     #[serde(default)]
-    arguments: JsonObject,
+    tool_args: Option<JsonObject>,
 }
 
-// -- audit ------------------------------------------------------------------
+// -- log --------------------------------------------------------------------
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct QueryAuditLogParams {
+struct LogParams {
     /// Substring filter on entrypoint (e.g. 'api', 'mcp', 'graphql').
     entrypoint: Option<String>,
     /// Substring filter on action (e.g. 'workspace.create', 'catalog:').
@@ -268,7 +212,7 @@ fn default_audit_limit() -> i64 {
     20
 }
 
-impl QueryAuditLogParams {
+impl LogParams {
     fn into_query(self) -> AuditLogQuery {
         let entrypoint = self
             .entrypoint
@@ -301,53 +245,32 @@ impl QueryAuditLogParams {
 // -- workspace --------------------------------------------------------------
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct CreateWorkspaceParams {
-    /// Display name for the new workspace.
-    name: String,
-    /// Optional freeform description.
-    description: Option<String>,
+#[serde(rename_all = "snake_case")]
+enum WorkspaceCommand {
+    /// Create a new workspace (also seeds a WorkspaceLead agent named 'lead').
+    Create,
+    /// List all workspaces in the system.
+    List,
 }
 
-impl CreateWorkspaceParams {
-    fn description(&self) -> Option<String> {
-        self.description
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-    }
+#[derive(Deserialize, schemars::JsonSchema)]
+struct WorkspaceParams {
+    /// Which workspace operation to perform.
+    command: WorkspaceCommand,
+    /// Display name for the new workspace (required for `create`).
+    name: Option<String>,
+    /// Optional freeform description (for `create`).
+    description: Option<String>,
 }
 
 // ===========================================================================
 // Static schemas
 // ===========================================================================
 
-static CREATE_AGENT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<CreateAgentParams>);
-static ATTACH_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<AttachSandboxParams>);
-static DETACH_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<DetachSandboxParams>);
-static LIST_AGENTS_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<ListAgentsParams>);
-static CREATE_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<CreateSandboxParams>);
-static LIST_SANDBOXES_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<ListSandboxesParams>);
-static GET_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<GetSandboxParams>);
-static INSPECT_SANDBOX_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<InspectSandboxParams>);
-static QUERY_AUDIT_LOG_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<QueryAuditLogParams>);
-static CREATE_WORKSPACE_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<CreateWorkspaceParams>);
-static LIST_WORKSPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false,
-    })
-});
+static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
+static SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SandboxParams>);
+static LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LogParams>);
+static WORKSPACE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkspaceParams>);
 
 // ===========================================================================
 // Tool descriptors
@@ -361,60 +284,32 @@ struct ToolDef {
 
 static TOOLS: &[ToolDef] = &[
     ToolDef {
-        name: "create_agent",
-        description: "Create a new agent in a specified workspace (admin).",
-        schema: &CREATE_AGENT_SCHEMA,
+        name: "agent",
+        description: "Manage agents. Commands: `create` (requires `workspace_id`, `name`), \
+                       `list` (requires `workspace_id`), \
+                       `attach_sandbox` (requires `agent_id`, `sandbox_id`, optional `mode`), \
+                       `detach_sandbox` (requires `agent_id`, `sandbox_id`).",
+        schema: &AGENT_SCHEMA,
     },
     ToolDef {
-        name: "attach_sandbox",
-        description: "Attach a sandbox to an agent (admin).",
-        schema: &ATTACH_SANDBOX_SCHEMA,
+        name: "sandbox",
+        description: "Manage sandboxes. Commands: `create` (requires `workspace_id`, `name`, \
+                       `mode`, optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
+                       `list` (requires `workspace_id`), \
+                       `get` (requires `sandbox_id`), \
+                       `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`).",
+        schema: &SANDBOX_SCHEMA,
     },
     ToolDef {
-        name: "detach_sandbox",
-        description: "Detach a sandbox from an agent (admin).",
-        schema: &DETACH_SANDBOX_SCHEMA,
-    },
-    ToolDef {
-        name: "list_agents",
-        description: "List all agents in a workspace (admin).",
-        schema: &LIST_AGENTS_SCHEMA,
-    },
-    ToolDef {
-        name: "create_sandbox",
-        description: "Create a new sandbox in a specified workspace (admin).",
-        schema: &CREATE_SANDBOX_SCHEMA,
-    },
-    ToolDef {
-        name: "list_sandboxes",
-        description: "List all sandboxes in a workspace (admin).",
-        schema: &LIST_SANDBOXES_SCHEMA,
-    },
-    ToolDef {
-        name: "get_sandbox",
-        description: "Get sandbox details by ID (admin).",
-        schema: &GET_SANDBOX_SCHEMA,
-    },
-    ToolDef {
-        name: "inspect_sandbox",
-        description: "Run a read-only tool (grep, glob, read, ls) against any sandbox (admin).",
-        schema: &INSPECT_SANDBOX_SCHEMA,
-    },
-    ToolDef {
-        name: "query_audit_log",
+        name: "log",
         description: "Query audit log entries across all workspaces.",
-        schema: &QUERY_AUDIT_LOG_SCHEMA,
+        schema: &LOG_SCHEMA,
     },
     ToolDef {
-        name: "create_workspace",
-        description: "Create a new workspace (admin). Also seeds the workspace with a \
-                       `WorkspaceLead` agent named 'lead'.",
-        schema: &CREATE_WORKSPACE_SCHEMA,
-    },
-    ToolDef {
-        name: "list_workspaces",
-        description: "List all workspaces in the system (admin).",
-        schema: &LIST_WORKSPACES_SCHEMA,
+        name: "workspace",
+        description: "Manage workspaces. Commands: `create` (requires `name`, optional \
+                       `description`; also seeds a WorkspaceLead agent), `list`.",
+        schema: &WORKSPACE_SCHEMA,
     },
 ];
 
@@ -463,7 +358,7 @@ impl AdminToolSet {
 #[async_trait::async_trait]
 impl SearchableToolSet for AdminToolSet {
     fn name(&self) -> &str {
-        "drua"
+        "drua_admin"
     }
 
     fn category(&self) -> &str {
@@ -489,17 +384,10 @@ impl SearchableToolSet for AdminToolSet {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         match tool_name {
-            "create_agent" => self.create_agent(subject, arguments).await,
-            "attach_sandbox" => self.attach_sandbox(subject, arguments).await,
-            "detach_sandbox" => self.detach_sandbox(subject, arguments).await,
-            "list_agents" => self.list_agents(subject, arguments).await,
-            "create_sandbox" => self.create_sandbox(subject, arguments).await,
-            "list_sandboxes" => self.list_sandboxes(subject, arguments).await,
-            "get_sandbox" => self.get_sandbox(subject, arguments).await,
-            "inspect_sandbox" => self.inspect_sandbox(subject, arguments).await,
-            "query_audit_log" => self.query_audit_log(arguments).await,
-            "create_workspace" => self.create_workspace(subject, arguments).await,
-            "list_workspaces" => self.list_workspaces(subject).await,
+            "agent" => self.agent(subject, arguments).await,
+            "sandbox" => self.sandbox(subject, arguments).await,
+            "log" => self.log(arguments).await,
+            "workspace" => self.workspace(subject, arguments).await,
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -512,140 +400,193 @@ impl SearchableToolSet for AdminToolSet {
 impl AdminToolSet {
     // -- agent --------------------------------------------------------------
 
-    async fn create_agent(
+    async fn agent(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let params: CreateAgentParams = parse_params(arguments)?;
-        let agent = self
-            .agents
-            .create_agent(subject, params.workspace_id, &params.name, None)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(format_agent(
-            &agent,
-        ))]))
-    }
+        let params: AgentParams = parse_params(arguments)?;
 
-    async fn attach_sandbox(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: AttachSandboxParams = parse_params(arguments)?;
-        let agent = self
-            .agents
-            .attach_sandbox(subject, params.agent_id, params.sandbox_id, params.mode)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(format_agent(
-            &agent,
-        ))]))
-    }
+        match params.command {
+            AgentCommand::Create => {
+                let workspace_id = params.workspace_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "workspace_id is required for create".to_string(),
+                    )
+                })?;
+                let name = params.name.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("name is required for create".to_string())
+                })?;
+                let agent = self
+                    .agents
+                    .create_agent(subject, workspace_id, &name, None)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_agent(
+                    &agent,
+                ))]))
+            }
 
-    async fn detach_sandbox(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: DetachSandboxParams = parse_params(arguments)?;
-        let agent = self
-            .agents
-            .detach_sandbox(subject, params.agent_id, params.sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(format_agent(
-            &agent,
-        ))]))
-    }
+            AgentCommand::List => {
+                let workspace_id = params.workspace_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("workspace_id is required for list".to_string())
+                })?;
+                let agents = self
+                    .agents
+                    .list_for_workspace(subject, workspace_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_agents(
+                    &agents,
+                ))]))
+            }
 
-    async fn list_agents(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: ListAgentsParams = parse_params(arguments)?;
-        let agents = self
-            .agents
-            .list_for_workspace(subject, params.workspace_id)
-            .await
-            .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(format_agents(
-            &agents,
-        ))]))
+            AgentCommand::AttachSandbox => {
+                let agent_id = params.agent_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "agent_id is required for attach_sandbox".to_string(),
+                    )
+                })?;
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "sandbox_id is required for attach_sandbox".to_string(),
+                    )
+                })?;
+                let mode = params.mode.unwrap_or(SandboxAgentMode::Read);
+                let agent = self
+                    .agents
+                    .attach_sandbox(subject, agent_id, sandbox_id, mode)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_agent(
+                    &agent,
+                ))]))
+            }
+
+            AgentCommand::DetachSandbox => {
+                let agent_id = params.agent_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "agent_id is required for detach_sandbox".to_string(),
+                    )
+                })?;
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "sandbox_id is required for detach_sandbox".to_string(),
+                    )
+                })?;
+                let agent = self
+                    .agents
+                    .detach_sandbox(subject, agent_id, sandbox_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_agent(
+                    &agent,
+                ))]))
+            }
+        }
     }
 
     // -- sandbox ------------------------------------------------------------
 
-    async fn create_sandbox(
+    async fn sandbox(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let params: CreateSandboxParams = parse_params(arguments)?;
-        let (name, specs, mode) = params.inner.into_args()?;
-        let sandbox = self
-            .sandboxes
-            .create(subject, params.workspace_id, name, specs, mode)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            format_sandbox(&sandbox),
-        )]))
+        let params: SandboxParams = parse_params(arguments)?;
+
+        match params.command {
+            SandboxCommand::Create => {
+                let workspace_id = params.workspace_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "workspace_id is required for create".to_string(),
+                    )
+                })?;
+                let name = params.name.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("name is required for create".to_string())
+                })?;
+                let mode_enum = params.mode.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("mode is required for create".to_string())
+                })?;
+
+                let sandbox_mode = match mode_enum {
+                    SandboxCreateMode::Repo => {
+                        let repo_url = params.repo_url.ok_or_else(|| {
+                            ToolSetsError::InvalidArgument(
+                                "repo_url is required when mode is 'repo'".to_string(),
+                            )
+                        })?;
+                        SandboxMode::Repo {
+                            repo_url,
+                            branch: params.branch,
+                        }
+                    }
+                    SandboxCreateMode::Scratch => SandboxMode::Scratch,
+                };
+
+                let specs = SandboxSpecs {
+                    cpu: params.cpu.unwrap_or_else(|| "500m".to_string()),
+                    memory: params.memory.unwrap_or_else(|| "512Mi".to_string()),
+                    disk_size: params.disk_size.unwrap_or_else(|| "10Gi".to_string()),
+                };
+
+                let sandbox = self
+                    .sandboxes
+                    .create(subject, workspace_id, name, specs, sandbox_mode)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_sandbox(&sandbox),
+                )]))
+            }
+
+            SandboxCommand::List => {
+                let workspace_id = params.workspace_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("workspace_id is required for list".to_string())
+                })?;
+                let sandboxes = self
+                    .sandboxes
+                    .list_for_workspace(subject, workspace_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_sandboxes(&sandboxes),
+                )]))
+            }
+
+            SandboxCommand::Get => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for get".to_string())
+                })?;
+                let sandbox = self
+                    .sandboxes
+                    .find_by_id(subject, sandbox_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_sandbox(&sandbox),
+                )]))
+            }
+
+            SandboxCommand::Inspect => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for inspect".to_string())
+                })?;
+                let tool = params.tool.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("tool is required for inspect".to_string())
+                })?;
+                let tool_args = params.tool_args.unwrap_or_default();
+
+                Audit::record_sandbox_id(sandbox_id);
+                execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
+            }
+        }
     }
 
-    async fn list_sandboxes(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: ListSandboxesParams = parse_params(arguments)?;
-        let sandboxes = self
-            .sandboxes
-            .list_for_workspace(subject, params.workspace_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            format_sandboxes(&sandboxes),
-        )]))
-    }
+    // -- log ----------------------------------------------------------------
 
-    async fn get_sandbox(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: GetSandboxParams = parse_params(arguments)?;
-        let sandbox = self
-            .sandboxes
-            .find_by_id(subject, params.sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            format_sandbox(&sandbox),
-        )]))
-    }
-
-    // -- inspect ------------------------------------------------------------
-
-    async fn inspect_sandbox(
-        &self,
-        subject: &AuthSubject,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: InspectSandboxParams = parse_params(arguments)?;
-        Audit::record_sandbox_id(params.sandbox_id);
-        execute_inspect(subject, &self.sandboxes, params).await
-    }
-
-    // -- audit --------------------------------------------------------------
-
-    async fn query_audit_log(
-        &self,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let params: QueryAuditLogParams = parse_params(arguments)?;
+    async fn log(&self, arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
+        let params: LogParams = parse_params(arguments)?;
         let query = params.into_query();
         let entries = self.audit.find(&query).await?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -655,34 +596,44 @@ impl AdminToolSet {
 
     // -- workspace ----------------------------------------------------------
 
-    async fn create_workspace(
+    async fn workspace(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let params: CreateWorkspaceParams = parse_params(arguments)?;
-        let workspace = self
-            .workspaces
-            .create(subject, &params.name, params.description())
-            .await
-            .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            format_workspace_created(&workspace),
-        )]))
-    }
+        let params: WorkspaceParams = parse_params(arguments)?;
 
-    async fn list_workspaces(
-        &self,
-        subject: &AuthSubject,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let all = self
-            .workspaces
-            .list_all(subject)
-            .await
-            .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            format_workspaces(&all),
-        )]))
+        match params.command {
+            WorkspaceCommand::Create => {
+                let name = params.name.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("name is required for create".to_string())
+                })?;
+                let description = params
+                    .description
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let workspace = self
+                    .workspaces
+                    .create(subject, &name, description)
+                    .await
+                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_workspace_created(&workspace),
+                )]))
+            }
+
+            WorkspaceCommand::List => {
+                let all = self
+                    .workspaces
+                    .list_all(subject)
+                    .await
+                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_workspaces(&all),
+                )]))
+            }
+        }
     }
 }
 
@@ -693,10 +644,11 @@ impl AdminToolSet {
 async fn execute_inspect(
     sub: &AuthSubject,
     sandboxes: &Sandboxes,
-    params: InspectSandboxParams,
+    sandbox_id: SandboxId,
+    tool: InspectTool,
+    tool_args: JsonObject,
 ) -> Result<CallToolResult, ToolSetsError> {
-    let is_ls = matches!(params.tool, InspectTool::Ls);
-    let tool_args = params.arguments;
+    let is_ls = matches!(tool, InspectTool::Ls);
 
     let ls_ignore: Vec<String> = if is_ls {
         tool_args
@@ -712,7 +664,7 @@ async fn execute_inspect(
         Vec::new()
     };
 
-    let req = match params.tool {
+    let req = match tool {
         InspectTool::Grep => ExecuteRequest {
             tool: "Grep".to_string(),
             input: serde_json::Value::Object(tool_args),
@@ -726,7 +678,7 @@ async fn execute_inspect(
     };
 
     let client = sandboxes
-        .instance_client_for(sub, params.sandbox_id)
+        .instance_client_for(sub, sandbox_id)
         .await
         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
