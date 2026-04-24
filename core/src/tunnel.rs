@@ -326,8 +326,8 @@ impl TunnelToolSet {
             })
             .collect();
 
-        let name = format!("{}-{}", deployment_id, registration.name);
-        let prefix = format!("{}_{}", deployment_id, registration.prefix);
+        let name = format!("{}_{}", deployment_id, registration.name).replace('-', "_");
+        let prefix = format!("{}_{}", deployment_id, registration.prefix).replace('-', "_");
 
         Ok(Self {
             name,
