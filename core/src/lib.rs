@@ -1,5 +1,3 @@
-#![recursion_limit = "256"]
-
 pub mod agent;
 pub mod audit;
 pub mod auth;
@@ -204,7 +202,7 @@ impl App {
 
         let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents), library.clone()));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
-        toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills), library.clone()));
+        toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
 
         // Admin tools live behind progressive disclosure (search_tools →
         // describe_tool → call_tool) to declutter the top-level list_tools
@@ -222,15 +220,15 @@ impl App {
             use skill::job::{SyncSkillsFromLibraryConfig, SyncSkillsFromLibraryJobInitializer};
             let sync_init = SyncSkillsFromLibraryJobInitializer::new(
                 library.clone(),
-                skills.as_ref().clone(),
-                workspaces.as_ref().clone(),
+                Arc::clone(&skills),
+                Arc::clone(&workspaces),
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
                 .spawn_unique(
                     job::JobId::new(),
                     SyncSkillsFromLibraryConfig {
-                        sync_interval_secs: 60,
+                        sync_interval_secs: config.library.skill_sync_interval_secs,
                     },
                 )
                 .await

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use job::*;
@@ -11,26 +12,19 @@ use super::Skills;
 
 pub(crate) const SYNC_SKILLS_FROM_LIBRARY_JOB: &str = "skill.sync-from-library";
 
-const DEFAULT_SYNC_INTERVAL_SECS: u64 = 60;
-
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SyncSkillsFromLibraryConfig {
-    #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
-}
-
-fn default_sync_interval_secs() -> u64 {
-    DEFAULT_SYNC_INTERVAL_SECS
 }
 
 pub(crate) struct SyncSkillsFromLibraryJobInitializer {
     library: Library,
-    skills: Skills,
-    workspaces: Workspaces,
+    skills: Arc<Skills>,
+    workspaces: Arc<Workspaces>,
 }
 
 impl SyncSkillsFromLibraryJobInitializer {
-    pub fn new(library: Library, skills: Skills, workspaces: Workspaces) -> Self {
+    pub fn new(library: Library, skills: Arc<Skills>, workspaces: Arc<Workspaces>) -> Self {
         Self {
             library,
             skills,
@@ -58,8 +52,8 @@ impl JobInitializer for SyncSkillsFromLibraryJobInitializer {
         let config: SyncSkillsFromLibraryConfig = job.config()?;
         Ok(Box::new(SyncSkillsFromLibraryRunner {
             library: self.library.clone(),
-            skills: self.skills.clone(),
-            workspaces: self.workspaces.clone(),
+            skills: Arc::clone(&self.skills),
+            workspaces: Arc::clone(&self.workspaces),
             sync_interval: Duration::from_secs(config.sync_interval_secs),
         }))
     }
@@ -67,8 +61,8 @@ impl JobInitializer for SyncSkillsFromLibraryJobInitializer {
 
 struct SyncSkillsFromLibraryRunner {
     library: Library,
-    skills: Skills,
-    workspaces: Workspaces,
+    skills: Arc<Skills>,
+    workspaces: Arc<Workspaces>,
     sync_interval: Duration,
 }
 

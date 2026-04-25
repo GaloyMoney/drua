@@ -22,6 +22,8 @@ pub use search::SearchResult;
 const LIBRARY_WRITE_JOB: &str = "library.write";
 const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
 
+const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 60;
+
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
     /// Local path to clone the library repo into.
@@ -31,6 +33,14 @@ pub struct LibraryConfig {
     /// Git remote URL to clone from.
     #[serde(default)]
     pub repo_url: Option<String>,
+    /// How often (in seconds) the reverse-sync job polls the library repo
+    /// for new or changed skill files. Defaults to 60.
+    #[serde(default = "default_skill_sync_interval_secs")]
+    pub skill_sync_interval_secs: u64,
+}
+
+fn default_skill_sync_interval_secs() -> u64 {
+    DEFAULT_SKILL_SYNC_INTERVAL_SECS
 }
 
 impl LibraryConfig {

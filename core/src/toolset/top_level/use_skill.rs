@@ -4,7 +4,6 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::auth::AuthSubject;
-use crate::library::Library;
 use crate::skill::Skills;
 
 use super::super::error::ToolSetsError;
@@ -72,12 +71,11 @@ static USE_SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 
 pub struct UseSkillTool {
     skills: Arc<Skills>,
-    library: Library,
 }
 
 impl UseSkillTool {
-    pub fn new(skills: Arc<Skills>, library: Library) -> Self {
-        Self { skills, library }
+    pub fn new(skills: Arc<Skills>) -> Self {
+        Self { skills }
     }
 }
 
@@ -129,13 +127,8 @@ impl TopLevelTool for UseSkillTool {
             UseSkillParams::Search { query, limit } => {
                 let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
                 let results = self
-                    .library
-                    .search(
-                        uuid::Uuid::from(workspace_id),
-                        &query,
-                        Some(crate::library::DocType::Skill),
-                        limit,
-                    )
+                    .skills
+                    .search(workspace_id, &query, limit)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 

@@ -362,33 +362,29 @@ pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile
     Some(parsed)
 }
 
+/// Typed frontmatter parsed from skill markdown files via serde.
+#[derive(serde::Deserialize, Default)]
+struct SkillFrontmatter {
+    #[serde(default)]
+    id: Option<uuid::Uuid>,
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    updated: Option<String>,
+}
+
 /// Parse a skill file that has frontmatter (starts with `---`).
 fn parse_with_frontmatter(
     content: &str,
     workspace_name: Option<String>,
 ) -> Option<ParsedSkillFile> {
     let rest = content.strip_prefix("---")?;
-    let (frontmatter, after_fm) = rest.split_once("\n---")?;
+    let (frontmatter_str, after_fm) = rest.split_once("\n---")?;
 
-    let mut id_str = None;
-    let mut created_at = String::new();
-    let mut updated_at = String::new();
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("id:") {
-            id_str = Some(val.trim().to_string());
-        } else if let Some(val) = line.strip_prefix("created:") {
-            created_at = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("updated:") {
-            updated_at = val.trim().to_string();
-        }
-    }
+    let fm: SkillFrontmatter = serde_yaml::from_str(frontmatter_str.trim()).unwrap_or_default();
 
-    let (skill_id, needs_rewrite) = match id_str {
-        Some(ref s) => {
-            let uuid = s.parse::<uuid::Uuid>().ok()?;
-            (SkillId::from(uuid), false)
-        }
+    let (skill_id, needs_rewrite) = match fm.id {
+        Some(uuid) => (SkillId::from(uuid), false),
         None => (SkillId::new(), true),
     };
 
@@ -405,8 +401,8 @@ fn parse_with_frontmatter(
             name,
             description,
             body,
-            created_at,
-            updated_at,
+            created_at: fm.created.unwrap_or_default(),
+            updated_at: fm.updated.unwrap_or_default(),
             slug,
             id_prefix,
             original_path: None,
@@ -584,8 +580,18 @@ mod tests {
         let path = "runtime/skills/test.md";
         // No heading at all
         assert!(parse_skill_markdown("not markdown", path).is_none());
-        // Frontmatter with bad UUID
-        assert!(parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", path).is_none());
+    }
+
+    #[test]
+    fn parse_skill_markdown_bad_uuid_generates_new_id() {
+        let path = "runtime/skills/test.md";
+        // Invalid UUID in frontmatter falls back to generating a new SkillId
+        let parsed = parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", path).unwrap();
+        assert!(parsed.needs_rewrite);
+        match &parsed.file {
+            RuntimeFile::Skill { name, .. } => assert_eq!(name, "Name"),
+            _ => panic!("expected Skill variant"),
+        }
     }
 
     #[test]

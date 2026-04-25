@@ -838,6 +838,13 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
     skills
 }
 
+/// Typed frontmatter parsed from a SKILL.md file via serde.
+#[derive(serde::Deserialize, Default)]
+struct SkillFrontmatter {
+    #[serde(default)]
+    description: Option<String>,
+}
+
 /// Parse YAML-style frontmatter from a SKILL.md file.
 ///
 /// Extracts the `description` field from a `---` delimited frontmatter block.
@@ -845,38 +852,18 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
 /// frontmatter, returns `(None, original_content)`.
 fn parse_skill_frontmatter(raw: &str) -> (Option<String>, String) {
     let trimmed = raw.trim_start();
-    if !trimmed.starts_with("---") {
-        return (None, raw.to_string());
-    }
-    // Skip the opening `---` line
-    let after_open = match trimmed.strip_prefix("---") {
-        Some(rest) => rest.trim_start_matches('-'),
-        None => return (None, raw.to_string()),
-    };
-    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
-
-    // Find the closing `---`
-    let Some(end_idx) = after_open.find("\n---") else {
+    let Some(rest) = trimmed.strip_prefix("---") else {
         return (None, raw.to_string());
     };
 
-    let frontmatter = &after_open[..end_idx];
-    let body_start = end_idx + 4; // skip "\n---"
-    let body = after_open[body_start..]
-        .trim_start_matches(['-', '\n'])
-        .to_string();
+    let Some((frontmatter_str, after_fm)) = rest.split_once("\n---") else {
+        return (None, raw.to_string());
+    };
 
-    // Simple key: value parsing for `description`
-    let description = frontmatter
-        .lines()
-        .find_map(|line| {
-            let line = line.trim();
-            line.strip_prefix("description:")
-                .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
-        })
-        .filter(|d| !d.is_empty());
+    let fm: SkillFrontmatter = serde_yaml::from_str(frontmatter_str.trim()).unwrap_or_default();
+    let body = after_fm.trim_start_matches(['-', '\n']).to_string();
 
-    (description, body)
+    (fm.description.filter(|d| !d.is_empty()), body)
 }
 
 // ---------------------------------------------------------------------------
