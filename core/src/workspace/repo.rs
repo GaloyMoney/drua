@@ -10,7 +10,7 @@ use super::entity::*;
 #[es_repo(
     entity = "Workspace",
     columns(name(ty = "String", list_by)),
-    delete = "soft"
+    delete = "soft_without_queries"
 )]
 pub struct WorkspaceRepo {
     #[allow(dead_code)]
