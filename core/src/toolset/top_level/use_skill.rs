@@ -8,7 +8,7 @@ use crate::skill::Skills;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+
 
 // ---------------------------------------------------------------------------
 // Params
@@ -20,17 +20,50 @@ fn default_search_limit() -> usize {
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
-enum UseSkillParams {
+enum UseSkillAction {
     Invoke {
         name: String,
         #[serde(default)]
         arguments: Option<String>,
     },
     Search {
+        #[serde(default)]
         query: String,
         #[serde(default = "default_search_limit")]
         limit: usize,
     },
+}
+
+/// Wrapper that defaults to Search when `action` is missing.
+fn parse_use_skill_params(arguments: Option<JsonObject>) -> Result<UseSkillAction, ToolSetsError> {
+    let Some(args) = arguments else {
+        return Ok(UseSkillAction::Search {
+            query: String::new(),
+            limit: default_search_limit(),
+        });
+    };
+    let map: serde_json::Map<String, serde_json::Value> = args.into_iter().collect();
+    if map.contains_key("action") {
+        let val = serde_json::Value::Object(map);
+        serde_json::from_value(val).map_err(ToolSetsError::from)
+    } else if let Some(name) = map.get("name").and_then(|v| v.as_str()) {
+        Ok(UseSkillAction::Invoke {
+            name: name.to_string(),
+            arguments: map.get("arguments").and_then(|v| v.as_str()).map(String::from),
+        })
+    } else {
+        Ok(UseSkillAction::Search {
+            query: map
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            limit: map
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(default_search_limit() as u64) as usize,
+        })
+    }
 }
 
 static USE_SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -104,10 +137,10 @@ impl TopLevelTool for UseSkillTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let params: UseSkillParams = parse_params(arguments)?;
+        let params = parse_use_skill_params(arguments)?;
 
         match params {
-            UseSkillParams::Invoke { name, arguments } => {
+            UseSkillAction::Invoke { name, arguments } => {
                 let workspace_id = subject.workspace_id();
                 let sandbox_id = subject.readable_sandbox_id();
                 let rendered = self
@@ -124,7 +157,7 @@ impl TopLevelTool for UseSkillTool {
                 }
             }
 
-            UseSkillParams::Search { query, limit } => {
+            UseSkillAction::Search { query, limit } => {
                 let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
                 let results = self
                     .skills
