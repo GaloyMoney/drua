@@ -15,13 +15,18 @@ pub enum AuthScope {
     /// Full administrative access.
     Admin,
     /// The subject is an admin of a specific workspace (granted to the
-    /// `WorkspaceLead` agent role today). Currently the only
-    /// workspace-level scope: gates workspace management tools
+    /// `WorkspaceLead` agent role today). Gates workspace management tools
     /// (list/create/update agents and sandboxes, query audit logs, etc.)
     /// and is checked by per-tool visibility to *hide* sandbox-backed
     /// filesystem tools (admins orchestrate; they don't run inside a
     /// sandbox themselves).
     WorkspaceAdmin(WorkspaceId),
+    /// Membership in a workspace. Grants any verb on workspace-scoped
+    /// resources (notes, skills, agents, the workspace itself). Given to
+    /// every agent at creation time. The distinction from `WorkspaceAdmin`
+    /// is in tool *visibility* (which tools the agent sees), not in what
+    /// the agent is *authorized* to do once it has a tool.
+    WorkspaceMember(WorkspaceId),
     /// Use access — the agent may invoke sandbox tools, including
     /// state-mutating ones (e.g. the `bash` top-level tool). Granted on a
     /// `Write` attach.
@@ -44,6 +49,28 @@ impl AuthScope {
             // WorkspaceAdmin grants any verb on any resource within its workspace.
             AuthScope::WorkspaceAdmin(ws) => {
                 resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
+            }
+
+            // WorkspaceMember grants a limited set of actions within its
+            // workspace. Expand this list explicitly as new tools need it.
+            AuthScope::WorkspaceMember(ws) => {
+                let in_ws = resource.workspace_id().is_some_and(|res_ws| res_ws == *ws);
+                if !in_ws {
+                    return false;
+                }
+                matches!(
+                    (verb, resource),
+                    // Read own workspace context (e.g. resolve workspace name).
+                    (AuthVerb::Read, AuthResource::Workspace(_))
+                    // CRUD on notes.
+                    | (AuthVerb::Create, AuthResource::Note(..))
+                    | (AuthVerb::Read, AuthResource::Note(..))
+                    | (AuthVerb::Update, AuthResource::Note(..))
+                    | (AuthVerb::Delete, AuthResource::Note(..))
+                    // List and use skills.
+                    | (AuthVerb::Read, AuthResource::Skill(..))
+                    | (AuthVerb::Use, AuthResource::Skill(..))
+                )
             }
 
             // SandboxUse grants Use and Read on the matching sandbox
@@ -82,6 +109,7 @@ impl fmt::Display for AuthScope {
         match self {
             AuthScope::Admin => f.write_str("admin"),
             AuthScope::WorkspaceAdmin(id) => write!(f, "ws:{id}:admin"),
+            AuthScope::WorkspaceMember(id) => write!(f, "ws:{id}:member"),
             AuthScope::SandboxUse(id) => write!(f, "sandbox:{id}:use"),
             AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
             AuthScope::External(s) => f.write_str(s),
@@ -97,11 +125,16 @@ impl FromStr for AuthScope {
             return Ok(AuthScope::Admin);
         }
 
-        // Parse "ws:{uuid}:admin"
+        // Parse "ws:{uuid}:admin" or "ws:{uuid}:member"
         if let Some(rest) = s.strip_prefix("ws:") {
             if let Some(uuid_str) = rest.strip_suffix(":admin") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::WorkspaceAdmin(WorkspaceId::from(uuid)));
+                }
+            }
+            if let Some(uuid_str) = rest.strip_suffix(":member") {
+                if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
+                    return Ok(AuthScope::WorkspaceMember(WorkspaceId::from(uuid)));
                 }
             }
         }
@@ -188,6 +221,7 @@ mod tests {
         let variants = vec![
             AuthScope::Admin,
             AuthScope::WorkspaceAdmin(ws_id),
+            AuthScope::WorkspaceMember(ws_id),
             AuthScope::SandboxUse(sb_id),
             AuthScope::SandboxRead(sb_id),
             AuthScope::External("custom:thing".to_owned()),
@@ -254,6 +288,10 @@ mod tests {
             AuthScope::WorkspaceAdmin(ws_id).to_string(),
             "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
         );
+        assert_eq!(
+            AuthScope::WorkspaceMember(ws_id).to_string(),
+            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
+        );
     }
 
     #[test]
@@ -269,6 +307,11 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(admin, AuthScope::WorkspaceAdmin(ws_id));
+
+        let member: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
+            .parse()
+            .unwrap();
+        assert_eq!(member, AuthScope::WorkspaceMember(ws_id));
     }
 
     #[test]

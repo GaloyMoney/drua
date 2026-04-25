@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use obix::{InboxEvent, InboxHandler, InboxResult};
 
-use super::job::{WriteToRuntimeConfig, WRITE_TO_RUNTIME_QUEUE};
+use super::job::{WriteToRuntimeConfig, LIBRARY_LOCK_QUEUE};
 use super::search::SearchStore;
 
 pub(super) struct LibraryWriteHandler {
@@ -44,7 +44,7 @@ impl InboxHandler for LibraryWriteHandler {
 
         let config = WriteToRuntimeConfig { file };
         self.write_spawner
-            .spawn_with_queue_id(job::JobId::new(), config, WRITE_TO_RUNTIME_QUEUE)
+            .spawn_with_queue_id(job::JobId::new(), config, LIBRARY_LOCK_QUEUE)
             .await?;
 
         Ok(InboxResult::Complete)

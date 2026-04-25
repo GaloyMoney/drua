@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use super::file::RuntimeFile;
 use super::upstream::Upstream;
 
-pub(super) const WRITE_TO_RUNTIME_QUEUE: &str = "write-to-runtime";
+/// Shared queue ID that serializes all git operations on the library repo.
+/// Both forward-sync (WriteToRuntime) and reverse-sync (SyncSkillsFromLibrary)
+/// jobs use this queue to prevent concurrent access to the working directory.
+pub const LIBRARY_LOCK_QUEUE: &str = "library-lock";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct WriteToRuntimeConfig {
@@ -67,26 +70,52 @@ impl JobRunner for WriteToRuntimeRunner {
             return Ok(JobCompletion::Complete);
         }
 
+        let err_msg = match self.write_and_push().await {
+            Ok(()) => return Ok(JobCompletion::Complete),
+            Err(e) => e.to_string(),
+        };
+
+        tracing::warn!(error = %err_msg, "write failed, resetting working tree");
+        if let Err(reset_err) = self.upstream.reset_dirty_state().await {
+            tracing::error!(error = %reset_err, "reset after failed write also failed");
+        }
+        Err(err_msg.into())
+    }
+}
+
+impl WriteToRuntimeRunner {
+    async fn write_and_push(&self) -> Result<(), Box<dyn std::error::Error>> {
         let canonical_path = self.file.relative_path();
         self.upstream
             .write_file(&canonical_path, &self.file.content())
             .await?;
 
-        // If the file was imported with a non-canonical name, remove the original.
+        // If the file was imported under a non-canonical name and the
+        // original still exists on disk (i.e. first write after import),
+        // remove it and commit both changes together.
         let original = self.file.original_path();
         let needs_rename = original.is_some_and(|p| p != canonical_path);
-        if let Some(old_path) = original.filter(|_| needs_rename) {
-            self.upstream.remove_file(old_path).await?;
-            self.upstream
-                .commit_paths(&[&canonical_path, old_path], &self.file.commit_message())
-                .await?;
+        if needs_rename {
+            let old_path = original.unwrap();
+            if self.upstream.file_exists(old_path).await {
+                self.upstream.remove_file(old_path).await?;
+                self.upstream
+                    .commit_paths(&[&canonical_path, old_path], &self.file.commit_message())
+                    .await?;
+            } else {
+                // Original already gone (previous attempt or never cloned) —
+                // just commit the canonical file.
+                self.upstream
+                    .add_and_commit(&canonical_path, &self.file.commit_message())
+                    .await?;
+            }
         } else {
             self.upstream
                 .add_and_commit(&canonical_path, &self.file.commit_message())
                 .await?;
         }
-        self.upstream.push().await?;
 
-        Ok(JobCompletion::Complete)
+        self.upstream.push().await?;
+        Ok(())
     }
 }

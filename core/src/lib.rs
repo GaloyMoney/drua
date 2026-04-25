@@ -215,7 +215,8 @@ impl App {
         ));
 
         // Reverse-sync: poll the library repo for skill files added/modified
-        // via git and upsert them into the DB.
+        // via git and upsert them into the DB. Runs on the library-lock queue
+        // so it serializes with forward-sync (WriteToRuntime) jobs.
         {
             use skill::job::{SyncSkillsFromLibraryConfig, SyncSkillsFromLibraryJobInitializer};
             let sync_init = SyncSkillsFromLibraryJobInitializer::new(
@@ -225,11 +226,13 @@ impl App {
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
-                .spawn_unique(
+                .spawn_with_queue_id(
                     job::JobId::new(),
                     SyncSkillsFromLibraryConfig {
                         sync_interval_secs: config.library.skill_sync_interval_secs,
+                        last_sync_commit: None,
                     },
+                    library::LIBRARY_LOCK_QUEUE,
                 )
                 .await
                 .map_err(|e| AppError::Job(e.to_string()))?;

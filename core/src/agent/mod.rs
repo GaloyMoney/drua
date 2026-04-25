@@ -14,14 +14,15 @@ use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
 /// Default authorization scopes granted to an agent when it's created.
-/// The `WorkspaceLead` role gets the `WorkspaceAdmin` workspace-level
-/// scope (the only one for now); plain agents get nothing from this
-/// function — they pick up `SandboxUse` / `SandboxRead` later
-/// when they're attached to a sandbox via [`Agent::sandbox_attached`].
+/// The `WorkspaceLead` role gets `WorkspaceAdmin` (full workspace
+/// management); plain agents get `WorkspaceMember` (read-only workspace
+/// access) so they can use workspace-scoped tools like notes and skills.
+/// Agents additionally pick up `SandboxUse` / `SandboxRead` later when
+/// attached to a sandbox via [`Agent::sandbox_attached`].
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
     match role {
         AgentRole::WorkspaceLead => vec![AuthScope::WorkspaceAdmin(workspace_id)],
-        AgentRole::Agent => Vec::new(),
+        AgentRole::Agent => vec![AuthScope::WorkspaceMember(workspace_id)],
     }
 }
 

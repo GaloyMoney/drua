@@ -1,11 +1,9 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use job::*;
 use serde::{Deserialize, Serialize};
-use tokio::select;
 
-use crate::library::{Library, RuntimeFile, SkillFileChange};
+use crate::library::{Library, RuntimeFile, SkillFileChange, LIBRARY_LOCK_QUEUE};
 use crate::workspace::Workspaces;
 
 use super::Skills;
@@ -15,6 +13,18 @@ pub(crate) const SYNC_SKILLS_FROM_LIBRARY_JOB: &str = "skill.sync-from-library";
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SyncSkillsFromLibraryConfig {
     pub sync_interval_secs: u64,
+    #[serde(default)]
+    #[allow(clippy::option_option)]
+    pub last_sync_commit: Option<String>,
+}
+
+impl SyncSkillsFromLibraryConfig {
+    fn next(&self, last_sync_commit: Option<String>) -> Self {
+        Self {
+            sync_interval_secs: self.sync_interval_secs,
+            last_sync_commit,
+        }
+    }
 }
 
 pub(crate) struct SyncSkillsFromLibraryJobInitializer {
@@ -40,21 +50,18 @@ impl JobInitializer for SyncSkillsFromLibraryJobInitializer {
         JobType::new(SYNC_SKILLS_FROM_LIBRARY_JOB)
     }
 
-    fn retry_on_error_settings(&self) -> RetrySettings {
-        RetrySettings::repeat_indefinitely()
-    }
-
     fn init(
         &self,
         job: &Job,
-        _spawner: JobSpawner<Self::Config>,
+        spawner: JobSpawner<Self::Config>,
     ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
         let config: SyncSkillsFromLibraryConfig = job.config()?;
         Ok(Box::new(SyncSkillsFromLibraryRunner {
             library: self.library.clone(),
             skills: Arc::clone(&self.skills),
             workspaces: Arc::clone(&self.workspaces),
-            sync_interval: Duration::from_secs(config.sync_interval_secs),
+            config,
+            spawner,
         }))
     }
 }
@@ -63,12 +70,8 @@ struct SyncSkillsFromLibraryRunner {
     library: Library,
     skills: Arc<Skills>,
     workspaces: Arc<Workspaces>,
-    sync_interval: Duration,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SyncState {
-    last_sync_commit: Option<String>,
+    config: SyncSkillsFromLibraryConfig,
+    spawner: JobSpawner<SyncSkillsFromLibraryConfig>,
 }
 
 #[async_trait::async_trait]
@@ -76,49 +79,47 @@ impl JobRunner for SyncSkillsFromLibraryRunner {
     #[tracing::instrument(name = "skill.sync_from_library.run", skip_all)]
     async fn run(
         &self,
-        mut current_job: CurrentJob,
+        current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        let mut state = current_job
-            .execution_state::<SyncState>()?
-            .unwrap_or_default();
-
-        loop {
-            match self.sync_once(&mut current_job, &mut state).await {
-                Ok(()) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "skill sync cycle failed, will retry next interval");
-                }
+        let next_commit = match self.sync_once(&current_job).await {
+            Ok(commit) => commit,
+            Err(e) => {
+                tracing::warn!(error = %e, "skill sync cycle failed");
+                self.config.last_sync_commit.clone()
             }
+        };
 
-            select! {
-                biased;
-                _ = current_job.shutdown_requested() => {
-                    tracing::info!("shutdown requested, rescheduling sync job");
-                    return Ok(JobCompletion::RescheduleNow);
-                }
-                _ = tokio::time::sleep(self.sync_interval) => {}
-            }
-        }
+        // Schedule the next sync on the same serialized queue.
+        let next_config = self.config.next(next_commit);
+        let schedule_at =
+            chrono::Utc::now() + chrono::Duration::seconds(self.config.sync_interval_secs as i64);
+        self.spawner
+            .spawn_at_with_queue_id(JobId::new(), next_config, schedule_at, LIBRARY_LOCK_QUEUE)
+            .await?;
+
+        Ok(JobCompletion::Complete)
     }
 }
 
 impl SyncSkillsFromLibraryRunner {
+    /// Run a single sync cycle. Returns the new HEAD commit hash to carry
+    /// forward into the next scheduled job.
     async fn sync_once(
         &self,
-        current_job: &mut CurrentJob,
-        state: &mut SyncState,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        current_job: &CurrentJob,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let changes = self
             .library
-            .find_new_skills(state.last_sync_commit.as_deref())
+            .find_new_skills(self.config.last_sync_commit.as_deref())
             .await?;
 
         if changes.files.is_empty() {
-            if !changes.head_commit.is_empty() {
-                state.last_sync_commit = Some(changes.head_commit);
-                current_job.update_execution_state(&state).await?;
-            }
-            return Ok(());
+            let commit = if changes.head_commit.is_empty() {
+                None
+            } else {
+                Some(changes.head_commit)
+            };
+            return Ok(commit);
         }
 
         tracing::info!(
@@ -151,9 +152,6 @@ impl SyncSkillsFromLibraryRunner {
         }
 
         // Batch upsert all skills in a single transaction.
-        // Batch upsert — original_path is already set on the RuntimeFile
-        // for files that need renaming. The post-persist hook propagates it
-        // through the WriteToRuntime pipeline which handles the rename.
         let mut op = current_job.begin_op().await?;
         for (change, ws_id) in &resolved {
             let file_hash = change.file.file_hash();
@@ -167,14 +165,7 @@ impl SyncSkillsFromLibraryRunner {
         }
         op.commit().await?;
 
-        // Update state after the upserts committed successfully.
-        // Safe even though it's a separate transaction: if we crash before
-        // persisting state, the next cycle re-processes the same files and
-        // the idempotent upsert (file_hash check) skips them.
-        state.last_sync_commit = Some(changes.head_commit);
-        current_job.update_execution_state(&state).await?;
-
-        Ok(())
+        Ok(Some(changes.head_commit))
     }
 
     /// Extract workspace_name from a RuntimeFile.

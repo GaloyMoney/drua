@@ -44,3 +44,30 @@ integration-tests: reset-deps
 
 start: reset-deps
 	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
+
+# ── Test library ──────────────────────────────────────────────────────────────
+TEST_LIBRARY_REPO ?= git@github.com:galoymoney/drua-test-library.git
+TEST_LIBRARY_DIR  = tmp/drua-test-library
+
+reset-test-library:
+	rm -rf $(TEST_LIBRARY_DIR) .library
+	mkdir -p $(TEST_LIBRARY_DIR)
+	cd $(TEST_LIBRARY_DIR) && git init && git remote add origin $(TEST_LIBRARY_REPO)
+	mkdir -p $(TEST_LIBRARY_DIR)/runtime/skills
+	mkdir -p $(TEST_LIBRARY_DIR)/runtime/workspaces
+	touch $(TEST_LIBRARY_DIR)/runtime/skills/.gitkeep
+	touch $(TEST_LIBRARY_DIR)/runtime/workspaces/.gitkeep
+	cd $(TEST_LIBRARY_DIR) && git add -A && \
+		git -c user.name=drua -c user.email=drua@galoy.io commit -m "init: empty library scaffold" && \
+		git push --force origin HEAD:main
+	@echo "Test library reset to empty scaffold. Restart the server to re-clone .library."
+
+add-test-skill:
+	@test -d $(TEST_LIBRARY_DIR)/.git || (echo "Run 'make reset-test-library' first" && exit 1)
+	@printf '# CI Check\n\nInvestigate the latest CI status for a Concourse pipeline.\n\n---\n\nUsing the concourse tools, find the most recent build failure of the **galoy-agents-bin** pipeline.\n\n1. List recent builds and identify the last failed one\n2. Fetch the build logs and summarize the failure reason\n3. If all recent builds passed, report that the pipeline is green\n\nIf $$ARGUMENTS is provided, check that pipeline instead.\n' \
+		> $(TEST_LIBRARY_DIR)/runtime/skills/ci-check.md
+	cd $(TEST_LIBRARY_DIR) && git pull --rebase origin main && \
+		git add -A && \
+		git -c user.name=drua -c user.email=drua@galoy.io commit -m "add global skill: ci-check" && \
+		git push origin HEAD:main
+	@echo "Pushed ci-check skill to test library."

@@ -17,6 +17,7 @@ pub use error::LibraryError;
 pub use file::{
     parse_skill_markdown, DocType, GitFileHash, ParsedSkillFile, RuntimeFile, SearchableFields,
 };
+pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::SearchResult;
 
 const LIBRARY_WRITE_JOB: &str = "library.write";

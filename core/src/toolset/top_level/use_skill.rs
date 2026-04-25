@@ -9,7 +9,6 @@ use crate::skill::Skills;
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 
-
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
@@ -49,7 +48,10 @@ fn parse_use_skill_params(arguments: Option<JsonObject>) -> Result<UseSkillActio
     } else if let Some(name) = map.get("name").and_then(|v| v.as_str()) {
         Ok(UseSkillAction::Invoke {
             name: name.to_string(),
-            arguments: map.get("arguments").and_then(|v| v.as_str()).map(String::from),
+            arguments: map
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         })
     } else {
         Ok(UseSkillAction::Search {

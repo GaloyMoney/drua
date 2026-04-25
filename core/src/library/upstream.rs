@@ -94,6 +94,10 @@ impl Upstream {
         Some(GitFileHash::from_sha1(format!("{:x}", hasher.finalize())))
     }
 
+    pub async fn file_exists(&self, relative_path: &str) -> bool {
+        self.repo_path.join(relative_path).exists()
+    }
+
     pub async fn write_file(&self, relative_path: &str, content: &str) -> Result<(), LibraryError> {
         let full_path = self.repo_path.join(relative_path);
         if let Some(parent) = full_path.parent() {
@@ -166,12 +170,65 @@ impl Upstream {
         Ok(())
     }
 
+    /// Discard any uncommitted changes left over from a previously failed
+    /// job. Safe because all git operations are serialized on the
+    /// `library-lock` queue — any dirty state is an incomplete write, not
+    /// in-progress work.
+    pub async fn reset_dirty_state(&self) -> Result<(), LibraryError> {
+        self.require_git_repo()?;
+
+        let status = tokio::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git status: {e}")))?;
+        let dirty = String::from_utf8_lossy(&status.stdout);
+        if dirty.trim().is_empty() {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            dirty = %dirty.trim(),
+            "cleaning up uncommitted changes from a previous failed job"
+        );
+
+        let reset = tokio::process::Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git checkout: {e}")))?;
+        if !reset.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git checkout -- . failed: {}",
+                String::from_utf8_lossy(&reset.stderr)
+            )));
+        }
+
+        // Also remove untracked files (e.g. newly written but never staged).
+        let clean = tokio::process::Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git clean: {e}")))?;
+        if !clean.status.success() {
+            tracing::warn!(
+                stderr = %String::from_utf8_lossy(&clean.stderr),
+                "git clean -fd failed"
+            );
+        }
+
+        Ok(())
+    }
+
     pub async fn pull(&self) -> Result<(), LibraryError> {
         self.require_git_repo()?;
 
         let token = Self::fresh_token(&self.github_app).await;
         let pull = git_cmd(token.as_deref())
-            .args(["pull", "--ff-only"])
+            .args(["pull", "--rebase"])
             .current_dir(&self.repo_path)
             .output()
             .await
