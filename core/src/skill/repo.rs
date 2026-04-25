@@ -31,22 +31,6 @@ impl SkillRepo {
         }
     }
 
-    /// List all global skills (workspace_id IS NULL).
-    ///
-    /// Uses a raw query because es-entity 0.10.34's generated
-    /// `list_for_workspace_id_by_created_at(None)` matches ALL rows when the
-    /// parameter is NULL. Fixed in es-entity 0.10.35 but blocked on the `job`
-    /// crate being rebuilt against 0.10.35.
-    pub async fn list_global(&self) -> Result<Vec<Skill>, SkillFindError> {
-        let (skills, _) = es_query!(
-            "SELECT id, created_at FROM skills WHERE workspace_id IS NULL AND deleted = FALSE ORDER BY created_at ASC LIMIT $1",
-            100i64
-        )
-        .fetch_n(&self.pool, 100)
-        .await?;
-        Ok(skills)
-    }
-
     /// Post-persist hook: sync skill content to the git-backed library.
     /// Only fires on content changes (Initialized/Updated).
     /// Skips when no library is configured (e.g. in tests).

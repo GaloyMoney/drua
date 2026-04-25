@@ -180,7 +180,19 @@ impl Skills {
                 es_entity::ListDirection::Ascending,
             )
             .await?;
-        let global_skills = self.repo.list_global().await?;
+        let global_query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let global_result = self
+            .repo
+            .list_for_workspace_id_by_created_at(
+                None,
+                global_query,
+                es_entity::ListDirection::Ascending,
+            )
+            .await?;
+        let global_skills = global_result.entities;
 
         // Merge: workspace skills first, then globals (dedup by name,
         // workspace wins).
