@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_graphql::{ComplexObject, InputObject, SimpleObject};
+use async_graphql::{ComplexObject, SimpleObject};
 
 use super::primitives::*;
 
@@ -10,7 +10,7 @@ use drua_core::skill::Skill as DomainSkill;
 #[graphql(complex)]
 pub struct Skill {
     id: SkillId,
-    workspace_id: WorkspaceId,
+    workspace_id: Option<WorkspaceId>,
     name: String,
     description: String,
     body: String,
@@ -37,34 +37,4 @@ impl From<DomainSkill> for Skill {
             entity: Arc::new(entity),
         }
     }
-}
-
-#[derive(InputObject)]
-pub struct SkillCreateInput {
-    pub workspace_id: WorkspaceId,
-    pub name: String,
-    pub description: String,
-    pub body: String,
-}
-
-mutation_payload! { SkillCreatePayload, skill: Skill }
-
-#[derive(InputObject)]
-pub struct SkillUpdateInput {
-    pub id: SkillId,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub body: Option<String>,
-}
-
-mutation_payload! { SkillUpdatePayload, skill: Skill }
-
-#[derive(InputObject)]
-pub struct SkillDeleteInput {
-    pub id: SkillId,
-}
-
-#[derive(async_graphql::SimpleObject)]
-pub struct SkillDeletePayload {
-    pub deleted_id: SkillId,
 }

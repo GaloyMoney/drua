@@ -94,6 +94,10 @@ impl Upstream {
         Some(GitFileHash::from_sha1(format!("{:x}", hasher.finalize())))
     }
 
+    pub async fn file_exists(&self, relative_path: &str) -> bool {
+        self.repo_path.join(relative_path).exists()
+    }
+
     pub async fn write_file(&self, relative_path: &str, content: &str) -> Result<(), LibraryError> {
         let full_path = self.repo_path.join(relative_path);
         if let Some(parent) = full_path.parent() {
@@ -108,12 +112,123 @@ impl Upstream {
         Ok(())
     }
 
+    pub async fn remove_file(&self, relative_path: &str) -> Result<(), LibraryError> {
+        let full_path = self.repo_path.join(relative_path);
+        if full_path.exists() {
+            tokio::fs::remove_file(&full_path)
+                .await
+                .map_err(|e| LibraryError::Io(e.to_string()))?;
+            tracing::info!(path = %full_path.display(), "removed runtime file");
+        }
+        Ok(())
+    }
+
+    /// Stage multiple paths and commit. Handles both new files and deletions
+    /// (a deleted file that is staged records the removal).
+    pub async fn commit_paths(&self, paths: &[&str], message: &str) -> Result<(), LibraryError> {
+        self.require_git_repo()?;
+
+        let mut add_args = vec!["add", "--"];
+        for path in paths {
+            add_args.push(path);
+        }
+        let add = tokio::process::Command::new("git")
+            .args(&add_args)
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git add: {e}")))?;
+        if !add.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            )));
+        }
+
+        let commit = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=drua",
+                "-c",
+                "user.email=drua@galoy.io",
+                "commit",
+                "-m",
+                message,
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            // Allow "nothing to commit" — the file may already match.
+            if !stderr.contains("nothing to commit") {
+                return Err(LibraryError::Git(format!("git commit failed: {stderr}")));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Discard any uncommitted changes left over from a previously failed
+    /// job. Safe because all git operations are serialized on the
+    /// `library-lock` queue — any dirty state is an incomplete write, not
+    /// in-progress work.
+    pub async fn reset_dirty_state(&self) -> Result<(), LibraryError> {
+        self.require_git_repo()?;
+
+        let status = tokio::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git status: {e}")))?;
+        let dirty = String::from_utf8_lossy(&status.stdout);
+        if dirty.trim().is_empty() {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            dirty = %dirty.trim(),
+            "cleaning up uncommitted changes from a previous failed job"
+        );
+
+        let reset = tokio::process::Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git checkout: {e}")))?;
+        if !reset.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git checkout -- . failed: {}",
+                String::from_utf8_lossy(&reset.stderr)
+            )));
+        }
+
+        // Also remove untracked files (e.g. newly written but never staged).
+        let clean = tokio::process::Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git clean: {e}")))?;
+        if !clean.status.success() {
+            tracing::warn!(
+                stderr = %String::from_utf8_lossy(&clean.stderr),
+                "git clean -fd failed"
+            );
+        }
+
+        Ok(())
+    }
+
     pub async fn pull(&self) -> Result<(), LibraryError> {
         self.require_git_repo()?;
 
         let token = Self::fresh_token(&self.github_app).await;
         let pull = git_cmd(token.as_deref())
-            .args(["pull", "--ff-only"])
+            .args(["pull", "--rebase"])
             .current_dir(&self.repo_path)
             .output()
             .await
@@ -177,6 +292,110 @@ impl Upstream {
 
         tracing::info!(path = relative_path, "committed runtime file");
         Ok(())
+    }
+
+    /// Return the HEAD commit hash, or `None` if the repo has no commits.
+    pub async fn head_commit_hash(&self) -> Result<Option<String>, LibraryError> {
+        self.require_git_repo()?;
+
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git rev-parse HEAD: {e}")))?;
+
+        if !output.status.success() {
+            // No commits yet — HEAD doesn't exist.
+            return Ok(None);
+        }
+
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if hash.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(hash))
+    }
+
+    /// Find skill files that changed since `last_commit`.
+    ///
+    /// Returns `(relative_path, content)` tuples for each changed `.md` file
+    /// under the skill directories.
+    ///
+    /// When `last_commit` is `None` (first sync), lists all tracked skill
+    /// files at HEAD.
+    pub async fn changed_skill_files(
+        &self,
+        last_commit: Option<&str>,
+    ) -> Result<Vec<(String, String)>, LibraryError> {
+        self.require_git_repo()?;
+
+        let paths = match last_commit {
+            Some(commit) => {
+                let output = tokio::process::Command::new("git")
+                    .args([
+                        "diff",
+                        "--name-only",
+                        &format!("{commit}..HEAD"),
+                        "--",
+                        "runtime/skills/",
+                        "runtime/workspaces/",
+                    ])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git diff: {e}")))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LibraryError::Git(format!("git diff failed: {stderr}")));
+                }
+
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|p| p.ends_with(".md") && p.contains("/skills/"))
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            }
+            None => {
+                // First run: list all tracked skill files.
+                let output = tokio::process::Command::new("git")
+                    .args([
+                        "ls-files",
+                        "--",
+                        "runtime/skills/*.md",
+                        "runtime/workspaces/*/skills/*.md",
+                    ])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git ls-files: {e}")))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LibraryError::Git(format!("git ls-files failed: {stderr}")));
+                }
+
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|p| !p.is_empty())
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let mut results = Vec::with_capacity(paths.len());
+        for path in paths {
+            let full_path = self.repo_path.join(&path);
+            match tokio::fs::read_to_string(&full_path).await {
+                Ok(content) => results.push((path, content)),
+                Err(e) => {
+                    // File may have been deleted in a later commit.
+                    tracing::debug!(path = %path, error = %e, "skipping unreadable skill file");
+                }
+            }
+        }
+        Ok(results)
     }
 
     pub async fn push(&self) -> Result<(), LibraryError> {

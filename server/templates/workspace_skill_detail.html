@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}New Skill — {{ workspace.name }} — Galoy Agents{% endblock %}
+{% block title %}{{ skill.name }} — {{ workspace.name }} — Galoy Agents{% endblock %}
 
 {% block head %}
 <style>
@@ -56,6 +56,15 @@
     background: var(--pico-primary-background);
     color: var(--pico-primary-inverse);
   }
+  .skill-body {
+    background: var(--pico-code-background);
+    padding: 1rem;
+    border-radius: var(--pico-border-radius);
+    white-space: pre-wrap;
+    font-family: var(--pico-font-family-monospace);
+    font-size: 0.85rem;
+    overflow-x: auto;
+  }
 </style>
 {% endblock %}
 
@@ -101,31 +110,14 @@
 
 {% block content %}
 <a href="/workspaces/{{ workspace.id }}/skills" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Skills</a>
-<h2>New Skill</h2>
+<h2>{{ skill.name }}{% if skill.is_global %} <mark style="font-size: 0.75rem; padding: 0.1rem 0.4rem; vertical-align: middle;">global</mark>{% endif %}</h2>
 
-<form data-gql-mutation="mutation($input: SkillCreateInput!) { skillCreate(input: $input) { skill { id } } }"
-      data-gql-build="buildSkillCreate"
-      data-gql-redirect="/workspaces/{{ workspace.id }}/skills">
-  <label>
-    Name
-    <input type="text" name="name" required placeholder="e.g. code-review">
-  </label>
-  <label>
-    Description
-    <input type="text" name="description" placeholder="Short description of what this skill does">
-  </label>
-  <label>
-    Body
-    <textarea name="body" rows="12" required placeholder="Markdown prompt text for the skill..."></textarea>
-  </label>
-  <div style="display: flex; gap: 1rem;">
-    <button type="submit">Create Skill</button>
-    <a href="/workspaces/{{ workspace.id }}/skills" role="button" class="outline">Cancel</a>
-  </div>
-</form>
-<script>
-  function buildSkillCreate(fd) {
-    return { workspaceId: "{{ workspace.id }}", name: fd.get('name'), description: fd.get('description') || '', body: fd.get('body') };
-  }
-</script>
+<p>{{ skill.description }}</p>
+
+<h5>Body</h5>
+<div class="skill-body">{{ skill.body }}</div>
+
+<footer>
+  <small>Created: {{ skill.created_at }} | ID: <code>{{ skill.id }}</code></small>
+</footer>
 {% endblock %}

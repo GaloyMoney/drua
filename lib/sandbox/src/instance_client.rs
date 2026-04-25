@@ -144,6 +144,9 @@ pub struct ExportedFile {
 pub struct ExportedSkill {
     pub name: String,
     pub content: String,
+    /// Short description extracted from SKILL.md frontmatter, if present.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

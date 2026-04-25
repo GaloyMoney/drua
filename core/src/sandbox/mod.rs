@@ -350,6 +350,34 @@ impl Sandboxes {
         Ok(self.repo.maybe_find_by_id(id.into()).await?)
     }
 
+    /// Collect exported skills from all ready sandboxes in a workspace.
+    ///
+    /// Used internally by the skills context builder to include
+    /// sandbox-exported skills in the agent's system prompt listing.
+    /// No auth check — this is a `pub(crate)` helper.
+    #[instrument(name = "domain.sandbox.exported_skills_for_workspace", skip(self))]
+    pub(crate) async fn exported_skills_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<sandbox::instance_client::ExportedSkill>, SandboxError> {
+        let query = PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .await?;
+        let mut skills = Vec::new();
+        for sandbox in &result.entities {
+            if sandbox.state != SandboxState::Ready {
+                continue;
+            }
+            skills.extend(sandbox.exported_skills.iter().cloned());
+        }
+        Ok(skills)
+    }
+
     /// Resolve a live [`InstanceClient`] for the sandbox identified by `id`.
     ///
     /// Loads the entity, asks the admin client for the current

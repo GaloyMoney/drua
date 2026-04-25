@@ -22,3 +22,4 @@ test-sandbox.sh
 .library/
 .bacon-locations
 style-agent/
+tmp

@@ -59,7 +59,10 @@ async fn send_message_round_trip_via_prompt_channel() {
             .await
             .expect("init sandboxes"),
     );
-    let skills = Arc::new(drua_core::skill::Skills::new(&pool, Arc::clone(&sandboxes)));
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
     let agents = Agents::new(
         &pool,
         config,
@@ -215,7 +218,10 @@ async fn send_message_dispatches_registered_tool_call() {
             .await
             .expect("init sandboxes"),
     );
-    let skills = Arc::new(drua_core::skill::Skills::new(&pool, Arc::clone(&sandboxes)));
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
     let agents = Agents::new(
         &pool,
         config,

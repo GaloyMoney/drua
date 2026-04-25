@@ -14,13 +14,18 @@ use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
-pub use file::{DocType, GitFileHash, RuntimeFile, SearchableFields};
+pub use file::{
+    parse_skill_markdown, DocType, GitFileHash, ParsedSkillFile, RuntimeFile, SearchableFields,
+};
+pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::SearchResult;
 
 const LIBRARY_WRITE_JOB: &str = "library.write";
 const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
 
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 20;
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
     /// Local path to clone the library repo into.
     /// Defaults to `<repo-root>/.library/`.
@@ -29,6 +34,24 @@ pub struct LibraryConfig {
     /// Git remote URL to clone from.
     #[serde(default)]
     pub repo_url: Option<String>,
+    /// How often (in seconds) the reverse-sync job polls the library repo
+    /// for new or changed skill files. Defaults to 20.
+    #[serde(default = "default_skill_sync_interval_secs")]
+    pub skill_sync_interval_secs: u64,
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: None,
+            repo_url: None,
+            skill_sync_interval_secs: DEFAULT_SKILL_SYNC_INTERVAL_SECS,
+        }
+    }
+}
+
+fn default_skill_sync_interval_secs() -> u64 {
+    DEFAULT_SKILL_SYNC_INTERVAL_SECS
 }
 
 impl LibraryConfig {
@@ -40,11 +63,30 @@ impl LibraryConfig {
     }
 }
 
+/// A single changed skill file with metadata for the sync job.
+pub struct SkillFileChange {
+    /// Parsed skill file. When `needs_rewrite` is true the file's
+    /// `original_path` field is set to the on-disk path.
+    pub file: RuntimeFile,
+    /// When `true`, the file on disk lacks proper frontmatter and should be
+    /// rewritten with canonical headers after entity creation.
+    pub needs_rewrite: bool,
+}
+
+/// Skill files detected as new or changed since the last sync.
+pub struct SkillChanges {
+    /// The HEAD commit hash after pulling.
+    pub head_commit: String,
+    /// Changed skill files with their original paths and rewrite flags.
+    pub files: Vec<SkillFileChange>,
+}
+
 #[derive(Clone)]
 pub struct Library {
     search: SearchStore,
     inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
+    upstream: Upstream,
 }
 
 impl Library {
@@ -59,7 +101,7 @@ impl Library {
             Upstream::init(config.repo_url.as_deref(), config.repo_path(), github_app).await?;
         let search = SearchStore::new(pool);
 
-        let write_init = WriteToRuntimeJobInitializer::new(upstream);
+        let write_init = WriteToRuntimeJobInitializer::new(upstream.clone());
         let write_spawner = jobs.add_initializer(write_init);
 
         let handler = LibraryWriteHandler::new(search.clone(), embedder.clone(), write_spawner);
@@ -70,6 +112,7 @@ impl Library {
             search,
             inbox,
             embedder,
+            upstream,
         })
     }
 
@@ -95,23 +138,80 @@ impl Library {
         Ok(())
     }
 
-    /// Queue a `.gitkeep` file for a new workspace so the folder structure
-    /// is committed to the library repo.
+    /// Queue `.gitkeep` files for a new workspace so the folder structure
+    /// (notes/ and skills/) is committed to the library repo.
     #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
     pub async fn sync_workspace_folder_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
         workspace_name: &str,
     ) -> Result<(), LibraryError> {
-        let file = RuntimeFile::GitKeep {
-            workspace_name: workspace_name.to_string(),
-        };
-        let idempotency_key = format!("gitkeep:{workspace_name}");
-        let _ = self
-            .inbox
-            .persist_and_queue_job_in_op(op, idempotency_key, &file)
-            .await?;
+        for subdir in ["notes", "skills"] {
+            let file = RuntimeFile::GitKeep {
+                workspace_name: workspace_name.to_string(),
+                subdir: subdir.to_string(),
+            };
+            let idempotency_key = format!("gitkeep:{workspace_name}:{subdir}");
+            let _ = self
+                .inbox
+                .persist_and_queue_job_in_op(op, idempotency_key, &file)
+                .await?;
+        }
         Ok(())
+    }
+
+    /// Pull the library repo and find skill files that changed since
+    /// `last_sync_commit`. Returns parsed `RuntimeFile::Skill` variants.
+    ///
+    /// On first run (`last_sync_commit` is `None`), returns all skill files.
+    /// Returns an empty `files` vec when HEAD hasn't moved.
+    #[tracing::instrument(name = "library.find_new_skills", skip(self))]
+    pub async fn find_new_skills(
+        &self,
+        last_sync_commit: Option<&str>,
+    ) -> Result<SkillChanges, LibraryError> {
+        self.upstream.pull().await?;
+
+        let head = self.upstream.head_commit_hash().await?;
+        let head = match head {
+            Some(h) => h,
+            None => {
+                tracing::debug!("no commits in library repo");
+                return Ok(SkillChanges {
+                    head_commit: String::new(),
+                    files: Vec::new(),
+                });
+            }
+        };
+
+        if last_sync_commit == Some(head.as_str()) {
+            return Ok(SkillChanges {
+                head_commit: head,
+                files: Vec::new(),
+            });
+        }
+
+        let changed = self.upstream.changed_skill_files(last_sync_commit).await?;
+
+        let mut files = Vec::with_capacity(changed.len());
+        for (path, content) in &changed {
+            match file::parse_skill_markdown(content, path) {
+                Some(parsed) => {
+                    files.push(SkillFileChange {
+                        needs_rewrite: parsed.needs_rewrite,
+                        file: parsed.file,
+                    });
+                }
+                None => {
+                    tracing::warn!(path = %path, "failed to parse skill markdown, skipping");
+                }
+            }
+        }
+
+        Ok(SkillChanges {
+            head_commit: head,
+            files,
+        })
     }
 
     /// Hybrid search across library documents.

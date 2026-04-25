@@ -44,10 +44,9 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/{id}", get(workspace_detail))
         .route("/workspaces/{id}/secrets/list", get(workspace_secrets_list))
         .route("/workspaces/{id}/skills", get(workspace_skills_page))
-        .route("/workspaces/{id}/skills/new", get(workspace_skill_new))
         .route(
             "/workspaces/{id}/skills/{skill_id}",
-            get(workspace_skill_edit),
+            get(workspace_skill_detail),
         )
         .route("/workspaces/{id}/sandboxes", get(workspace_sandboxes_page))
         .route("/workspaces/{id}/sandboxes/new", get(workspace_sandbox_new))
@@ -538,11 +537,12 @@ async fn workspace_secrets_list(
 fn skill_to_view(s: &domain::skill::Skill) -> SkillView {
     SkillView {
         id: s.id.to_string(),
-        workspace_id: s.workspace_id.to_string(),
+        workspace_id: s.workspace_id.map(|id| id.to_string()).unwrap_or_default(),
         name: s.name.clone(),
         description: s.description.clone(),
         body: s.body.clone(),
         created_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+        is_global: s.workspace_id.is_none(),
     }
 }
 
@@ -569,7 +569,7 @@ async fn workspace_skills_page(
     let skills = state
         .app
         .skills()
-        .list_by_workspace_id(&sub, workspace_id)
+        .list_for_workspace(&sub, workspace_id)
         .await
         .unwrap_or_default();
 
@@ -578,40 +578,13 @@ async fn workspace_skills_page(
         lead_agent,
         agents: agent_views,
         skills: skills.iter().map(skill_to_view).collect(),
+        library_repo_url: state.library_repo_url.clone(),
     }
     .into_response()
 }
 
-#[instrument(name = "web.workspace_skill_new", skip_all)]
-async fn workspace_skill_new(
-    State(state): State<AppState>,
-    session: Session,
-    Path(id): Path<uuid::Uuid>,
-) -> Response {
-    let user_id = match extract_user_id(&session).await {
-        Some(id) => id,
-        None => return Redirect::to("/").into_response(),
-    };
-    let sub = AuthSubject::User(user_id);
-
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
-    };
-
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
-
-    WorkspaceSkillNewTemplate {
-        workspace: workspace_to_view(&ws),
-        lead_agent,
-        agents: agent_views,
-    }
-    .into_response()
-}
-
-#[instrument(name = "web.workspace_skill_edit", skip_all)]
-async fn workspace_skill_edit(
+#[instrument(name = "web.workspace_skill_detail", skip_all)]
+async fn workspace_skill_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -629,14 +602,19 @@ async fn workspace_skill_edit(
     };
 
     let skill_id = SkillId::from(skill_id);
-    let skill = match state.app.skills().find_by_id(&sub, skill_id).await {
+    let skill = match state
+        .app
+        .skills()
+        .find_by_id(&sub, skill_id, workspace_id)
+        .await
+    {
         Ok(s) => s,
         Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
     };
 
     let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
 
-    WorkspaceSkillEditTemplate {
+    WorkspaceSkillDetailTemplate {
         workspace: workspace_to_view(&ws),
         lead_agent,
         agents: agent_views,
@@ -667,6 +645,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         .map(|sk| ExportedSkillView {
             name: sk.name.clone(),
             content: sk.content.clone(),
+            description: sk.description.clone(),
         })
         .collect();
 

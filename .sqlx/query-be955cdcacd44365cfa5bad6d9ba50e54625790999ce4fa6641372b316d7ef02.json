@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE session_threads SET deleted = TRUE WHERE session_id = $1 AND deleted = FALSE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be955cdcacd44365cfa5bad6d9ba50e54625790999ce4fa6641372b316d7ef02"
+}

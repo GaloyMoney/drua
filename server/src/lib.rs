@@ -41,6 +41,8 @@ pub struct AppState {
     pub session_store: PgSessionStore,
     /// Parsed tunnel-deployment public keys. See [`TunnelPublicKeys`].
     pub tunnel_public_keys: TunnelPublicKeys,
+    /// Git remote URL for the library repo (rendered as a link in the UI).
+    pub library_repo_url: Option<String>,
 }
 
 impl AppState {
@@ -67,6 +69,7 @@ impl AppState {
             sa_token_validator: None,
             session_store: PgSessionStore::new(pool),
             tunnel_public_keys,
+            library_repo_url: None,
         }
     }
 
@@ -193,6 +196,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         app_config_yaml,
         std::sync::Arc::new(tunnel_public_keys),
     );
+    app_state.library_repo_url = config.library.repo_url.clone();
 
     if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await {
         tracing::info!("SA token validator initialized (in-cluster)");

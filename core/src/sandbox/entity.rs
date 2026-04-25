@@ -108,25 +108,18 @@ pub struct Sandbox {
     pub specs: SandboxSpecs,
     pub mode: SandboxMode,
     /// Absolute path to the workspace directory inside the sandbox,
-    /// cached at creation time from the admin client. Empty for
-    /// sandboxes created before this field was added.
-    #[builder(default)]
+    /// cached at creation time from the admin client.
     pub mount_path: String,
-    #[builder(default = "SandboxState::Provisioning")]
     pub state: SandboxState,
     /// Reason for the most recent failed provisioning step, set by
     /// [`Self::errored`] and rendered in the UI when `state == Errored`.
     /// Cleared back to `None` when the sandbox transitions out of
     /// `Errored` (e.g. via `provisioning()` on restart).
-    #[builder(default)]
     pub last_error: Option<String>,
-    #[builder(default)]
     pub exported_system_prompt: Option<ExportedFile>,
-    #[builder(default)]
     pub exported_skills: Vec<ExportedSkill>,
     /// Agents currently attached to this sandbox. At most one entry may
     /// have [`SandboxAgentMode::Write`] (enforced by [`Self::attach_agent`]).
-    #[builder(default)]
     pub attached_agents: Vec<(AgentId, SandboxAgentMode)>,
     events: EntityEvents<SandboxEvent>,
 }
@@ -360,7 +353,9 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                         .specs(specs.clone())
                         .mode(mode.clone())
                         .mount_path(mount_path.clone())
-                        .state(SandboxState::Provisioning);
+                        .state(SandboxState::Provisioning)
+                        .exported_system_prompt(None)
+                        .exported_skills(Vec::new());
                 }
                 SandboxEvent::StateChanged { state } => {
                     if *state != SandboxState::Errored {

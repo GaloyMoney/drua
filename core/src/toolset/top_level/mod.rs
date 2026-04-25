@@ -95,6 +95,7 @@ mod notes;
 mod read;
 mod sandbox;
 mod text_editor;
+mod use_skill;
 mod whoami;
 
 pub use agent::WorkspaceAgent;
@@ -108,4 +109,5 @@ pub use notes::NotesTool;
 pub use read::Read;
 pub use sandbox::WorkspaceSandbox;
 pub use text_editor::TextEditor;
+pub use use_skill::UseSkillTool;
 pub use whoami::WhoAmI;

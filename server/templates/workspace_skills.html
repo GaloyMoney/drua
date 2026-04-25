@@ -101,16 +101,17 @@
 
 {% block content %}
 <h2>Skills</h2>
-<p><small>Reusable prompt templates that agents can invoke.</small></p>
+<p><small>Reusable prompt templates that agents can invoke.{% match library_repo_url %}{% when Some(url) %} <a href="{{ url }}" target="_blank" rel="noopener">View library repo &rarr;</a>{% when None %}{% endmatch %}</small></p>
 
 {% if skills.is_empty() %}
-<p><em>No skills configured yet.</em></p>
+<p><em>No skills synced yet. Add skill files to the library repo to see them here.</em></p>
 {% else %}
 <figure>
   <table>
     <thead>
       <tr>
         <th>Name</th>
+        <th>Scope</th>
         <th>Description</th>
         <th>Created</th>
       </tr>
@@ -119,6 +120,7 @@
       {% for skill in skills %}
       <tr style="cursor: pointer;" onclick="window.location='/workspaces/{{ workspace.id }}/skills/{{ skill.id }}'">
         <td><strong>{{ skill.name }}</strong></td>
+        <td>{% if skill.is_global %}<mark style="font-size: 0.75rem; padding: 0.1rem 0.4rem;">global</mark>{% else %}<small style="color: var(--pico-muted-color);">workspace</small>{% endif %}</td>
         <td>{{ skill.description }}</td>
         <td><small>{{ skill.created_at }}</small></td>
       </tr>
@@ -127,6 +129,4 @@
   </table>
 </figure>
 {% endif %}
-
-<a href="/workspaces/{{ workspace.id }}/skills/new" role="button">New Skill</a>
 {% endblock %}

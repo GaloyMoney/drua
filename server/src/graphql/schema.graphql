@@ -177,9 +177,6 @@ type Mutation {
 	sandboxCreate(input: SandboxCreateInput!): SandboxCreatePayload!
 	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
-	skillCreate(input: SkillCreateInput!): SkillCreatePayload!
-	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
-	skillUpdate(input: SkillUpdateInput!): SkillUpdatePayload!
 	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
 	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
 	workspaceSecretCreate(input: WorkspaceSecretCreateInput!): WorkspaceSecretCreatePayload!
@@ -370,40 +367,10 @@ type Skill {
 	description: String!
 	id: SkillId!
 	name: String!
-	workspaceId: WorkspaceId!
-}
-
-input SkillCreateInput {
-	body: String!
-	description: String!
-	name: String!
-	workspaceId: WorkspaceId!
-}
-
-type SkillCreatePayload {
-	skill: Skill!
-}
-
-input SkillDeleteInput {
-	id: SkillId!
-}
-
-type SkillDeletePayload {
-	deletedId: SkillId!
+	workspaceId: WorkspaceId
 }
 
 scalar SkillId
-
-input SkillUpdateInput {
-	body: String
-	description: String
-	id: SkillId!
-	name: String
-}
-
-type SkillUpdatePayload {
-	skill: Skill!
-}
 
 type Subscription {
 	"""

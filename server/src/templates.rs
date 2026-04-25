@@ -138,6 +138,7 @@ pub struct SkillView {
     pub description: String,
     pub body: String,
     pub created_at: String,
+    pub is_global: bool,
 }
 
 #[derive(Template, WebTemplate)]
@@ -147,19 +148,12 @@ pub struct WorkspaceSkillsPageTemplate {
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub skills: Vec<SkillView>,
+    pub library_repo_url: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_skill_new.html")]
-pub struct WorkspaceSkillNewTemplate {
-    pub workspace: WorkspaceView,
-    pub lead_agent: Option<AgentView>,
-    pub agents: Vec<AgentView>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "workspace_skill_edit.html")]
-pub struct WorkspaceSkillEditTemplate {
+#[template(path = "workspace_skill_detail.html")]
+pub struct WorkspaceSkillDetailTemplate {
     pub workspace: WorkspaceView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
@@ -178,6 +172,7 @@ pub struct ExportedFileView {
 pub struct ExportedSkillView {
     pub name: String,
     pub content: String,
+    pub description: Option<String>,
 }
 
 #[allow(dead_code)]

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT doc_id, doc_type, title_text, content_text, tags,\n                      ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank\n               FROM library_search_data\n               WHERE workspace_id = $2\n                 AND search_tsv @@ plainto_tsquery('english', $1)\n                 AND ($3::text IS NULL OR doc_type = $3)\n               ORDER BY rank DESC\n               LIMIT $4",
+  "query": "SELECT doc_id, doc_type, title_text, content_text, tags,\n                          embedding <=> $1 AS distance\n                   FROM library_search_data\n                   WHERE workspace_id IN ($2, $5)\n                     AND embedding IS NOT NULL\n                     AND ($3::text IS NULL OR doc_type = $3)\n                   ORDER BY distance ASC\n                   LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -30,16 +30,22 @@
       },
       {
         "ordinal": 5,
-        "name": "rank",
-        "type_info": "Float4"
+        "name": "distance",
+        "type_info": "Float8"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
+        {
+          "Custom": {
+            "name": "vector",
+            "kind": "Simple"
+          }
+        },
         "Uuid",
         "Text",
-        "Int8"
+        "Int8",
+        "Uuid"
       ]
     },
     "nullable": [
@@ -51,5 +57,5 @@
       null
     ]
   },
-  "hash": "9a0887e280f0b30e7ec0149926c203ab19cab054ae74294dd97bcd2cfacee346"
+  "hash": "f0065e83d9e6e7f37db8c02e3738e259419b832a77e393a7e94ba088674b8238"
 }
