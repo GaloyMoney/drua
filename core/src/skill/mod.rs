@@ -370,8 +370,7 @@ impl Skills {
                 .id(doc_id)
                 .name(name.clone())
                 .description(description.clone())
-                .body(body.clone())
-                .file_hash(Some(file_hash));
+                .body(body.clone());
             if let Some(ws_id) = workspace_id {
                 builder = builder.workspace_id(ws_id);
             }

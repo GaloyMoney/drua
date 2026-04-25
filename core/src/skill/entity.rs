@@ -27,8 +27,6 @@ pub enum SkillEvent {
         name: Option<String>,
         description: Option<String>,
         body: Option<String>,
-        #[serde(default)]
-        file_hash: Option<GitFileHash>,
     },
 }
 
@@ -43,8 +41,6 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
-    #[builder(default)]
-    pub(crate) file_hash: GitFileHash,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     events: EntityEvents<SkillEvent>,
@@ -82,14 +78,21 @@ impl Skill {
         )
     }
 
+    /// Compute the file hash from the entity's canonical runtime representation.
+    /// This matches the content that `WriteToRuntime` writes to disk, so the
+    /// reverse-sync can compare against the on-disk hash without drift.
+    pub(crate) fn file_hash(&self) -> GitFileHash {
+        self.as_runtime_file().file_hash()
+    }
+
     pub fn update(
         &mut self,
         name: Option<String>,
         description: Option<String>,
         body: Option<String>,
-        file_hash: GitFileHash,
+        incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
-        if self.file_hash == file_hash {
+        if self.file_hash() == incoming_file_hash {
             return Idempotent::AlreadyApplied;
         }
         if let Some(ref n) = name {
@@ -101,12 +104,10 @@ impl Skill {
         if let Some(ref b) = body {
             self.body = b.clone();
         }
-        self.file_hash = file_hash.clone();
         self.events.push(SkillEvent::Updated {
             name,
             description,
             body,
-            file_hash: Some(file_hash),
         });
         Idempotent::Executed(())
     }
@@ -350,8 +351,8 @@ impl TryFromEvents<SkillEvent> for Skill {
                     name,
                     description,
                     body,
-                    file_hash,
                     original_path,
+                    ..
                 } => {
                     builder = builder
                         .id(*id)
@@ -360,7 +361,6 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
-                        .file_hash(file_hash.clone().unwrap_or_default())
                         .original_path(original_path.clone());
                 }
 
@@ -368,7 +368,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                     name,
                     description,
                     body,
-                    file_hash,
+                    ..
                 } => {
                     if let Some(name) = name {
                         builder = builder.name(name.clone());
@@ -378,9 +378,6 @@ impl TryFromEvents<SkillEvent> for Skill {
                     }
                     if let Some(body) = body {
                         builder = builder.body(body.clone());
-                    }
-                    if let Some(file_hash) = file_hash {
-                        builder = builder.file_hash(file_hash.clone());
                     }
                 }
             }
@@ -405,8 +402,6 @@ pub struct NewSkill {
     pub(super) description: String,
     #[builder(setter(into))]
     pub(super) body: String,
-    #[builder(default)]
-    pub(super) file_hash: Option<GitFileHash>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
 }
@@ -428,7 +423,7 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 name: self.name,
                 description: self.description,
                 body: self.body,
-                file_hash: self.file_hash,
+                file_hash: None,
                 original_path: self.original_path,
             }],
         )
