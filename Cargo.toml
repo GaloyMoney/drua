@@ -116,7 +116,7 @@ es-entity = "0.10.35"
 derive_builder = "0.20"
 
 # Job processing
-job = "0.6"
+job = { version = "0.6", features = ["es-entity"] }
 obix = "0.2"
 
 # Database

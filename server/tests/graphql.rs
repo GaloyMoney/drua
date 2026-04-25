@@ -196,120 +196,6 @@ async fn workspace_create_update_delete_via_graphql() {
     );
 }
 
-// ─── Skill mutation tests ───────────────────────────────────────────────────
-
-#[tokio::test]
-async fn skill_create_update_delete_via_graphql() {
-    let pool = pool().await;
-    let app = test_app(&pool).await;
-    let schema = drua_server::graphql::schema(Some(app.clone()));
-    let sub = test_sub();
-
-    // Create workspace first
-    let result = execute_graphql(
-        &schema,
-        &app,
-        &sub,
-        r#"mutation($input: WorkspaceCreateInput!) {
-            workspaceCreate(input: $input) { workspace { id } }
-        }"#,
-        serde_json::json!({ "input": { "name": format!("skill-test-ws-{}", uuid::Uuid::new_v4()) } }),
-    )
-    .await;
-    let ws_id = assert_no_errors(&result)["workspaceCreate"]["workspace"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Create skill
-    let result = execute_graphql(
-        &schema,
-        &app,
-        &sub,
-        r#"mutation($input: SkillCreateInput!) {
-            skillCreate(input: $input) { skill { id name description body workspaceId } }
-        }"#,
-        serde_json::json!({ "input": {
-            "workspaceId": ws_id,
-            "name": "test-skill",
-            "description": "A skill for testing",
-            "body": "Do the thing"
-        }}),
-    )
-    .await;
-    let data = assert_no_errors(&result);
-    let skill = &data["skillCreate"]["skill"];
-    assert_eq!(skill["name"], "test-skill");
-    assert_eq!(skill["description"], "A skill for testing");
-    assert_eq!(skill["body"], "Do the thing");
-    let skill_id = skill["id"].as_str().unwrap().to_string();
-
-    // Update skill
-    let result = execute_graphql(
-        &schema,
-        &app,
-        &sub,
-        r#"mutation($input: SkillUpdateInput!) {
-            skillUpdate(input: $input) { skill { id name description body } }
-        }"#,
-        serde_json::json!({ "input": {
-            "id": skill_id,
-            "name": "updated-skill",
-            "body": "Updated body"
-        }}),
-    )
-    .await;
-    let data = assert_no_errors(&result);
-    assert_eq!(data["skillUpdate"]["skill"]["name"], "updated-skill");
-    assert_eq!(data["skillUpdate"]["skill"]["body"], "Updated body");
-
-    // Verify skill appears in workspace skills list
-    let result = execute_graphql(
-        &schema,
-        &app,
-        &sub,
-        r#"query($id: WorkspaceId!) { workspace(id: $id) { skills { id name } } }"#,
-        serde_json::json!({ "id": ws_id }),
-    )
-    .await;
-    let data = assert_no_errors(&result);
-    let skills = data["workspace"]["skills"].as_array().unwrap();
-    assert!(skills.iter().any(|s| s["id"].as_str() == Some(&skill_id)));
-
-    // Delete skill
-    let result = execute_graphql(
-        &schema,
-        &app,
-        &sub,
-        r#"mutation($input: SkillDeleteInput!) {
-            skillDelete(input: $input) { deletedId }
-        }"#,
-        serde_json::json!({ "input": { "id": skill_id } }),
-    )
-    .await;
-    assert_no_errors(&result);
-
-    // Verify skill is gone from workspace
-    let result = execute_graphql(
-        &schema,
-        &app,
-        &sub,
-        r#"query($id: WorkspaceId!) { workspace(id: $id) { skills { id } } }"#,
-        serde_json::json!({ "id": ws_id }),
-    )
-    .await;
-    let data = assert_no_errors(&result);
-    let skills = data["workspace"]["skills"].as_array().unwrap();
-    assert!(!skills.iter().any(|s| s["id"].as_str() == Some(&skill_id)));
-
-    // Cleanup
-    let _ = execute_graphql(
-        &schema, &app, &sub,
-        r#"mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"#,
-        serde_json::json!({ "input": { "id": ws_id } }),
-    ).await;
-}
-
 // ─── Workspace Secret mutation tests ────────────────────────────────────────
 
 #[tokio::test]
@@ -564,9 +450,6 @@ async fn schema_has_expected_mutations() {
         "sandboxCreate",
         "sandboxSuspend",
         "sandboxRestart",
-        "skillCreate",
-        "skillUpdate",
-        "skillDelete",
         "workspaceSecretCreate",
         "workspaceSecretDelete",
         "mcpCredentialsCreate",

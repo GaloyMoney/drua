@@ -3,7 +3,7 @@ use async_graphql::{Context, Object};
 use super::agent::*;
 use super::mcp_creds::*;
 use super::sandbox::*;
-use super::skill::*;
+
 use super::workspace::*;
 use super::workspace_secret::*;
 
@@ -143,49 +143,6 @@ impl Mutation {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let sb = app.sandboxes().restart(sub, input.id).await?;
         Ok(SandboxRestartPayload::from(Sandbox::from(sb)))
-    }
-
-    // ── Skill ───────────────────────────────────────────────────────────
-
-    async fn skill_create(
-        &self,
-        ctx: &Context<'_>,
-        input: SkillCreateInput,
-    ) -> async_graphql::Result<SkillCreatePayload> {
-        let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let new = drua_core::skill::NewSkill::builder()
-            .workspace_id(input.workspace_id)
-            .name(input.name)
-            .description(input.description)
-            .body(input.body)
-            .build()
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        let skill = app.skills().create(sub, new).await?;
-        Ok(SkillCreatePayload::from(Skill::from(skill)))
-    }
-
-    async fn skill_update(
-        &self,
-        ctx: &Context<'_>,
-        input: SkillUpdateInput,
-    ) -> async_graphql::Result<SkillUpdatePayload> {
-        let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let mut skill = app.skills().find_by_id(sub, input.id).await?;
-        let _ = skill.update(input.name, input.description, input.body);
-        app.skills().update(sub, &mut skill).await?;
-        Ok(SkillUpdatePayload::from(Skill::from(skill)))
-    }
-
-    async fn skill_delete(
-        &self,
-        ctx: &Context<'_>,
-        input: SkillDeleteInput,
-    ) -> async_graphql::Result<SkillDeletePayload> {
-        let (app, sub) = app_and_sub_from_ctx!(ctx);
-        app.skills().delete(sub, input.id).await?;
-        Ok(SkillDeletePayload {
-            deleted_id: input.id,
-        })
     }
 
     // ── Workspace Secret ────────────────────────────────────────────────

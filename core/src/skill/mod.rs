@@ -319,19 +319,6 @@ impl Skills {
         Ok(Some(buf))
     }
 
-    /// Upsert a skill from a library git file (reverse sync).
-    ///
-    /// - If the skill already exists and its `file_hash` matches → skip.
-    /// - If it exists and the hash differs → update name/description/body.
-    /// - If it doesn't exist → create a new entity.
-    ///
-    /// The post-persist hook fires `library.write_in_op()` (embedding +
-    /// WriteToRuntime), but the WriteToRuntime runner will see the file hash
-    /// on disk already matches and skip the write.
-    pub(crate) async fn begin_op(&self) -> Result<es_entity::DbOp<'_>, SkillError> {
-        Ok(self.repo.begin_op().await?)
-    }
-
     /// Upsert a skill from a library file within an existing transaction.
     ///
     /// When the file carries an `original_path` the entity stores it so the

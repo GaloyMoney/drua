@@ -154,7 +154,7 @@ impl SyncSkillsFromLibraryRunner {
         // Batch upsert — original_path is already set on the RuntimeFile
         // for files that need renaming. The post-persist hook propagates it
         // through the WriteToRuntime pipeline which handles the rename.
-        let mut op = self.skills.begin_op().await?;
+        let mut op = current_job.begin_op().await?;
         for (change, ws_id) in &resolved {
             let file_hash = change.file.file_hash();
             if let Err(e) = self
