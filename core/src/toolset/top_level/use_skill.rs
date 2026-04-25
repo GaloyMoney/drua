@@ -163,7 +163,7 @@ impl TopLevelTool for UseSkillTool {
                 let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
                 let results = self
                     .skills
-                    .search(workspace_id, &query, limit)
+                    .search(subject, workspace_id, &query, limit)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 

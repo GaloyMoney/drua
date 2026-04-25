@@ -214,10 +214,12 @@ impl Skills {
     #[instrument(name = "skill.search", skip(self))]
     pub async fn search(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
         let library = self
             .library
             .as_ref()
