@@ -271,8 +271,13 @@ impl RuntimeFile {
                 ..
             } => {
                 format!(
-                    "---\nid: {}\ncreated: {}\nupdated: {}\n---\n\n# {}\n\n{}\n\n---\n\n{}\n",
-                    doc_id, created_at, updated_at, name, description, body
+                    "---\nid: {}\nname: \"{}\"\ndescription: \"{}\"\ncreated: {}\nupdated: {}\n---\n\n{}\n",
+                    doc_id,
+                    name.replace('"', "\\\""),
+                    description.replace('"', "\\\""),
+                    created_at,
+                    updated_at,
+                    body
                 )
             }
             RuntimeFile::GitKeep { .. } => String::new(),
@@ -350,11 +355,14 @@ pub struct ParsedSkillFile {
 pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile> {
     let workspace_name = workspace_name_from_skill_path(path);
     let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
 
     let mut parsed = if content.starts_with("---") {
-        parse_with_frontmatter(content, workspace_name)?
+        parse_with_frontmatter(content, workspace_name, path)?
     } else {
-        parse_without_frontmatter(content, workspace_name)?
+        parse_without_frontmatter(content, workspace_name, path)?
     };
 
     parsed.file.set_original_path(path.to_string());
@@ -368,55 +376,97 @@ struct SkillFrontmatter {
     #[serde(default)]
     id: Option<uuid::Uuid>,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     created: Option<String>,
     #[serde(default)]
     updated: Option<String>,
 }
 
 /// Parse a skill file that has frontmatter (starts with `---`).
+///
+/// Name/description priority:
+/// 1. Frontmatter `name:`/`description:` fields (canonical format)
+/// 2. `# Heading` / first paragraph in content (legacy format)
+/// 3. Filename for name (last resort)
 fn parse_with_frontmatter(
     content: &str,
     workspace_name: Option<String>,
+    path: &str,
 ) -> Option<ParsedSkillFile> {
     let rest = content.strip_prefix("---")?;
     let (frontmatter_str, after_fm) = rest.split_once("\n---")?;
 
     let fm: SkillFrontmatter = serde_yaml::from_str(frontmatter_str.trim()).unwrap_or_default();
 
-    let (skill_id, needs_rewrite) = match fm.id {
-        Some(uuid) => (SkillId::from(uuid), false),
-        None => (SkillId::new(), true),
+    let (skill_id, has_id) = match fm.id {
+        Some(uuid) => (SkillId::from(uuid), true),
+        None => (SkillId::new(), false),
     };
 
-    let (name, description, body) = parse_heading_and_body(after_fm)?;
+    let has_fm_name = fm.name.is_some();
+
+    let (name, description, body) = if let Some(fm_name) = fm.name {
+        // Canonical format: name+description in frontmatter, body after.
+        let desc = fm.description.unwrap_or_default();
+        let body = after_fm.trim().to_string();
+        (fm_name, desc, body)
+    } else if let Some((h_name, h_desc, h_body)) = parse_heading_and_body(after_fm) {
+        // Legacy format: name from heading, description from first paragraph.
+        let desc = fm.description.unwrap_or(h_desc);
+        (h_name, desc, h_body)
+    } else {
+        // Last resort: name from filename.
+        let name = name_from_filename(path)?;
+        let desc = fm.description.unwrap_or_default();
+        let body = after_fm.trim().to_string();
+        (name, desc, body)
+    };
 
     let slug = slugify(&name);
     let id_prefix = skill_id.to_string()[..8].to_string();
 
+    let file = RuntimeFile::Skill {
+        doc_id: skill_id,
+        workspace_id: None,
+        workspace_name,
+        name,
+        description,
+        body,
+        created_at: fm.created.unwrap_or_default(),
+        updated_at: fm.updated.unwrap_or_default(),
+        slug,
+        id_prefix,
+        original_path: None,
+    };
+
+    // Canonical only when id + name in frontmatter AND path already matches.
+    let needs_rewrite = !has_id || !has_fm_name || file.relative_path() != path;
+
     Some(ParsedSkillFile {
-        file: RuntimeFile::Skill {
-            doc_id: skill_id,
-            workspace_id: None,
-            workspace_name,
-            name,
-            description,
-            body,
-            created_at: fm.created.unwrap_or_default(),
-            updated_at: fm.updated.unwrap_or_default(),
-            slug,
-            id_prefix,
-            original_path: None,
-        },
+        file,
         needs_rewrite,
     })
 }
 
 /// Parse a skill file with no frontmatter (human-authored).
+///
+/// Name priority: `# Heading` → filename.
 fn parse_without_frontmatter(
     content: &str,
     workspace_name: Option<String>,
+    path: &str,
 ) -> Option<ParsedSkillFile> {
-    let (name, description, body) = parse_heading_and_body(content)?;
+    let (name, description, body) = if let Some(parsed) = parse_heading_and_body(content) {
+        parsed
+    } else {
+        // No heading — derive name from filename, treat entire content as body.
+        let name = name_from_filename(path)?;
+        (name, String::new(), content.trim().to_string())
+    };
+
     let skill_id = SkillId::new();
     let slug = slugify(&name);
     let id_prefix = skill_id.to_string()[..8].to_string();
@@ -474,6 +524,55 @@ pub fn workspace_name_from_skill_path(relative_path: &str) -> Option<String> {
         Some(parts[2].to_string())
     } else {
         None
+    }
+}
+
+/// Derive a human-readable name from a skill file's path.
+///
+/// Strips the `.md` extension and any trailing `-{8-hex-char}` id prefix,
+/// then title-cases hyphen-separated words.
+///
+/// `runtime/skills/ci-check-019dc56a.md` → `"Ci Check"`
+fn name_from_filename(path: &str) -> Option<String> {
+    let filename = path.rsplit('/').next()?;
+    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+
+    // Strip id-prefix suffix: "slug-abcd1234" → "slug"
+    let base = if let Some((prefix, suffix)) = stem.rsplit_once('-') {
+        if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            prefix
+        } else {
+            stem
+        }
+    } else {
+        stem
+    };
+
+    if base.is_empty() {
+        return None;
+    }
+
+    // Title-case: "ci-check" → "Ci Check"
+    let name = base
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    format!("{upper}{}", chars.as_str())
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
 }
 
@@ -576,10 +675,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_skill_markdown_returns_none_for_bad_input() {
+    fn parse_skill_markdown_no_heading_falls_back_to_filename() {
         let path = "runtime/skills/test.md";
-        // No heading at all
-        assert!(parse_skill_markdown("not markdown", path).is_none());
+        let parsed = parse_skill_markdown("not markdown", path).expect("filename fallback");
+        assert!(parsed.needs_rewrite);
+        match &parsed.file {
+            RuntimeFile::Skill { name, body, .. } => {
+                assert_eq!(name, "Test");
+                assert_eq!(body, "not markdown");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_markdown_returns_none_for_empty() {
+        let path = "runtime/skills/.gitkeep";
+        assert!(parse_skill_markdown("", path).is_none());
     }
 
     #[test]
@@ -699,6 +811,93 @@ mod tests {
             }
             _ => panic!("expected Skill variant"),
         }
+    }
+
+    /// Legacy format (id present, heading-based name) triggers needs_rewrite
+    /// so it gets migrated to canonical frontmatter format.
+    #[test]
+    fn parse_skill_markdown_legacy_format_needs_rewrite() {
+        let content = "---\nid: 019dc56a-502f-7ce3-9623-877d6b3a1c5c\ncreated: 2025-01-01\nupdated: 2025-06-01\n---\n\n# CI Check\n\nInvestigate CI\n\n---\n\nBody here";
+        let path = "runtime/skills/ci-check-019dc56a.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
+        assert!(parsed.needs_rewrite, "legacy heading format needs rewrite");
+
+        match &parsed.file {
+            RuntimeFile::Skill {
+                name,
+                description,
+                body,
+                ..
+            } => {
+                assert_eq!(name, "CI Check");
+                assert_eq!(description, "Investigate CI");
+                assert_eq!(body, "Body here");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    /// Frontmatter with name+description but no heading in body.
+    #[test]
+    fn parse_skill_markdown_frontmatter_name_desc() {
+        let content = "---\nid: 019dc56a-502f-7ce3-9623-877d6b3a1c5c\nname: \"CI Check\"\ndescription: \"Investigate CI status\"\ncreated: 2025-01-01\nupdated: 2025-06-01\n---\n\nDo the thing.\n";
+        let path = "runtime/skills/ci-check-019dc56a.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
+        assert!(
+            !parsed.needs_rewrite,
+            "canonical format should not need rewrite"
+        );
+
+        match &parsed.file {
+            RuntimeFile::Skill {
+                name,
+                description,
+                body,
+                ..
+            } => {
+                assert_eq!(name, "CI Check");
+                assert_eq!(description, "Investigate CI status");
+                assert_eq!(body, "Do the thing.");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    /// Frontmatter with only name, no heading — body is everything after frontmatter.
+    #[test]
+    fn parse_skill_markdown_frontmatter_only_filename_for_body() {
+        let content =
+            "---\nid: 019dc56a-502f-7ce3-9623-877d6b3a1c5c\n---\n\nJust raw content, no heading";
+        let path = "runtime/skills/my-tool-019dc56a.md";
+        let parsed = parse_skill_markdown(content, path).expect("should parse");
+        assert!(
+            parsed.needs_rewrite,
+            "no name in frontmatter triggers rewrite"
+        );
+
+        match &parsed.file {
+            RuntimeFile::Skill { name, body, .. } => {
+                assert_eq!(name, "My Tool");
+                assert_eq!(body, "Just raw content, no heading");
+            }
+            _ => panic!("expected Skill variant"),
+        }
+    }
+
+    #[test]
+    fn name_from_filename_strips_id_prefix() {
+        assert_eq!(
+            name_from_filename("runtime/skills/ci-check-019dc56a.md"),
+            Some("Ci Check".to_string())
+        );
+    }
+
+    #[test]
+    fn name_from_filename_no_id_prefix() {
+        assert_eq!(
+            name_from_filename("runtime/skills/my-cool-skill.md"),
+            Some("My Cool Skill".to_string())
+        );
     }
 
     #[test]
