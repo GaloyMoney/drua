@@ -45,7 +45,7 @@ fn parse_use_skill_params(arguments: Option<JsonObject>) -> Result<UseSkillActio
     let map: serde_json::Map<String, serde_json::Value> = args.into_iter().collect();
     if map.contains_key("action") {
         let val = serde_json::Value::Object(map);
-        serde_json::from_value(val).map_err(ToolSetsError::from)
+        serde_json::from_value(val).map_err(|e| ToolSetsError::Skill(e.to_string()))
     } else if let Some(name) = map.get("name").and_then(|v| v.as_str()) {
         Ok(UseSkillAction::Invoke {
             name: name.to_string(),
