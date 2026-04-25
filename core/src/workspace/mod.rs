@@ -16,21 +16,41 @@ use repo::*;
 use crate::agent::Agents;
 use crate::audit::Audit;
 use crate::library::Library;
+use crate::note::Notes;
 use crate::primitives::*;
+use crate::sandbox::Sandboxes;
+use crate::skill::Skills;
+use crate::workspace_secret::WorkspaceSecrets;
 
 #[derive(Clone)]
 pub struct Workspaces {
     repo: WorkspaceRepo,
     agents: Arc<Agents>,
+    sandboxes: Arc<Sandboxes>,
+    skills: Arc<Skills>,
+    notes: Arc<Notes>,
+    secrets: WorkspaceSecrets,
     library: Library,
 }
 
 impl Workspaces {
-    pub fn new(pool: &sqlx::PgPool, agents: Arc<Agents>, library: Library) -> Self {
+    pub fn new(
+        pool: &sqlx::PgPool,
+        agents: Arc<Agents>,
+        sandboxes: Arc<Sandboxes>,
+        skills: Arc<Skills>,
+        notes: Arc<Notes>,
+        secrets: WorkspaceSecrets,
+        library: Library,
+    ) -> Self {
         let repo = WorkspaceRepo::new(pool);
         Self {
             repo,
             agents,
+            sandboxes,
+            skills,
+            notes,
+            secrets,
             library,
         }
     }
@@ -153,18 +173,50 @@ impl Workspaces {
             return Ok(workspace);
         }
 
-        // Cascade: soft-delete agents (which also destroys their sandboxes)
+        // ── 1. Suspend all workspace sandboxes ─────────────────────────
+        // Tear down pods/processes via the admin client before touching
+        // any DB state so in-flight sandbox work stops.
+        if let Err(e) = self.sandboxes.suspend_for_workspace_in_op(op, id).await {
+            tracing::warn!(error = %e, "failed to suspend sandboxes during workspace delete");
+        }
+
+        // ── 2. Cascade soft-delete agents (→ sessions → threads) ───────
         let agent_list = self.agents.list_for_workspace(_sub, id).await?;
         for agent in &agent_list {
             if let Err(e) = self.agents.delete_in_op(op, agent.id).await {
                 tracing::warn!(
                     agent_id = %agent.id,
                     error = %e,
-                    "Failed to delete agent during workspace delete"
+                    "failed to delete agent during workspace delete"
                 );
             }
         }
 
+        // ── 3. Cascade soft-delete workspace-scoped skills ─────────────
+        if let Err(e) = self.skills.delete_for_workspace_in_op(op, id).await {
+            tracing::warn!(error = %e, "failed to delete skills during workspace delete");
+        }
+
+        // ── 4. Cascade soft-delete workspace notes ─────────────────────
+        if let Err(e) = self.notes.delete_for_workspace_in_op(op, id).await {
+            tracing::warn!(error = %e, "failed to delete notes during workspace delete");
+        }
+
+        // ── 5. Cascade soft-delete workspace secrets ───────────────────
+        if let Err(e) = self.secrets.delete_for_workspace_in_op(op, id).await {
+            tracing::warn!(error = %e, "failed to delete secrets during workspace delete");
+        }
+
+        // ── 6. Clean up library search data + queue git dir removal ────
+        if let Err(e) = self
+            .library
+            .cleanup_workspace_in_op(op, uuid::Uuid::from(id), &workspace.name)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to clean up library during workspace delete");
+        }
+
+        // ── 7. Archive + soft-delete the workspace entity itself ───────
         self.repo.update_in_op(op, &mut workspace).await?;
         self.repo
             .delete_in_op(op, self.repo.find_by_id(id).await?)

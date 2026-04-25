@@ -160,6 +160,33 @@ impl Library {
         Ok(())
     }
 
+    /// Remove all search data for a workspace and queue a background job
+    /// to delete the `runtime/workspaces/<name>/` directory from the
+    /// library git repo. Call within the workspace delete transaction so
+    /// the search data is removed atomically.
+    #[tracing::instrument(name = "library.cleanup_workspace_in_op", skip_all)]
+    pub async fn cleanup_workspace_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        workspace_id: uuid::Uuid,
+        workspace_name: &str,
+    ) -> Result<(), LibraryError> {
+        self.search
+            .delete_for_workspace_in_op(op, workspace_id)
+            .await?;
+
+        let file = RuntimeFile::WorkspaceCleanup {
+            workspace_name: workspace_name.to_string(),
+        };
+        let idempotency_key = format!("workspace-cleanup:{workspace_name}");
+        let _ = self
+            .inbox
+            .persist_and_queue_job_in_op(op, idempotency_key, &file)
+            .await?;
+
+        Ok(())
+    }
+
     /// Pull the library repo and find skill files that changed since
     /// `last_sync_commit`. Returns parsed `RuntimeFile::Skill` variants.
     ///

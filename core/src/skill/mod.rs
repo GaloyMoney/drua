@@ -393,6 +393,20 @@ impl Skills {
 }
 
 impl Skills {
+    /// Bulk soft-delete all workspace-scoped skills within a transaction.
+    /// Used during workspace cascade deletion.
+    #[instrument(name = "skill.delete_for_workspace_in_op", skip_all)]
+    pub(crate) async fn delete_for_workspace_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), SkillError> {
+        self.repo
+            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .await?;
+        Ok(())
+    }
+
     /// Constructor without library sync — for tests or contexts where
     /// git-backed persistence is not needed.
     pub fn new_without_library(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>) -> Self {

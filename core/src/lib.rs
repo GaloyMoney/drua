@@ -200,7 +200,15 @@ impl App {
         ));
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
-        let workspaces = Arc::new(Workspaces::new(pool, Arc::clone(&agents), library.clone()));
+        let workspaces = Arc::new(Workspaces::new(
+            pool,
+            Arc::clone(&agents),
+            Arc::clone(&sandboxes),
+            Arc::clone(&skills),
+            Arc::clone(&notes),
+            workspace_secrets.clone(),
+            library.clone(),
+        ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
 

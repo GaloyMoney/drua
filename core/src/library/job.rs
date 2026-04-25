@@ -58,6 +58,31 @@ impl JobRunner for WriteToRuntimeRunner {
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         self.upstream.pull().await?;
 
+        // Workspace cleanup: remove the entire workspace directory from
+        // the git repo. No hash comparison — always execute.
+        if let RuntimeFile::WorkspaceCleanup { workspace_name } = &self.file {
+            let dir_path = format!("runtime/workspaces/{workspace_name}");
+            let message = format!("workspace: delete {workspace_name}");
+
+            let err_msg = match self
+                .upstream
+                .remove_dir_and_commit(&dir_path, &message)
+                .await
+            {
+                Ok(()) => {
+                    self.upstream.push().await?;
+                    return Ok(JobCompletion::Complete);
+                }
+                Err(e) => e.to_string(),
+            };
+
+            tracing::warn!(error = %err_msg, "workspace cleanup failed, resetting working tree");
+            if let Err(reset_err) = self.upstream.reset_dirty_state().await {
+                tracing::error!(error = %reset_err, "reset after failed cleanup also failed");
+            }
+            return Err(err_msg.into());
+        }
+
         let new_hash = self.file.file_hash();
         if self
             .upstream
