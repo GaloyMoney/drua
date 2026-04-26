@@ -76,7 +76,7 @@ toolsets:
         - list_issues
         - search_issues
     - name: github_actions
-      url: https://api.githubcopilot.com/x/actions/readonly
+      url: https://api.githubcopilot.com/mcp/x/actions/readonly
       tool_prefix: github_actions
       category: ci
       category_description: "GitHub Actions workflows, runs, jobs, and logs"

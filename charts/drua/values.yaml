@@ -96,7 +96,7 @@ galoyAgents:
     #     - list_issues
     #     - search_issues
     # - name: github_actions
-    #   url: https://api.githubcopilot.com/x/actions/readonly
+    #   url: https://api.githubcopilot.com/mcp/x/actions/readonly
     #   toolPrefix: github_actions
     #   category: ci
     #   categoryDescription: "GitHub Actions workflows, runs, jobs, and logs"
