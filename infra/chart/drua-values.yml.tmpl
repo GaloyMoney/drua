@@ -1,4 +1,4 @@
-galoyAgents:
+drua:
   image:
     tag: ${image_tag}
   secrets:
@@ -8,6 +8,6 @@ postgresql:
   image:
     tag: latest
   auth:
-    existingSecret: galoy-agents
+    existingSecret: drua
     secretKeys:
       userPasswordKey: "pg-user-pw"

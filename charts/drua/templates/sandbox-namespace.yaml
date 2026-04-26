@@ -5,7 +5,7 @@ kind: Namespace
 metadata:
   name: {{ .Values.sandbox.namespace }}
   labels:
-    app: {{ template "galoyAgents.fullname" . }}
+    app: {{ template "drua.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
 {{- end }}

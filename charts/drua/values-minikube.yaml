@@ -1,6 +1,6 @@
-galoyAgents:
+drua:
   image:
-    repository: us.gcr.io/galoyorg/galoy-agents
+    repository: us.gcr.io/galoyorg/drua
     tag: edge
     digest: ""
   config:
@@ -12,12 +12,12 @@ galoyAgents:
       githubRedirectUri: "http://localhost:5254/auth/callback"
   secrets:
     create: true
-    pgCon: "postgresql://galoy-agents:galoy-agents@galoy-agents-postgresql:5432/galoy-agents"
+    pgCon: "postgresql://drua:drua@drua-postgresql:5432/drua"
     githubClientSecret: "dummy-client-secret"
   codeAssistant:
     indexHash: "825ef7dd2d3b0ae5c61a97f4eb92d09e11c222d452e339d5614edc59c27bfd84"
     modelHash: "5049594d7ce4b8bd3c29c2aa9b7d64575b939e64db935f7922bacee466076696"
-    gcsBucket: galoy-agents-models
+    gcsBucket: drua-models
     initImage: google/cloud-sdk:slim
 postgresql:
   enabled: true
@@ -25,6 +25,6 @@ postgresql:
     tag: latest
   auth:
     enablePostgresUser: false
-    username: galoy-agents
-    password: galoy-agents
-    database: galoy-agents
+    username: drua
+    password: drua
+    database: drua

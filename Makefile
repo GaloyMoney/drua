@@ -64,7 +64,7 @@ reset-test-library:
 
 add-test-skill:
 	@test -d $(TEST_LIBRARY_DIR)/.git || (echo "Run 'make reset-test-library' first" && exit 1)
-	@printf '# CI Check\n\nInvestigate the latest CI status for a Concourse pipeline.\n\n---\n\nUsing the concourse tools, find the most recent build failure of the **galoy-agents-bin** pipeline.\n\n1. List recent builds and identify the last failed one\n2. Fetch the build logs and summarize the failure reason\n3. If all recent builds passed, report that the pipeline is green\n\nIf $$ARGUMENTS is provided, check that pipeline instead.\n' \
+	@printf '# CI Check\n\nInvestigate the latest CI status for a Concourse pipeline.\n\n---\n\nUsing the concourse tools, find the most recent build failure of the **drua-bin** pipeline.\n\n1. List recent builds and identify the last failed one\n2. Fetch the build logs and summarize the failure reason\n3. If all recent builds passed, report that the pipeline is green\n\nIf $$ARGUMENTS is provided, check that pipeline instead.\n' \
 		> $(TEST_LIBRARY_DIR)/runtime/skills/ci-check.md
 	cd $(TEST_LIBRARY_DIR) && git pull --rebase origin main && \
 		git add -A && \

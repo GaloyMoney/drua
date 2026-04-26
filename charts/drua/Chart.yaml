@@ -1,5 +1,5 @@
 apiVersion: v2
-name: galoy-agents
+name: drua
 description: Helm chart for deploying GaloyMoney/drua
 type: application
 version: 0.1.0-dev

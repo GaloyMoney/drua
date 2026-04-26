@@ -3,7 +3,7 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contain chart name it will be used as a full name.
 */}}
-{{- define "galoyAgents.fullname" -}}
+{{- define "drua.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -19,26 +19,26 @@ If release name contain chart name it will be used as a full name.
 {{/*
 Postgres MCP fullname: <release>-postgres-mcp
 */}}
-{{- define "galoyAgents.postgresMcp.fullname" -}}
+{{- define "drua.postgresMcp.fullname" -}}
 {{- printf "%s-postgres-mcp" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
-Postgres MCP secret name: defaults to the main galoy-agents secret (which already
-holds `pg-con`). Allows override via .Values.galoyAgents.postgresMcp.databaseUrlSecret.name.
+Postgres MCP secret name: defaults to the main drua secret (which already
+holds `pg-con`). Allows override via .Values.drua.postgresMcp.databaseUrlSecret.name.
 */}}
-{{- define "galoyAgents.postgresMcp.secretName" -}}
-{{- if .Values.galoyAgents.postgresMcp.databaseUrlSecret.name -}}
-{{- .Values.galoyAgents.postgresMcp.databaseUrlSecret.name -}}
+{{- define "drua.postgresMcp.secretName" -}}
+{{- if .Values.drua.postgresMcp.databaseUrlSecret.name -}}
+{{- .Values.drua.postgresMcp.databaseUrlSecret.name -}}
 {{- else -}}
-{{- template "galoyAgents.fullname" . -}}
+{{- template "drua.fullname" . -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
 Sandbox namespace: use .Values.sandbox.namespace if set, otherwise .Release.Namespace
 */}}
-{{- define "galoyAgents.sandboxNamespace" -}}
+{{- define "drua.sandboxNamespace" -}}
 {{- if .Values.sandbox.namespace -}}
 {{- .Values.sandbox.namespace -}}
 {{- else -}}
@@ -50,7 +50,7 @@ Sandbox namespace: use .Values.sandbox.namespace if set, otherwise .Release.Name
 Sandbox controller namespace: use .Values.sandbox.controllerNamespace if set,
 otherwise "agent-sandbox-system" (upstream default).
 */}}
-{{- define "galoyAgents.controllerNamespace" -}}
+{{- define "drua.controllerNamespace" -}}
 {{- if .Values.sandbox.controllerNamespace -}}
 {{- .Values.sandbox.controllerNamespace -}}
 {{- else -}}

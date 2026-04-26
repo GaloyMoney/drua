@@ -4,7 +4,7 @@
 #@ )
 
 groups:
-- name: galoy-agents
+- name: drua
   jobs:
   - check-code
   - test-integration
@@ -187,8 +187,8 @@ jobs:
             printf '%s' "$TUNNEL_DEPLOYMENTS_PUBLIC_KEYS" > deployment/tf/tunnel-deployments-public-keys.json
             set -x
             echo "Deployment files prepared"
-  - put: tf-galoy-agents-prod
-    tags: [galoy-agents]
+  - put: tf-drua-prod
+    tags: [drua]
     params:
       env_name: prod
       vars_files: [deployment/tf/terraform.tfvars]
@@ -264,7 +264,7 @@ jobs:
             ln -s "$(pwd)/lana-repo" /tmp/repos/lana-bank
             ln -s "$(pwd)/job-repo" /tmp/repos/job
             ln -s "$(pwd)/obix-repo" /tmp/repos/obix
-            ln -s "$(pwd)/repo" /tmp/repos/galoy-agents
+            ln -s "$(pwd)/repo" /tmp/repos/drua
 
             cd repo
             nix run ./ci#build-code-assistant-index -- /tmp/repos "$(pwd)/../index" "$(pwd)/../embedder" "$(pwd)/../code-assistant-model"
@@ -299,11 +299,11 @@ jobs:
             cd repo-updated
             nix run ./ci#commit-hash -- "$(pwd)" \
               charts/drua/values.yaml \
-              "galoyAgents.codeAssistant.indexHash" \
+              "drua.codeAssistant.indexHash" \
               "$INDEX_HASH"
             nix run ./ci#commit-hash -- "$(pwd)" \
               charts/drua/values.yaml \
-              "galoyAgents.codeAssistant.embedderHash" \
+              "drua.codeAssistant.embedderHash" \
               "$EMBEDDER_HASH"
   - put: repo-chart-values
     params:
@@ -606,13 +606,13 @@ resources:
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/tunnel-connector"
 
-- name: tf-galoy-agents-prod
+- name: tf-drua-prod
   type: terraform
   source:
     backend_type: gcs
     backend_config:
       bucket: #@ data.values.deploy_tf_state_bucket
-      prefix: galoy-agents/prod
+      prefix: drua/prod
       credentials: #@ data.values.deploy_gcp_creds_json
     env:
       GOOGLE_CREDENTIALS: #@ data.values.deploy_gcp_creds_json

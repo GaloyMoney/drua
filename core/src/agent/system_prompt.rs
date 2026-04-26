@@ -9,7 +9,7 @@ use super::session::message::SystemBlock;
 /// Identity line shared by every agent role. The workspace name is
 /// interpolated at construction time via [`build_base_block`].
 const BASE_PROMPT_PREFIX: &str = "You are an AI agent operating inside the \
-Galoy Agents platform, in workspace";
+Drua platform, in workspace";
 
 /// Behavioral guidelines shared by every agent role. These are
 /// high-ROI directives drawn from Anthropic's official prompting
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(blocks.len(), 4);
         match &blocks[0] {
             SystemBlock::Text { text } => {
-                assert!(text.contains("Galoy Agents platform"));
+                assert!(text.contains("Drua platform"));
                 assert!(text.contains("acme-corp"));
             }
         }

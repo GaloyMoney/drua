@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite;
 
 // ---------------------------------------------------------------------------
-// Wire protocol (mirrored from galoy-agents-core::tunnel)
+// Wire protocol (mirrored from drua-core::tunnel)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]

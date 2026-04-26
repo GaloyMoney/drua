@@ -10,24 +10,24 @@ gar_registry: us.gcr.io/galoyorg
 gar_registry_user: ((gar-creds.username))
 gar_registry_password: ((gar-creds.password))
 
-folder_registry_image: galoy-agents
+folder_registry_image: drua
 
 cala_git_uri: git@github.com:GaloyMoney/cala.git
 lana_git_uri: git@github.com:GaloyMoney/lana-bank.git
 job_git_uri: git@github.com:GaloyMoney/job.git
 obix_git_uri: git@github.com:GaloyMoney/obix.git
 
-gcs_creds_json: ((galoy-agents-gcp-creds.creds_json))
-code_assistant_gcs_bucket: galoy-agents-models
+gcs_creds_json: ((drua-gcp-creds.creds_json))
+code_assistant_gcs_bucket: drua-models
 
-deploy_gcp_creds_json: ((galoy-agents-gcp-creds.creds_json))
-deploy_tf_state_bucket: galoy-agents-tf-state
-deploy_github_client_secret: ((galoy-agents-prod-secrets.github_client_secret))
+deploy_gcp_creds_json: ((drua-gcp-creds.creds_json))
+deploy_tf_state_bucket: drua-tf-state
+deploy_github_client_secret: ((drua-prod-secrets.github_client_secret))
 deploy_concourse_username: ((galoybot-concourse-creds.username))
 deploy_concourse_password: ((galoybot-concourse-creds.password))
 honeycomb_api_key: ((mcp-upstream.honeycomb_api_key))
 github_pat: ((mcp-upstream.github_pat))
 lingo_api_key: ((mcp-upstream.lingo_dev_api_key))
 deploy_anthropic_api_key: ((anthropic-api-key.key))
-deploy_github_app_private_key: ((galoy-agents-prod-secrets.github_app_private_key))
+deploy_github_app_private_key: ((drua-prod-secrets.github_app_private_key))
 tunnel_deployments_public_keys: ((tunnel-deployments.public_keys))

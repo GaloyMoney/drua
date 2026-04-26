@@ -1,31 +1,31 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ template "galoyAgents.fullname" . }}-config
+  name: {{ template "drua.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
 data:
   drua.yml: |-
     server:
-      port: {{ .Values.galoyAgents.server.service.port }}
-      host: {{ .Values.galoyAgents.config.server.host | quote }}
-      secure_cookies: {{ .Values.galoyAgents.config.server.secureCookies }}
-      mcp_endpoint: {{ .Values.galoyAgents.config.server.mcpEndpoint | quote }}
+      port: {{ .Values.drua.server.service.port }}
+      host: {{ .Values.drua.config.server.host | quote }}
+      secure_cookies: {{ .Values.drua.config.server.secureCookies }}
+      mcp_endpoint: {{ .Values.drua.config.server.mcpEndpoint | quote }}
       tunnel:
         deployments:
-        {{- range $deployment_id, $public_key := .Values.galoyAgents.config.server.tunnel.deployments }}
+        {{- range $deployment_id, $public_key := .Values.drua.config.server.tunnel.deployments }}
           {{ $deployment_id }}: |
             {{- $public_key | nindent 12 }}
         {{- end }}
     oauth:
-      github_client_id: {{ .Values.galoyAgents.config.oauth.githubClientId | quote }}
-      github_redirect_uri: {{ .Values.galoyAgents.config.oauth.githubRedirectUri | quote }}
-    {{- if .Values.galoyAgents.config.oauth.githubAllowedTeams }}
+      github_client_id: {{ .Values.drua.config.oauth.githubClientId | quote }}
+      github_redirect_uri: {{ .Values.drua.config.oauth.githubRedirectUri | quote }}
+    {{- if .Values.drua.config.oauth.githubAllowedTeams }}
       github_allowed_teams:
-      {{- range .Values.galoyAgents.config.oauth.githubAllowedTeams }}
+      {{- range .Values.drua.config.oauth.githubAllowedTeams }}
         - {{ . | quote }}
       {{- end }}
     {{- end }}
-    {{- with .Values.galoyAgents.config.providers }}
+    {{- with .Values.drua.config.providers }}
     providers:
     {{- range . }}
       - name: {{ .name | quote }}
@@ -40,8 +40,8 @@ data:
     agents:
       builtin_roles:
         workspace_lead:
-          model: {{ .Values.galoyAgents.config.agents.workspaceLead.model | quote }}
-          {{- with .Values.galoyAgents.config.agents.workspaceLead.compaction }}
+          model: {{ .Values.drua.config.agents.workspaceLead.model | quote }}
+          {{- with .Values.drua.config.agents.workspaceLead.compaction }}
           compaction:
             {{- with .resetTimeDeltaSeconds }}
             reset_time_delta_seconds: {{ . }}
@@ -50,8 +50,8 @@ data:
           system:
             - type: text
               text: |-
-                {{- .Values.galoyAgents.config.agents.workspaceLead.systemPrompt | nindent 16 }}
-        {{- with .Values.galoyAgents.config.agents.agent }}
+                {{- .Values.drua.config.agents.workspaceLead.systemPrompt | nindent 16 }}
+        {{- with .Values.drua.config.agents.agent }}
         agent:
           model: {{ .model | quote }}
           {{- with .compaction }}
@@ -67,17 +67,17 @@ data:
         {{- end }}
     toolsets:
       code_assistant:
-        db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}
+        db_path: {{ .Values.drua.config.codeAssistant.dbPath | quote }}
       concourse:
-        enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
-        url: {{ .Values.galoyAgents.config.concourse.url | quote }}
-        team: {{ .Values.galoyAgents.config.concourse.team | quote }}
-      {{- $hasUpstreams := .Values.galoyAgents.config.mcpUpstreams }}
+        enabled: {{ .Values.drua.config.concourse.enabled }}
+        url: {{ .Values.drua.config.concourse.url | quote }}
+        team: {{ .Values.drua.config.concourse.team | quote }}
+      {{- $hasUpstreams := .Values.drua.config.mcpUpstreams }}
       {{- $k8sMcp := index .Values "kubernetes-mcp-server" }}
-      {{- $pgMcp := .Values.galoyAgents.postgresMcp }}
+      {{- $pgMcp := .Values.drua.postgresMcp }}
       {{- if or $hasUpstreams (and $k8sMcp $k8sMcp.enabled) (and $pgMcp $pgMcp.enabled) }}
       mcp_upstreams:
-      {{- range .Values.galoyAgents.config.mcpUpstreams }}
+      {{- range .Values.drua.config.mcpUpstreams }}
         - name: {{ .name | quote }}
           url: {{ .url | quote }}
           {{- if .authHeaderName }}
@@ -132,7 +132,7 @@ data:
       {{- end }}
       {{- if and $pgMcp $pgMcp.enabled }}
         - name: "postgres"
-          url: "http://{{ template "galoyAgents.postgresMcp.fullname" . }}:{{ $pgMcp.service.port }}/mcp"
+          url: "http://{{ template "drua.postgresMcp.fullname" . }}:{{ $pgMcp.service.port }}/mcp"
           auth_required: false
           tool_prefix: "pg"
           category: "database"
@@ -141,7 +141,7 @@ data:
             - "admin"
       {{- end }}
       {{- end }}
-    {{- with .Values.galoyAgents.config.library }}
+    {{- with .Values.drua.config.library }}
     library:
       {{- with .dataDir }}
       data_dir: {{ . | quote }}
@@ -150,10 +150,10 @@ data:
       repo_url: {{ . | quote }}
       {{- end }}
     {{- end }}
-    {{- if .Values.galoyAgents.config.githubApp.enabled }}
+    {{- if .Values.drua.config.githubApp.enabled }}
     github_app:
-      client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}
-      installation_id: {{ .Values.galoyAgents.config.githubApp.installationId | quote }}
+      client_id: {{ .Values.drua.config.githubApp.clientId | quote }}
+      installation_id: {{ .Values.drua.config.githubApp.installationId | quote }}
     {{- end }}
     {{- if .Values.sandbox.namespace }}
     # Sandbox provisioning. Without this section the binary defaults to

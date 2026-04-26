@@ -3,9 +3,9 @@ apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: {{ .Values.sandbox.templateName }}
-  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
+  namespace: {{ include "drua.sandboxNamespace" . }}
   labels:
-    app: {{ template "galoyAgents.fullname" . }}
+    app: {{ template "drua.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
 spec:
@@ -48,9 +48,9 @@ spec:
         - name: {{ .name }}
           value: {{ .value | quote }}
         {{- end }}
-        {{- if .Values.galoyAgents.tracing }}
+        {{- if .Values.drua.tracing }}
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | replace ":4317" ":4318" | quote }}
+          value: {{ .Values.drua.tracing.otelExporterOtlpEndpoint | replace ":4317" ":4318" | quote }}
         {{- end }}
         {{- if .Values.sandbox.anthropicApiKeySecret }}
         - name: ANTHROPIC_API_KEY
@@ -65,7 +65,7 @@ spec:
         {{- end }}
         volumeMounts:
         - name: mcp-token
-          mountPath: /var/run/secrets/galoy-agents
+          mountPath: /var/run/secrets/drua
           readOnly: true
         - name: workspace-secrets
           mountPath: /run/secrets
@@ -77,7 +77,7 @@ spec:
         projected:
           sources:
           - serviceAccountToken:
-              audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-mcp" }}
+              audience: {{ .Values.sandbox.saTokenAudience | default "drua-mcp" }}
               expirationSeconds: 3600
               path: token
       dnsConfig:

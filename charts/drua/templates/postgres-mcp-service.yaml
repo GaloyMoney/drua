@@ -1,20 +1,20 @@
-{{- if .Values.galoyAgents.postgresMcp.enabled -}}
+{{- if .Values.drua.postgresMcp.enabled -}}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ template "galoyAgents.postgresMcp.fullname" . }}
+  name: {{ template "drua.postgresMcp.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+    app: {{ template "drua.postgresMcp.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
 spec:
-  type: {{ .Values.galoyAgents.postgresMcp.service.type }}
+  type: {{ .Values.drua.postgresMcp.service.type }}
   ports:
-  - port: {{ .Values.galoyAgents.postgresMcp.service.port }}
-    targetPort: {{ .Values.galoyAgents.postgresMcp.service.port }}
+  - port: {{ .Values.drua.postgresMcp.service.port }}
+    targetPort: {{ .Values.drua.postgresMcp.service.port }}
     protocol: TCP
     name: http
   selector:
-    app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+    app: {{ template "drua.postgresMcp.fullname" . }}
 {{- end }}

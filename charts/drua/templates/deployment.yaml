@@ -1,13 +1,13 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ template "galoyAgents.fullname" . }}
+  name: {{ template "drua.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ template "galoyAgents.fullname" . }}
+    app: {{ template "drua.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
-    kube-monkey/identifier: {{ template "galoyAgents.fullname" . }}
+    kube-monkey/identifier: {{ template "drua.fullname" . }}
     kube-monkey/enabled: enabled
     kube-monkey/kill-mode: fixed
     kube-monkey/kill-value: "1"
@@ -15,31 +15,31 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: {{ template "galoyAgents.fullname" . }}
+      app: {{ template "drua.fullname" . }}
       release: {{ .Release.Name }}
-  replicas: {{ .Values.galoyAgents.replicas }}
+  replicas: {{ .Values.drua.replicas }}
   template:
     metadata:
       labels:
-        app: {{ template "galoyAgents.fullname" . }}
+        app: {{ template "drua.fullname" . }}
         chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
         release: "{{ .Release.Name }}"
-        kube-monkey/identifier: {{ template "galoyAgents.fullname" . }}
+        kube-monkey/identifier: {{ template "drua.fullname" . }}
         kube-monkey/enabled: enabled
-      {{- with .Values.galoyAgents.labels }}
+      {{- with .Values.drua.labels }}
         {{ toYaml . | nindent 8 }}
       {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- if .Values.galoyAgents.secrets.create }}
+        {{- if .Values.drua.secrets.create }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
-        {{- if .Values.galoyAgents.secretChecksum }}
-        checksum/external-secret: {{ .Values.galoyAgents.secretChecksum | quote }}
+        {{- if .Values.drua.secretChecksum }}
+        checksum/external-secret: {{ .Values.drua.secretChecksum | quote }}
         {{- end }}
     spec:
       {{- if .Values.sandbox.enabled }}
-      serviceAccountName: {{ template "galoyAgents.fullname" . }}-sandbox
+      serviceAccountName: {{ template "drua.fullname" . }}-sandbox
       {{- end }}
       initContainers:
       - name: wait-for-postgresql
@@ -57,11 +57,11 @@ spec:
         - name: PG_CON
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "pg-con"
-      {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+      {{- if .Values.drua.codeAssistant.indexHash }}
       - name: init-code-assistant
-        image: {{ .Values.galoyAgents.codeAssistant.initImage }}
+        image: {{ .Values.drua.codeAssistant.initImage }}
         command:
           - "sh"
           - "-c"
@@ -71,9 +71,9 @@ spec:
               printf '%s' "$GCS_CREDS" > /tmp/gcs-key.json
               gcloud auth activate-service-account --key-file=/tmp/gcs-key.json
             fi
-            echo "Downloading index {{ .Values.galoyAgents.codeAssistant.indexHash }}..."
+            echo "Downloading index {{ .Values.drua.codeAssistant.indexHash }}..."
             gsutil cp \
-              "gs://{{ .Values.galoyAgents.codeAssistant.gcsBucket }}/index/{{ .Values.galoyAgents.codeAssistant.indexHash }}.tar.gz" \
+              "gs://{{ .Values.drua.codeAssistant.gcsBucket }}/index/{{ .Values.drua.codeAssistant.indexHash }}.tar.gz" \
               /tmp/code-assistant-index.tar.gz
             mkdir -p /data
             tar -xzf /tmp/code-assistant-index.tar.gz -C /data
@@ -81,10 +81,10 @@ spec:
             if [ -f /data/style-agent.db ] && [ ! -f /data/code-assistant.db ]; then
               mv /data/style-agent.db /data/code-assistant.db
             fi
-            {{- if .Values.galoyAgents.codeAssistant.embedderHash }}
-            echo "Downloading embedder {{ .Values.galoyAgents.codeAssistant.embedderHash }}..."
+            {{- if .Values.drua.codeAssistant.embedderHash }}
+            echo "Downloading embedder {{ .Values.drua.codeAssistant.embedderHash }}..."
             gsutil cp \
-              "gs://{{ .Values.galoyAgents.codeAssistant.gcsBucket }}/embedder/{{ .Values.galoyAgents.codeAssistant.embedderHash }}.tar.gz" \
+              "gs://{{ .Values.drua.codeAssistant.gcsBucket }}/embedder/{{ .Values.drua.codeAssistant.embedderHash }}.tar.gz" \
               /tmp/embedder.tar.gz
             tar -xzf /tmp/embedder.tar.gz -C /data
             {{- end }}
@@ -93,7 +93,7 @@ spec:
         - name: GCS_CREDS
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "gcs-creds"
               optional: true
         volumeMounts:
@@ -102,27 +102,27 @@ spec:
       {{- end }}
       containers:
       - name: {{ .Chart.Name }}
-        image: "{{ .Values.galoyAgents.image.repository }}{{- if .Values.galoyAgents.image.tag -}}:{{ .Values.galoyAgents.image.tag }}{{- else -}}@{{ .Values.galoyAgents.image.digest }}{{- end }}"
+        image: "{{ .Values.drua.image.repository }}{{- if .Values.drua.image.tag -}}:{{ .Values.drua.image.tag }}{{- else -}}@{{ .Values.drua.image.digest }}{{- end }}"
         ports:
         - name: server
-          containerPort: {{ .Values.galoyAgents.server.service.port }}
+          containerPort: {{ .Values.drua.server.service.port }}
           protocol: TCP
         volumeMounts:
         - name: config
           mountPath: "/config/drua.yml"
           subPath: "drua.yml"
           readOnly: true
-        {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+        {{- if .Values.drua.codeAssistant.indexHash }}
         - name: code-assistant-data
           mountPath: /data/code-assistant
         {{- end }}
-        {{- with .Values.galoyAgents.config.library }}
+        {{- with .Values.drua.config.library }}
         {{- with .dataDir }}
         - name: library-data
           mountPath: {{ . }}
         {{- end }}
         {{- end }}
-        {{- if .Values.galoyAgents.config.githubApp.enabled }}
+        {{- if .Values.drua.config.githubApp.enabled }}
         - name: github-app-key
           mountPath: /secrets/github-app
           readOnly: true
@@ -131,44 +131,44 @@ spec:
         - name: DRUA_CONFIG
           value: "/config/drua.yml"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
+          value: {{ .Values.drua.tracing.otelExporterOtlpEndpoint | quote }}
         - name: PG_CON
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "pg-con"
         - name: GITHUB_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "github-client-secret"
         - name: CONCOURSE_USERNAME
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "concourse-username"
               optional: true
         - name: CONCOURSE_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "concourse-password"
               optional: true
-        {{- range .Values.galoyAgents.config.mcpUpstreams }}
+        {{- range .Values.drua.config.mcpUpstreams }}
         - name: {{ .name | upper }}_AUTH_HEADER
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" $ }}
+              name: {{ template "drua.fullname" $ }}
               key: {{ printf "%s-auth-header" .name | quote }}
               optional: true
         {{- end }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.fullname" . }}
+              name: {{ template "drua.fullname" . }}
               key: "anthropic-api-key"
               optional: true
-        {{- if .Values.galoyAgents.config.githubApp.enabled }}
+        {{- if .Values.drua.config.githubApp.enabled }}
         - name: GITHUB_APP_PRIVATE_KEY_PATH
           value: "/secrets/github-app/private-key.pem"
         {{- end }}
@@ -177,31 +177,31 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName
-        {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+        {{- if .Values.drua.codeAssistant.indexHash }}
         - name: FASTEMBED_CACHE_DIR
           value: /data/code-assistant/.fastembed_cache
         {{- end }}
         resources:
-        {{- toYaml .Values.galoyAgents.resources | nindent 10 }}
+        {{- toYaml .Values.drua.resources | nindent 10 }}
       volumes:
       - name: config
         configMap:
-          name: {{ template "galoyAgents.fullname" . }}-config
-      {{- if .Values.galoyAgents.codeAssistant.indexHash }}
+          name: {{ template "drua.fullname" . }}-config
+      {{- if .Values.drua.codeAssistant.indexHash }}
       - name: code-assistant-data
         emptyDir: {}
       {{- end }}
-      {{- with .Values.galoyAgents.config.library }}
+      {{- with .Values.drua.config.library }}
       {{- with .dataDir }}
       - name: library-data
         persistentVolumeClaim:
-          claimName: {{ template "galoyAgents.fullname" $ }}-library
+          claimName: {{ template "drua.fullname" $ }}-library
       {{- end }}
       {{- end }}
-      {{- if .Values.galoyAgents.config.githubApp.enabled }}
+      {{- if .Values.drua.config.githubApp.enabled }}
       - name: github-app-key
         secret:
-          secretName: {{ template "galoyAgents.fullname" . }}
+          secretName: {{ template "drua.fullname" . }}
           items:
             - key: "github-app-private-key"
               path: "private-key.pem"

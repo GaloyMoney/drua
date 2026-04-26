@@ -1,7 +1,7 @@
 //! Tunnel transport for deployment-side MCP servers.
 //!
 //! Instead of exposing MCP servers on a public endpoint with JWT auth,
-//! a lightweight connector in the target cluster dials *out* to galoy-agents
+//! a lightweight connector in the target cluster dials *out* to drua
 //! over WebSocket. Tool calls are relayed through the already-authenticated
 //! tunnel — no ingress, Envoy, or JWT validation required in the target
 //! cluster.

@@ -1,26 +1,26 @@
-{{- if .Values.galoyAgents.postgresMcp.enabled -}}
+{{- if .Values.drua.postgresMcp.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ template "galoyAgents.postgresMcp.fullname" . }}
+  name: {{ template "drua.postgresMcp.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+    app: {{ template "drua.postgresMcp.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
 spec:
-  replicas: {{ .Values.galoyAgents.postgresMcp.replicas }}
+  replicas: {{ .Values.drua.postgresMcp.replicas }}
   selector:
     matchLabels:
-      app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+      app: {{ template "drua.postgresMcp.fullname" . }}
       release: {{ .Release.Name }}
   template:
     metadata:
       labels:
-        app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+        app: {{ template "drua.postgresMcp.fullname" . }}
         chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
         release: "{{ .Release.Name }}"
-      {{- with .Values.galoyAgents.labels }}
+      {{- with .Values.drua.labels }}
         {{ toYaml . | nindent 8 }}
       {{- end }}
     spec:
@@ -32,23 +32,23 @@ spec:
           type: RuntimeDefault
       containers:
       - name: postgres-mcp
-        image: "{{ .Values.galoyAgents.postgresMcp.image.repository }}:{{ .Values.galoyAgents.postgresMcp.image.tag }}"
-        imagePullPolicy: {{ .Values.galoyAgents.postgresMcp.image.pullPolicy }}
+        image: "{{ .Values.drua.postgresMcp.image.repository }}:{{ .Values.drua.postgresMcp.image.tag }}"
+        imagePullPolicy: {{ .Values.drua.postgresMcp.image.pullPolicy }}
         args:
           - "--transport=http"
-          - "--port={{ .Values.galoyAgents.postgresMcp.service.port }}"
+          - "--port={{ .Values.drua.postgresMcp.service.port }}"
         env:
         - name: DSN
           valueFrom:
             secretKeyRef:
-              name: {{ template "galoyAgents.postgresMcp.secretName" . }}
-              key: {{ .Values.galoyAgents.postgresMcp.databaseUrlSecret.key }}
+              name: {{ template "drua.postgresMcp.secretName" . }}
+              key: {{ .Values.drua.postgresMcp.databaseUrlSecret.key }}
         ports:
         - name: http
-          containerPort: {{ .Values.galoyAgents.postgresMcp.service.port }}
+          containerPort: {{ .Values.drua.postgresMcp.service.port }}
           protocol: TCP
         resources:
-          {{- toYaml .Values.galoyAgents.postgresMcp.resources | nindent 10 }}
+          {{- toYaml .Values.drua.postgresMcp.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

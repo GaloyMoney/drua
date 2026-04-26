@@ -1,34 +1,34 @@
-{{- if .Values.galoyAgents.ingress.enabled }}
+{{- if .Values.drua.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ template "galoyAgents.fullname" . }}
+  name: {{ template "drua.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ template "galoyAgents.fullname" . }}
+    app: {{ template "drua.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
-  {{- with .Values.galoyAgents.ingress.annotations }}
+  {{- with .Values.drua.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  {{- if .Values.galoyAgents.ingress.ingressClassName }}
-  ingressClassName: {{ .Values.galoyAgents.ingress.ingressClassName }}
+  {{- if .Values.drua.ingress.ingressClassName }}
+  ingressClassName: {{ .Values.drua.ingress.ingressClassName }}
   {{- end }}
-  {{- if .Values.galoyAgents.ingress.tls }}
+  {{- if .Values.drua.ingress.tls }}
   tls:
-    {{- toYaml .Values.galoyAgents.ingress.tls | nindent 4 }}
+    {{- toYaml .Values.drua.ingress.tls | nindent 4 }}
   {{- end }}
   rules:
-  - host: {{ .Values.galoyAgents.ingress.host }}
+  - host: {{ .Values.drua.ingress.host }}
     http:
       paths:
       - path: /
         pathType: Prefix
         backend:
           service:
-            name: {{ template "galoyAgents.fullname" . }}
+            name: {{ template "drua.fullname" . }}
             port:
-              number: {{ .Values.galoyAgents.server.service.port }}
+              number: {{ .Values.drua.server.service.port }}
 {{- end }}

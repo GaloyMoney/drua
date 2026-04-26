@@ -1,19 +1,19 @@
-{{- with .Values.galoyAgents.config.library }}
+{{- with .Values.drua.config.library }}
 {{- with .dataDir }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ template "galoyAgents.fullname" $ }}-library
+  name: {{ template "drua.fullname" $ }}-library
   namespace: {{ $.Release.Namespace }}
   labels:
-    app: {{ template "galoyAgents.fullname" $ }}
+    app: {{ template "drua.fullname" $ }}
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: {{ $.Values.galoyAgents.config.library.size | default "1Gi" }}
-  {{- with $.Values.galoyAgents.config.library.storageClassName }}
+      storage: {{ $.Values.drua.config.library.size | default "1Gi" }}
+  {{- with $.Values.drua.config.library.storageClassName }}
   storageClassName: {{ . }}
   {{- end }}
 {{- end }}
