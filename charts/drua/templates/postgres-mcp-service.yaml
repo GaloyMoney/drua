@@ -1,0 +1,20 @@
+{{- if .Values.galoyAgents.postgresMcp.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "galoyAgents.postgresMcp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  type: {{ .Values.galoyAgents.postgresMcp.service.type }}
+  ports:
+  - port: {{ .Values.galoyAgents.postgresMcp.service.port }}
+    targetPort: {{ .Values.galoyAgents.postgresMcp.service.port }}
+    protocol: TCP
+    name: http
+  selector:
+    app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+{{- end }}

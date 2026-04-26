@@ -17,6 +17,25 @@ If release name contain chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+Postgres MCP fullname: <release>-postgres-mcp
+*/}}
+{{- define "galoyAgents.postgresMcp.fullname" -}}
+{{- printf "%s-postgres-mcp" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Postgres MCP secret name: defaults to the main galoy-agents secret (which already
+holds `pg-con`). Allows override via .Values.galoyAgents.postgresMcp.databaseUrlSecret.name.
+*/}}
+{{- define "galoyAgents.postgresMcp.secretName" -}}
+{{- if .Values.galoyAgents.postgresMcp.databaseUrlSecret.name -}}
+{{- .Values.galoyAgents.postgresMcp.databaseUrlSecret.name -}}
+{{- else -}}
+{{- template "galoyAgents.fullname" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Sandbox namespace: use .Values.sandbox.namespace if set, otherwise .Release.Namespace
 */}}
 {{- define "galoyAgents.sandboxNamespace" -}}
