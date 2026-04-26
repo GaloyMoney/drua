@@ -159,6 +159,10 @@ impl TopLevelTool for WorkspaceSandbox {
         subject.can_read_workspace()
     }
 
+    fn composable(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,

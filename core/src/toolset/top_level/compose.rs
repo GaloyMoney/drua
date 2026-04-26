@@ -22,9 +22,6 @@ use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
 use super::{parse_params, schema_for};
 
-/// Tools excluded from compose dispatch to prevent recursion.
-pub(super) const COMPOSE_EXCLUDED: &[&str] = &["compose", "use_skill", "agent", "sandbox"];
-
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -106,6 +103,10 @@ impl TopLevelTool for ComposeTool {
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
         Some(&COMPOSE_OUTPUT_SCHEMA)
+    }
+
+    fn composable(&self) -> bool {
+        false
     }
 
     #[tracing::instrument(name = "toolset.compose.call", skip_all)]
@@ -271,20 +272,16 @@ impl CatalogDispatcher {
     }
 
     /// Dispatch to a top-level tool by exact name. Respects visibility and
-    /// excludes tools in [`COMPOSE_EXCLUDED`] to prevent recursion.
+    /// each tool's [`TopLevelTool::composable`] flag.
     async fn call_top_level(
         &self,
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        if COMPOSE_EXCLUDED.contains(&name) {
-            return Err(format!("Cannot call '{name}' from within a compose script"));
-        }
-
         let tool = {
             let map = self.top_level.read().expect("top_level lock poisoned");
             map.get(name)
-                .filter(|t| t.is_visible(&self.subject))
+                .filter(|t| t.composable() && t.is_visible(&self.subject))
                 .cloned()
                 .ok_or_else(|| format!("Tool not found: {name}"))?
         };
@@ -353,7 +350,7 @@ pub(super) fn generate_dts(
     // Top-level tools (flat, no namespace prefix)
     let mut top_fns: Vec<(String, String, String)> = Vec::new();
     for (name, tool) in top_level.iter() {
-        if !tool.is_visible(subject) || COMPOSE_EXCLUDED.contains(&name.as_str()) {
+        if !tool.composable() || !tool.is_visible(subject) {
             continue;
         }
         let params_ts = schema_to_ts_params(tool.input_schema());

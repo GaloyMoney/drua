@@ -12,7 +12,7 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::compose::{output_schema_to_ts, schema_to_ts_params, COMPOSE_EXCLUDED};
+use super::compose::{output_schema_to_ts, schema_to_ts_params};
 use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,10 @@ impl TopLevelTool for ComposeTypes {
         Some(&COMPOSE_TYPES_OUTPUT_SCHEMA)
     }
 
+    fn composable(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -106,7 +110,7 @@ impl TopLevelTool for ComposeTypes {
         let mut matched: Vec<String> = Vec::new();
 
         for (name, tool) in top.iter() {
-            if !tool.is_visible(subject) || COMPOSE_EXCLUDED.contains(&name.as_str()) {
+            if !tool.composable() || !tool.is_visible(subject) {
                 continue;
             }
             if !want_all && !params.tool_names.contains(name) {

@@ -134,6 +134,10 @@ impl TopLevelTool for UseSkillTool {
         subject.workspace_id().is_some()
     }
 
+    fn composable(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,

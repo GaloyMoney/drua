@@ -85,10 +85,11 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Shared output shape structs (schemars-derived)
+// Shared output shape structs
 //
-// Never instantiated — schemars reads the type at compile time to produce
-// JSON Schema. Re-used across tools that share the same output shape.
+// Dual-purpose: schemars derives the JSON Schema for `output_schema()`,
+// serde::Serialize produces `structured_content` at call time.
+// Re-used across tools that share the same output shape.
 // ---------------------------------------------------------------------------
 
 /// Single `output` string — used by bash, grep, text_editor.

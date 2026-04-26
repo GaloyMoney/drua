@@ -58,6 +58,14 @@ pub trait TopLevelTool: Send + Sync {
         true
     }
 
+    /// Whether this tool can be called from within a `compose` script.
+    /// Default: `true`. Override to `false` to prevent recursive dispatch
+    /// (compose itself), or to exclude tools whose execution model is
+    /// incompatible with compose (agent, use_skill, sandbox).
+    fn composable(&self) -> bool {
+        true
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
