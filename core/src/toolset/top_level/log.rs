@@ -127,7 +127,7 @@ struct AuditEntryOutput {
 impl From<&AuditEntry> for AuditEntryOutput {
     fn from(e: &AuditEntry) -> Self {
         Self {
-            id: e.id.to_string().parse().unwrap_or(0),
+            id: i64::from(e.id),
             recorded_at: e.recorded_at.to_rfc3339(),
             interaction_type: e.interaction_type.clone(),
             entrypoint: e.entrypoint.clone().unwrap_or_default(),

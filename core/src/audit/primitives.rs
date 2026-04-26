@@ -13,6 +13,12 @@ impl std::fmt::Display for AuditEntryId {
     }
 }
 
+impl From<AuditEntryId> for i64 {
+    fn from(value: AuditEntryId) -> i64 {
+        value.0
+    }
+}
+
 /// The type of service boundary interaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
