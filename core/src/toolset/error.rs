@@ -34,6 +34,8 @@ pub enum ToolSetsError {
     Note(String),
     #[error("ToolSetsError - Skill: {0}")]
     Skill(String),
+    #[error("ToolSetsError - Compose: {0}")]
+    Compose(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

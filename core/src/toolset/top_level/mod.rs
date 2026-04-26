@@ -87,6 +87,7 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 mod agent;
 mod bash;
 mod catalog;
+mod compose;
 mod glob;
 mod grep;
 mod log;
@@ -101,6 +102,7 @@ mod whoami;
 pub use agent::WorkspaceAgent;
 pub use bash::Bash;
 pub use catalog::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
+pub use compose::ComposeTool;
 pub use glob::GlobTool;
 pub use grep::Grep;
 pub use log::WorkspaceLog;
