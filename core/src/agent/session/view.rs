@@ -13,6 +13,12 @@ use super::{entity::AgentSessionEvent, error::AgentSessionError, message::*};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SystemBlockIndex(usize);
 
+impl SystemBlockIndex {
+    pub(super) fn new(idx: usize) -> Self {
+        Self(idx)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolDefinitionIndex(usize);
 
@@ -40,6 +46,16 @@ pub struct SystemView {
     pub(super) indexes: Vec<SystemBlockIndex>,
 }
 
+impl SystemView {
+    pub(super) fn from_indexes(indexes: Vec<SystemBlockIndex>) -> Self {
+        Self { indexes }
+    }
+
+    pub(super) fn indexes(&self) -> &[SystemBlockIndex] {
+        &self.indexes
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinitionsView {
     pub(super) indexes: Vec<ToolDefinitionIndex>,
@@ -48,6 +64,14 @@ pub struct ToolDefinitionsView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMessagesView {
     pub(super) indexes: Vec<MessageBlockIndex>,
+}
+
+impl UserMessagesView {
+    pub(super) fn empty() -> Self {
+        Self {
+            indexes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +120,20 @@ impl<'a> MaterializedSession<'a> {
         self.system_breakpoints
             .push(SystemBlockIndex(self.system_blocks.len()));
         self.system_blocks.extend(blocks);
+    }
+
+    /// Total number of system blocks accumulated so far across all events.
+    /// Used by `maybe_update_context` to compute where appended delta blocks
+    /// will land in the global flat list.
+    pub fn system_blocks_len(&self) -> usize {
+        self.system_blocks.len()
+    }
+
+    /// Resolve a `SystemBlockIndex` to its block.
+    /// Panics if the index is out of range — callers must only pass indexes
+    /// they obtained from this same materialized state.
+    pub fn system_block_at(&self, idx: SystemBlockIndex) -> &SystemBlock {
+        self.system_blocks[idx.0]
     }
 
     pub fn push_tool_defs(&mut self, defs: impl Iterator<Item = &'a ToolDefinition>) {

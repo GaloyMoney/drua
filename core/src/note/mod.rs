@@ -17,13 +17,36 @@ use crate::primitives::*;
 pub struct Notes {
     repo: NoteRepo,
     library: Library,
+    pool: sqlx::PgPool,
+    context_generation: ContextGeneration,
 }
 
 impl Notes {
-    pub fn new(pool: &sqlx::PgPool, library: Library) -> Self {
+    pub fn new(
+        pool: &sqlx::PgPool,
+        library: Library,
+        context_generation: ContextGeneration,
+    ) -> Self {
         Self {
             repo: NoteRepo::new(pool, library.clone()),
             library,
+            pool: pool.clone(),
+            context_generation,
+        }
+    }
+
+    /// Bump the local context generation counter and broadcast to other
+    /// instances via PG NOTIFY. Same-process listeners pick up the local
+    /// bump immediately; remote instances receive the notification through
+    /// their PgListener and bump their own atomic.
+    async fn bump_context(&self, workspace_id: WorkspaceId) {
+        self.context_generation.bump();
+        if let Err(e) = sqlx::query("SELECT pg_notify('context_changed', $1)")
+            .bind(workspace_id.to_string())
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(error = %e, "pg_notify(context_changed) failed");
         }
     }
 
@@ -73,6 +96,7 @@ impl Notes {
         let note = self.repo.create_in_op(&mut op, new_note).await?;
         op.commit().await?;
 
+        self.bump_context(workspace_id).await;
         Ok(note)
     }
 
@@ -123,6 +147,7 @@ impl Notes {
         self.repo.update_in_op(&mut op, &mut note).await?;
         op.commit().await?;
 
+        self.bump_context(workspace_id).await;
         Ok(note)
     }
 
@@ -172,6 +197,7 @@ impl Notes {
         )?;
         if note.pin().did_execute() {
             self.repo.update(&mut note).await?;
+            self.bump_context(workspace_id).await;
         }
         Ok(note)
     }
@@ -197,6 +223,7 @@ impl Notes {
         )?;
         if note.unpin().did_execute() {
             self.repo.update(&mut note).await?;
+            self.bump_context(workspace_id).await;
         }
         Ok(note)
     }

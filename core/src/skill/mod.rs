@@ -28,15 +28,43 @@ pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
     library: Option<Library>,
+    pool: Option<sqlx::PgPool>,
+    context_generation: ContextGeneration,
 }
 
 impl Skills {
-    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>, library: Library) -> Self {
+    pub fn new(
+        pool: &sqlx::PgPool,
+        sandboxes: Arc<Sandboxes>,
+        library: Library,
+        context_generation: ContextGeneration,
+    ) -> Self {
         let repo = SkillRepo::new(pool, library.clone());
         Self {
             repo,
             sandboxes,
             library: Some(library),
+            pool: Some(pool.clone()),
+            context_generation,
+        }
+    }
+
+    /// Bump the local context generation counter and broadcast to other
+    /// instances via PG NOTIFY. See `Notes::bump_context` for the design.
+    async fn bump_context(&self, workspace_id: Option<WorkspaceId>) {
+        self.context_generation.bump();
+        let Some(pool) = self.pool.as_ref() else {
+            return;
+        };
+        let payload = workspace_id
+            .map(|w| w.to_string())
+            .unwrap_or_else(|| "global".to_string());
+        if let Err(e) = sqlx::query("SELECT pg_notify('context_changed', $1)")
+            .bind(payload)
+            .execute(pool)
+            .await
+        {
+            tracing::warn!(error = %e, "pg_notify(context_changed) failed");
         }
     }
 
@@ -388,6 +416,9 @@ impl Skills {
             self.repo.create_in_op(op, new).await?;
             tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
+        // Bump optimistically (before op commits). A false bump is harmless —
+        // it triggers one re-check that finds nothing changed.
+        self.bump_context(workspace_id).await;
         Ok(())
     }
 }
@@ -415,6 +446,8 @@ impl Skills {
             repo,
             sandboxes,
             library: None,
+            pool: None,
+            context_generation: ContextGeneration::new(),
         }
     }
 }

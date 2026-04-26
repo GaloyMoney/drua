@@ -20,6 +20,7 @@ use super::{
 pub enum ThreadStartReason {
     InitialThread,
     ToolDefsUpdated,
+    ContextRefreshed,
     Compaction { from_thread: SessionThreadId },
     Orphan { from_thread: SessionThreadId },
 }
@@ -348,6 +349,81 @@ impl AgentSession {
     pub fn update_system_blocks(&mut self, system_blocks: Vec<SystemBlock>) {
         self.events
             .push(AgentSessionEvent::SystemBlocksUpdated { system_blocks });
+    }
+
+    /// Compare the proposed system blocks against the current main thread's
+    /// blocks, persist only the changed ones via `SystemBlocksUpdated`, and
+    /// start a new thread whose `SystemView` cherry-picks unchanged blocks
+    /// from their old indexes and changed blocks from the newly-appended
+    /// indexes.
+    ///
+    /// Returns `true` if a refresh occurred. Returns `false` when nothing
+    /// changed, or when there is no current thread yet (in which case the
+    /// initial-thread creation path will inject the proposed blocks via
+    /// the `Initialized` event already in flight at session creation).
+    pub fn maybe_update_context(&mut self, proposed: Vec<SystemBlock>) -> bool {
+        let Some(thread_id) = self.current_main_thread else {
+            return false;
+        };
+        let Some(thread) = self.threads.get_persisted(&thread_id) else {
+            return false;
+        };
+        let current_view = thread.prompt_definition().system_view().clone();
+        let tool_view = thread.prompt_definition().tool_definitions_view().clone();
+
+        let materialized = self.materialize();
+        let append_at = materialized.system_blocks_len();
+
+        let mut new_indexes: Vec<SystemBlockIndex> = Vec::with_capacity(proposed.len());
+        let mut delta: Vec<SystemBlock> = Vec::new();
+
+        for (i, block) in proposed.iter().enumerate() {
+            if let Some(old_idx) = current_view.indexes().get(i).copied() {
+                if block == materialized.system_block_at(old_idx) {
+                    new_indexes.push(old_idx);
+                    continue;
+                }
+            }
+            new_indexes.push(SystemBlockIndex::new(append_at + delta.len()));
+            delta.push(block.clone());
+        }
+
+        // If proposed has fewer blocks than current, the trailing old blocks
+        // are dropped from the view (the new thread simply doesn't reference
+        // them). If equal length and no diffs, we have a no-op.
+        let length_changed = new_indexes.len() != current_view.indexes().len();
+        if delta.is_empty() && !length_changed {
+            return false;
+        }
+
+        // Drop the materialized borrow before we mutate `self`.
+        drop(materialized);
+
+        if !delta.is_empty() {
+            self.events.push(AgentSessionEvent::SystemBlocksUpdated {
+                system_blocks: delta,
+            });
+        }
+
+        let new_thread_id = SessionThreadId::new();
+        let new_system_view = SystemView::from_indexes(new_indexes);
+        let new_thread = NewSessionThread::builder()
+            .id(new_thread_id)
+            .session_id(self.id)
+            .start_reason(ThreadStartReason::ContextRefreshed)
+            .model_defaults(self.model_defaults.clone())
+            .system_view(new_system_view)
+            .tool_definitions_view(tool_view)
+            .initial_user_messages(UserMessagesView::empty())
+            .build()
+            .expect("NewSessionThread build");
+        self.threads.add_new(new_thread);
+        self.events.push(AgentSessionEvent::ThreadStarted {
+            thread_id: new_thread_id,
+            start_reason: ThreadStartReason::ContextRefreshed,
+        });
+        self.current_main_thread = Some(new_thread_id);
+        true
     }
 
     pub fn add_tool_results(
@@ -1567,5 +1643,142 @@ mod tests {
         let fake_id = SessionThreadId::new();
         let result = session.thread_messages(fake_id);
         assert!(matches!(result, Err(AgentSessionError::ThreadNotFound)));
+    }
+
+    fn block(text: &str) -> SystemBlock {
+        SystemBlock::Text { text: text.into() }
+    }
+
+    /// Helper: drive the session to create an initial thread so we have
+    /// a current_main_thread to compare against.
+    fn seed_initial_thread(session: &mut AgentSession, blocks: Vec<SystemBlock>) {
+        // Push initial system blocks via update_system_blocks (which adds a
+        // SystemBlocksUpdated event). Then add a user input + next_prompt to
+        // create the initial thread.
+        session.update_system_blocks(blocks);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "hi".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(session);
+    }
+
+    #[test]
+    fn maybe_update_context_noop_when_unchanged() {
+        let mut session = new_session();
+        seed_initial_thread(
+            &mut session,
+            vec![block("A"), block("B"), block("C"), block("D")],
+        );
+        let thread_before = session.current_main_thread;
+
+        let refreshed = session.maybe_update_context(vec![
+            block("A"),
+            block("B"),
+            block("C"),
+            block("D"),
+        ]);
+
+        assert!(!refreshed, "no change should be a no-op");
+        assert_eq!(
+            session.current_main_thread, thread_before,
+            "no-op must not create a new thread"
+        );
+    }
+
+    #[test]
+    fn maybe_update_context_persists_only_changed_block() {
+        let mut session = new_session();
+        seed_initial_thread(
+            &mut session,
+            vec![block("A"), block("B"), block("C"), block("D")],
+        );
+        let thread_before = session.current_main_thread;
+        let events_before = session.events.iter_all().count();
+
+        // Only the last block changed.
+        let refreshed = session.maybe_update_context(vec![
+            block("A"),
+            block("B"),
+            block("C"),
+            block("D'"),
+        ]);
+        assert!(refreshed);
+        assert_ne!(
+            session.current_main_thread, thread_before,
+            "refresh should create a new thread"
+        );
+
+        // Verify exactly one SystemBlocksUpdated event was added with only
+        // the delta — not the full set.
+        let updates: Vec<&SystemBlock> = session
+            .events
+            .iter_all()
+            .filter_map(|e| match e {
+                AgentSessionEvent::SystemBlocksUpdated { system_blocks } => Some(system_blocks),
+                _ => None,
+            })
+            .next_back()
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        assert_eq!(updates.len(), 1, "only the delta block should be persisted");
+        assert_eq!(updates[0], &block("D'"));
+
+        // Resolved system blocks for the new thread should be A, B, C, D'.
+        hydrate_threads(&mut session);
+        let new_thread_id = session.current_main_thread.unwrap();
+        let new_thread = session.threads.get_persisted(&new_thread_id).unwrap();
+        let pd = new_thread.prompt_definition();
+        let prompt = pd
+            .into_prompt(TargetThread::Id(new_thread_id), &session.events)
+            .unwrap();
+        let resolved: Vec<&str> = prompt
+            .system
+            .iter()
+            .map(|b| match b {
+                SystemBlock::Text { text } => text.as_str(),
+            })
+            .collect();
+        assert_eq!(resolved, vec!["A", "B", "C", "D'"]);
+
+        // Verify a new thread events were added (SystemBlocksUpdated +
+        // ThreadStarted = 2 events).
+        let events_after = session.events.iter_all().count();
+        assert_eq!(events_after - events_before, 2);
+    }
+
+    #[test]
+    fn maybe_update_context_returns_false_with_no_thread() {
+        let mut session = new_session();
+        // No initial thread exists yet — maybe_update_context should be a no-op.
+        let refreshed = session.maybe_update_context(vec![block("A")]);
+        assert!(!refreshed);
+        assert!(session.current_main_thread.is_none());
+    }
+
+    #[test]
+    fn maybe_update_context_handles_added_block() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![block("A"), block("B")]);
+
+        // Append a new block at position 2 — the prior view had length 2.
+        let refreshed = session.maybe_update_context(vec![block("A"), block("B"), block("C")]);
+        assert!(refreshed);
+
+        hydrate_threads(&mut session);
+        let new_thread_id = session.current_main_thread.unwrap();
+        let new_thread = session.threads.get_persisted(&new_thread_id).unwrap();
+        let pd = new_thread.prompt_definition();
+        let prompt = pd
+            .into_prompt(TargetThread::Id(new_thread_id), &session.events)
+            .unwrap();
+        let resolved: Vec<&str> = prompt
+            .system
+            .iter()
+            .map(|b| match b {
+                SystemBlock::Text { text } => text.as_str(),
+            })
+            .collect();
+        assert_eq!(resolved, vec!["A", "B", "C"]);
     }
 }

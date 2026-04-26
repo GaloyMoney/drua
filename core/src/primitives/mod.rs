@@ -3,9 +3,11 @@
 //! `agent` crates were dissolved.
 
 mod chat_output_event;
+mod context_generation;
 
 pub use crate::auth::{error::AuthorizationError, AuthResource, AuthScope, AuthSubject, AuthVerb};
 pub use chat_output_event::ChatOutputEvent;
+pub use context_generation::ContextGeneration;
 
 es_entity::entity_id! {
     UserId,

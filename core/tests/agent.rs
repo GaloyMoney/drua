@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfig};
-use drua_core::primitives::{AuthSubject, ChatOutputEvent, UserId, WorkspaceId};
+use drua_core::primitives::{
+    AuthSubject, ChatOutputEvent, ContextGeneration, UserId, WorkspaceId,
+};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
@@ -71,6 +73,7 @@ async fn send_message_round_trip_via_prompt_channel() {
         Arc::clone(&sandboxes),
         Arc::clone(&skills),
         None,
+        ContextGeneration::new(),
     );
 
     let sub = AuthSubject::User(UserId::new());
@@ -230,6 +233,7 @@ async fn send_message_dispatches_registered_tool_call() {
         Arc::clone(&sandboxes),
         Arc::clone(&skills),
         None,
+        ContextGeneration::new(),
     );
 
     let sub = AuthSubject::User(UserId::new());
