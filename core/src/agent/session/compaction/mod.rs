@@ -48,7 +48,7 @@ pub(super) fn event_belongs_to_thread(
         // Global events don't belong to any specific thread
         AgentSessionEvent::Initialized { .. }
         | AgentSessionEvent::ToolDefsUpdated { .. }
-        | AgentSessionEvent::SystemBlocksUpdated { .. }
+        | AgentSessionEvent::SystemBlockUpdated { .. }
         | AgentSessionEvent::ThreadStarted { .. }
         | AgentSessionEvent::ToolResultsMasked { .. } => false,
     }

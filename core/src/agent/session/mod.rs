@@ -63,15 +63,26 @@ impl Sessions {
         Ok(session)
     }
 
-    #[instrument(name = "domain.agent_session.add_user_input", skip(self, prompt))]
+    /// Apply a fresh set of proposed system blocks (notes/skills/etc) and
+    /// record a user input in a single DB round-trip. The `proposed_system_blocks`
+    /// vec carries the caller's current view of the workspace context — any
+    /// kind that differs from what's persisted is recorded as a
+    /// `SystemBlockUpdated` event. Thread refresh happens lazily in
+    /// `next_prompt`.
+    #[instrument(
+        name = "domain.agent_session.add_user_input",
+        skip(self, prompt, proposed_system_blocks)
+    )]
     pub async fn add_user_input(
         &self,
         agent_id: AgentId,
         target: TargetThread,
         source: UserMessageSource,
         prompt: String,
+        proposed_system_blocks: Vec<SystemBlock>,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
         let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let _ = session.apply_proposed_system_blocks(proposed_system_blocks);
         let response = session.add_user_input(target, source, prompt)?;
         self.repo.update(&mut session).await?;
         Ok(response)
@@ -87,30 +98,6 @@ impl Sessions {
         let prompt = session.next_prompt(target)?;
         self.repo.update(&mut session).await?;
         Ok(prompt.into())
-    }
-
-    /// Compare proposed system blocks against the current main thread's
-    /// blocks. If different, persist only the changed ones and start a new
-    /// thread with a `SystemView` that cherry-picks unchanged blocks from
-    /// their old indexes and changed blocks from the newly-appended ones.
-    ///
-    /// Returns `true` if a refresh occurred. Safe to call on every turn —
-    /// no-op when nothing changed (no events written, no DB update).
-    #[instrument(
-        name = "domain.agent_session.maybe_update_context",
-        skip(self, proposed_system_blocks)
-    )]
-    pub async fn maybe_update_context(
-        &self,
-        agent_id: AgentId,
-        proposed_system_blocks: Vec<SystemBlock>,
-    ) -> Result<bool, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
-        let refreshed = session.maybe_update_context(proposed_system_blocks);
-        if refreshed {
-            self.repo.update(&mut session).await?;
-        }
-        Ok(refreshed)
     }
 
     #[instrument(

@@ -73,7 +73,8 @@ pub struct Agents {
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
     context_generation: ContextGeneration,
-    context_cache: Arc<std::sync::RwLock<std::collections::HashMap<WorkspaceId, CachedWorkspaceContext>>>,
+    context_cache:
+        Arc<std::sync::RwLock<std::collections::HashMap<WorkspaceId, CachedWorkspaceContext>>>,
 }
 
 impl Agents {
@@ -131,7 +132,7 @@ impl Agents {
                 .await
                 .ok()
                 .flatten()
-                .map(|text| session::message::SystemBlock::Text { text }),
+                .map(|text| session::message::SystemBlock::Notes { text }),
             None => None,
         };
         let skills_block = self
@@ -140,7 +141,7 @@ impl Agents {
             .await
             .ok()
             .flatten()
-            .map(|text| session::message::SystemBlock::Text { text });
+            .map(|text| session::message::SystemBlock::Skills { text });
 
         let entry = CachedWorkspaceContext {
             generation: current_gen,
@@ -333,7 +334,7 @@ impl Agents {
         if let Some(notes) = &self.notes {
             if let Ok(Some(pinned_content)) = notes.pinned_context_for_workspace(workspace_id).await
             {
-                system_blocks.push(session::message::SystemBlock::Text {
+                system_blocks.push(session::message::SystemBlock::Notes {
                     text: pinned_content,
                 });
             }
@@ -343,7 +344,7 @@ impl Agents {
         if let Ok(Some(skills_content)) =
             self.skills.skills_context_for_workspace(workspace_id).await
         {
-            system_blocks.push(session::message::SystemBlock::Text {
+            system_blocks.push(session::message::SystemBlock::Skills {
                 text: skills_content,
             });
         }
@@ -669,11 +670,13 @@ impl Agents {
             None => agent.auth_subject(),
         };
 
-        // Optimistically refresh the session's system context if notes or
-        // skills have changed. The cache check is O(1) (one atomic load +
-        // one HashMap read); a DB fetch only happens when the generation
-        // counter has bumped. Done BEFORE add_user_input so the new user
-        // message attaches to the refreshed thread.
+        // Build the current proposed system blocks for this workspace. The
+        // cache makes this cheap: a 1ns atomic compare against the global
+        // `ContextGeneration`; a DB fetch only happens when the counter
+        // has bumped (via Notes/Skills mutations or PG NOTIFY from a peer).
+        // We pass the blocks into `add_user_input` so the diff + user-input
+        // event share a single session repo round-trip. Lazy refresh in
+        // `next_prompt` then spawns a fresh thread if any kind changed.
         let dynamic_blocks = self.cached_dynamic_blocks(agent.workspace_id).await;
         let mut proposed_system_blocks = system_prompt::system_blocks_for_role(
             agent.agent_role,
@@ -682,18 +685,16 @@ impl Agents {
             &agent.workspace_name,
         );
         proposed_system_blocks.extend(dynamic_blocks);
-        if let Err(e) = self
-            .sessions
-            .maybe_update_context(id, proposed_system_blocks)
-            .await
-        {
-            // Don't fail the turn — log and proceed with stale context.
-            tracing::warn!(error = %e, "context refresh failed; continuing with stale context");
-        }
 
         let session_response = self
             .sessions
-            .add_user_input(id, session::TargetThread::Main, source, prompt.clone())
+            .add_user_input(
+                id,
+                session::TargetThread::Main,
+                source,
+                prompt.clone(),
+                proposed_system_blocks,
+            )
             .await?;
 
         match session_response {

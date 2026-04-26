@@ -121,12 +121,12 @@ pub fn system_blocks_for_role(
     };
 
     vec![
-        SystemBlock::Text { text: base_text },
-        SystemBlock::Text { text: tools_text },
-        SystemBlock::Text {
+        SystemBlock::Base { text: base_text },
+        SystemBlock::Tools { text: tools_text },
+        SystemBlock::Behavioral {
             text: BEHAVIORAL_GUIDELINES.to_string(),
         },
-        SystemBlock::Text {
+        SystemBlock::Role {
             text: role_text.to_string(),
         },
     ]
@@ -178,25 +178,17 @@ mod tests {
         let blocks =
             system_blocks_for_role(AgentRole::WorkspaceLead, &toolsets, &subject, "acme-corp");
         assert_eq!(blocks.len(), 4);
-        match &blocks[0] {
-            SystemBlock::Text { text } => {
-                assert!(text.contains("Galoy Agents platform"));
-                assert!(text.contains("acme-corp"));
-            }
-        }
-        match &blocks[1] {
-            SystemBlock::Text { text } => assert!(text.contains("progressive disclosure")),
-        }
-        match &blocks[2] {
-            SystemBlock::Text { text } => {
-                assert!(text.contains("investigate_before_answering"));
-                assert!(text.contains("use_parallel_tool_calls"));
-                assert!(text.contains("use_compose_for_efficiency"));
-            }
-        }
-        match &blocks[3] {
-            SystemBlock::Text { text } => assert!(text.contains("workspace lead")),
-        }
+        assert!(matches!(&blocks[0], SystemBlock::Base { .. }));
+        assert!(blocks[0].text().contains("Galoy Agents platform"));
+        assert!(blocks[0].text().contains("acme-corp"));
+        assert!(matches!(&blocks[1], SystemBlock::Tools { .. }));
+        assert!(blocks[1].text().contains("progressive disclosure"));
+        assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
+        assert!(blocks[2].text().contains("investigate_before_answering"));
+        assert!(blocks[2].text().contains("use_parallel_tool_calls"));
+        assert!(blocks[2].text().contains("use_compose_for_efficiency"));
+        assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
+        assert!(blocks[3].text().contains("workspace lead"));
     }
 
     #[test]
@@ -211,24 +203,15 @@ mod tests {
         let blocks =
             system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-workspace");
         assert_eq!(blocks.len(), 4);
-        match &blocks[1] {
-            SystemBlock::Text { text } => {
-                assert!(text.contains("Sandbox tools"));
-                assert!(text.contains("require an attached sandbox"));
-            }
-        }
-        match &blocks[2] {
-            SystemBlock::Text { text } => {
-                assert!(text.contains("investigate_before_answering"));
-                assert!(text.contains("use_parallel_tool_calls"));
-                assert!(text.contains("use_compose_for_efficiency"));
-            }
-        }
-        match &blocks[3] {
-            SystemBlock::Text { text } => {
-                assert!(text.contains("task agent"));
-                assert!(text.contains("default_to_action"));
-            }
-        }
+        assert!(matches!(&blocks[1], SystemBlock::Tools { .. }));
+        assert!(blocks[1].text().contains("Sandbox tools"));
+        assert!(blocks[1].text().contains("require an attached sandbox"));
+        assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
+        assert!(blocks[2].text().contains("investigate_before_answering"));
+        assert!(blocks[2].text().contains("use_parallel_tool_calls"));
+        assert!(blocks[2].text().contains("use_compose_for_efficiency"));
+        assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
+        assert!(blocks[3].text().contains("task agent"));
+        assert!(blocks[3].text().contains("default_to_action"));
     }
 }

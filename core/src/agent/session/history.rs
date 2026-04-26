@@ -235,8 +235,12 @@ pub(super) fn build_thread_infos<'a>(
                 .get(&thread.id)
                 .map(|r| match r {
                     ThreadStartReason::InitialThread => ThreadStartReasonKind::InitialThread,
-                    ThreadStartReason::ToolDefsUpdated => ThreadStartReasonKind::ToolDefsUpdated,
-                    ThreadStartReason::ContextRefreshed => ThreadStartReasonKind::ContextRefreshed,
+                    ThreadStartReason::ToolDefsUpdated { .. } => {
+                        ThreadStartReasonKind::ToolDefsUpdated
+                    }
+                    ThreadStartReason::ContextRefreshed { .. } => {
+                        ThreadStartReasonKind::ContextRefreshed
+                    }
                     ThreadStartReason::Compaction { .. } => ThreadStartReasonKind::Compaction,
                     ThreadStartReason::Orphan { .. } => ThreadStartReasonKind::Orphan,
                 })
