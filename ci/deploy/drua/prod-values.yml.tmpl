@@ -62,15 +62,9 @@ galoyAgents:
         category: ci
         categoryDescription: "GitHub Actions workflows, runs, jobs, and logs"
         allowedTools:
-          - list_workflows
-          - list_workflow_runs
-          - get_workflow_run
-          - get_workflow_run_logs
-          - get_workflow_run_usage
-          - list_workflow_jobs
+          - actions_list
+          - actions_get
           - get_job_logs
-          - list_workflow_run_artifacts
-          - download_workflow_run_artifact
       - name: lingo
         url: https://mcp.lingo.dev/account
         authHeaderName: x-api-key
