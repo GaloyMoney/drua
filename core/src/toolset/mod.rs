@@ -26,7 +26,7 @@ use crate::auth::AuthSubject;
 
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
-    top_level: RwLock<HashMap<String, Arc<dyn TopLevelTool>>>,
+    top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     audit: Option<Arc<Audit>>,
     init_errors: Vec<(String, String)>,
 }
@@ -62,31 +62,35 @@ impl ToolSets {
         }
 
         let sets = Arc::new(RwLock::new(sets));
+        let top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
 
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
-        let compose = Arc::new(ComposeTool::new(Arc::clone(&sets)));
-        let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets)));
+        let compose = Arc::new(ComposeTool::new(Arc::clone(&sets), Arc::clone(&top_level)));
+        let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
         let whoami = Arc::new(WhoAmI::new());
 
-        let mut top_level = HashMap::new();
-        top_level.insert(search.name().to_string(), search as Arc<dyn TopLevelTool>);
-        top_level.insert(
-            describe.name().to_string(),
-            describe as Arc<dyn TopLevelTool>,
-        );
-        top_level.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
-        top_level.insert(compose.name().to_string(), compose as Arc<dyn TopLevelTool>);
-        top_level.insert(
-            compose_types.name().to_string(),
-            compose_types as Arc<dyn TopLevelTool>,
-        );
-        top_level.insert(whoami.name().to_string(), whoami as Arc<dyn TopLevelTool>);
+        {
+            let mut map = top_level.write().expect("top_level lock poisoned");
+            map.insert(search.name().to_string(), search as Arc<dyn TopLevelTool>);
+            map.insert(
+                describe.name().to_string(),
+                describe as Arc<dyn TopLevelTool>,
+            );
+            map.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
+            map.insert(compose.name().to_string(), compose as Arc<dyn TopLevelTool>);
+            map.insert(
+                compose_types.name().to_string(),
+                compose_types as Arc<dyn TopLevelTool>,
+            );
+            map.insert(whoami.name().to_string(), whoami as Arc<dyn TopLevelTool>);
+        }
 
         Ok(Self {
             sets,
-            top_level: RwLock::new(top_level),
+            top_level,
             audit: None,
             init_errors,
         })
@@ -336,7 +340,7 @@ impl ToolSets {
     pub fn empty_for_test() -> Self {
         Self {
             sets: Arc::new(RwLock::new(Vec::new())),
-            top_level: RwLock::new(HashMap::new()),
+            top_level: Arc::new(RwLock::new(HashMap::new())),
             audit: None,
             init_errors: Vec::new(),
         }

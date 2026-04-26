@@ -2,7 +2,7 @@
 //! use with `compose`. A batched, code-focused alternative to `describe_tool`
 //! that gives agents typed function signatures before writing compose scripts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
@@ -12,7 +12,7 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::compose::{output_schema_to_ts, schema_to_ts_params};
+use super::compose::{output_schema_to_ts, schema_to_ts_params, COMPOSE_EXCLUDED};
 use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
@@ -33,11 +33,15 @@ struct ComposeTypesParams {
 
 pub struct ComposeTypes {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
 }
 
 impl ComposeTypes {
-    pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
-        Self { sets }
+    pub fn new(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+    ) -> Self {
+        Self { sets, top_level }
     }
 }
 
@@ -93,12 +97,33 @@ impl TopLevelTool for ComposeTypes {
         let params: ComposeTypesParams = parse_params(arguments)?;
 
         let sets = self.sets.read().expect("toolset lock poisoned");
+        let top = self.top_level.read().expect("top_level lock poisoned");
 
         let want_all = params.tool_names.len() == 1 && params.tool_names[0] == "*";
 
-        // Build a (prefix, tool_name, params_ts, return_ts) list for matching tools
-        let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+        // ── Top-level tools (no prefix) ──────────────────────────────────
+        let mut top_fns: Vec<(String, String, String)> = Vec::new();
         let mut matched: Vec<String> = Vec::new();
+
+        for (name, tool) in top.iter() {
+            if !tool.is_visible(subject) || COMPOSE_EXCLUDED.contains(&name.as_str()) {
+                continue;
+            }
+            if !want_all && !params.tool_names.contains(name) {
+                continue;
+            }
+            let params_ts = schema_to_ts_params(tool.input_schema());
+            let return_ts = tool
+                .output_schema()
+                .map(output_schema_to_ts)
+                .unwrap_or_else(|| "any".to_string());
+            top_fns.push((name.clone(), params_ts, return_ts));
+            matched.push(name.clone());
+        }
+        top_fns.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // ── Catalog tools (prefix_name) ──────────────────────────────────
+        let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
 
         for set in sets.iter() {
             if !set.is_visible(subject) {
@@ -145,10 +170,20 @@ impl TopLevelTool for ComposeTypes {
         };
 
         // Format as .d.ts
-        let dts = if namespaces.is_empty() {
+        let has_content = !top_fns.is_empty() || !namespaces.is_empty();
+        let dts = if !has_content {
             "// No matching tools found".to_string()
         } else {
             let mut lines = vec!["declare namespace tools {".to_string()];
+
+            // Top-level functions first
+            for (name, params, ret) in &top_fns {
+                lines.push(format!(
+                    "  function {name}(args: {{ {params} }}): Promise<{ret}>;"
+                ));
+            }
+
+            // Then namespace-grouped catalog tools
             for (ns, tools) in &namespaces {
                 lines.push(format!("  namespace {ns} {{"));
                 for (name, params, ret) in tools {

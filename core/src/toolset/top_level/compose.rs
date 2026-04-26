@@ -6,7 +6,7 @@
 //! Includes TypeScript declaration generation from catalog JSON Schemas so
 //! agents see typed APIs in the execution context.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
@@ -21,6 +21,9 @@ use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
 use super::{parse_params, schema_for};
+
+/// Tools excluded from compose dispatch to prevent recursion.
+pub(super) const COMPOSE_EXCLUDED: &[&str] = &["compose"];
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_TIMEOUT: Duration = Duration::from_secs(300);
@@ -47,11 +50,15 @@ struct ComposeParams {
 /// dispatch path as `call_tool`, preserving audit and visibility filtering.
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
 }
 
 impl ComposeTool {
-    pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
-        Self { sets }
+    pub fn new(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+    ) -> Self {
+        Self { sets, top_level }
     }
 }
 
@@ -116,10 +123,11 @@ impl TopLevelTool for ComposeTool {
 
         Audit::record_action("compose".to_string());
 
-        // Generate TypeScript declarations from the visible catalog
+        // Generate TypeScript declarations from the visible catalog + top-level tools
         let dts = {
             let sets = self.sets.read().expect("toolset lock poisoned");
-            generate_dts(subject, &sets)
+            let top = self.top_level.read().expect("top_level lock poisoned");
+            generate_dts(subject, &sets, &top)
         };
 
         // Prepend type declarations as a JS block comment so the script
@@ -132,6 +140,7 @@ impl TopLevelTool for ComposeTool {
 
         let dispatcher = Arc::new(CatalogDispatcher {
             sets: Arc::clone(&self.sets),
+            top_level: Arc::clone(&self.top_level),
             subject: subject.clone(),
         });
 
@@ -183,11 +192,12 @@ impl TopLevelTool for ComposeTool {
 
 // ─── Catalog Dispatcher ──────────────────────────────────────────────────────
 
-/// Bridges the JS engine's [`js_engine::ToolDispatcher`] trait to the catalog
-/// toolset dispatch path, preserving visibility filtering, audit logging, and
-/// output filtering.
+/// Bridges the JS engine's [`js_engine::ToolDispatcher`] trait to both the
+/// catalog (SearchableToolSet) dispatch path and the top-level tool registry,
+/// preserving visibility filtering, audit logging, and output filtering.
 struct CatalogDispatcher {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     subject: AuthSubject,
 }
 
@@ -195,40 +205,40 @@ struct CatalogDispatcher {
 impl js_engine::ToolDispatcher for CatalogDispatcher {
     async fn call_tool(
         &self,
-        prefixed_name: &str,
+        name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let (set, tool_name, default_filter) =
-            self.find_set(prefixed_name).map_err(|e| e.to_string())?;
+        // First: try catalog sets (prefixed names like "honeycomb_list_environments")
+        if let Ok((set, tool_name, default_filter)) = self.find_set(name) {
+            Audit::record_action(format!("compose > catalog: {name}"));
 
-        Audit::record_action(format!("compose > catalog: {prefixed_name}"));
+            let inner_args = match args {
+                serde_json::Value::Object(obj) => Some(obj),
+                serde_json::Value::Null => None,
+                _ => return Err(format!("Expected object arguments, got: {args}")),
+            };
 
-        let inner_args = match args {
-            serde_json::Value::Object(obj) => Some(obj),
-            serde_json::Value::Null => None,
-            _ => return Err(format!("Expected object arguments, got: {args}")),
-        };
+            let result = set
+                .call(&self.subject, &tool_name, inner_args)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let result = set
-            .call(&self.subject, &tool_name, inner_args)
-            .await
-            .map_err(|e| e.to_string())?;
+            let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
+            let filtered = filter.apply(result).map_err(|e| e.to_string())?;
 
-        // Apply default output filter
-        let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
-        let filtered = filter.apply(result).map_err(|e| e.to_string())?;
+            if let Some(structured) = &filtered.structured_content {
+                return Ok(structured.clone());
+            }
 
-        // Prefer structured_content (typed JSON) over text parsing
-        if let Some(structured) = &filtered.structured_content {
-            return Ok(structured.clone());
+            let text = extract_text(&filtered);
+            return match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => Ok(v),
+                Err(_) => Ok(serde_json::Value::String(text)),
+            };
         }
 
-        // Fall back: extract text content and try to parse as JSON
-        let text = extract_text(&filtered);
-        match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) => Ok(v),
-            Err(_) => Ok(serde_json::Value::String(text)),
-        }
+        // Fall back: top-level tool (e.g. "bash", "read", "glob")
+        self.call_top_level(name, args).await
     }
 }
 
@@ -259,6 +269,50 @@ impl CatalogDispatcher {
         }
         Err(ToolSetsError::ToolNotFound(prefixed_name.to_string()))
     }
+
+    /// Dispatch to a top-level tool by exact name. Respects visibility and
+    /// excludes tools in [`COMPOSE_EXCLUDED`] to prevent recursion.
+    async fn call_top_level(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if COMPOSE_EXCLUDED.contains(&name) {
+            return Err(format!("Cannot call '{name}' from within a compose script"));
+        }
+
+        let tool = {
+            let map = self.top_level.read().expect("top_level lock poisoned");
+            map.get(name)
+                .filter(|t| t.is_visible(&self.subject))
+                .cloned()
+                .ok_or_else(|| format!("Tool not found: {name}"))?
+        };
+
+        Audit::record_action(format!("compose > top_level: {name}"));
+
+        let inner_args = match args {
+            serde_json::Value::Object(obj) => Some(obj),
+            serde_json::Value::Null => None,
+            _ => return Err(format!("Expected object arguments, got: {args}")),
+        };
+
+        let result = tool
+            .call(&self.subject, inner_args)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Prefer structured_content (typed JSON) over text parsing
+        if let Some(structured) = &result.structured_content {
+            return Ok(structured.clone());
+        }
+
+        let text = extract_text(&result);
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(serde_json::Value::String(text)),
+        }
+    }
 }
 
 /// Extract all text content from a [`CallToolResult`] into a single string.
@@ -276,11 +330,13 @@ fn extract_text(result: &CallToolResult) -> String {
 
 // ─── TypeScript Declaration Generation ───────────────────────────────────────
 
-/// Generate TypeScript declarations from the visible catalog entries,
-/// grouped by server prefix. Output looks like:
+/// Generate TypeScript declarations from the visible catalog entries and
+/// top-level tools, grouped by server prefix. Output looks like:
 ///
 /// ```ts
 /// declare namespace tools {
+///   function bash(args: { command: string; ... }): Promise<any>;
+///   function read(args: { file_path: string; ... }): Promise<any>;
 ///   namespace honeycomb {
 ///     function list_environments(args: { ... }): Promise<{ env_id: string }>;
 ///   }
@@ -289,10 +345,28 @@ fn extract_text(result: &CallToolResult) -> String {
 ///
 /// When a tool has an `output_schema`, the return type is derived from that
 /// schema instead of the default `any`.
-fn generate_dts(subject: &AuthSubject, sets: &[Arc<dyn SearchableToolSet>]) -> String {
-    // Group tools by server prefix: (tool_name, params_ts, return_ts)
-    let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+pub(super) fn generate_dts(
+    subject: &AuthSubject,
+    sets: &[Arc<dyn SearchableToolSet>],
+    top_level: &HashMap<String, Arc<dyn TopLevelTool>>,
+) -> String {
+    // Top-level tools (flat, no namespace prefix)
+    let mut top_fns: Vec<(String, String, String)> = Vec::new();
+    for (name, tool) in top_level.iter() {
+        if !tool.is_visible(subject) || COMPOSE_EXCLUDED.contains(&name.as_str()) {
+            continue;
+        }
+        let params_ts = schema_to_ts_params(tool.input_schema());
+        let return_ts = tool
+            .output_schema()
+            .map(output_schema_to_ts)
+            .unwrap_or_else(|| "any".to_string());
+        top_fns.push((name.clone(), params_ts, return_ts));
+    }
+    top_fns.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Catalog tools grouped by server prefix: (tool_name, params_ts, return_ts)
+    let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     for set in sets.iter() {
         if !set.is_visible(subject) {
             continue;
@@ -316,11 +390,20 @@ fn generate_dts(subject: &AuthSubject, sets: &[Arc<dyn SearchableToolSet>]) -> S
         }
     }
 
-    if namespaces.is_empty() {
+    if namespaces.is_empty() && top_fns.is_empty() {
         return String::new();
     }
 
     let mut lines = vec!["declare namespace tools {".to_string()];
+
+    // Top-level functions first
+    for (name, params, ret) in &top_fns {
+        lines.push(format!(
+            "  function {name}(args: {{ {params} }}): Promise<{ret}>;"
+        ));
+    }
+
+    // Then namespace-grouped catalog tools
     for (ns, tools) in &namespaces {
         lines.push(format!("  namespace {ns} {{"));
         for (name, params, ret) in tools {
