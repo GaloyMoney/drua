@@ -33,10 +33,6 @@ galoyAgents:
       enabled: true
       clientId: "Iv23liCAm3yHFqmGmayW"
       installationId: "123146136"
-  postgresMcp:
-    enabled: true
-    databaseUrlSecret:
-      key: pg-mcp-uri
     mcpUpstreams:
       - name: honeycomb
         url: https://mcp.honeycomb.io/mcp
@@ -80,6 +76,10 @@ galoyAgents:
         authHeaderName: x-api-key
         category: localization
         categoryDescription: "AI-powered localization engine management and translation"
+  postgresMcp:
+    enabled: true
+    databaseUrlSecret:
+      key: pg-mcp-uri
   ingress:
     enabled: true
     host: dashboard.agents.galoy.io
