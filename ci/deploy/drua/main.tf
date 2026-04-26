@@ -81,6 +81,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "concourse-password"     = var.concourse_password
     "honeycomb-auth-header"  = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
     "github-auth-header"     = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "github_actions-auth-header" = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "lingo-auth-header"      = var.lingo_api_key
     "anthropic-api-key"      = var.anthropic_api_key
     "github-app-private-key" = local.github_app_private_key
