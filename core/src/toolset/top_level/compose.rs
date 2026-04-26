@@ -339,7 +339,7 @@ fn generate_dts(subject: &AuthSubject, sets: &[Arc<dyn SearchableToolSet>]) -> S
 /// object types. Arrays become `T[]`.
 ///
 /// Example output: `repo: string; state?: string; limit?: number`
-fn schema_to_ts_params(schema: &serde_json::Value) -> String {
+pub(super) fn schema_to_ts_params(schema: &serde_json::Value) -> String {
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => return "...args: any".to_string(),
@@ -365,7 +365,7 @@ fn schema_to_ts_params(schema: &serde_json::Value) -> String {
 }
 
 /// Convert a single JSON Schema type definition to a TypeScript type string.
-fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
+pub(super) fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("string") => "string",
         Some("number" | "integer") => "number",
@@ -380,7 +380,7 @@ fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
 /// Convert an output JSON Schema (root type "object") into a TypeScript
 /// inline object type, e.g. `{ temperature: number; humidity: number }`.
 /// Falls back to `any` for schemas that aren't simple object types.
-fn output_schema_to_ts(schema: &serde_json::Value) -> String {
+pub(super) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) if !p.is_empty() => p,
         _ => return "any".to_string(),

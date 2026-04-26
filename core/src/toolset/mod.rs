@@ -10,8 +10,8 @@ pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
-    Bash, CallCatalogTool, ComposeTool, DescribeCatalogTool, GlobTool, Grep, Ls, NotesTool, Read,
-    SearchCatalog, TextEditor, UseSkillTool, WhoAmI, WorkspaceAgent, WorkspaceLog,
+    Bash, CallCatalogTool, ComposeTool, ComposeTypes, DescribeCatalogTool, GlobTool, Grep, Ls,
+    NotesTool, Read, SearchCatalog, TextEditor, UseSkillTool, WhoAmI, WorkspaceAgent, WorkspaceLog,
     WorkspaceSandbox,
 };
 pub use traits::*;
@@ -67,6 +67,7 @@ impl ToolSets {
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
         let compose = Arc::new(ComposeTool::new(Arc::clone(&sets)));
+        let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets)));
         let whoami = Arc::new(WhoAmI::new());
 
         let mut top_level = HashMap::new();
@@ -77,6 +78,10 @@ impl ToolSets {
         );
         top_level.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
         top_level.insert(compose.name().to_string(), compose as Arc<dyn TopLevelTool>);
+        top_level.insert(
+            compose_types.name().to_string(),
+            compose_types as Arc<dyn TopLevelTool>,
+        );
         top_level.insert(whoami.name().to_string(), whoami as Arc<dyn TopLevelTool>);
 
         Ok(Self {
