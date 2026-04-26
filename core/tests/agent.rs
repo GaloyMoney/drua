@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfig};
-use drua_core::primitives::{
-    AuthSubject, ChatOutputEvent, ContextGeneration, UserId, WorkspaceId,
-};
+use drua_core::primitives::{AuthSubject, ChatOutputEvent, ContextGeneration, UserId, WorkspaceId};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;

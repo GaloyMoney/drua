@@ -259,15 +259,15 @@ impl AgentSession {
         // thread's prompt_definition is computed inline (it's still in
         // `new_entities` so `get_persisted` won't find it yet); we use it
         // directly to skip the normal lookup path below.
-        let refreshed: Option<PromptDefinition> =
-            if matches!(target, TargetThread::Main) && self.thread_has_stale_system_view(thread_id)
-            {
-                let (new_id, new_pd) = self.spawn_context_refreshed_thread(thread_id);
-                thread_id = new_id;
-                Some(new_pd)
-            } else {
-                None
-            };
+        let refreshed: Option<PromptDefinition> = if matches!(target, TargetThread::Main)
+            && self.thread_has_stale_system_view(thread_id)
+        {
+            let (new_id, new_pd) = self.spawn_context_refreshed_thread(thread_id);
+            thread_id = new_id;
+            Some(new_pd)
+        } else {
+            None
+        };
 
         // Collect pending BlockIndexes since last PromptSent for this thread (scan backwards)
         let total_blocks = self.events.iter_all().fold(0usize, |acc, e| match e {
@@ -407,10 +407,7 @@ impl AgentSession {
     ///
     /// Thread creation is NOT done here — it happens lazily inside
     /// `next_prompt` when the current thread's view is detected as stale.
-    pub fn apply_proposed_system_blocks(
-        &mut self,
-        proposed: Vec<SystemBlock>,
-    ) -> Idempotent<()> {
+    pub fn apply_proposed_system_blocks(&mut self, proposed: Vec<SystemBlock>) -> Idempotent<()> {
         // Compute the diff under an immutable borrow so we can decide
         // up-front which blocks are new vs unchanged.
         let to_push: Vec<SystemBlock> = {
@@ -1769,10 +1766,7 @@ mod tests {
         hydrate_threads(session);
     }
 
-    fn resolved_blocks(
-        session: &AgentSession,
-        thread_id: SessionThreadId,
-    ) -> Vec<SystemBlock> {
+    fn resolved_blocks(session: &AgentSession, thread_id: SessionThreadId) -> Vec<SystemBlock> {
         let thread = session.threads.get_persisted(&thread_id).unwrap();
         let pd = thread.prompt_definition();
         let prompt = pd
@@ -1784,13 +1778,9 @@ mod tests {
     #[test]
     fn apply_proposed_system_blocks_no_changes_returns_already_applied() {
         let mut session = new_session();
-        seed_initial_thread(
-            &mut session,
-            vec![role("R"), notes("N"), skills("S")],
-        );
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
 
-        let result = session
-            .apply_proposed_system_blocks(vec![role("R"), notes("N"), skills("S")]);
+        let result = session.apply_proposed_system_blocks(vec![role("R"), notes("N"), skills("S")]);
         assert!(matches!(result, Idempotent::AlreadyApplied));
 
         // No SystemBlockUpdated events were pushed.
@@ -1806,10 +1796,7 @@ mod tests {
     #[test]
     fn apply_proposed_system_blocks_records_changed_kinds_only() {
         let mut session = new_session();
-        seed_initial_thread(
-            &mut session,
-            vec![role("R"), notes("N"), skills("S")],
-        );
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
         let updates_before = session
             .events
             .iter_all()
@@ -1817,8 +1804,8 @@ mod tests {
             .count();
 
         // Notes changed; Role + Skills unchanged.
-        let result = session
-            .apply_proposed_system_blocks(vec![role("R"), notes("N'"), skills("S")]);
+        let result =
+            session.apply_proposed_system_blocks(vec![role("R"), notes("N'"), skills("S")]);
         assert!(matches!(result, Idempotent::Executed(())));
 
         let updates_after = session
@@ -1848,10 +1835,7 @@ mod tests {
     #[test]
     fn next_prompt_lazily_spawns_refreshed_thread_when_block_changed() {
         let mut session = new_session();
-        seed_initial_thread(
-            &mut session,
-            vec![role("R"), notes("N"), skills("S")],
-        );
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
         let thread_before = session.current_main_thread.unwrap();
 
         // Record a change to Notes — no thread created yet.
@@ -1886,15 +1870,11 @@ mod tests {
     #[test]
     fn next_prompt_does_not_spawn_thread_when_view_is_fresh() {
         let mut session = new_session();
-        seed_initial_thread(
-            &mut session,
-            vec![role("R"), notes("N"), skills("S")],
-        );
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
         let thread_before = session.current_main_thread.unwrap();
 
         // Apply identical blocks — no updates recorded.
-        let result = session
-            .apply_proposed_system_blocks(vec![role("R"), notes("N"), skills("S")]);
+        let result = session.apply_proposed_system_blocks(vec![role("R"), notes("N"), skills("S")]);
         assert!(matches!(result, Idempotent::AlreadyApplied));
 
         session
