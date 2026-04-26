@@ -2,8 +2,8 @@
 
 # Writes the current `tunnel-connector:edge` digest into
 # `charts/galoy-deps/values.yaml` in the galoy-charts clone and commits.
-# The pipeline's `put: galoy-charts-repo` (with `rebase: true`) pushes
-# the commit straight to galoy-charts main.
+# The pipeline then force-pushes the resulting commit to a bot branch
+# and the `open-pr` task opens/refreshes a PR against main.
 #
 # Runs inside the nix-flakes Concourse image — `nix shell` pulls in
 # `yq-go` and `git` from nixpkgs because the base image has neither.
