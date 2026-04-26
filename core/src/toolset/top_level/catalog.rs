@@ -10,6 +10,8 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
+use serde_json::json;
+
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 
 use crate::audit::Audit;
@@ -148,12 +150,34 @@ impl SearchCatalog {
 }
 
 static SEARCH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
+    json!({
         "type": "object",
         "properties": {
             "query": { "type": "string", "description": "Free-form search query" },
             "category": { "type": "string", "description": "Optional category filter ('all' for any)" }
         }
+    })
+});
+
+static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "properties": {
+            "tools": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Prefixed tool name for use with describe_tool/call_tool" },
+                        "category": { "type": "string" },
+                        "description": { "type": "string" }
+                    },
+                    "required": ["name", "category", "description"]
+                }
+            },
+            "total": { "type": "integer", "description": "Number of tools returned" }
+        },
+        "required": ["tools", "total"]
     })
 });
 
@@ -170,6 +194,9 @@ impl TopLevelTool for SearchCatalog {
     fn input_schema(&self) -> &serde_json::Value {
         &SEARCH_SCHEMA
     }
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&SEARCH_OUTPUT_SCHEMA)
+    }
 
     async fn call(
         &self,
@@ -183,7 +210,17 @@ impl TopLevelTool for SearchCatalog {
             .and_then(|v| v.as_str());
         let results = self.execute_search(subject, query, category);
         let text = Self::format_results(&results);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let structured = json!({
+            "tools": results.iter().map(|e| json!({
+                "name": e.prefixed_name,
+                "category": e.category,
+                "description": e.brief_description,
+            })).collect::<Vec<_>>(),
+            "total": results.len(),
+        });
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(structured);
+        Ok(result)
     }
 }
 
@@ -225,13 +262,20 @@ impl DescribeCatalogTool {
                 OutputFilter::global_default().describe()
             ),
         };
+        let output_section = tool
+            .output_schema
+            .as_ref()
+            .and_then(|s| serde_json::to_string_pretty(s.as_ref()).ok())
+            .map(|s| format!("\n\n### Output schema\n```json\n{s}\n```"))
+            .unwrap_or_default();
         format!(
-            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
             entry.prefixed_name,
             entry.upstream_name,
             entry.category,
             description,
             schema,
+            output_section,
             filter_desc,
             entry.prefixed_name,
         )
@@ -239,12 +283,28 @@ impl DescribeCatalogTool {
 }
 
 static DESCRIBE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
+    json!({
         "type": "object",
         "properties": {
             "tool_name": { "type": "string", "description": "The prefixed tool name returned from search_tools" }
         },
         "required": ["tool_name"]
+    })
+});
+
+static DESCRIBE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "description": "Prefixed tool name" },
+            "upstream": { "type": "string", "description": "Upstream service name" },
+            "category": { "type": "string" },
+            "description": { "type": "string" },
+            "input_schema": { "type": "object", "description": "JSON Schema for tool parameters" },
+            "output_schema": { "type": "object", "description": "JSON Schema for tool output (if declared)" },
+            "default_output_filter": { "type": "string", "description": "Default output filter description" }
+        },
+        "required": ["name", "upstream", "category", "description", "input_schema", "default_output_filter"]
     })
 });
 
@@ -260,6 +320,9 @@ impl TopLevelTool for DescribeCatalogTool {
     fn input_schema(&self) -> &serde_json::Value {
         &DESCRIBE_SCHEMA
     }
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&DESCRIBE_OUTPUT_SCHEMA)
+    }
 
     async fn call(
         &self,
@@ -271,11 +334,37 @@ impl TopLevelTool for DescribeCatalogTool {
             .and_then(|a| a.get("tool_name"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let text = match self.execute_describe(subject, tool_name) {
-            Some(entry) => Self::format_entry(&entry),
-            None => format!("Tool not found: {tool_name}"),
-        };
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        match self.execute_describe(subject, tool_name) {
+            Some(entry) => {
+                let text = Self::format_entry(&entry);
+                let tool = &entry.full_tool;
+                let filter_desc = match &entry.default_output_filter {
+                    Some(f) => format!("tool default: {}", f.describe()),
+                    None => format!(
+                        "global default: {}",
+                        OutputFilter::global_default().describe()
+                    ),
+                };
+                let mut structured = json!({
+                    "name": entry.prefixed_name,
+                    "upstream": entry.upstream_name,
+                    "category": entry.category,
+                    "description": tool.description.as_deref().unwrap_or(""),
+                    "input_schema": serde_json::Value::Object(tool.input_schema.as_ref().clone()),
+                    "default_output_filter": filter_desc,
+                });
+                if let Some(output_schema) = &tool.output_schema {
+                    structured["output_schema"] =
+                        serde_json::Value::Object(output_schema.as_ref().clone());
+                }
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(structured);
+                Ok(result)
+            }
+            None => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Tool not found: {tool_name}"
+            ))])),
+        }
     }
 }
 
@@ -326,7 +415,7 @@ impl CallCatalogTool {
 }
 
 static CALL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
+    json!({
         "type": "object",
         "properties": {
             "tool_name": {

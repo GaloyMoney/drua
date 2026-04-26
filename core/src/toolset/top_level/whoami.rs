@@ -32,6 +32,27 @@ static WHOAMI_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
+static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "description": "Identity type: user, exported_agent, agent, agent_on_behalf_of_user, or anonymous"
+            },
+            "user_id": { "type": "string" },
+            "creds_id": { "type": "string" },
+            "workspace_id": { "type": "string" },
+            "agent_id": { "type": "string" },
+            "scopes": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["type"]
+    })
+});
+
 #[async_trait::async_trait]
 impl TopLevelTool for WhoAmI {
     fn name(&self) -> &str {
@@ -44,6 +65,10 @@ impl TopLevelTool for WhoAmI {
 
     fn input_schema(&self) -> &serde_json::Value {
         &WHOAMI_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&WHOAMI_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -109,6 +134,9 @@ impl TopLevelTool for WhoAmI {
         }
 
         let text = serde_json::to_string_pretty(&info).unwrap_or_else(|_| format!("{info:?}"));
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let structured = serde_json::Value::Object(info);
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(structured);
+        Ok(result)
     }
 }

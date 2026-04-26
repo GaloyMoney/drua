@@ -57,6 +57,23 @@ impl ComposeTool {
 
 static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ComposeParams>);
 
+static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "result": { "description": "The value returned by the script" },
+            "console": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Console output captured during execution"
+            },
+            "tool_calls": { "type": "integer", "description": "Number of tool calls made" },
+            "execution_time_ms": { "type": "integer", "description": "Execution time in milliseconds" }
+        },
+        "required": ["result", "console", "tool_calls", "execution_time_ms"]
+    })
+});
+
 #[async_trait::async_trait]
 impl TopLevelTool for ComposeTool {
     fn name(&self) -> &str {
@@ -78,6 +95,10 @@ impl TopLevelTool for ComposeTool {
 
     fn input_schema(&self) -> &serde_json::Value {
         &COMPOSE_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&COMPOSE_OUTPUT_SCHEMA)
     }
 
     #[tracing::instrument(name = "toolset.compose.call", skip_all)]
@@ -148,7 +169,15 @@ impl TopLevelTool for ComposeTool {
         ));
 
         let text = sections.join("\n\n");
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let structured = serde_json::json!({
+            "result": result.value,
+            "console": result.console_output,
+            "tool_calls": result.tool_calls_made,
+            "execution_time_ms": result.execution_time.as_millis() as u64,
+        });
+        let mut ctr = CallToolResult::success(vec![Content::text(text)]);
+        ctr.structured_content = Some(structured);
+        Ok(ctr)
     }
 }
 
@@ -189,9 +218,13 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
         let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
         let filtered = filter.apply(result).map_err(|e| e.to_string())?;
 
-        // Extract text content as the return value
+        // Prefer structured_content (typed JSON) over text parsing
+        if let Some(structured) = &filtered.structured_content {
+            return Ok(structured.clone());
+        }
+
+        // Fall back: extract text content and try to parse as JSON
         let text = extract_text(&filtered);
-        // Try to parse as JSON; if it fails, return as a string value
         match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) => Ok(v),
             Err(_) => Ok(serde_json::Value::String(text)),
@@ -249,13 +282,16 @@ fn extract_text(result: &CallToolResult) -> String {
 /// ```ts
 /// declare namespace tools {
 ///   namespace honeycomb {
-///     function list_environments(args: { ... }): Promise<any>;
+///     function list_environments(args: { ... }): Promise<{ env_id: string }>;
 ///   }
 /// }
 /// ```
+///
+/// When a tool has an `output_schema`, the return type is derived from that
+/// schema instead of the default `any`.
 fn generate_dts(subject: &AuthSubject, sets: &[Arc<dyn SearchableToolSet>]) -> String {
-    // Group tools by server prefix
-    let mut namespaces: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    // Group tools by server prefix: (tool_name, params_ts, return_ts)
+    let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
 
     for set in sets.iter() {
         if !set.is_visible(subject) {
@@ -267,7 +303,16 @@ fn generate_dts(subject: &AuthSubject, sets: &[Arc<dyn SearchableToolSet>]) -> S
             let schema_val =
                 serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
             let params_ts = schema_to_ts_params(&schema_val);
-            tools_in_ns.push((entry.name.clone(), params_ts));
+            let return_ts = entry
+                .description
+                .output_schema
+                .as_ref()
+                .map(|s| {
+                    let schema_val = serde_json::Value::Object(s.as_ref().clone());
+                    output_schema_to_ts(&schema_val)
+                })
+                .unwrap_or_else(|| "any".to_string());
+            tools_in_ns.push((entry.name.clone(), params_ts, return_ts));
         }
     }
 
@@ -278,9 +323,9 @@ fn generate_dts(subject: &AuthSubject, sets: &[Arc<dyn SearchableToolSet>]) -> S
     let mut lines = vec!["declare namespace tools {".to_string()];
     for (ns, tools) in &namespaces {
         lines.push(format!("  namespace {ns} {{"));
-        for (name, params) in tools {
+        for (name, params, ret) in tools {
             lines.push(format!(
-                "    function {name}(args: {{ {params} }}): Promise<any>;"
+                "    function {name}(args: {{ {params} }}): Promise<{ret}>;"
             ));
         }
         lines.push("  }".to_string());
@@ -330,4 +375,32 @@ fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
         Some("null") => "null",
         _ => "any",
     }
+}
+
+/// Convert an output JSON Schema (root type "object") into a TypeScript
+/// inline object type, e.g. `{ temperature: number; humidity: number }`.
+/// Falls back to `any` for schemas that aren't simple object types.
+fn output_schema_to_ts(schema: &serde_json::Value) -> String {
+    let properties = match schema.get("properties").and_then(|p| p.as_object()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "any".to_string(),
+    };
+
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut parts = Vec::new();
+    for (name, prop_schema) in properties {
+        let ts_type = json_schema_to_ts(prop_schema);
+        let optional = if required.contains(&name.as_str()) {
+            ""
+        } else {
+            "?"
+        };
+        parts.push(format!("{name}{optional}: {ts_type}"));
+    }
+    format!("{{ {} }}", parts.join("; "))
 }

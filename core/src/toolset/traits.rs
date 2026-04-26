@@ -44,6 +44,13 @@ pub trait TopLevelTool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> &serde_json::Value;
 
+    /// Optional JSON Schema declaring the structure of this tool's output.
+    /// When present the MCP gateway includes it in the tool definition and
+    /// the tool MUST return `structured_content` in its `CallToolResult`.
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        None
+    }
+
     /// Whether this tool should appear in `list_tools` / prompt tool arrays
     /// for the given subject. Default: always visible. Override to hide a
     /// tool (e.g. admin-only controls) without blocking execution.
