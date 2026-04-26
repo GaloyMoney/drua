@@ -29,6 +29,17 @@ parallel. For example, when reading several files, read them all at \
 once rather than one at a time.
 </use_parallel_tool_calls>
 
+<use_compose_for_efficiency>
+When a task involves multiple dependent tool calls, data filtering, or \
+fan-out patterns (e.g. checking N items in parallel), prefer the \
+`compose` tool over sequential `call_tool` round trips. A single \
+compose call executes JavaScript that can chain tools, filter results, \
+and use Promise.all() — reducing latency and keeping large intermediate \
+data off the conversation context. Reserve individual call_tool for \
+one-off lookups or when you need to inspect output before deciding \
+what to do next.
+</use_compose_for_efficiency>
+
 <workspace_notes>
 The workspace has a shared notes system (the `notes` tool). Notes are \
 concise knowledge snippets that persist across agent sessions. They are \
@@ -180,6 +191,7 @@ mod tests {
             SystemBlock::Text { text } => {
                 assert!(text.contains("investigate_before_answering"));
                 assert!(text.contains("use_parallel_tool_calls"));
+                assert!(text.contains("use_compose_for_efficiency"));
             }
         }
         match &blocks[3] {
@@ -209,6 +221,7 @@ mod tests {
             SystemBlock::Text { text } => {
                 assert!(text.contains("investigate_before_answering"));
                 assert!(text.contains("use_parallel_tool_calls"));
+                assert!(text.contains("use_compose_for_efficiency"));
             }
         }
         match &blocks[3] {
