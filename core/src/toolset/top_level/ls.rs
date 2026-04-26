@@ -17,7 +17,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{parse_params, schema_for};
+use super::{parse_params, schema_for, EntriesOutput};
 
 // ---------------------------------------------------------------------------
 // Params
@@ -48,6 +48,8 @@ impl Ls {
 
 static LS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LsParams>);
 
+static LS_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<EntriesOutput>);
+
 #[async_trait::async_trait]
 impl TopLevelTool for Ls {
     fn name(&self) -> &str {
@@ -61,6 +63,10 @@ impl TopLevelTool for Ls {
 
     fn input_schema(&self) -> &serde_json::Value {
         &LS_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&LS_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -110,12 +116,22 @@ impl TopLevelTool for Ls {
                         .join("\n")
                 };
 
+                let out = EntriesOutput {
+                    entries: output
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect(),
+                };
+                let structured = serde_json::to_value(&out).expect("EntriesOutput serialization");
                 let content = vec![Content::text(output)];
-                if resp.is_error {
-                    Ok(CallToolResult::error(content))
+                let mut result = if resp.is_error {
+                    CallToolResult::error(content)
                 } else {
-                    Ok(CallToolResult::success(content))
-                }
+                    CallToolResult::success(content)
+                };
+                result.structured_content = Some(structured);
+                Ok(result)
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

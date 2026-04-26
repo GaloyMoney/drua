@@ -100,6 +100,47 @@ impl WorkspaceLog {
 static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<AuditLogParams>);
 
+// ---------------------------------------------------------------------------
+// Output shapes (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AuditLogOutput {
+    /// Audit log entries (most recent first).
+    entries: Vec<AuditEntryOutput>,
+    /// Number of entries returned.
+    count: usize,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AuditEntryOutput {
+    id: i64,
+    /// ISO 8601 timestamp.
+    recorded_at: String,
+    interaction_type: String,
+    entrypoint: String,
+    action: String,
+    outcome: String,
+    duration_ms: Option<i64>,
+}
+
+impl From<&AuditEntry> for AuditEntryOutput {
+    fn from(e: &AuditEntry) -> Self {
+        Self {
+            id: e.id.to_string().parse().unwrap_or(0),
+            recorded_at: e.recorded_at.to_rfc3339(),
+            interaction_type: e.interaction_type.clone(),
+            entrypoint: e.entrypoint.clone().unwrap_or_default(),
+            action: e.action.clone(),
+            outcome: e.outcome.clone(),
+            duration_ms: e.duration_ms,
+        }
+    }
+}
+
+static WORKSPACE_LOG_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AuditLogOutput>);
+
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceLog {
     fn name(&self) -> &str {
@@ -113,6 +154,10 @@ impl TopLevelTool for WorkspaceLog {
 
     fn input_schema(&self) -> &serde_json::Value {
         &WORKSPACE_LOG_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&WORKSPACE_LOG_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -134,9 +179,15 @@ impl TopLevelTool for WorkspaceLog {
 
         let entries = self.audit.find(&query).await?;
 
-        Ok(CallToolResult::success(vec![Content::text(
-            format_entries(&entries),
-        )]))
+        let out = AuditLogOutput {
+            count: entries.len(),
+            entries: entries.iter().map(AuditEntryOutput::from).collect(),
+        };
+        let structured = serde_json::to_value(&out).expect("AuditLogOutput serialization");
+
+        let mut result = CallToolResult::success(vec![Content::text(format_entries(&entries))]);
+        result.structured_content = Some(structured);
+        Ok(result)
     }
 }
 

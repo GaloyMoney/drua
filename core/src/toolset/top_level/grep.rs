@@ -15,6 +15,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{schema_for, TextOutput};
 
 pub struct Grep {
     sandboxes: Arc<Sandboxes>,
@@ -25,6 +26,8 @@ impl Grep {
         Self { sandboxes }
     }
 }
+
+static GREP_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<TextOutput>);
 
 static GREP_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -101,6 +104,10 @@ impl TopLevelTool for Grep {
         &GREP_SCHEMA
     }
 
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&GREP_OUTPUT_SCHEMA)
+    }
+
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs: hidden from workspace admins.
         subject.is_agent() && !subject.is_workspace_admin()
@@ -130,12 +137,18 @@ impl TopLevelTool for Grep {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let content = vec![Content::text(resp.output)];
-                if resp.is_error {
-                    Ok(CallToolResult::error(content))
+                let out = TextOutput {
+                    output: resp.output,
+                };
+                let structured = serde_json::to_value(&out).expect("TextOutput serialization");
+                let content = vec![Content::text(&out.output)];
+                let mut result = if resp.is_error {
+                    CallToolResult::error(content)
                 } else {
-                    Ok(CallToolResult::success(content))
-                }
+                    CallToolResult::success(content)
+                };
+                result.structured_content = Some(structured);
+                Ok(result)
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

@@ -84,6 +84,41 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
+// ---------------------------------------------------------------------------
+// Shared output shape structs (schemars-derived)
+//
+// Never instantiated — schemars reads the type at compile time to produce
+// JSON Schema. Re-used across tools that share the same output shape.
+// ---------------------------------------------------------------------------
+
+/// Single `output` string — used by bash, grep, text_editor.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct TextOutput {
+    /// Tool output text.
+    pub output: String,
+}
+
+/// File content string — used by read.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct ContentOutput {
+    /// File content (with line numbers if applicable).
+    pub content: String,
+}
+
+/// Array of file paths — used by glob.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct FilesOutput {
+    /// Matching file paths.
+    pub files: Vec<String>,
+}
+
+/// Array of directory entries — used by ls.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct EntriesOutput {
+    /// Directory entries (directories have trailing '/').
+    pub entries: Vec<String>,
+}
+
 mod agent;
 mod bash;
 mod catalog;

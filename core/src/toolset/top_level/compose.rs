@@ -23,7 +23,7 @@ use super::liberal;
 use super::{parse_params, schema_for};
 
 /// Tools excluded from compose dispatch to prevent recursion.
-pub(super) const COMPOSE_EXCLUDED: &[&str] = &["compose"];
+pub(super) const COMPOSE_EXCLUDED: &[&str] = &["compose", "use_skill", "agent", "sandbox"];
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_TIMEOUT: Duration = Duration::from_secs(300);
