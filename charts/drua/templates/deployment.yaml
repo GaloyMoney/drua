@@ -194,8 +194,7 @@ spec:
       {{- with .Values.galoyAgents.config.library }}
       {{- with .dataDir }}
       - name: library-data
-        persistentVolumeClaim:
-          claimName: {{ template "galoyAgents.fullname" $ }}-library
+        emptyDir: {}
       {{- end }}
       {{- end }}
       {{- if .Values.galoyAgents.config.githubApp.enabled }}
