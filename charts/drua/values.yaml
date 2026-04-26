@@ -107,9 +107,37 @@ galoyAgents:
       enabled: false
       clientId: ""
       installationId: ""
+  ## Optional postgres MCP sidecar exposing drua's own database to admins
+  ## via MCP Streamable-HTTP at /mcp. Uses bytebase/dbhub (the same image
+  ## lana-bank uses) — read-only posture should be enforced at the database
+  ## user layer (the DSN it reads must point to a read-only role).
+  postgresMcp:
+    enabled: false
+    image:
+      repository: bytebase/dbhub
+      tag: 0.21.1
+      pullPolicy: IfNotPresent
+    service:
+      type: ClusterIP
+      port: 8000
+    ## Source of the postgres DSN (env var DSN). Defaults to the main
+    ## galoy-agents secret (key `pg-con`) populated by Terraform from the
+    ## GCP postgres module — no extra secret wiring required.
+    databaseUrlSecret:
+      name: ""
+      key: pg-con
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
   secrets:
     create: true
     pgCon: ""
+    pgMcpUri: ""
     githubClientSecret: ""
     concourseUsername: ""
     concoursePassword: ""

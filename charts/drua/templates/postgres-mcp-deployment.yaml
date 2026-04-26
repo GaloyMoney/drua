@@ -1,0 +1,57 @@
+{{- if .Values.galoyAgents.postgresMcp.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "galoyAgents.postgresMcp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  replicas: {{ .Values.galoyAgents.postgresMcp.replicas }}
+  selector:
+    matchLabels:
+      app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ template "galoyAgents.postgresMcp.fullname" . }}
+        chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+        release: "{{ .Release.Name }}"
+      {{- with .Values.galoyAgents.labels }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: postgres-mcp
+        image: "{{ .Values.galoyAgents.postgresMcp.image.repository }}:{{ .Values.galoyAgents.postgresMcp.image.tag }}"
+        imagePullPolicy: {{ .Values.galoyAgents.postgresMcp.image.pullPolicy }}
+        args:
+          - "--transport=http"
+          - "--port={{ .Values.galoyAgents.postgresMcp.service.port }}"
+        env:
+        - name: DSN
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.postgresMcp.secretName" . }}
+              key: {{ .Values.galoyAgents.postgresMcp.databaseUrlSecret.key }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.galoyAgents.postgresMcp.service.port }}
+          protocol: TCP
+        resources:
+          {{- toYaml .Values.galoyAgents.postgresMcp.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+{{- end }}

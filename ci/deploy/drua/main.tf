@@ -42,6 +42,7 @@ module "postgresql" {
   highly_available = false
   tier             = "db-f1-micro"
   replication      = false
+  readonly_users   = ["mcp"]
 }
 
 resource "kubernetes_namespace" "galoy_agents" {
@@ -70,6 +71,10 @@ resource "kubernetes_secret" "galoy_agents" {
 
   data = {
     "pg-con"                 = module.postgresql.creds["galoy-agents"].conn
+    # Read-only DSN for the postgres-mcp sidecar. `?sslmode=require` is
+    # required — Cloud SQL's pg_hba.conf rejects unencrypted connections
+    # and dbhub crash-loops without it.
+    "pg-mcp-uri"             = "postgres://${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].user}:${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].password}@${module.postgresql.creds["galoy-agents"].host}:5432/galoy-agents?sslmode=require"
     "github-client-secret"   = var.github_client_secret
     "gcs-creds"              = file("${path.module}/gcs-creds.json")
     "concourse-username"     = var.concourse_username

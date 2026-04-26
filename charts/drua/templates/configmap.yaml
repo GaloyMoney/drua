@@ -74,7 +74,8 @@ data:
         team: {{ .Values.galoyAgents.config.concourse.team | quote }}
       {{- $hasUpstreams := .Values.galoyAgents.config.mcpUpstreams }}
       {{- $k8sMcp := index .Values "kubernetes-mcp-server" }}
-      {{- if or $hasUpstreams (and $k8sMcp $k8sMcp.enabled) }}
+      {{- $pgMcp := .Values.galoyAgents.postgresMcp }}
+      {{- if or $hasUpstreams (and $k8sMcp $k8sMcp.enabled) (and $pgMcp $pgMcp.enabled) }}
       mcp_upstreams:
       {{- range .Values.galoyAgents.config.mcpUpstreams }}
         - name: {{ .name | quote }}
@@ -128,6 +129,16 @@ data:
             - "pods_log"
             - "resources_list"
             - "resources_get"
+      {{- end }}
+      {{- if and $pgMcp $pgMcp.enabled }}
+        - name: "postgres"
+          url: "http://{{ template "galoyAgents.postgresMcp.fullname" . }}:{{ $pgMcp.service.port }}/mcp"
+          auth_required: false
+          tool_prefix: "pg"
+          category: "database"
+          category_description: "Drua's own PostgreSQL — schema inspection and read-only SQL"
+          required_scopes:
+            - "admin"
       {{- end }}
       {{- end }}
     {{- with .Values.galoyAgents.config.library }}
