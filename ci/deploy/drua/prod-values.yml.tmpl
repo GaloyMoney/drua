@@ -60,6 +60,21 @@ galoyAgents:
           - issue_read
           - list_issues
           - search_issues
+      - name: github_actions
+        url: https://api.githubcopilot.com/x/actions/readonly
+        toolPrefix: github_actions
+        category: ci
+        categoryDescription: "GitHub Actions workflows, runs, jobs, and logs"
+        allowedTools:
+          - list_workflows
+          - list_workflow_runs
+          - get_workflow_run
+          - get_workflow_run_logs
+          - get_workflow_run_usage
+          - list_workflow_jobs
+          - get_job_logs
+          - list_workflow_run_artifacts
+          - download_workflow_run_artifact
       - name: lingo
         url: https://mcp.lingo.dev/account
         authHeaderName: x-api-key
