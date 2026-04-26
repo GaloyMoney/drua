@@ -428,6 +428,7 @@ type ThreadMessageUsage {
 
 enum ThreadStartReason {
 	COMPACTION
+	CONTEXT_REFRESHED
 	INITIAL_THREAD
 	ORPHAN
 	TOOL_DEFS_UPDATED
