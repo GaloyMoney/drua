@@ -3,6 +3,8 @@
 git_uri: git@github.com:GaloyMoney/drua.git
 git_branch: main
 github_private_key: ((github.private_key))
+github_app_id: ((github.github_app_id))
+github_app_private_key: ((github.github_app_private_key))
 
 gar_registry: us.gcr.io/galoyorg
 gar_registry_user: ((gar-creds.username))
