@@ -398,6 +398,58 @@ impl Upstream {
         Ok(results)
     }
 
+    /// Remove an entire directory from the working tree, stage the
+    /// removal with `git rm -r`, and commit. No-op when the directory
+    /// doesn't exist.
+    pub async fn remove_dir_and_commit(
+        &self,
+        relative_dir: &str,
+        message: &str,
+    ) -> Result<(), LibraryError> {
+        self.require_git_repo()?;
+
+        let full_path = self.repo_path.join(relative_dir);
+        if !full_path.exists() {
+            return Ok(());
+        }
+
+        let rm = tokio::process::Command::new("git")
+            .args(["rm", "-r", "--", relative_dir])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git rm: {e}")))?;
+        if !rm.status.success() {
+            return Err(LibraryError::Git(format!(
+                "git rm -r failed: {}",
+                String::from_utf8_lossy(&rm.stderr)
+            )));
+        }
+
+        let commit = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=drua",
+                "-c",
+                "user.email=drua@galoy.io",
+                "commit",
+                "-m",
+                message,
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            if !stderr.contains("nothing to commit") {
+                return Err(LibraryError::Git(format!("git commit failed: {stderr}")));
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn push(&self) -> Result<(), LibraryError> {
         self.require_git_repo()?;
 

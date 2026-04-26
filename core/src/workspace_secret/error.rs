@@ -10,6 +10,8 @@ use super::repo::{
 
 #[derive(Error, Debug)]
 pub enum WorkspaceSecretError {
+    #[error("WorkspaceSecretError - Sqlx: {0}")]
+    Sqlx(#[from] sqlx::Error),
     #[error("WorkspaceSecretError - Create: {0}")]
     Create(#[from] WorkspaceSecretCreateError),
     #[error("WorkspaceSecretError - Modify: {0}")]

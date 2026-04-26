@@ -291,6 +291,20 @@ impl Notes {
         Ok(result.entities)
     }
 
+    /// Bulk soft-delete all notes belonging to a workspace within a
+    /// transaction. Used during workspace cascade deletion.
+    #[instrument(name = "note.delete_for_workspace_in_op", skip_all)]
+    pub(crate) async fn delete_for_workspace_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), NoteError> {
+        self.repo
+            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .await?;
+        Ok(())
+    }
+
     /// Maximum total characters of pinned note content to inject into an
     /// agent's system prompt. Notes are included most-recently-updated-first;
     /// once this budget is exhausted, remaining pinned notes are omitted with

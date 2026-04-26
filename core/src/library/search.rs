@@ -85,6 +85,21 @@ impl SearchStore {
         Ok(())
     }
 
+    /// Remove all search data rows belonging to a workspace within an
+    /// atomic operation. Called during workspace cascade deletion.
+    #[tracing::instrument(name = "library.search_store.delete_for_workspace_in_op", skip_all)]
+    pub async fn delete_for_workspace_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        workspace_id: uuid::Uuid,
+    ) -> Result<(), LibraryError> {
+        sqlx::query("DELETE FROM library_search_data WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(op.as_executor())
+            .await?;
+        Ok(())
+    }
+
     /// Hybrid search: FTS + vector similarity fused via Reciprocal Rank Fusion.
     #[tracing::instrument(name = "library.search_store.search", skip_all)]
     pub async fn search(

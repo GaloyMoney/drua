@@ -148,6 +148,20 @@ impl WorkspaceSecrets {
         Ok(())
     }
 
+    /// Bulk soft-delete all secrets belonging to a workspace within a
+    /// transaction. Used during workspace cascade deletion.
+    #[instrument(name = "workspace_secret.delete_for_workspace_in_op", skip_all)]
+    pub(crate) async fn delete_for_workspace_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), WorkspaceSecretError> {
+        self.repo
+            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .await?;
+        Ok(())
+    }
+
     /// List secrets with decrypted values for a workspace (internal use — harness injection).
     #[instrument(name = "workspace_secret.list_decrypted", skip_all)]
     pub async fn list_decrypted(

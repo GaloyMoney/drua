@@ -90,6 +90,10 @@ pub enum RuntimeFile {
         /// Subdirectory under the workspace folder (e.g. `"notes"`, `"skills"`).
         subdir: String,
     },
+    /// Queued when a workspace is deleted. The job runner removes the entire
+    /// `runtime/workspaces/{workspace_name}/` directory from the library
+    /// repo and pushes.
+    WorkspaceCleanup { workspace_name: String },
 }
 
 impl RuntimeFile {
@@ -206,7 +210,7 @@ impl RuntimeFile {
                 body: description.clone(),
                 tags: Vec::new(),
             }),
-            RuntimeFile::GitKeep { .. } => None,
+            RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => None,
         }
     }
 
@@ -235,6 +239,9 @@ impl RuntimeFile {
                 subdir,
             } => {
                 format!("runtime/workspaces/{workspace_name}/{subdir}/.gitkeep")
+            }
+            RuntimeFile::WorkspaceCleanup { workspace_name } => {
+                format!("runtime/workspaces/{workspace_name}")
             }
         }
     }
@@ -280,7 +287,7 @@ impl RuntimeFile {
                     body
                 )
             }
-            RuntimeFile::GitKeep { .. } => String::new(),
+            RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => String::new(),
         }
     }
 
@@ -297,6 +304,9 @@ impl RuntimeFile {
                 subdir,
             } => {
                 format!("workspace: scaffold {workspace_name}/{subdir}")
+            }
+            RuntimeFile::WorkspaceCleanup { workspace_name } => {
+                format!("workspace: delete {workspace_name}")
             }
         }
     }

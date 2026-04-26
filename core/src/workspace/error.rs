@@ -3,6 +3,10 @@ use thiserror::Error;
 use crate::agent::AgentError;
 use crate::auth::error::AuthorizationError;
 use crate::library::LibraryError;
+use crate::note::NoteError;
+use crate::sandbox::SandboxError;
+use crate::skill::SkillError;
+use crate::workspace_secret::WorkspaceSecretError;
 
 use super::repo::{
     WorkspaceCreateError, WorkspaceFindError, WorkspaceModifyError, WorkspaceQueryError,
@@ -26,4 +30,12 @@ pub enum WorkspaceError {
     Authorization(#[from] AuthorizationError),
     #[error("WorkspaceError - Library: {0}")]
     Library(#[from] LibraryError),
+    #[error("WorkspaceError - Sandbox: {0}")]
+    Sandbox(#[from] SandboxError),
+    #[error("WorkspaceError - Skill: {0}")]
+    Skill(#[from] SkillError),
+    #[error("WorkspaceError - Note: {0}")]
+    Note(#[from] NoteError),
+    #[error("WorkspaceError - WorkspaceSecret: {0}")]
+    WorkspaceSecret(#[from] WorkspaceSecretError),
 }

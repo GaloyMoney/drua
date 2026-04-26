@@ -547,6 +547,40 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
+    /// Suspend all sandboxes belonging to a workspace within an existing
+    /// transaction. Each sandbox's pod/process is torn down via the admin
+    /// client (best-effort) and the entity transitions to
+    /// [`SandboxState::Suspended`]. Failures on individual sandboxes are
+    /// logged and skipped so the overall workspace teardown can proceed.
+    #[instrument(name = "domain.sandbox.suspend_for_workspace_in_op", skip(self, op))]
+    pub async fn suspend_for_workspace_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), SandboxError> {
+        let query = PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .await?;
+        for sandbox in result.entities {
+            if sandbox.state == SandboxState::Suspended {
+                continue;
+            }
+            if let Err(e) = self.suspend_in_op(op, sandbox.id).await {
+                tracing::warn!(
+                    sandbox_id = %sandbox.id,
+                    error = %e,
+                    "failed to suspend sandbox during workspace delete"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[instrument(name = "domain.sandbox.suspend", skip(self, sub))]
     pub async fn suspend(
         &self,
