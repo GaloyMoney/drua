@@ -223,9 +223,7 @@ impl Workspaces {
             .await?;
         Ok(workspace)
     }
-}
 
-impl Workspaces {
     /// Look up a workspace by name (internal, no auth check).
     /// Returns `Ok(None)` when no workspace matches.
     #[instrument(name = "domain.workspace.find_by_name", skip(self))]
