@@ -11,6 +11,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -18,8 +19,21 @@ use crate::auth::AuthSubject;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
+use super::{parse_params, schema_for};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ComposeParams {
+    /// JavaScript code to execute. Has access to a `tools` namespace for
+    /// calling upstream MCP tools. Use `return` for the final value.
+    /// Top-level `await` is supported.
+    script: String,
+}
 
 /// A `TopLevelTool` that evaluates JavaScript with access to upstream MCP
 /// tools via a `tools.*` proxy. Each inner tool call goes through the same
@@ -34,19 +48,7 @@ impl ComposeTool {
     }
 }
 
-static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "script": {
-                "type": "string",
-                "description": "JavaScript code to execute. Has access to `tools.*` proxy for calling upstream MCP tools. Use `return` for the final value. Top-level `await` is supported."
-            }
-        },
-        "required": ["script"],
-        "additionalProperties": false
-    })
-});
+static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ComposeParams>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for ComposeTool {
@@ -77,12 +79,7 @@ impl TopLevelTool for ComposeTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let script = arguments
-            .as_ref()
-            .and_then(|a| a.get("script"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("script".to_string()))?
-            .to_string();
+        let params: ComposeParams = parse_params(arguments)?;
 
         Audit::record_action("compose".to_string());
 
@@ -94,10 +91,10 @@ impl TopLevelTool for ComposeTool {
 
         // Prepend type declarations as a JS block comment so the script
         // context is self-documenting (helpful for error diagnostics).
-        let script_with_types = if dts.is_empty() {
-            script
+        let script = if dts.is_empty() {
+            params.script
         } else {
-            format!("/*\n{dts}*/\n{script}")
+            format!("/*\n{dts}*/\n{}", params.script)
         };
 
         let dispatcher = Arc::new(CatalogDispatcher {
@@ -107,7 +104,7 @@ impl TopLevelTool for ComposeTool {
 
         let engine = js_engine::JsEngine::new();
         let result = engine
-            .execute(&script_with_types, dispatcher, DEFAULT_TIMEOUT)
+            .execute(&script, dispatcher, DEFAULT_TIMEOUT)
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
