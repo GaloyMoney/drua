@@ -10,6 +10,7 @@ members = [
   "lib/anthropic-client",
   "lib/openai-client",
   "lib/llm",
+  "lib/js-engine",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",
@@ -44,6 +45,7 @@ name = "drua"
 # Internal crates
 concourse-client = { path = "lib/concourse-client" }
 sandbox = { path = "lib/sandbox" }
+js-engine = { path = "lib/js-engine" }
 code-assistant-core = { path = "code-assistant/crates/core" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }

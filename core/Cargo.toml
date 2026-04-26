@@ -25,6 +25,7 @@ job = { workspace = true }
 obix = { workspace = true }
 futures = { workspace = true }
 hex = "0.4"
+js-engine = { workspace = true }
 http = "1"
 llm = { workspace = true }
 rand = "0.9"
