@@ -19,9 +19,11 @@ use crate::auth::AuthSubject;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
+use super::liberal;
 use super::{parse_params, schema_for};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
 // Params
@@ -33,6 +35,11 @@ struct ComposeParams {
     /// calling upstream MCP tools. Use `return` for the final value.
     /// Top-level `await` is supported.
     script: String,
+
+    /// Optional execution timeout in milliseconds. Defaults to 120 000 (2 min),
+    /// max 300 000 (5 min). Covers the entire script including all tool calls.
+    #[serde(default, deserialize_with = "liberal::deserialize_option_i64")]
+    timeout_ms: Option<i64>,
 }
 
 /// A `TopLevelTool` that evaluates JavaScript with access to upstream MCP
@@ -81,6 +88,11 @@ impl TopLevelTool for ComposeTool {
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: ComposeParams = parse_params(arguments)?;
 
+        let timeout = match params.timeout_ms {
+            Some(ms) if ms > 0 => Duration::from_millis(ms as u64).min(MAX_TIMEOUT),
+            _ => DEFAULT_TIMEOUT,
+        };
+
         Audit::record_action("compose".to_string());
 
         // Generate TypeScript declarations from the visible catalog
@@ -104,7 +116,7 @@ impl TopLevelTool for ComposeTool {
 
         let engine = js_engine::JsEngine::new();
         let result = engine
-            .execute(&script, dispatcher, DEFAULT_TIMEOUT)
+            .execute(&script, dispatcher, timeout)
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
