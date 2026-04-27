@@ -7,7 +7,7 @@ mod context_generation;
 
 pub use crate::auth::{error::AuthorizationError, AuthResource, AuthScope, AuthSubject, AuthVerb};
 pub use chat_output_event::ChatOutputEvent;
-pub use context_generation::ContextGeneration;
+pub use context_generation::{ContextBumpHook, ContextGeneration};
 
 es_entity::entity_id! {
     UserId,
