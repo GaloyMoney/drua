@@ -12,6 +12,24 @@ pub use primitives::*;
 /// [`EventContext`].
 const AUDIT_CONTEXT_KEY: &str = "audit";
 
+/// Maximum number of bytes persisted for an error message. Anything beyond
+/// this is dropped — the goal is debuggability, not storing entire stack
+/// traces. Set generously at 4 KiB so typical messages fit without truncation.
+pub const MAX_ERROR_MESSAGE_BYTES: usize = 4096;
+
+/// Truncate `s` to at most [`MAX_ERROR_MESSAGE_BYTES`] bytes without
+/// splitting a UTF-8 code point.
+fn truncate_error_message(s: &str) -> String {
+    if s.len() <= MAX_ERROR_MESSAGE_BYTES {
+        return s.to_owned();
+    }
+    let mut end = MAX_ERROR_MESSAGE_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
 #[derive(Clone)]
 pub struct Audit {
     pool: sqlx::PgPool,
@@ -185,7 +203,7 @@ impl Audit {
         }
         let audit = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = audit.insert(&ctx_data).await {
+            if let Err(e) = audit.record(&ctx_data).await {
                 tracing::warn!(error = %e, "Failed to record audit entry");
             }
         });
@@ -208,6 +226,7 @@ impl Audit {
                 metadata AS "metadata: serde_json::Value",
                 outcome,
                 error,
+                error_message,
                 duration_ms,
                 tokens_returned,
                 recorded_at
@@ -256,6 +275,7 @@ impl Audit {
                 metadata AS "metadata: serde_json::Value",
                 outcome,
                 error,
+                error_message,
                 duration_ms,
                 tokens_returned,
                 recorded_at
@@ -287,7 +307,12 @@ impl Audit {
         Ok(rows)
     }
 
-    async fn insert(&self, ctx: &AuditContextData) -> Result<AuditEntry, AuditError> {
+    /// Persist an audit entry from the given context data.
+    ///
+    /// Synchronous variant of [`Self::record_from_context`] — callers (and
+    /// tests) that need the inserted row should use this directly rather
+    /// than the fire-and-forget context helper.
+    pub async fn record(&self, ctx: &AuditContextData) -> Result<AuditEntry, AuditError> {
         let acting_user_id = ctx.acting_user_id.map(uuid::Uuid::from);
         let acting_agent_id = ctx.acting_agent_id.map(uuid::Uuid::from);
         let on_behalf_of = ctx.on_behalf_of_user_id.map(uuid::Uuid::from);
@@ -303,6 +328,10 @@ impl Audit {
         let outcome = ctx.outcome.as_ref().unwrap_or(&InteractionOutcome::Success);
         let out = outcome.to_string();
         let error = matches!(outcome, InteractionOutcome::Error { .. });
+        let error_message = match outcome {
+            InteractionOutcome::Error { message } => Some(truncate_error_message(message)),
+            InteractionOutcome::Success => None,
+        };
         let dur = ctx.duration_ms.map(|ms| ms as i64);
         let tokens = ctx.tokens_returned.map(|t| t as i64);
 
@@ -311,8 +340,8 @@ impl Audit {
             r#"INSERT INTO audit_entries
                 (acting_user_id, acting_agent_id, on_behalf_of_user_id,
                  resource_ids, entrypoint, interaction_type, action, metadata,
-                 outcome, error, duration_ms, tokens_returned)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 outcome, error, error_message, duration_ms, tokens_returned)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING
                 id AS "id: AuditEntryId",
                 acting_user_id AS "acting_user_id: UserId",
@@ -325,6 +354,7 @@ impl Audit {
                 metadata AS "metadata: serde_json::Value",
                 outcome,
                 error,
+                error_message,
                 duration_ms,
                 tokens_returned,
                 recorded_at"#,
@@ -338,11 +368,43 @@ impl Audit {
             metadata,
             out,
             error,
+            error_message,
             dur,
             tokens,
         )
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_error_message_short_passthrough() {
+        let s = "boom";
+        assert_eq!(truncate_error_message(s), "boom");
+    }
+
+    #[test]
+    fn truncate_error_message_caps_at_limit() {
+        let s = "x".repeat(MAX_ERROR_MESSAGE_BYTES + 100);
+        let out = truncate_error_message(&s);
+        assert_eq!(out.len(), MAX_ERROR_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn truncate_error_message_respects_utf8_boundaries() {
+        // 4-byte char (😀 = 0xF0 0x9F 0x98 0x80) straddling the cap.
+        let prefix_len = MAX_ERROR_MESSAGE_BYTES - 2;
+        let mut s = "a".repeat(prefix_len);
+        s.push('😀');
+        s.push_str("tail");
+        let out = truncate_error_message(&s);
+        // Cut should land on the char boundary before the emoji.
+        assert_eq!(out.len(), prefix_len);
+        assert!(out.is_char_boundary(out.len()));
     }
 }

@@ -131,6 +131,11 @@ pub struct AuditEntry {
     pub metadata: serde_json::Value,
     pub outcome: String,
     pub error: Option<bool>,
+    /// Error message text recorded for failed interactions. Truncated to
+    /// [`MAX_ERROR_MESSAGE_BYTES`](super::MAX_ERROR_MESSAGE_BYTES) at
+    /// insertion time. `None` for successful interactions or rows
+    /// recorded before this column was introduced.
+    pub error_message: Option<String>,
     pub duration_ms: Option<i64>,
     pub tokens_returned: Option<i64>,
     pub recorded_at: chrono::DateTime<chrono::Utc>,
