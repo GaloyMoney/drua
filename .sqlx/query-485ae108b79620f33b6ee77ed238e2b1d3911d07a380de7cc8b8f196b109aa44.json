@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM notes WHERE COALESCE(workspace_id = $1, $1 IS NULL) AND (COALESCE(id < $3, true)) AND deleted = FALSE ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN note_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT parent_job_id, id FROM jobs WHERE ((parent_job_id IS NOT DISTINCT FROM $1) AND (COALESCE(id < $3, true))) ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN job_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -45,5 +45,5 @@
       false
     ]
   },
-  "hash": "08b66f503ff2bccffae7757603ccd4b8850596bc5853bde5b62db8af7509c24d"
+  "hash": "485ae108b79620f33b6ee77ed238e2b1d3911d07a380de7cc8b8f196b109aa44"
 }

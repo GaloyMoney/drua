@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}Run {{ run.id }} — {{ workflow_name }} — {{ workspace.name }} — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .ws-back { display: block; font-size: 0.8rem; text-decoration: none; color: var(--pico-muted-color); margin-bottom: 0.25rem; }
+  .ws-back:hover { color: var(--pico-primary); }
+  .ws-mode-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+  .ws-mode-header h4 { margin: 0; font-size: 1rem; }
+  .ws-settings-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.75rem; height: 1.75rem; padding: 0; margin: 0;
+    border: 1px solid var(--pico-muted-border-color); border-radius: var(--pico-border-radius);
+    background: none; text-decoration: none; color: var(--pico-muted-color); font-size: 0.9rem;
+    cursor: pointer; flex-shrink: 0;
+  }
+  .ws-settings-btn:hover { background: var(--pico-primary-background); color: var(--pico-primary-inverse); }
+  .agent-item {
+    display: block; padding: 0.4rem 0.75rem; border-radius: var(--pico-border-radius);
+    text-decoration: none; color: var(--pico-color); font-size: 0.9rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .agent-item:hover, .agent-item.active { background: var(--pico-primary-background); color: var(--pico-primary-inverse); }
+  .step-card {
+    margin-bottom: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+  }
+  .step-output {
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    background: var(--pico-muted-background);
+    padding: 0.5rem;
+    border-radius: var(--pico-border-radius);
+    overflow-x: auto;
+    max-height: 30rem;
+  }
+  .step-error {
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    background: var(--pico-mark-background-color);
+    padding: 0.5rem;
+    border-radius: var(--pico-border-radius);
+    overflow-x: auto;
+  }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/workspaces/{{ workspace.id }}/workflows/{{ workflow_id }}" class="ws-back">&larr; {{ workflow_name }}</a>
+<div class="ws-mode-header">
+  <h4>{{ workspace.name }}</h4>
+  <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn" title="Workspace settings">&#9881;</a>
+</div>
+
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/workspaces/{{ workspace.id }}/chat?agent={{ lead.id }}" class="agent-item">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for agent in agents %}
+<a href="/workspaces/{{ workspace.id }}/chat?agent={{ agent.id }}" class="agent-item">
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/workflows" class="agent-item active">Workflows</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<h2>Run {{ run.id }}</h2>
+<table>
+  <tr><th>Workflow</th><td><a href="/workspaces/{{ workspace.id }}/workflows/{{ workflow_id }}">{{ workflow_name }}</a></td></tr>
+  <tr><th>State</th><td>{{ run.state }}</td></tr>
+  <tr><th>Started</th><td>{{ run.started_at }}</td></tr>
+  {% match run.completed_at %}{% when Some(c) %}<tr><th>Completed</th><td>{{ c }}</td></tr>{% when None %}{% endmatch %}
+</table>
+
+<section>
+  <h4>Steps</h4>
+  {% if steps.is_empty() %}
+  <p><em>No steps recorded yet — the run may be queued.</em></p>
+  {% else %}
+  {% for step in steps %}
+  <article class="step-card">
+    <strong>{{ step.name }}</strong> — <small>{{ step.state }}</small>
+    {% match step.completed_at %}{% when Some(c) %}<small style="color: var(--pico-muted-color);"> @ {{ c }}</small>{% when None %}{% endmatch %}
+    {% match step.error %}
+      {% when Some(e) %}
+      <div class="step-error">{{ e }}</div>
+      {% when None %}
+    {% endmatch %}
+    {% match step.output %}
+      {% when Some(o) %}
+      <details style="margin-top: 0.5rem;"><summary><small>Output</small></summary>
+        <pre class="step-output">{{ o }}</pre>
+      </details>
+      {% when None %}
+    {% endmatch %}
+  </article>
+  {% endfor %}
+  {% endif %}
+</section>
+
+<section>
+  <h4>Agents owned by this run</h4>
+  {% if run_agents.is_empty() %}
+  <p><em>No agents spawned yet.</em></p>
+  {% else %}
+  <p><small>These agents were spawned to execute the run's steps. They don't appear in the workspace's main agent list.</small></p>
+  <ul>
+    {% for a in run_agents %}
+    <li><a href="/workspaces/{{ workspace.id }}/agents/{{ a.id }}">{{ a.name }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

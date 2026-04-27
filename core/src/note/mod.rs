@@ -54,6 +54,15 @@ impl Notes {
         Ok(op)
     }
 
+<<<<<<< HEAD
+=======
+    /// Create a new note in a workspace.
+    ///
+    /// `workflow_id` scopes the note to a specific workflow definition
+    /// (surfaced on that workflow's web/MCP views as runbook context).
+    /// Pass `None` for the standard workspace-scoped note.
+    #[allow(clippy::too_many_arguments)]
+>>>>>>> c6e6882 (feat(workflow): web UI + workflow-scoped notes)
     #[instrument(name = "note.store", skip(self))]
     pub async fn store(
         &self,
@@ -63,6 +72,7 @@ impl Notes {
         title: String,
         content: String,
         tags: Vec<String>,
+        workflow_id: Option<WorkflowDefinitionId>,
     ) -> Result<Note, NoteError> {
         if content.len() > MAX_NOTE_CONTENT_LEN {
             return Err(NoteError::ContentTooLarge(content.len()));
@@ -85,16 +95,19 @@ impl Notes {
         );
         let file_hash = runtime_file.file_hash();
 
-        let new_note = NewNote::builder()
+        let mut builder = NewNote::builder();
+        builder
             .id(note_id)
             .workspace_id(workspace_id)
             .workspace_name(workspace_name)
             .title(&title)
             .content(&content)
             .tags(tags)
-            .file_hash(file_hash)
-            .build()
-            .expect("NewNote builder should not fail");
+            .file_hash(file_hash);
+        if let Some(wf) = workflow_id {
+            builder.workflow_id(wf);
+        }
+        let new_note = builder.build().expect("NewNote builder should not fail");
 
         let note = self.repo.create_in_op(&mut op, new_note).await?;
         op.commit().await?;
@@ -149,7 +162,14 @@ impl Notes {
         Ok(note)
     }
 
+<<<<<<< HEAD
     /// `Some(id)` updates; `None` creates.
+=======
+    /// Create or update a note. If `note_id` is provided, update;
+    /// otherwise create with the given `workflow_id` scope (or `None`
+    /// for workspace-scoped). `workflow_id` is only honoured on create —
+    /// scope is set at creation time and not migrated by `update`.
+>>>>>>> c6e6882 (feat(workflow): web UI + workflow-scoped notes)
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "note.store_or_update", skip(self))]
     pub async fn store_or_update(
@@ -161,6 +181,7 @@ impl Notes {
         title: String,
         content: String,
         tags: Vec<String>,
+        workflow_id: Option<WorkflowDefinitionId>,
     ) -> Result<Note, NoteError> {
         match note_id {
             Some(id) => {
@@ -168,8 +189,16 @@ impl Notes {
                     .await
             }
             None => {
-                self.store(sub, workspace_id, workspace_name, title, content, tags)
-                    .await
+                self.store(
+                    sub,
+                    workspace_id,
+                    workspace_name,
+                    title,
+                    content,
+                    tags,
+                    workflow_id,
+                )
+                .await
             }
         }
     }
@@ -289,6 +318,13 @@ impl Notes {
             .map_err(NoteError::from)
     }
 
+<<<<<<< HEAD
+=======
+    /// List workspace-scoped notes only (excludes notes attached to a
+    /// specific workflow definition). The default listing in the agent
+    /// chat / dashboard wants this — workflow notes appear on the
+    /// workflow's own page.
+>>>>>>> c6e6882 (feat(workflow): web UI + workflow-scoped notes)
     #[instrument(name = "note.list", skip(self))]
     pub async fn list(
         &self,
@@ -309,7 +345,43 @@ impl Notes {
                 es_entity::ListDirection::Descending,
             )
             .await?;
-        Ok(result.entities)
+        Ok(result
+            .entities
+            .into_iter()
+            .filter(|n| n.workflow_id.is_none())
+            .collect())
+    }
+
+    /// List notes attached to a specific workflow definition.
+    ///
+    /// `workspace_id` is required so the auth check stays scoped to the
+    /// workflow's workspace. The caller (typically the workflow web
+    /// page) already has it from the loaded `WorkflowDefinition`.
+    #[instrument(name = "note.list_for_workflow_definition", skip(self))]
+    pub async fn list_for_workflow_definition(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        workflow_id: WorkflowDefinitionId,
+    ) -> Result<Vec<Note>, NoteError> {
+        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workflow_id_by_created_at(
+                Some(workflow_id),
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result
+            .entities
+            .into_iter()
+            .filter(|n| n.workspace_id == workspace_id)
+            .collect())
     }
 
     /// Used during workspace cascade deletion.
@@ -357,8 +429,24 @@ impl Notes {
             return Ok(None);
         }
 
-        let mut pinned: Vec<&Note> = result.entities.iter().filter(|n| n.pinned).collect();
-        let non_pinned: Vec<&Note> = result.entities.iter().filter(|n| !n.pinned).collect();
+        // Workflow-scoped notes are runbook context for that specific
+        // workflow only — never inject them into the broader workspace
+        // prompt.
+        let workspace_only: Vec<&Note> = result
+            .entities
+            .iter()
+            .filter(|n| n.workflow_id.is_none())
+            .collect();
+        let mut pinned: Vec<&Note> = workspace_only
+            .iter()
+            .filter(|n| n.pinned)
+            .copied()
+            .collect();
+        let non_pinned: Vec<&Note> = workspace_only
+            .iter()
+            .filter(|n| !n.pinned)
+            .copied()
+            .collect();
 
         let header = "# Workspace Notes\n\n\
              Use the `notes` tool with command `search` to retrieve full content.\n";

@@ -155,6 +155,98 @@ pub struct WorkspaceSkillDetailTemplate {
     pub skill: SkillView,
 }
 
+// ── Workflows ─────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub struct WorkflowDefinitionView {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `"manual"` or `"webhook"`.
+    pub trigger_type: String,
+    pub trigger_provider: Option<String>,
+    /// Detail page only — never set on listings.
+    pub webhook_secret: Option<String>,
+    pub webhook_url: Option<String>,
+    pub steps: Vec<WorkflowStepView>,
+    pub created_at: String,
+}
+
+#[allow(dead_code)]
+pub struct WorkflowStepView {
+    pub name: String,
+    pub step_type: String,
+    pub skill: String,
+    pub sandbox: Option<String>,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[allow(dead_code)]
+pub struct WorkflowRunView {
+    pub id: String,
+    pub definition_id: String,
+    /// `pending` / `running` / `succeeded` / `failed`.
+    pub state: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    /// Last step's text output (or `ERROR: …`) — for the listing.
+    pub output_summary: String,
+}
+
+#[allow(dead_code)]
+pub struct StepResultView {
+    pub name: String,
+    pub state: String,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_workflows.html")]
+pub struct WorkspaceWorkflowsPageTemplate {
+    pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
+    pub agents: Vec<AgentView>,
+    pub workflows: Vec<WorkflowDefinitionView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_workflow_detail.html")]
+pub struct WorkspaceWorkflowDetailTemplate {
+    pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
+    pub agents: Vec<AgentView>,
+    pub workflow: WorkflowDefinitionView,
+    pub recent_runs: Vec<WorkflowRunView>,
+    pub workflow_notes: Vec<NoteView>,
+    pub flash: Option<String>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_workflow_run_detail.html")]
+pub struct WorkspaceWorkflowRunDetailTemplate {
+    pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
+    pub agents: Vec<AgentView>,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub run: WorkflowRunView,
+    pub steps: Vec<StepResultView>,
+    pub run_agents: Vec<AgentView>,
+}
+
+#[allow(dead_code)]
+pub struct NoteView {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
+
+// ── Sandboxes ─────────────────────────────────────────────────────────
+
 #[allow(dead_code)]
 pub struct ExportedFileView {
     pub file_name: String,

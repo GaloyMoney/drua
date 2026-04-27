@@ -18,6 +18,15 @@ pub enum NoteEvent {
         content: String,
         tags: Vec<String>,
         file_hash: GitFileHash,
+        /// Optional [`WorkflowDefinitionId`] this note is scoped to.
+        ///
+        /// `None` means the note is workspace-scoped (the existing
+        /// behaviour). `Some` attaches the note to a specific workflow
+        /// definition — surfaced on that workflow's web/MCP views as
+        /// runbook-style context shared across runs. Notes are never
+        /// scoped per run.
+        #[serde(default)]
+        workflow_id: Option<WorkflowDefinitionId>,
     },
     Updated {
         title: String,
@@ -40,6 +49,10 @@ pub struct Note {
     pub(crate) tags: Vec<String>,
     pub(crate) file_hash: Option<GitFileHash>,
     pub(crate) pinned: bool,
+    /// Workflow definition this note is scoped to, if any. See
+    /// [`NoteEvent::Initialized::workflow_id`] for semantics.
+    #[builder(default)]
+    pub workflow_id: Option<WorkflowDefinitionId>,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
@@ -49,7 +62,28 @@ impl Note {
         self.as_runtime_file().content()
     }
 
-    pub(crate) fn created_at(&self) -> String {
+    /// Note title (first line / heading).
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Markdown body of the note (no frontmatter).
+    pub fn body(&self) -> &str {
+        &self.content
+    }
+
+    /// Tags applied to the note.
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// Whether the note is pinned (injected into the workspace's
+    /// shared agent context).
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    pub fn created_at(&self) -> String {
         self.events
             .entity_first_persisted_at()
             .map(|t| t.to_rfc3339())
@@ -158,6 +192,7 @@ impl TryFromEvents<NoteEvent> for Note {
                     content,
                     tags,
                     file_hash,
+                    workflow_id,
                 } => {
                     builder = builder
                         .id(*id)
@@ -167,7 +202,8 @@ impl TryFromEvents<NoteEvent> for Note {
                         .content(content.clone())
                         .tags(tags.clone())
                         .file_hash(Some(file_hash.clone()))
-                        .pinned(false);
+                        .pinned(false)
+                        .workflow_id(*workflow_id);
                 }
                 NoteEvent::Updated {
                     title,
@@ -211,6 +247,9 @@ pub struct NewNote {
     pub(super) file_hash: GitFileHash,
     #[builder(default)]
     pub(super) pinned: bool,
+    /// Optional workflow scope. `None` for workspace-scoped notes.
+    #[builder(default, setter(into, strip_option))]
+    pub(super) workflow_id: Option<WorkflowDefinitionId>,
 }
 
 impl NewNote {
@@ -233,6 +272,7 @@ impl IntoEvents<NoteEvent> for NewNote {
                 content: self.content,
                 tags: self.tags,
                 file_hash: self.file_hash,
+                workflow_id: self.workflow_id,
             }],
         )
     }
@@ -243,7 +283,7 @@ mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
     use crate::library::GitFileHash;
-    use crate::primitives::{NoteId, WorkspaceId};
+    use crate::primitives::{NoteId, WorkflowDefinitionId, WorkspaceId};
 
     use super::{NewNote, Note};
 
@@ -285,6 +325,27 @@ mod tests {
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
         assert_eq!(note.workspace_name, "test");
         assert!(note.file_hash.is_some());
+        // Default scope is workspace (no workflow attachment).
+        assert!(note.workflow_id.is_none());
+    }
+
+    #[test]
+    fn note_workflow_scoped_hydration() {
+        let wf = WorkflowDefinitionId::new();
+        let new = NewNote::builder()
+            .id(NoteId::new())
+            .workspace_id(WorkspaceId::new())
+            .workspace_name("test")
+            .title("Runbook")
+            .content("On alert, query Honeycomb dataset X.")
+            .tags(vec!["runbook".into()])
+            .file_hash(test_hash())
+            .workflow_id(wf)
+            .build()
+            .unwrap();
+
+        let note = Note::try_from_events(new.into_events()).unwrap();
+        assert_eq!(note.workflow_id, Some(wf));
     }
 
     #[test]
