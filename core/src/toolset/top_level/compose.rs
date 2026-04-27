@@ -370,10 +370,10 @@ pub(crate) fn generate_dts(
         if !tool.composable() || !tool.is_visible(subject) {
             continue;
         }
-        let params_ts = schema_to_ts_params(tool.input_schema());
+        let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
         let return_ts = tool
             .output_schema()
-            .map(output_schema_to_ts)
+            .map(json_schema_ts::schema_to_ts)
             .unwrap_or_else(|| "any".to_string());
         top_fns.push((name.clone(), params_ts, return_ts));
     }
@@ -390,14 +390,14 @@ pub(crate) fn generate_dts(
         for entry in set.tools() {
             let schema_val =
                 serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
-            let params_ts = schema_to_ts_params(&schema_val);
+            let params_ts = json_schema_ts::schema_to_ts_params(&schema_val);
             let return_ts = entry
                 .description
                 .output_schema
                 .as_ref()
                 .map(|s| {
                     let schema_val = serde_json::Value::Object(s.as_ref().clone());
-                    output_schema_to_ts(&schema_val)
+                    json_schema_ts::schema_to_ts(&schema_val)
                 })
                 .unwrap_or_else(|| "any".to_string());
             tools_in_ns.push((entry.name.clone(), params_ts, return_ts));
@@ -431,95 +431,6 @@ pub(crate) fn generate_dts(
     lines.join("\n")
 }
 
-/// Convert a JSON Schema `input_schema` object into a TypeScript parameter
-/// string. Handles common JSON Schema types; nested objects become inline
-/// object types. Arrays become `T[]`.
-///
-/// Example output: `repo: string; state?: string; limit?: number`
-pub(crate) fn schema_to_ts_params(schema: &serde_json::Value) -> String {
-    let properties = match schema.get("properties").and_then(|p| p.as_object()) {
-        Some(p) => p,
-        None => return "...args: any".to_string(),
-    };
-
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-
-    let mut parts = Vec::new();
-    for (name, prop_schema) in properties {
-        let ts_type = json_schema_to_ts(prop_schema);
-        let optional = if required.contains(&name.as_str()) {
-            ""
-        } else {
-            "?"
-        };
-        parts.push(format!("{name}{optional}: {ts_type}"));
-    }
-    parts.join("; ")
-}
-
-/// Convert a single JSON Schema type definition to a TypeScript type string.
-pub(crate) fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
-    match schema.get("type").and_then(|t| t.as_str()) {
-        Some("string") => "string",
-        Some("number" | "integer") => "number",
-        Some("boolean") => "boolean",
-        Some("array") => "any[]",
-        Some("object") => "Record<string, any>",
-        Some("null") => "null",
-        _ => "any",
-    }
-}
-
-/// Convert an output JSON Schema into a TypeScript inline type.
-///
-/// Handles the two common shapes catalog tools produce:
-/// - `type: "object"` → `{ key: T; ... }`
-/// - `type: "array"` → `T[]` (recursing into `items` for object element types)
-///
-/// Falls back to `any` for schemas that don't match either shape.
-pub(crate) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
-    // Array: render items type with [] suffix.
-    if schema.get("type").and_then(|t| t.as_str()) == Some("array") {
-        if let Some(items) = schema.get("items") {
-            // Object items → recurse for typed properties.
-            if items.get("properties").is_some() {
-                return format!("{}[]", output_schema_to_ts(items));
-            }
-            // Primitive items (string[], number[], etc.).
-            return format!("{}[]", json_schema_to_ts(items));
-        }
-        return "any[]".to_string();
-    }
-
-
-    let properties = match schema.get("properties").and_then(|p| p.as_object()) {
-        Some(p) if !p.is_empty() => p,
-        _ => return "any".to_string(),
-    };
-
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-
-    let mut parts = Vec::new();
-    for (name, prop_schema) in properties {
-        let ts_type = json_schema_to_ts(prop_schema);
-        let optional = if required.contains(&name.as_str()) {
-            ""
-        } else {
-            "?"
-        };
-        parts.push(format!("{name}{optional}: {ts_type}"));
-    }
-    format!("{{ {} }}", parts.join("; "))
-}
-
 /// Append a "call `compose_types` first" suggestion to a dispatcher error so
 /// the agent learns to fetch real signatures instead of re-guessing. The
 /// prefix is derived from the requested tool name (everything before the
@@ -543,6 +454,9 @@ mod tests {
         assert!(out.contains("concourse_*"));
     }
 
+    /// Catalog tools sometimes return arrays of objects (e.g. concourse
+    /// `list_builds`). The new generator handles `type: array` with object
+    /// items by recursing into `items`.
     #[test]
     fn output_schema_array_of_objects() {
         let schema = serde_json::json!({
@@ -556,10 +470,10 @@ mod tests {
                 "required": ["build_id", "name"]
             }
         });
-        let ts = output_schema_to_ts(&schema);
-        assert!(ts.contains("build_id: number"));
-        assert!(ts.contains("name: string"));
-        assert!(ts.ends_with("[]"));
+        let ts = json_schema_ts::schema_to_ts(&schema);
+        assert!(ts.contains("build_id: number"), "{ts}");
+        assert!(ts.contains("name: string"), "{ts}");
+        assert!(ts.ends_with("[]"), "{ts}");
     }
 
     #[test]
@@ -568,7 +482,7 @@ mod tests {
             "type": "array",
             "items": { "type": "string" }
         });
-        assert_eq!(output_schema_to_ts(&schema), "string[]");
+        assert_eq!(json_schema_ts::schema_to_ts(&schema), "string[]");
     }
 
     #[test]
@@ -578,7 +492,51 @@ mod tests {
             "properties": { "logs": { "type": "string" } },
             "required": ["logs"]
         });
-        let ts = output_schema_to_ts(&schema);
-        assert!(ts.contains("logs: string"));
+        let ts = json_schema_ts::schema_to_ts(&schema);
+        assert!(ts.contains("logs: string"), "{ts}");
+    }
+
+    /// Integration test: a realistic schemars-derived schema (with `Option`,
+    /// `Vec`, `HashMap`, and a string enum) is rendered into a TS type that
+    /// captures the nullable union, enum literals, array, and Record shape
+    /// — none of which the previous `output_schema_to_ts` could handle.
+    #[test]
+    fn end_to_end_schemars_to_ts() {
+        use std::collections::HashMap;
+
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        #[serde(rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum Status {
+            Pending,
+            Done,
+        }
+
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Sample {
+            id: String,
+            description: Option<String>,
+            tags: Vec<String>,
+            counters: HashMap<String, u32>,
+            status: Status,
+        }
+
+        let schema = super::super::schema_for::<Sample>();
+        let ts = json_schema_ts::schema_to_ts(&schema);
+
+        assert!(ts.contains("id: string"), "{ts}");
+        // Option<String> → string | null (or null | string).
+        assert!(
+            ts.contains("string | null") || ts.contains("null | string"),
+            "{ts}"
+        );
+        // Vec<String> → string[].
+        assert!(ts.contains("tags: string[]"), "{ts}");
+        // HashMap<String, u32> → Record<string, number>.
+        assert!(ts.contains("Record<string, number>"), "{ts}");
+        // Enum variants render as a union of string literals.
+        assert!(ts.contains("\"pending\""), "{ts}");
+        assert!(ts.contains("\"done\""), "{ts}");
     }
 }

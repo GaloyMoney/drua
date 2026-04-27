@@ -28,7 +28,8 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        obj.remove("definitions");
+        // Note: `definitions` intentionally retained for $ref resolution
+        // by the compose TS generator.
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),

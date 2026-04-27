@@ -1397,6 +1397,7 @@ dependencies = [
  "http",
  "job",
  "js-engine",
+ "json-schema-ts",
  "jsonwebtoken",
  "llm",
  "obix",
@@ -2683,6 +2684,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "json-schema-ts"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

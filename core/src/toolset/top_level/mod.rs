@@ -61,10 +61,15 @@ pub(super) fn parse_params<T: serde::de::DeserializeOwned>(
 
 /// Derive a JSON Schema from a params struct that implements [`schemars::JsonSchema`].
 ///
-/// Uses draft-07, inlines sub-schemas, and strips `title`/`definitions`/`$schema`
-/// to match the shape expected by MCP tool `input_schema`. Adds
+/// Uses draft-07, inlines sub-schemas, and strips `title`/`$schema` to match
+/// the shape expected by MCP tool `input_schema`. Adds
 /// `additionalProperties: false` so the schema rejects unknown fields without
 /// needing `#[serde(deny_unknown_fields)]` (which conflicts with `#[serde(flatten)]`).
+///
+/// `definitions` is **kept** so that downstream consumers (notably the
+/// `compose` TypeScript declaration generator) can resolve `$ref`s for
+/// recursive types — schemars 0.8 still falls back to `$ref` for recursive
+/// shapes even with `inline_subschemas=true`.
 pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.inline_subschemas = true;
@@ -75,7 +80,6 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        obj.remove("definitions");
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),
