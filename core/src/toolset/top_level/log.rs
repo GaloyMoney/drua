@@ -124,6 +124,9 @@ struct AuditEntryOutput {
     /// Whether this entry was an error.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<bool>,
+    /// Error message text for failed interactions (truncated to 4 KiB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
     duration_ms: Option<i64>,
     /// Acting user UUID.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,6 +158,7 @@ impl From<&AuditEntry> for AuditEntryOutput {
             action: e.action.clone(),
             outcome: e.outcome.clone(),
             error: e.error,
+            error_message: e.error_message.clone(),
             duration_ms: e.duration_ms,
             acting_user_id: e.acting_user_id.map(|id| id.to_string()),
             acting_agent_id: e.acting_agent_id.map(|id| id.to_string()),
