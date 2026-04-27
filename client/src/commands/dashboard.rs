@@ -17,8 +17,8 @@ use crate::config::Config;
 use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
-    AgentItem, BlockDetail, CellKind, Focus, SandboxInfo, ScreenState, ThreadGridState, ThreadInfo,
-    UsageDetail, WorkspaceItem,
+    AgentItem, BlockDetail, CellKind, Focus, GridSection, SandboxInfo, ScreenState,
+    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkspaceItem,
 };
 use crate::tui::{handlers, ui};
 
@@ -264,6 +264,7 @@ const THREADS_QUERY: &str = r#"
                     systemBlocks {
                         index
                         kind
+                        text
                     }
                     toolDefinitionsCount
                     messages {
@@ -327,6 +328,8 @@ struct ThreadNode {
 struct SystemBlockInfoNode {
     index: i32,
     kind: String,
+    #[serde(default)]
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,7 +367,7 @@ enum ChatStreamEvent {
     /// Pre-fetched chat history for an agent (agent_id, messages).
     HistoryLoaded(String, Vec<ChatMessage>),
     /// Thread grid data loaded for an agent (agent_id, grid_state).
-    ThreadsLoaded(String, ThreadGridState),
+    ThreadsLoaded(String, Box<ThreadGridState>),
     /// Thread export completed — (path, result message).
     ExportComplete(String),
 }
@@ -623,6 +626,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let mut system_grid: Vec<Vec<CellKind>> =
         vec![vec![CellKind::Empty; num_system_positions]; num_threads];
     let mut tool_def_counts: Vec<usize> = vec![0; num_threads];
+    let mut system_details: HashMap<(usize, usize), SystemBlockDetail> = HashMap::new();
     let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
     let mut thread_infos = Vec::new();
     // Track owner's content per block-index for condensed detection.
@@ -643,6 +647,13 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                     CellKind::Shared
                 };
                 system_grid[thread_idx][col] = cell;
+                system_details.insert(
+                    (thread_idx, col),
+                    SystemBlockDetail {
+                        kind: sb.kind.clone(),
+                        text: sb.text.clone(),
+                    },
+                );
             }
         }
         tool_def_counts[thread_idx] = node.tool_definitions_count.max(0) as usize;
@@ -738,6 +749,8 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         system_positions,
         system_grid,
         tool_def_counts,
+        cursor_section: GridSection::Messages,
+        system_details,
     }
 }
 
@@ -764,6 +777,7 @@ mod tests {
         SystemBlockInfoNode {
             index,
             kind: kind.to_string(),
+            text: String::new(),
         }
     }
 
@@ -850,6 +864,19 @@ mod tests {
         let grid = build_thread_grid(threads);
         assert_eq!(grid.tool_def_counts, vec![17, 25]);
     }
+
+    #[test]
+    fn cursor_section_defaults_to_messages() {
+        let threads = vec![make_thread(
+            "t1",
+            true,
+            "INITIAL_THREAD",
+            vec![sys(0, "BASE")],
+            5,
+        )];
+        let grid = build_thread_grid(threads);
+        assert_eq!(grid.cursor_section, GridSection::Messages);
+    }
 }
 
 fn content_type_char(content: &ContentBlock, role: ChatRole) -> char {
@@ -926,7 +953,7 @@ fn spawn_threads_fetch(
         let client = GraphqlClient::new(&base_url, &token);
         match fetch_threads(&client, &agent_id).await {
             Ok(grid) => {
-                let _ = tx.send(ChatStreamEvent::ThreadsLoaded(agent_id, grid));
+                let _ = tx.send(ChatStreamEvent::ThreadsLoaded(agent_id, Box::new(grid)));
             }
             Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(format!(
@@ -971,7 +998,7 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
         ChatStreamEvent::ThreadsLoaded(agent_id, grid) => {
             if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
                 state.status_message = None;
-                state.thread_view = Some(grid);
+                state.thread_view = Some(*grid);
                 state.focus = Focus::Threads;
             }
         }
