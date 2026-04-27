@@ -261,6 +261,11 @@ const THREADS_QUERY: &str = r#"
                     isCurrent
                     nextTurn
                     startReason
+                    systemBlocks {
+                        index
+                        kind
+                    }
+                    toolDefinitionsCount
                     messages {
                         role
                         blockIndexes
@@ -311,7 +316,17 @@ struct ThreadNode {
     is_current: bool,
     next_turn: String,
     start_reason: String,
+    #[serde(default)]
+    system_blocks: Vec<SystemBlockInfoNode>,
+    #[serde(default)]
+    tool_definitions_count: i32,
     messages: Vec<ThreadMessageNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SystemBlockInfoNode {
+    index: i32,
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -576,6 +591,23 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         }
     }
 
+    // 1b. Collect system-block positions and ownership analogously.
+    let mut all_system_positions = BTreeSet::new();
+    let mut system_owner: HashMap<i32, usize> = HashMap::new();
+    for (thread_idx, node) in thread_nodes.iter().enumerate() {
+        for sb in &node.system_blocks {
+            all_system_positions.insert(sb.index);
+            system_owner.entry(sb.index).or_insert(thread_idx);
+        }
+    }
+    let system_positions: Vec<i32> = all_system_positions.into_iter().collect();
+    let sys_pos_map: HashMap<i32, usize> = system_positions
+        .iter()
+        .enumerate()
+        .map(|(i, &pos)| (pos, i))
+        .collect();
+    let num_system_positions = system_positions.len();
+
     let positions: Vec<i32> = all_positions.into_iter().collect();
     let pos_map: HashMap<i32, usize> = positions
         .iter()
@@ -588,6 +620,9 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
 
     // 2. Build grid and details (consuming thread_nodes).
     let mut grid: Vec<Vec<CellKind>> = vec![vec![CellKind::Empty; num_positions]; num_threads];
+    let mut system_grid: Vec<Vec<CellKind>> =
+        vec![vec![CellKind::Empty; num_system_positions]; num_threads];
+    let mut tool_def_counts: Vec<usize> = vec![0; num_threads];
     let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
     let mut thread_infos = Vec::new();
     // Track owner's content per block-index for condensed detection.
@@ -596,6 +631,21 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     for (thread_idx, node) in thread_nodes.into_iter().enumerate() {
         let is_compaction = node.start_reason == "COMPACTION";
         let msg_count = node.messages.len();
+
+        // Populate this row's system grid: owners get Unique(<kind letter>),
+        // subsequent referencers get Shared.
+        for sb in &node.system_blocks {
+            if let Some(&col) = sys_pos_map.get(&sb.index) {
+                let is_owner = system_owner.get(&sb.index) == Some(&thread_idx);
+                let cell = if is_owner {
+                    CellKind::Unique(system_kind_letter(&sb.kind))
+                } else {
+                    CellKind::Shared
+                };
+                system_grid[thread_idx][col] = cell;
+            }
+        }
+        tool_def_counts[thread_idx] = node.tool_definitions_count.max(0) as usize;
 
         thread_infos.push(ThreadInfo {
             id: node.id,
@@ -685,6 +735,24 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         cursor_row: current_thread_idx,
         scroll_col: 0,
         visible_cols: 0,
+        system_positions,
+        system_grid,
+        tool_def_counts,
+    }
+}
+
+/// Map a SystemBlockKind GraphQL enum value (uppercase snake) to the single
+/// letter used in the grid: B=Base, T=Tools, H=beHavioral (avoids B clash),
+/// R=Role, N=Notes, S=Skills.
+fn system_kind_letter(kind: &str) -> char {
+    match kind {
+        "BASE" => 'B',
+        "TOOLS" => 'T',
+        "BEHAVIORAL" => 'H',
+        "ROLE" => 'R',
+        "NOTES" => 'N',
+        "SKILLS" => 'S',
+        _ => '?',
     }
 }
 

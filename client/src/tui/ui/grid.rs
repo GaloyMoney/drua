@@ -93,7 +93,18 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
 
     let label_width: usize = 12;
     let cell_width: usize = 4;
-    let grid_px = inner.width as usize - label_width.min(inner.width as usize);
+    // System + tools sections live to the left of the messages section and
+    // do not scroll horizontally. Their fixed widths are subtracted before
+    // computing the messages-section visible_cols.
+    let sys_section_w: usize = grid.system_positions.len() * cell_width;
+    let tool_section_w: usize = 8; // "⚙×NNN  " — pad to fixed width
+    let divider_w: usize = 3; // " │ "
+    let header_w = label_width
+        .saturating_add(sys_section_w)
+        .saturating_add(divider_w)
+        .saturating_add(tool_section_w)
+        .saturating_add(divider_w);
+    let grid_px = (inner.width as usize).saturating_sub(header_w);
     let visible_cols = grid_px.checked_div(cell_width).unwrap_or(0);
 
     grid.update_visible_cols(visible_cols);
@@ -187,6 +198,45 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
 
                 let row_cells = &grid.grid[row_idx];
                 let mut spans = vec![label_span];
+
+                // ── System blocks section (positionally aligned, no scroll) ──
+                let sys_row = grid.system_grid.get(row_idx);
+                let last_sys_ne =
+                    sys_row.and_then(|r| r.iter().rposition(|c| !matches!(c, CellKind::Empty)));
+                for sys_col in 0..grid.system_positions.len() {
+                    let cell = sys_row
+                        .and_then(|r| r.get(sys_col))
+                        .copied()
+                        .unwrap_or(CellKind::Empty);
+                    let has_rightward = !matches!(cell, CellKind::Empty)
+                        && last_sys_ne.map(|l| sys_col < l).unwrap_or(false);
+                    let conn_str = if has_rightward { "───" } else { "   " };
+                    let conn_style = Style::default().fg(Color::DarkGray);
+                    if matches!(cell, CellKind::Empty) {
+                        spans.push(Span::styled("    ", conn_style));
+                    } else {
+                        render_cell_span(&mut spans, cell, false, conn_str);
+                    }
+                }
+
+                // Section divider (system → tools)
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+
+                // ── Tool count section ──
+                let tool_count = grid.tool_def_counts.get(row_idx).copied().unwrap_or(0);
+                let tool_str = if tool_count > 0 {
+                    format!("⚙×{tool_count}")
+                } else {
+                    String::new()
+                };
+                let pad = tool_section_w.saturating_sub(tool_str.chars().count());
+                spans.push(Span::styled(tool_str, Style::default().fg(Color::Gray)));
+                if pad > 0 {
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+
+                // Section divider (tools → messages)
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
 
                 if section == 0 {
                     // Section 0: globally aligned with horizontal scrolling.
@@ -524,11 +574,16 @@ fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
     match cell {
         CellKind::Unique(c) | CellKind::Summary(c) => {
             let color = match c {
+                // Message-block letters
                 'U' => Color::Cyan,
                 'A' => Color::White,
                 't' => Color::Gray,
                 'T' => Color::Yellow,
                 'R' => Color::Gray,
+                // System-block letters (S also reused for Sandbox messages — both green)
+                'B' => Color::Blue,
+                'H' => Color::Magenta,
+                'N' => Color::LightYellow,
                 'S' => Color::Green,
                 _ => Color::White,
             };

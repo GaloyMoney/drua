@@ -138,6 +138,14 @@ pub struct ThreadGridState {
     pub scroll_col: usize,
     /// Number of visible columns (updated from render path).
     pub visible_cols: usize,
+    /// Sorted global SystemBlockIndex positions across all threads.
+    pub system_positions: Vec<i32>,
+    /// Per-thread system grid: `system_grid[thread_idx][system_pos_idx]`.
+    /// First thread to reference a system idx owns it (Unique with kind letter);
+    /// subsequent threads share it.
+    pub system_grid: Vec<Vec<CellKind>>,
+    /// Per-thread count of tool definitions exposed to the LLM.
+    pub tool_def_counts: Vec<usize>,
 }
 
 impl ThreadGridState {
