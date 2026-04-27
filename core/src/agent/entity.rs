@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::primitives::{AgentId, AuthScope, AuthSubject, SandboxId, UserId, WorkspaceId};
+use crate::primitives::{
+    AgentId, AuthScope, AuthSubject, SandboxId, UserId, WorkflowDefinitionId, WorkflowRunId,
+    WorkspaceId,
+};
 use crate::sandbox::SandboxAgentMode;
 use es_entity::*;
 
@@ -26,6 +29,15 @@ pub enum AgentEvent {
         name: String,
         authz_scopes: Vec<AuthScope>,
         workspace_name: String,
+        /// Workflow definition this agent was spawned for, if any.
+        /// `None` for user-created agents — those are the ones the
+        /// workspace agent listing surfaces by default.
+        #[serde(default)]
+        workflow_id: Option<WorkflowDefinitionId>,
+        /// Specific workflow run that owns this agent. Always `Some`
+        /// when `workflow_id` is `Some`. See [`Agent::workflow_run_id`].
+        #[serde(default)]
+        workflow_run_id: Option<WorkflowRunId>,
     },
     /// Effective delta only (no-ops filtered out before firing).
     AuthScopesUpdated {
@@ -57,6 +69,19 @@ pub struct Agent {
     /// At most one attached sandbox at a time (enforced by `sandbox_attached`).
     #[builder(default)]
     pub attached_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+    /// Workflow definition this agent was spawned for, if any.
+    ///
+    /// `None` means the agent was created directly by a user (the normal
+    /// case — these are what `Agents::list_for_workspace` returns).
+    /// `Some` means the agent was spawned by a [`crate::workflow`] run
+    /// to execute one of its steps; those agents are owned by the run
+    /// and hidden from the default workspace listing.
+    #[builder(default)]
+    pub workflow_id: Option<WorkflowDefinitionId>,
+    /// Specific workflow run that owns this agent. Populated together
+    /// with [`Self::workflow_id`].
+    #[builder(default)]
+    pub workflow_run_id: Option<WorkflowRunId>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -193,13 +218,17 @@ impl TryFromEvents<AgentEvent> for Agent {
                     name,
                     authz_scopes,
                     workspace_name,
+                    workflow_id,
+                    workflow_run_id,
                 } => {
                     builder = builder
                         .id(*id)
                         .workspace_id(*workspace_id)
                         .agent_role(*agent_role)
                         .name(name.clone())
-                        .workspace_name(workspace_name.clone());
+                        .workspace_name(workspace_name.clone())
+                        .workflow_id(*workflow_id)
+                        .workflow_run_id(*workflow_run_id);
                     scopes = authz_scopes.iter().cloned().collect();
                 }
                 AgentEvent::AuthScopesUpdated { added, removed } => {
@@ -240,6 +269,11 @@ pub struct NewAgent {
     pub(super) authz_scopes: Vec<AuthScope>,
     #[builder(setter(into))]
     pub(super) workspace_name: String,
+    /// `Some` when the agent is spawned by a workflow run.
+    #[builder(default, setter(into, strip_option))]
+    pub(super) workflow_id: Option<WorkflowDefinitionId>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) workflow_run_id: Option<WorkflowRunId>,
 }
 
 impl NewAgent {
@@ -259,7 +293,51 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 name: self.name,
                 authz_scopes: self.authz_scopes,
                 workspace_name: self.workspace_name,
+                workflow_id: self.workflow_id,
+                workflow_run_id: self.workflow_run_id,
             }],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+    use super::*;
+
+    fn build(workflow_id: Option<WorkflowDefinitionId>, run_id: Option<WorkflowRunId>) -> Agent {
+        let mut builder = NewAgent::builder();
+        builder
+            .id(AgentId::new())
+            .workspace_id(WorkspaceId::new())
+            .agent_role(AgentRole::Agent)
+            .name("test")
+            .authz_scopes(Vec::new())
+            .workspace_name("ws");
+        if let Some(wf) = workflow_id {
+            builder.workflow_id(wf);
+        }
+        if let Some(r) = run_id {
+            builder.workflow_run_id(r);
+        }
+        let new = builder.build().unwrap();
+        Agent::try_from_events(new.into_events()).unwrap()
+    }
+
+    #[test]
+    fn user_owned_agent_has_no_workflow_refs() {
+        let agent = build(None, None);
+        assert!(agent.workflow_id.is_none());
+        assert!(agent.workflow_run_id.is_none());
+    }
+
+    #[test]
+    fn workflow_agent_carries_both_refs() {
+        let wf = WorkflowDefinitionId::new();
+        let run = WorkflowRunId::new();
+        let agent = build(Some(wf), Some(run));
+        assert_eq!(agent.workflow_id, Some(wf));
+        assert_eq!(agent.workflow_run_id, Some(run));
     }
 }

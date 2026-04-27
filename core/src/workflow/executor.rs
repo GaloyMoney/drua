@@ -56,6 +56,7 @@ pub async fn execute_run(
     }
 
     let workspace_id = run.workspace_id;
+    let workflow_id = run.definition_id;
     let trigger_context = run.trigger_context.clone();
     let steps = run.steps_snapshot.clone();
 
@@ -78,6 +79,7 @@ pub async fn execute_run(
             &skills,
             &sandboxes,
             workspace_id,
+            workflow_id,
             run_id,
             step,
             &trigger_context,
@@ -121,11 +123,13 @@ fn step_results_have_failure(run: &WorkflowRun) -> bool {
     run.step_results.iter().any(|r| r.error.is_some())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_step(
     agents: &Agents,
     skills: &Skills,
     sandboxes: &Sandboxes,
     workspace_id: WorkspaceId,
+    workflow_id: WorkflowDefinitionId,
     run_id: WorkflowRunId,
     step: &WorkflowStepDef,
     trigger_context: &serde_json::Value,
@@ -168,11 +172,27 @@ async fn execute_step(
                 .map_err(|e| WorkflowError::Skill(e.to_string()))?
                 .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
 
-            // Spawn a transient agent in the workspace. We reuse the
-            // same system-level subject as the sandbox lookup above.
+            // Spawn an agent owned by this workflow run. The
+            // `(workflow_id, workflow_run_id)` stamp keeps it out of
+            // the default workspace agent listing — see
+            // `Agents::list_for_workspace`.
             let agent_name = format!("workflow-{}-{}", run_id, name);
+            let mut op = agents
+                .begin_op()
+                .await
+                .map_err(|e| WorkflowError::Agent(e.to_string()))?;
             let agent = agents
-                .create_agent(&system_subject, workspace_id, &agent_name, attach_sandbox)
+                .create_for_workflow_run_in_op(
+                    &mut op,
+                    workspace_id,
+                    workflow_id,
+                    run_id,
+                    &agent_name,
+                    attach_sandbox,
+                )
+                .await
+                .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+            op.commit()
                 .await
                 .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 

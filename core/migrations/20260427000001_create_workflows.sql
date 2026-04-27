@@ -38,3 +38,20 @@ CREATE TABLE IF NOT EXISTS workflow_run_events (
     recorded_at TIMESTAMPTZ NOT NULL,
     UNIQUE(id, sequence)
 );
+
+-- Workflow-spawned agents are tracked via two nullable refs on the
+-- existing agents table (NULL == user-owned). Both columns are populated
+-- together — workflow_run_id without workflow_id makes no sense — but we
+-- don't enforce that with a CHECK constraint to keep the schema simple.
+ALTER TABLE agents ADD COLUMN workflow_id UUID NULL REFERENCES workflow_definitions(id);
+ALTER TABLE agents ADD COLUMN workflow_run_id UUID NULL REFERENCES workflow_runs(id);
+
+-- Hot path: `Agents::list_for_workspace` filters out workflow-owned
+-- agents so they don't pollute the user's workspace agent list. A
+-- partial index keeps that listing fast as workflow runs accumulate.
+CREATE INDEX idx_agents_workspace_id_user_owned
+    ON agents(workspace_id, created_at DESC)
+    WHERE workflow_id IS NULL;
+
+-- For drilling into the agents owned by a specific workflow run.
+CREATE INDEX idx_agents_workflow_run_id ON agents(workflow_run_id) WHERE workflow_run_id IS NOT NULL;

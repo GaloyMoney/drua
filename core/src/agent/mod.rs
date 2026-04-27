@@ -26,7 +26,7 @@ use tracing::instrument;
 
 use crate::primitives::{
     AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, ContextGeneration,
-    SandboxId, WorkspaceId,
+    SandboxId, WorkflowDefinitionId, WorkflowRunId, WorkspaceId,
 };
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ModelDefaults, RoleConfig};
@@ -148,6 +148,12 @@ impl Agents {
         &self.skills
     }
 
+    /// Compose `*_in_op` agent methods with caller-driven writes (e.g. the
+    /// workflow executor stamping a new agent inside a workflow run).
+    pub async fn begin_op(&self) -> Result<es_entity::DbOp<'_>, sqlx::Error> {
+        self.repo.begin_op().await
+    }
+
     #[instrument(name = "domain.agent.create_workspace_lead", skip(self, sub))]
     pub async fn create_workspace_lead(
         &self,
@@ -171,6 +177,8 @@ impl Agents {
                 name,
                 None,
                 workspace_name,
+                None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -202,10 +210,45 @@ impl Agents {
                 name,
                 attach_sandbox,
                 &workspace_name,
+                None,
+                None,
             )
             .await?;
         op.commit().await?;
         Ok(agent)
+    }
+
+    /// Stamps `(workflow_id, workflow_run_id)` so the agent is excluded
+    /// from [`Self::list_for_workspace`] and surfaced through
+    /// [`Self::list_for_workflow_run`]. Caller commits the op.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
+    pub async fn create_for_workflow_run_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+        workflow_id: WorkflowDefinitionId,
+        workflow_run_id: WorkflowRunId,
+        name: impl Into<String> + std::fmt::Debug,
+        attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+    ) -> Result<Agent, AgentError> {
+        Audit::record_action_if_unset("agent.create_for_workflow_run");
+        Audit::record_workspace_id(workspace_id);
+        let workspace_name = self.resolve_workspace_name(workspace_id).await?;
+        let id = AgentId::new();
+        Audit::record_agent_id(id);
+        self.create_in_op(
+            op,
+            id,
+            workspace_id,
+            AgentRole::Agent,
+            name,
+            attach_sandbox,
+            &workspace_name,
+            Some(workflow_id),
+            Some(workflow_run_id),
+        )
+        .await
     }
 
     async fn resolve_workspace_name(
@@ -251,10 +294,14 @@ impl Agents {
             name,
             None,
             workspace_name,
+            None,
+            None,
         )
         .await
     }
 
+    /// `workflow_id` / `workflow_run_id` are set/unset together;
+    /// user-created agents pass `None` for both.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
     async fn create_in_op(
@@ -266,6 +313,8 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
         workspace_name: &str,
+        workflow_id: Option<WorkflowDefinitionId>,
+        workflow_run_id: Option<WorkflowRunId>,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -282,15 +331,21 @@ impl Agents {
 
         let authz_scopes = default_authz_scopes(agent_role, workspace_id);
 
-        let new_agent = NewAgent::builder()
+        let mut new_agent_builder = NewAgent::builder();
+        new_agent_builder
             .id(id)
             .workspace_id(workspace_id)
             .agent_role(agent_role)
             .name(name)
             .authz_scopes(authz_scopes)
-            .workspace_name(workspace_name)
-            .build()
-            .expect("NewAgent build");
+            .workspace_name(workspace_name);
+        if let Some(wf_id) = workflow_id {
+            new_agent_builder.workflow_id(wf_id);
+        }
+        if let Some(run_id) = workflow_run_id {
+            new_agent_builder.workflow_run_id(run_id);
+        }
+        let new_agent = new_agent_builder.build().expect("NewAgent build");
 
         let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
@@ -383,6 +438,14 @@ impl Agents {
         Ok(agent)
     }
 
+    /// List user-owned agents in a workspace.
+    ///
+    /// Workflow-spawned agents (those with [`Agent::workflow_id`] set)
+    /// are filtered out — they belong to a specific workflow run, not
+    /// to the workspace's free-agent pool, and surfacing them in the
+    /// default listing would drown out the agents the user actually
+    /// cares about. Use [`Self::list_for_workflow_run`] to retrieve
+    /// the agents owned by a specific run.
     #[instrument(name = "domain.agent.list_for_workspace", skip(self, sub))]
     pub async fn list_for_workspace(
         &self,
@@ -402,6 +465,42 @@ impl Agents {
                 workspace_id,
                 query,
                 es_entity::ListDirection::Descending,
+            )
+            .await?;
+        // The partial index `idx_agents_workspace_id_user_owned` covers
+        // this filter so it stays cheap as workflow runs accumulate.
+        Ok(result
+            .entities
+            .into_iter()
+            .filter(|a| a.workflow_id.is_none())
+            .collect())
+    }
+
+    /// List agents owned by a specific workflow run.
+    ///
+    /// `workspace_id` is required so the auth check can be scoped to
+    /// the run's workspace — the caller (typically the workflow
+    /// service) already has it from the loaded `WorkflowRun`.
+    #[instrument(name = "domain.agent.list_for_workflow_run", skip(self, sub))]
+    pub async fn list_for_workflow_run(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        run_id: WorkflowRunId,
+    ) -> Result<Vec<Agent>, AgentError> {
+        sub.can(AuthVerb::Read, AuthResource::Agent(workspace_id, None))?;
+        Audit::record_action_if_unset("agent.list_for_workflow_run");
+        Audit::record_workspace_id(workspace_id);
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workflow_run_id_by_created_at(
+                Some(run_id),
+                query,
+                es_entity::ListDirection::Ascending,
             )
             .await?;
         Ok(result.entities)

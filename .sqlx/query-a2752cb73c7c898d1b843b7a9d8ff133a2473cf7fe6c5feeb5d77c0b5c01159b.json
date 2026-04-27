@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM jobs WHERE (NOT $1 OR parent_job_id IS NOT DISTINCT FROM $2) AND (COALESCE(id > $4, true)) ORDER BY id ASC LIMIT $3) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN job_events e ON i.id = e.id ORDER BY i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT workflow_run_id, created_at, id FROM agents WHERE ((workflow_run_id IS NOT DISTINCT FROM $1) AND (COALESCE((created_at, id) > ($4, $3), $3 IS NULL))) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN agent_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,10 +31,10 @@
     ],
     "parameters": {
       "Left": [
-        "Bool",
         "Uuid",
         "Int8",
         "Uuid",
+        "Timestamptz",
         "Bool"
       ]
     },
@@ -46,5 +46,5 @@
       false
     ]
   },
-  "hash": "6c430bf212e5798b04acd38dc841d6a33a829dbacb73d8608572f365d246f08a"
+  "hash": "a2752cb73c7c898d1b843b7a9d8ff133a2473cf7fe6c5feeb5d77c0b5c01159b"
 }
