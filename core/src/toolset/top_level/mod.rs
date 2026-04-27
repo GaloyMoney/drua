@@ -84,10 +84,47 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
+// ---------------------------------------------------------------------------
+// Shared output shape structs
+//
+// Dual-purpose: schemars derives the JSON Schema for `output_schema()`,
+// serde::Serialize produces `structured_content` at call time.
+// Re-used across tools that share the same output shape.
+// ---------------------------------------------------------------------------
+
+/// Single `output` string — used by bash, grep, text_editor.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct TextOutput {
+    /// Tool output text.
+    pub output: String,
+}
+
+/// File content string — used by read.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct ContentOutput {
+    /// File content (with line numbers if applicable).
+    pub content: String,
+}
+
+/// Array of file paths — used by glob.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct FilesOutput {
+    /// Matching file paths.
+    pub files: Vec<String>,
+}
+
+/// Array of directory entries — used by ls.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct EntriesOutput {
+    /// Directory entries (directories have trailing '/').
+    pub entries: Vec<String>,
+}
+
 mod agent;
 mod bash;
 mod catalog;
 mod compose;
+mod compose_types;
 mod glob;
 mod grep;
 mod log;
@@ -103,6 +140,7 @@ pub use agent::WorkspaceAgent;
 pub use bash::Bash;
 pub use catalog::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
 pub use compose::ComposeTool;
+pub use compose_types::ComposeTypes;
 pub use glob::GlobTool;
 pub use grep::Grep;
 pub use log::WorkspaceLog;

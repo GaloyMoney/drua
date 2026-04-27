@@ -109,6 +109,7 @@ impl OutputFilter {
         let output = filtered.join("\n");
         let mut filtered_result = CallToolResult::success(vec![Content::text(output)]);
         filtered_result.is_error = result.is_error;
+        filtered_result.structured_content = result.structured_content;
         Ok(filtered_result)
     }
 }

@@ -26,6 +26,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{schema_for, TextOutput};
 
 pub struct TextEditor {
     sandboxes: Arc<Sandboxes>,
@@ -36,6 +37,9 @@ impl TextEditor {
         Self { sandboxes }
     }
 }
+
+static TEXT_EDITOR_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<TextOutput>);
 
 static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     // Single object with the union of fields across all four commands.
@@ -117,6 +121,10 @@ impl TopLevelTool for TextEditor {
         &TEXT_EDITOR_SCHEMA
     }
 
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&TEXT_EDITOR_OUTPUT_SCHEMA)
+    }
+
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs: workspace admins don't run inside sandboxes, hide it.
         subject.is_agent() && !subject.is_workspace_admin()
@@ -165,12 +173,18 @@ impl TopLevelTool for TextEditor {
         // gets from Anthropic's built-in editor.
         match client.execute(&req).await {
             Ok(resp) => {
-                let content = vec![Content::text(resp.output)];
-                if resp.is_error {
-                    Ok(CallToolResult::error(content))
+                let out = TextOutput {
+                    output: resp.output,
+                };
+                let structured = serde_json::to_value(&out).expect("TextOutput serialization");
+                let content = vec![Content::text(&out.output)];
+                let mut result = if resp.is_error {
+                    CallToolResult::error(content)
                 } else {
-                    Ok(CallToolResult::success(content))
-                }
+                    CallToolResult::success(content)
+                };
+                result.structured_content = Some(structured);
+                Ok(result)
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

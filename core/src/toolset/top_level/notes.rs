@@ -12,7 +12,7 @@ use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::parse_params;
+use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
 // Params
@@ -74,6 +74,45 @@ impl NotesParams {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Output shapes (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+/// Union output for all notes subcommands.  Only `command` is required;
+/// the other fields are populated per subcommand.
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+struct NotesOutput {
+    /// The command that was executed.
+    command: String,
+    /// Note UUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    /// Full note content (get) or confirmation text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pinned: Option<bool>,
+    /// Search/list results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    results: Option<Vec<NoteResultOutput>>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct NoteResultOutput {
+    note_id: String,
+    title: String,
+    preview: String,
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<f64>,
+}
+
+static NOTES_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<NotesOutput>);
 
 static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -166,6 +205,10 @@ impl TopLevelTool for NotesTool {
         &NOTES_SCHEMA
     }
 
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&NOTES_OUTPUT_SCHEMA)
+    }
+
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         subject.workspace_id().is_some()
     }
@@ -180,7 +223,7 @@ impl TopLevelTool for NotesTool {
 
         Audit::record_action(format!("notes.{}", params.command_name()));
 
-        match params {
+        let (text, out) = match params {
             NotesParams::Store {
                 title,
                 content,
@@ -207,9 +250,15 @@ impl TopLevelTool for NotesTool {
                 } else {
                     "created"
                 };
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Note {action}.\n{note}"
-                ))]))
+                let text = format!("Note {action}.\n{note}");
+                let out = NotesOutput {
+                    command: action.to_string(),
+                    note_id: Some(note.id.to_string()),
+                    title: Some(note.title.clone()),
+                    tags: Some(note.tags.clone()),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
             NotesParams::Get { note_id } => {
@@ -219,7 +268,16 @@ impl TopLevelTool for NotesTool {
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                Ok(CallToolResult::success(vec![Content::text(note.content())]))
+                let text = note.content().to_string();
+                let out = NotesOutput {
+                    command: "get".to_string(),
+                    note_id: Some(note.id.to_string()),
+                    title: Some(note.title.clone()),
+                    content: Some(note.content.clone()),
+                    tags: Some(note.tags.clone()),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
             NotesParams::Search { query, limit } => {
@@ -229,21 +287,33 @@ impl TopLevelTool for NotesTool {
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                if results.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "No notes found matching your query.",
-                    )]));
-                }
-
-                let text = results
-                    .iter()
-                    .map(|r| r.to_string())
-                    .collect::<Vec<_>>()
-                    .join("---\n");
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Found {} note(s):\n\n{text}",
-                    results.len(),
-                ))]))
+                let text = if results.is_empty() {
+                    "No notes found matching your query.".to_string()
+                } else {
+                    let body = results
+                        .iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join("---\n");
+                    format!("Found {} note(s):\n\n{body}", results.len())
+                };
+                let out = NotesOutput {
+                    command: "search".to_string(),
+                    results: Some(
+                        results
+                            .iter()
+                            .map(|r| NoteResultOutput {
+                                note_id: r.doc_id.to_string(),
+                                title: r.title.clone(),
+                                preview: r.content.chars().take(200).collect(),
+                                tags: r.tags.clone(),
+                                score: Some(r.score),
+                            })
+                            .collect(),
+                    ),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
             NotesParams::Pin { note_id } => {
@@ -252,9 +322,15 @@ impl TopLevelTool for NotesTool {
                     .pin(subject, workspace_id, note_id)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Note pinned.\n{note}"
-                ))]))
+                let text = format!("Note pinned.\n{note}");
+                let out = NotesOutput {
+                    command: "pin".to_string(),
+                    note_id: Some(note.id.to_string()),
+                    title: Some(note.title.clone()),
+                    pinned: Some(true),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
             NotesParams::Unpin { note_id } => {
@@ -263,9 +339,15 @@ impl TopLevelTool for NotesTool {
                     .unpin(subject, workspace_id, note_id)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Note unpinned.\n{note}"
-                ))]))
+                let text = format!("Note unpinned.\n{note}");
+                let out = NotesOutput {
+                    command: "unpin".to_string(),
+                    note_id: Some(note.id.to_string()),
+                    title: Some(note.title.clone()),
+                    pinned: Some(false),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
             NotesParams::List { limit } => {
@@ -275,24 +357,42 @@ impl TopLevelTool for NotesTool {
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                if notes.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "No notes in this workspace yet.",
-                    )]));
-                }
-
                 let results: Vec<SearchResult> =
                     notes.into_iter().map(SearchResult::from).collect();
-                let text = results
-                    .iter()
-                    .map(|r| r.to_string())
-                    .collect::<Vec<_>>()
-                    .join("---\n");
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "{} note(s):\n\n{text}",
-                    results.len(),
-                ))]))
+
+                let text = if results.is_empty() {
+                    "No notes in this workspace yet.".to_string()
+                } else {
+                    let body = results
+                        .iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join("---\n");
+                    format!("{} note(s):\n\n{body}", results.len())
+                };
+                let out = NotesOutput {
+                    command: "list".to_string(),
+                    results: Some(
+                        results
+                            .iter()
+                            .map(|r| NoteResultOutput {
+                                note_id: r.doc_id.to_string(),
+                                title: r.title.clone(),
+                                preview: r.content.chars().take(200).collect(),
+                                tags: r.tags.clone(),
+                                score: None,
+                            })
+                            .collect(),
+                    ),
+                    ..Default::default()
+                };
+                (text, out)
             }
-        }
+        };
+
+        let structured = serde_json::to_value(&out).expect("NotesOutput serialization");
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(structured);
+        Ok(result)
     }
 }

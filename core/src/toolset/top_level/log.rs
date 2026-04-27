@@ -100,6 +100,73 @@ impl WorkspaceLog {
 static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<AuditLogParams>);
 
+// ---------------------------------------------------------------------------
+// Output shapes (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AuditLogOutput {
+    /// Audit log entries (most recent first).
+    entries: Vec<AuditEntryOutput>,
+    /// Number of entries returned.
+    count: usize,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AuditEntryOutput {
+    id: i64,
+    /// ISO 8601 timestamp.
+    recorded_at: String,
+    interaction_type: String,
+    entrypoint: String,
+    action: String,
+    outcome: String,
+    /// Whether this entry was an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<bool>,
+    duration_ms: Option<i64>,
+    /// Acting user UUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acting_user_id: Option<String>,
+    /// Acting agent UUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acting_agent_id: Option<String>,
+    /// User on whose behalf the agent acted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of_user_id: Option<String>,
+    /// Resource IDs involved (workspace_id, sandbox_id, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_ids: Option<serde_json::Value>,
+}
+
+impl From<&AuditEntry> for AuditEntryOutput {
+    fn from(e: &AuditEntry) -> Self {
+        let resource_ids = match &e.resource_ids {
+            serde_json::Value::Object(m) if !m.is_empty() => {
+                Some(serde_json::Value::Object(m.clone()))
+            }
+            _ => None,
+        };
+        Self {
+            id: i64::from(e.id),
+            recorded_at: e.recorded_at.to_rfc3339(),
+            interaction_type: e.interaction_type.clone(),
+            entrypoint: e.entrypoint.clone().unwrap_or_default(),
+            action: e.action.clone(),
+            outcome: e.outcome.clone(),
+            error: e.error,
+            duration_ms: e.duration_ms,
+            acting_user_id: e.acting_user_id.map(|id| id.to_string()),
+            acting_agent_id: e.acting_agent_id.map(|id| id.to_string()),
+            on_behalf_of_user_id: e.on_behalf_of_user_id.map(|id| id.to_string()),
+            resource_ids,
+        }
+    }
+}
+
+static WORKSPACE_LOG_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<AuditLogOutput>);
+
 #[async_trait::async_trait]
 impl TopLevelTool for WorkspaceLog {
     fn name(&self) -> &str {
@@ -113,6 +180,10 @@ impl TopLevelTool for WorkspaceLog {
 
     fn input_schema(&self) -> &serde_json::Value {
         &WORKSPACE_LOG_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&WORKSPACE_LOG_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -134,9 +205,15 @@ impl TopLevelTool for WorkspaceLog {
 
         let entries = self.audit.find(&query).await?;
 
-        Ok(CallToolResult::success(vec![Content::text(
-            format_entries(&entries),
-        )]))
+        let out = AuditLogOutput {
+            count: entries.len(),
+            entries: entries.iter().map(AuditEntryOutput::from).collect(),
+        };
+        let structured = serde_json::to_value(&out).expect("AuditLogOutput serialization");
+
+        let mut result = CallToolResult::success(vec![Content::text(format_entries(&entries))]);
+        result.structured_content = Some(structured);
+        Ok(result)
     }
 }
 

@@ -15,6 +15,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::{schema_for, FilesOutput};
 
 pub struct GlobTool {
     sandboxes: Arc<Sandboxes>,
@@ -25,6 +26,8 @@ impl GlobTool {
         Self { sandboxes }
     }
 }
+
+static GLOB_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<FilesOutput>);
 
 static GLOB_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -60,6 +63,10 @@ impl TopLevelTool for GlobTool {
         &GLOB_SCHEMA
     }
 
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&GLOB_OUTPUT_SCHEMA)
+    }
+
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // Hidden from workspace admins — see bash.rs.
         subject.is_agent() && !subject.is_workspace_admin()
@@ -89,12 +96,23 @@ impl TopLevelTool for GlobTool {
 
         match client.execute(&req).await {
             Ok(resp) => {
+                let out = FilesOutput {
+                    files: resp
+                        .output
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect(),
+                };
+                let structured = serde_json::to_value(&out).expect("FilesOutput serialization");
                 let content = vec![Content::text(resp.output)];
-                if resp.is_error {
-                    Ok(CallToolResult::error(content))
+                let mut result = if resp.is_error {
+                    CallToolResult::error(content)
                 } else {
-                    Ok(CallToolResult::success(content))
-                }
+                    CallToolResult::success(content)
+                };
+                result.structured_content = Some(structured);
+                Ok(result)
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

@@ -17,7 +17,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{parse_params, schema_for};
+use super::{parse_params, schema_for, ContentOutput};
 
 // ---------------------------------------------------------------------------
 // Params
@@ -51,6 +51,8 @@ impl Read {
 
 static READ_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ReadParams>);
 
+static READ_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ContentOutput>);
+
 #[async_trait::async_trait]
 impl TopLevelTool for Read {
     fn name(&self) -> &str {
@@ -64,6 +66,10 @@ impl TopLevelTool for Read {
 
     fn input_schema(&self) -> &serde_json::Value {
         &READ_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&READ_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -112,12 +118,18 @@ impl TopLevelTool for Read {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let content = vec![Content::text(resp.output)];
-                if resp.is_error {
-                    Ok(CallToolResult::error(content))
+                let out = ContentOutput {
+                    content: resp.output,
+                };
+                let structured = serde_json::to_value(&out).expect("ContentOutput serialization");
+                let content = vec![Content::text(&out.content)];
+                let mut result = if resp.is_error {
+                    CallToolResult::error(content)
                 } else {
-                    Ok(CallToolResult::success(content))
-                }
+                    CallToolResult::success(content)
+                };
+                result.structured_content = Some(structured);
+                Ok(result)
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

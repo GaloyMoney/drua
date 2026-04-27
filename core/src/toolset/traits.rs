@@ -44,10 +44,25 @@ pub trait TopLevelTool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> &serde_json::Value;
 
+    /// Optional JSON Schema declaring the structure of this tool's output.
+    /// When present the MCP gateway includes it in the tool definition and
+    /// the tool MUST return `structured_content` in its `CallToolResult`.
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        None
+    }
+
     /// Whether this tool should appear in `list_tools` / prompt tool arrays
     /// for the given subject. Default: always visible. Override to hide a
     /// tool (e.g. admin-only controls) without blocking execution.
     fn is_visible(&self, _subject: &AuthSubject) -> bool {
+        true
+    }
+
+    /// Whether this tool can be called from within a `compose` script.
+    /// Default: `true`. Override to `false` to prevent recursive dispatch
+    /// (compose itself), or to exclude tools whose execution model is
+    /// incompatible with compose (agent, use_skill, sandbox).
+    fn composable(&self) -> bool {
         true
     }
 

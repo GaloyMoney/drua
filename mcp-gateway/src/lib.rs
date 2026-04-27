@@ -80,10 +80,15 @@ fn to_mcp_tool(tool: &(dyn TopLevelTool + '_)) -> Tool {
         // returns something else.
         _ => serde_json::Map::new(),
     };
+    let output_schema = tool.output_schema().and_then(|v| match v {
+        serde_json::Value::Object(map) => Some(Arc::new(map.clone())),
+        _ => None,
+    });
     let mut t = Tool::default();
     t.name = tool.name().to_string().into();
     t.description = Some(tool.description().to_string().into());
     t.input_schema = Arc::new(input_schema);
+    t.output_schema = output_schema;
     t
 }
 
