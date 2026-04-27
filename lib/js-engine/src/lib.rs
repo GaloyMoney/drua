@@ -8,6 +8,7 @@ mod error;
 
 pub use error::JsEngineError;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,6 +52,11 @@ pub struct JsEngine {
     /// agent context stays clean; compose's job is to shrink large tool
     /// results into small agent-readable answers.
     max_return_bytes: usize,
+    /// Cap on the console buffer in bytes. Drops oldest entries (tail
+    /// truncation) when exceeded. Console is a debug sidecar, not primary
+    /// output — kept small so a runaway log loop can never flood the agent
+    /// context. Memory is bounded *during* execution, not just at the end.
+    max_console_bytes: usize,
 }
 
 impl Default for JsEngine {
@@ -67,6 +73,7 @@ impl JsEngine {
             max_tool_calls: 50,
             max_tool_result_bytes: 4 * 1024 * 1024, // 4 MB per inner tool result
             max_return_bytes: 100 * 1024,           // 100 KB final return
+            max_console_bytes: 8 * 1024,            // 8 KB console tail (~2k tokens)
         }
     }
 
@@ -84,6 +91,13 @@ impl JsEngine {
     /// Set the cap on the script's final return value (in bytes).
     pub fn with_max_return_bytes(mut self, n: usize) -> Self {
         self.max_return_bytes = n;
+        self
+    }
+
+    /// Set the cap on the console buffer (in bytes). When exceeded, oldest
+    /// entries are dropped (tail truncation) and a marker line is prepended.
+    pub fn with_max_console_bytes(mut self, n: usize) -> Self {
+        self.max_console_bytes = n;
         self
     }
 
@@ -110,10 +124,11 @@ impl JsEngine {
         let max_return_bytes = self.max_return_bytes;
         let memory_limit = self.memory_limit;
         let stack_limit = self.stack_limit;
+        let max_console_bytes = self.max_console_bytes;
 
         // Shared state between Rust host and JS guest
-        let console_buf: Arc<std::sync::Mutex<Vec<String>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let console_buf: Arc<std::sync::Mutex<ConsoleBuf>> =
+            Arc::new(std::sync::Mutex::new(ConsoleBuf::new(max_console_bytes)));
         let tool_call_count = Arc::new(AtomicUsize::new(0));
         let timed_out = Arc::new(AtomicBool::new(false));
 
@@ -241,7 +256,9 @@ impl JsEngine {
             });
         }
 
-        let console_output = console_buf.lock().unwrap().clone();
+        // Drain the ring buffer into a Vec, prepending the dropped-line
+        // marker if any entries were truncated.
+        let console_output = console_buf.lock().unwrap().snapshot();
         let tool_calls_made = tool_call_count.load(Ordering::Relaxed);
 
         Ok(ExecutionResult {
@@ -255,52 +272,186 @@ impl JsEngine {
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+/// Bounded ring buffer for console output. Drops the oldest entries (tail
+/// truncation) when total bytes exceed `max_bytes`. Tracks how many were
+/// dropped so a marker line can be emitted when the buffer is read.
+///
+/// Tail truncation (not head): the last log lines carry the most signal
+/// — final state on success, the operation just before a crash on failure.
+/// Mirrors the convention of every other log handler in the codebase.
+struct ConsoleBuf {
+    lines: VecDeque<String>,
+    bytes: usize,
+    dropped: usize,
+    max_bytes: usize,
+}
+
+impl ConsoleBuf {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            lines: VecDeque::new(),
+            bytes: 0,
+            dropped: 0,
+            max_bytes,
+        }
+    }
+
+    fn push(&mut self, msg: String) {
+        let added = msg.len() + 1; // +1 for the implicit newline between lines
+        self.bytes += added;
+        self.lines.push_back(msg);
+
+        // Drop oldest until we fit. Always keep at least one line so the
+        // most recent push is never the one we drop (a single oversized
+        // line is preferable to silently dropping it).
+        while self.bytes > self.max_bytes && self.lines.len() > 1 {
+            if let Some(oldest) = self.lines.pop_front() {
+                self.bytes -= oldest.len() + 1;
+                self.dropped += 1;
+            }
+        }
+    }
+
+    /// Snapshot the buffer into a Vec (without consuming). Prepends a
+    /// `[... N earlier lines dropped]` marker if any entries were dropped.
+    fn snapshot(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.lines.iter().cloned().collect();
+        if self.dropped > 0 {
+            out.insert(0, format!("[... {} earlier lines dropped]", self.dropped));
+        }
+        out
+    }
+}
+
 /// Register `console.log`, `console.warn`, `console.error`, `console.info`
-/// as native functions that capture output to a shared buffer.
+/// as native functions that capture output to a shared bounded ring buffer.
+///
+/// All four methods accept arbitrary JS values (strings, numbers, booleans,
+/// null, undefined, functions, objects, arrays). Values are stringified per
+/// real JS-runtime semantics — strings unquoted, primitives via their
+/// natural representation, objects/arrays via `JSON.stringify`, circular
+/// references gracefully fall back to `[Circular]`. Arguments are joined
+/// with a single space. Never throws on the value side.
 fn register_console(
     ctx: &rquickjs::Ctx<'_>,
-    buf: Arc<std::sync::Mutex<Vec<String>>>,
+    buf: Arc<std::sync::Mutex<ConsoleBuf>>,
 ) -> Result<(), rquickjs::Error> {
     let console = Object::new(ctx.clone())?;
+
+    // Helper function: takes Ctx + Rest with the same 'js lifetime, forcing
+    // the calling closure to unify them (closure literals would otherwise
+    // assign separate anonymous lifetimes per parameter).
+    fn log_with<'js>(
+        ctx: rquickjs::Ctx<'js>,
+        args: Rest<rquickjs::Value<'js>>,
+        prefix: &str,
+        buf: &std::sync::Mutex<ConsoleBuf>,
+    ) {
+        let msg = format_console_args(&ctx, &args.0, prefix);
+        buf.lock().unwrap().push(msg);
+    }
 
     let b = Arc::clone(&buf);
     console.set(
         "log",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = args.0.join(" ");
-            b.lock().unwrap().push(msg);
-        })?,
+        Function::new(ctx.clone(), move |ctx, args| log_with(ctx, args, "", &b))?,
     )?;
 
     let b = Arc::clone(&buf);
     console.set(
         "info",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = args.0.join(" ");
-            b.lock().unwrap().push(msg);
-        })?,
+        Function::new(ctx.clone(), move |ctx, args| log_with(ctx, args, "", &b))?,
     )?;
 
     let b = Arc::clone(&buf);
     console.set(
         "warn",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = format!("[WARN] {}", args.0.join(" "));
-            b.lock().unwrap().push(msg);
+        Function::new(ctx.clone(), move |ctx, args| {
+            log_with(ctx, args, "[WARN]", &b)
         })?,
     )?;
 
     let b = Arc::clone(&buf);
     console.set(
         "error",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = format!("[ERROR] {}", args.0.join(" "));
-            b.lock().unwrap().push(msg);
+        Function::new(ctx.clone(), move |ctx, args| {
+            log_with(ctx, args, "[ERROR]", &b)
         })?,
     )?;
 
     ctx.globals().set("console", console)?;
     Ok(())
+}
+
+/// Stringify each console arg, join with single space, prefix optional.
+fn format_console_args<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    args: &[rquickjs::Value<'js>],
+    prefix: &str,
+) -> String {
+    let parts: Vec<String> = args.iter().map(|v| console_arg_to_string(ctx, v)).collect();
+    let joined = parts.join(" ");
+    if prefix.is_empty() {
+        joined
+    } else {
+        format!("{prefix} {joined}")
+    }
+}
+
+/// Coerce a single JS value to its console-friendly string representation,
+/// matching real JS-runtime semantics (strings unquoted, objects via JSON,
+/// circular references → `[Circular]`).
+fn console_arg_to_string<'js>(ctx: &rquickjs::Ctx<'js>, v: &rquickjs::Value<'js>) -> String {
+    if v.is_undefined() {
+        return "undefined".into();
+    }
+    if v.is_null() {
+        return "null".into();
+    }
+    if v.is_bool() {
+        return v
+            .as_bool()
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "false".into());
+    }
+    if v.is_string() {
+        return v
+            .as_string()
+            .and_then(|s| s.to_string().ok())
+            .unwrap_or_default();
+    }
+    if v.is_number() {
+        // Covers both int and float tags. Special-case ±Infinity to match
+        // JS output (Rust's f64::Display writes "inf"/"-inf").
+        let n = v.as_number().unwrap_or(0.0);
+        if n.is_infinite() {
+            return if n.is_sign_negative() {
+                "-Infinity".into()
+            } else {
+                "Infinity".into()
+            };
+        }
+        return n.to_string();
+    }
+    if v.is_function() {
+        return "[Function]".into();
+    }
+    if v.is_symbol() {
+        return "[Symbol]".into();
+    }
+    // Objects, arrays — stringify via JSON. Circular references make
+    // JSON.stringify throw a TypeError; fall back gracefully so console
+    // calls never abort the script.
+    json_stringify(ctx, v).unwrap_or_else(|_| "[Circular]".into())
+}
+
+fn json_stringify<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    v: &rquickjs::Value<'js>,
+) -> rquickjs::Result<String> {
+    let json: Object = ctx.globals().get("JSON")?;
+    let stringify: Function = json.get("stringify")?;
+    stringify.call((v.clone(),))
 }
 
 /// Register `__call_tool_raw(name, args_json)` → Promise<string> as the
@@ -522,6 +673,172 @@ mod tests {
             result.console_output,
             vec!["hello", "[WARN] careful", "[ERROR] oops"]
         );
+    }
+
+    #[tokio::test]
+    async fn console_log_accepts_objects() {
+        let result = engine()
+            .execute(
+                r#"console.log("build:", { id: 5905454, status: "failed" }); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.console_output.len(), 1);
+        assert!(result.console_output[0].starts_with("build: "));
+        assert!(result.console_output[0].contains("\"id\":5905454"));
+        assert!(result.console_output[0].contains("\"status\":\"failed\""));
+    }
+
+    #[tokio::test]
+    async fn console_log_accepts_mixed_types() {
+        let result = engine()
+            .execute(
+                r#"console.log("count:", 42, true, null, undefined); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.console_output, vec!["count: 42 true null undefined"]);
+    }
+
+    #[tokio::test]
+    async fn console_log_accepts_arrays() {
+        let result = engine()
+            .execute(
+                r#"console.log("ids:", [1, 2, 3]); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.console_output, vec!["ids: [1,2,3]"]);
+    }
+
+    #[tokio::test]
+    async fn console_log_handles_circular_reference() {
+        let result = engine()
+            .execute(
+                r#"const a = {}; a.self = a; console.log(a); return "ok";"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value, serde_json::json!("ok"));
+        // Should not have aborted — circular reference handled gracefully
+        assert!(!result.console_output.is_empty());
+        assert_eq!(result.console_output[0], "[Circular]");
+    }
+
+    #[tokio::test]
+    async fn console_warn_keeps_prefix_with_object_arg() {
+        let result = engine()
+            .execute(
+                r#"console.warn("careful:", { issue: "x" }); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert!(result.console_output[0].starts_with("[WARN] careful: "));
+        assert!(result.console_output[0].contains("\"issue\":\"x\""));
+    }
+
+    #[tokio::test]
+    async fn console_buffer_truncates_to_tail() {
+        let engine = JsEngine::new().with_max_console_bytes(200);
+        let result = engine
+            .execute(
+                r#"
+                for (let i = 0; i < 100; i++) {
+                    console.log("line " + i);
+                }
+                return "done";
+                "#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        // First entry is the dropped-count marker
+        assert!(result.console_output[0].starts_with("[..."));
+        assert!(result.console_output[0].contains("dropped"));
+
+        // Last entry should be near the end of the loop, not the start —
+        // tail truncation keeps the most recent lines.
+        let last = result.console_output.last().unwrap();
+        assert!(last.starts_with("line 9"), "tail not preserved: {last}");
+    }
+
+    #[tokio::test]
+    async fn console_buffer_under_cap_no_marker() {
+        let result = engine()
+            .execute(
+                r#"
+                console.log("a");
+                console.log("b");
+                console.log("c");
+                return "done";
+                "#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        // No marker — all three short lines fit well under the 8 KB default.
+        assert_eq!(result.console_output, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn console_buffer_marker_reflects_drop_count() {
+        let engine = JsEngine::new().with_max_console_bytes(50);
+        let result = engine
+            .execute(
+                r#"
+                for (let i = 0; i < 20; i++) console.log("xxxxxxxxxx");
+                return "done";
+                "#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        // The first entry is the marker; the dropped count parsed out of it
+        // should reflect that most of the 20 lines were truncated.
+        let marker = &result.console_output[0];
+        assert!(marker.contains("dropped"), "no marker: {marker}");
+        let parsed: Option<usize> = marker.split_whitespace().find_map(|w| w.parse().ok());
+        assert!(
+            parsed.unwrap_or(0) > 10,
+            "expected >10 drops, got: {marker}"
+        );
+    }
+
+    #[tokio::test]
+    async fn console_buffer_keeps_at_least_one_line() {
+        // A single very large line should still appear. The ring buffer
+        // never drops to empty — preserving a single oversized line is
+        // strictly better than silently swallowing it.
+        let engine = JsEngine::new().with_max_console_bytes(10);
+        let result = engine
+            .execute(
+                r#"console.log("this is much longer than 10 bytes"); return "done";"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result
+            .console_output
+            .iter()
+            .any(|s| s.contains("longer than")));
     }
 
     #[tokio::test]

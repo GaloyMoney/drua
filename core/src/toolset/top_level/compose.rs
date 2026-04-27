@@ -158,6 +158,7 @@ impl TopLevelTool for ComposeTool {
             .with_max_tool_calls(self.config.max_tool_calls)
             .with_max_tool_result_bytes(self.config.max_tool_result_bytes)
             .with_max_return_bytes(self.config.max_return_bytes)
+            .with_max_console_bytes(self.config.max_console_bytes)
             .with_memory_limit(self.config.memory_limit_bytes)
             .with_stack_limit(self.config.stack_limit_bytes);
         let result = engine
