@@ -296,8 +296,9 @@ impl PromptDefinition {
         &self.system_view
     }
 
-    /// Read-only access to the prompt's message views. Used by callers
-    /// that need to inherit history (e.g. context refresh).
+    /// Read-only access to the prompt's message views. Used by tests and
+    /// by callers that need to inherit history (e.g. context refresh).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn messages(&self) -> &[MessageView] {
         &self.messages
     }

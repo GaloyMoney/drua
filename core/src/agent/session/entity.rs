@@ -251,23 +251,7 @@ impl AgentSession {
             });
             return self.build_prompt(target, prompt_definition);
         }
-        let mut thread_id = thread_id.unwrap();
-
-        // Lazy context refresh: if any system block kind has been updated
-        // since this thread captured its `SystemView`, spawn a fresh thread
-        // whose view points at the latest content for each kind. The new
-        // thread's prompt_definition is computed inline (it's still in
-        // `new_entities` so `get_persisted` won't find it yet); we use it
-        // directly to skip the normal lookup path below.
-        let refreshed: Option<PromptDefinition> = if matches!(target, TargetThread::Main)
-            && self.thread_has_stale_system_view(thread_id)
-        {
-            let (new_id, new_pd) = self.spawn_context_refreshed_thread(thread_id);
-            thread_id = new_id;
-            Some(new_pd)
-        } else {
-            None
-        };
+        let thread_id = thread_id.unwrap();
 
         // Collect pending BlockIndexes since last PromptSent for this thread (scan backwards)
         let total_blocks = self.events.iter_all().fold(0usize, |acc, e| match e {
@@ -314,24 +298,16 @@ impl AgentSession {
         }
         pending_indexes.reverse();
 
-        // Build prompt definition from current thread WITHOUT adding
-        // the new user messages to the thread yet. We augment the
-        // prompt_definition directly so compaction can see the full
-        // context, but the old thread won't carry the user message
-        // if compaction creates a new thread (avoiding duplication).
-        //
-        // If a context refresh just spawned a new thread, use its inline
-        // prompt_definition — `get_persisted` won't find it (still in
-        // `new_entities`) and there's no point compacting a fresh thread
-        // with no messages.
-        let mut prompt_definition = match refreshed {
-            Some(pd) => pd,
-            None => self
-                .threads
-                .get_persisted(&thread_id)
-                .ok_or(AgentSessionError::ThreadNotFound)?
-                .prompt_definition(),
-        };
+        // Build prompt definition from the current (still-old) thread and
+        // append the pending user messages. We augment the prompt_definition
+        // directly so compaction (and any context refresh below) sees the
+        // full context, but the old thread's event log is only updated with
+        // a UserTurn event when no new thread is spawned.
+        let mut prompt_definition = self
+            .threads
+            .get_persisted(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?
+            .prompt_definition();
 
         let pending_user_view = if !pending_indexes.is_empty() {
             let umv = UserMessagesView {
@@ -345,6 +321,23 @@ impl AgentSession {
             None
         };
 
+        // Lazy context refresh: spawn a fresh thread now that the augmented
+        // messages (history + pending user input) are assembled, so the
+        // refreshed thread inherits the COMPLETE conversation including the
+        // user turn that triggered this prompt. Without this, the refreshed
+        // thread's last inherited message would be the prior assistant
+        // response and hydration would set its turn to `User` — causing the
+        // upcoming assistant response to be rejected as `NotAssistantTurn`.
+        let (thread_id, prompt_definition) = if matches!(target, TargetThread::Main)
+            && self.thread_has_stale_system_view(thread_id)
+        {
+            let (new_id, new_pd) =
+                self.spawn_context_refreshed_thread(thread_id, prompt_definition.messages.clone());
+            (new_id, new_pd)
+        } else {
+            (thread_id, prompt_definition)
+        };
+
         // --- Compaction check ---
         // Compaction runs on the (possibly just-refreshed) thread. A
         // refresh inherits the prior thread's messages, so if those are
@@ -353,10 +346,12 @@ impl AgentSession {
         let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
             Some(result) => result, // user messages carried to compacted thread
             None => {
-                // No compaction — attach user messages to the existing
-                // thread's event stream when it lives in `entities`. New
-                // threads (in `new_entities`, e.g. just spawned by refresh)
-                // pick up pending inputs via the scan-back at next turn.
+                // No compaction — attach the pending user message to the
+                // current thread's event log when it lives in `entities`.
+                // For threads that were just spawned (refresh / compaction)
+                // and live in `new_entities`, the pending message is already
+                // baked into their `Initialized*` event so no UserTurn is
+                // needed.
                 if let Some(umv) = pending_user_view {
                     if let Some(thread) = self.threads.get_persisted_mut(&thread_id) {
                         thread.add_user_message(umv);
@@ -464,21 +459,27 @@ impl AgentSession {
     ///
     /// Caller must have verified the current view is stale via
     /// `thread_has_stale_system_view`.
+    /// Spawn a new thread whose `SystemView` references the latest content
+    /// for each kind. The new thread inherits the supplied `messages`
+    /// verbatim — typically the from_thread's full message history plus
+    /// any pending user input the caller has already appended. Returns
+    /// the new thread's id and prompt definition.
+    ///
+    /// Caller must have verified the current view is stale via
+    /// `thread_has_stale_system_view`.
     fn spawn_context_refreshed_thread(
         &mut self,
         from_thread: SessionThreadId,
+        messages: Vec<MessageView>,
     ) -> (SessionThreadId, PromptDefinition) {
         let new_view = self.canonical_refreshed_view();
-        let from_pd = self
+        let tool_view = self
             .threads
             .get_persisted(&from_thread)
             .expect("from_thread exists")
-            .prompt_definition();
-        let tool_view = from_pd.tool_definitions_view().clone();
-        // Carry the prior thread's messages forward verbatim — only the
-        // system blocks differ between threads. Compaction can still run
-        // on the new thread if these inherited messages exceed budget.
-        let inherited_messages: Vec<MessageView> = from_pd.messages().to_vec();
+            .prompt_definition()
+            .tool_definitions_view()
+            .clone();
 
         let new_thread_id = SessionThreadId::new();
         let new_thread = NewSessionThread::refreshed(
@@ -487,7 +488,7 @@ impl AgentSession {
             self.model_defaults.clone(),
             new_view.clone(),
             tool_view.clone(),
-            inherited_messages.clone(),
+            messages.clone(),
             from_thread,
         );
         self.threads.add_new(new_thread);
@@ -497,14 +498,11 @@ impl AgentSession {
         });
         self.current_main_thread = Some(new_thread_id);
 
-        // Build the new thread's PromptDefinition directly with the
-        // inherited messages. The next_prompt scan-back then appends any
-        // pending UserInputAdded events on top.
         let new_pd = PromptDefinition::for_refreshed_thread(
             self.model_defaults.clone(),
             new_view,
             tool_view,
-            inherited_messages,
+            messages,
         );
         (new_thread_id, new_pd)
     }
@@ -2021,5 +2019,62 @@ mod tests {
             "Notes kind should be present in the refreshed view, got {:?}",
             resolved
         );
+    }
+
+    #[test]
+    fn refreshed_thread_accepts_assistant_response() {
+        // Reproduces: after a context refresh, the next assistant
+        // response was rejected with NotAssistantTurn because the
+        // refreshed thread's `turn` defaulted to User (last inherited
+        // message was an Assistant turn — the prior LLM response —
+        // so hydration assumed user-next). The fix bakes the pending
+        // user input into the new thread's `messages` so turn=Assistant.
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R")]);
+        let initial_thread = session.current_main_thread.unwrap();
+
+        // Complete one round-trip on the initial thread: assistant
+        // response → next pending user input would be the trigger.
+        let response = session
+            .assistant_response_received(
+                initial_thread,
+                vec![AssistantBlock::Text {
+                    text: "first answer".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response 1");
+        assert!(matches!(response, AgentSessionResponse::Done));
+        hydrate_threads(&mut session);
+
+        // Pin "first" Notes mid-session, then send a new user message.
+        let _ = session.apply_proposed_system_blocks(vec![role("R"), notes("N")]);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "after refresh".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(
+            new_thread_id, initial_thread,
+            "context refresh should have spawned a new thread"
+        );
+
+        // The LLM responds — must be accepted as the assistant's turn.
+        let response = session
+            .assistant_response_received(
+                new_thread_id,
+                vec![AssistantBlock::Text {
+                    text: "answer after refresh".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response on refreshed thread must succeed");
+        assert!(matches!(response, AgentSessionResponse::Done));
     }
 }
