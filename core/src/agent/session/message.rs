@@ -35,10 +35,76 @@ pub struct Prompt {
     pub compaction: Option<CompactionMetadata>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+/// The semantic role of a system prompt block. Each kind appears at most
+/// once in a thread's view; updates are matched by kind so callers don't
+/// need to know positional indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemBlockKind {
+    /// Identity line: "You are an AI agent in workspace X."
+    Base,
+    /// Tools description: top-level tools, MCP gateway, etc.
+    Tools,
+    /// Behavioral guidelines: investigate-before-answering, parallel calls.
+    Behavioral,
+    /// Role-specific instructions (WorkspaceLead vs Agent).
+    Role,
+    /// Pinned workspace notes (changes when notes are pinned/edited).
+    Notes,
+    /// Available skills listing (changes when skills are imported).
+    Skills,
+}
+
+impl SystemBlockKind {
+    /// Canonical ordering of system blocks in a prompt. Matches the order
+    /// produced by `system_prompt::system_blocks_for_role` followed by
+    /// notes/skills injection in `Agents::send_message`. Used by the
+    /// session entity to build refreshed views — the entity can't ask the
+    /// agent module what order it wants, so the order lives here as the
+    /// shared contract.
+    pub const ORDER: &'static [SystemBlockKind] = &[
+        SystemBlockKind::Base,
+        SystemBlockKind::Tools,
+        SystemBlockKind::Behavioral,
+        SystemBlockKind::Role,
+        SystemBlockKind::Notes,
+        SystemBlockKind::Skills,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SystemBlock {
-    Text { text: String },
+    Base { text: String },
+    Tools { text: String },
+    Behavioral { text: String },
+    Role { text: String },
+    Notes { text: String },
+    Skills { text: String },
+}
+
+impl SystemBlock {
+    pub fn kind(&self) -> SystemBlockKind {
+        match self {
+            SystemBlock::Base { .. } => SystemBlockKind::Base,
+            SystemBlock::Tools { .. } => SystemBlockKind::Tools,
+            SystemBlock::Behavioral { .. } => SystemBlockKind::Behavioral,
+            SystemBlock::Role { .. } => SystemBlockKind::Role,
+            SystemBlock::Notes { .. } => SystemBlockKind::Notes,
+            SystemBlock::Skills { .. } => SystemBlockKind::Skills,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        match self {
+            SystemBlock::Base { text }
+            | SystemBlock::Tools { text }
+            | SystemBlock::Behavioral { text }
+            | SystemBlock::Role { text }
+            | SystemBlock::Notes { text }
+            | SystemBlock::Skills { text } => text,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,11 +209,20 @@ impl From<Prompt> for llm::Prompt {
 
 impl From<SystemBlock> for llm::prompt::SystemBlock {
     fn from(b: SystemBlock) -> Self {
-        match b {
-            SystemBlock::Text { text } => llm::prompt::SystemBlock::Text {
-                text,
-                cache_control: None,
-            },
+        // All kinds map to the wire-format `Text` block — the kind is a
+        // domain-level distinction used for replacement-by-kind semantics
+        // and is not visible to the LLM API.
+        let text = match b {
+            SystemBlock::Base { text }
+            | SystemBlock::Tools { text }
+            | SystemBlock::Behavioral { text }
+            | SystemBlock::Role { text }
+            | SystemBlock::Notes { text }
+            | SystemBlock::Skills { text } => text,
+        };
+        llm::prompt::SystemBlock::Text {
+            text,
+            cache_control: None,
         }
     }
 }
@@ -286,13 +361,9 @@ impl From<llm::prompt::Tool> for ToolDefinition {
     }
 }
 
-impl From<llm::prompt::SystemBlock> for SystemBlock {
-    fn from(b: llm::prompt::SystemBlock) -> Self {
-        match b {
-            llm::prompt::SystemBlock::Text { text, .. } => SystemBlock::Text { text },
-        }
-    }
-}
+// Note: there is intentionally no `From<llm::prompt::SystemBlock> for SystemBlock`
+// — wire-format blocks carry no `kind`, so they can't be mapped back to a
+// typed domain block without additional context.
 
 // ============================================================================
 // Sandbox notification helpers

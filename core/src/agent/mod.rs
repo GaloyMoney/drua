@@ -29,8 +29,8 @@ fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthS
 use tracing::instrument;
 
 use crate::primitives::{
-    AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, SandboxId,
-    WorkspaceId,
+    AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, ContextGeneration,
+    SandboxId, WorkspaceId,
 };
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ModelDefaults, RoleConfig};
@@ -38,6 +38,29 @@ pub use entity::*;
 pub use error::AgentError;
 use repo::AgentRepo;
 use session::Sessions;
+
+/// Snapshot of a workspace's dynamic system blocks (notes + skills),
+/// keyed by the `ContextGeneration` value at fetch time. Used to skip
+/// DB round-trips on the hot path of `send_message`.
+#[derive(Clone)]
+struct CachedWorkspaceContext {
+    generation: u64,
+    notes_block: Option<session::message::SystemBlock>,
+    skills_block: Option<session::message::SystemBlock>,
+}
+
+impl CachedWorkspaceContext {
+    fn to_blocks(&self) -> Vec<session::message::SystemBlock> {
+        let mut out = Vec::with_capacity(2);
+        if let Some(b) = &self.notes_block {
+            out.push(b.clone());
+        }
+        if let Some(b) = &self.skills_block {
+            out.push(b.clone());
+        }
+        out
+    }
+}
 
 #[derive(Clone)]
 pub struct Agents {
@@ -49,9 +72,13 @@ pub struct Agents {
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
+    context_generation: ContextGeneration,
+    context_cache:
+        Arc<std::sync::RwLock<std::collections::HashMap<WorkspaceId, CachedWorkspaceContext>>>,
 }
 
 impl Agents {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: &sqlx::PgPool,
         config: AgentsConfig,
@@ -60,6 +87,7 @@ impl Agents {
         sandboxes: Arc<Sandboxes>,
         skills: Arc<Skills>,
         notes: Option<Arc<Notes>>,
+        context_generation: ContextGeneration,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
@@ -70,7 +98,61 @@ impl Agents {
             config,
             toolsets,
             prompt_requests,
+            context_generation,
+            context_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Hot-path lookup of the dynamic (notes + skills) system blocks for a
+    /// workspace. Reads the global `ContextGeneration` (1ns atomic load)
+    /// and returns cached blocks when the generation matches. Only fetches
+    /// from DB when the generation has bumped — meaning notes or skills
+    /// have changed somewhere (possibly in another workspace, in which
+    /// case the hash check inside `maybe_update_context` will no-op).
+    async fn cached_dynamic_blocks(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Vec<session::message::SystemBlock> {
+        let current_gen = self.context_generation.current();
+
+        // Fast path: cache hit (no DB).
+        {
+            let cache = self.context_cache.read().expect("context_cache poisoned");
+            if let Some(cached) = cache.get(&workspace_id) {
+                if cached.generation == current_gen {
+                    return cached.to_blocks();
+                }
+            }
+        }
+
+        // Slow path: fetch fresh from DB.
+        let notes_block = match &self.notes {
+            Some(notes) => notes
+                .pinned_context_for_workspace(workspace_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|text| session::message::SystemBlock::Notes { text }),
+            None => None,
+        };
+        let skills_block = self
+            .skills
+            .skills_context_for_workspace(workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|text| session::message::SystemBlock::Skills { text });
+
+        let entry = CachedWorkspaceContext {
+            generation: current_gen,
+            notes_block: notes_block.clone(),
+            skills_block: skills_block.clone(),
+        };
+        let result = entry.to_blocks();
+        if let Ok(mut cache) = self.context_cache.write() {
+            cache.insert(workspace_id, entry);
+        }
+        result
     }
 
     pub fn skills(&self) -> &Skills {
@@ -252,7 +334,7 @@ impl Agents {
         if let Some(notes) = &self.notes {
             if let Ok(Some(pinned_content)) = notes.pinned_context_for_workspace(workspace_id).await
             {
-                system_blocks.push(session::message::SystemBlock::Text {
+                system_blocks.push(session::message::SystemBlock::Notes {
                     text: pinned_content,
                 });
             }
@@ -262,7 +344,7 @@ impl Agents {
         if let Ok(Some(skills_content)) =
             self.skills.skills_context_for_workspace(workspace_id).await
         {
-            system_blocks.push(session::message::SystemBlock::Text {
+            system_blocks.push(session::message::SystemBlock::Skills {
                 text: skills_content,
             });
         }
@@ -588,9 +670,31 @@ impl Agents {
             None => agent.auth_subject(),
         };
 
+        // Build the current proposed system blocks for this workspace. The
+        // cache makes this cheap: a 1ns atomic compare against the global
+        // `ContextGeneration`; a DB fetch only happens when the counter
+        // has bumped (via Notes/Skills mutations or PG NOTIFY from a peer).
+        // We pass the blocks into `add_user_input` so the diff + user-input
+        // event share a single session repo round-trip. Lazy refresh in
+        // `next_prompt` then spawns a fresh thread if any kind changed.
+        let dynamic_blocks = self.cached_dynamic_blocks(agent.workspace_id).await;
+        let mut proposed_system_blocks = system_prompt::system_blocks_for_role(
+            agent.agent_role,
+            &self.toolsets,
+            &agent_subject,
+            &agent.workspace_name,
+        );
+        proposed_system_blocks.extend(dynamic_blocks);
+
         let session_response = self
             .sessions
-            .add_user_input(id, session::TargetThread::Main, source, prompt.clone())
+            .add_user_input(
+                id,
+                session::TargetThread::Main,
+                source,
+                prompt.clone(),
+                proposed_system_blocks,
+            )
             .await?;
 
         match session_response {

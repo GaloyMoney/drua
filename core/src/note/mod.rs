@@ -2,6 +2,7 @@ mod entity;
 pub mod error;
 pub(crate) mod repo;
 
+use es_entity::AtomicOperation;
 use tracing::instrument;
 
 pub use entity::Note;
@@ -17,14 +18,43 @@ use crate::primitives::*;
 pub struct Notes {
     repo: NoteRepo,
     library: Library,
+    pool: sqlx::PgPool,
+    context_generation: ContextGeneration,
 }
 
 impl Notes {
-    pub fn new(pool: &sqlx::PgPool, library: Library) -> Self {
+    pub fn new(
+        pool: &sqlx::PgPool,
+        library: Library,
+        context_generation: ContextGeneration,
+    ) -> Self {
         Self {
             repo: NoteRepo::new(pool, library.clone()),
             library,
+            pool: pool.clone(),
+            context_generation,
         }
+    }
+
+    /// Begin a transaction with a `ContextBumpHook` already registered,
+    /// scoped to the given workspace. After this op commits successfully,
+    /// the hook bumps the local `ContextGeneration` and fires a
+    /// `context_changed` PG NOTIFY so peer instances refresh on their
+    /// next turn. Mutation methods should always go through this helper
+    /// rather than calling `self.repo.begin_op()` directly.
+    async fn begin_op(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<es_entity::DbOp<'static>, NoteError> {
+        let mut op = self.repo.begin_op().await?;
+        let hook = ContextBumpHook::new(
+            self.context_generation.clone(),
+            self.pool.clone(),
+            Some(workspace_id),
+        );
+        op.add_commit_hook(hook)
+            .expect("DbOp supports commit hooks");
+        Ok(op)
     }
 
     /// Create a new note in a workspace.
@@ -43,7 +73,7 @@ impl Notes {
         }
         sub.can(AuthVerb::Create, AuthResource::Note(workspace_id, None))?;
 
-        let mut op = self.repo.begin_op().await?.with_db_time().await?;
+        let mut op = self.begin_op(workspace_id).await?.with_db_time().await?;
 
         let note_id = NoteId::new();
         let created_at = op.now().to_rfc3339();
@@ -72,7 +102,6 @@ impl Notes {
 
         let note = self.repo.create_in_op(&mut op, new_note).await?;
         op.commit().await?;
-
         Ok(note)
     }
 
@@ -90,19 +119,19 @@ impl Notes {
         if content.len() > MAX_NOTE_CONTENT_LEN {
             return Err(NoteError::ContentTooLarge(content.len()));
         }
-        let mut note = self.repo.find_by_id(note_id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
+
+        let mut op = self.begin_op(workspace_id).await?.with_db_time().await?;
+        let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
         if note.workspace_id != workspace_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Read,
                 resource: AuthResource::Workspace(Some(workspace_id)),
             }));
         }
-        sub.can(
-            AuthVerb::Update,
-            AuthResource::Note(workspace_id, Some(note_id)),
-        )?;
-
-        let mut op = self.repo.begin_op().await?.with_db_time().await?;
         let updated_at = op.now().to_rfc3339();
 
         let created_at = note.created_at();
@@ -122,7 +151,6 @@ impl Notes {
 
         self.repo.update_in_op(&mut op, &mut note).await?;
         op.commit().await?;
-
         Ok(note)
     }
 
@@ -159,19 +187,21 @@ impl Notes {
         workspace_id: WorkspaceId,
         note_id: NoteId,
     ) -> Result<Note, NoteError> {
-        let mut note = self.repo.find_by_id(note_id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
+        let mut op = self.begin_op(workspace_id).await?;
+        let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
         if note.workspace_id != workspace_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
                 resource: AuthResource::Workspace(Some(workspace_id)),
             }));
         }
-        sub.can(
-            AuthVerb::Update,
-            AuthResource::Note(workspace_id, Some(note_id)),
-        )?;
         if note.pin().did_execute() {
-            self.repo.update(&mut note).await?;
+            self.repo.update_in_op(&mut op, &mut note).await?;
+            op.commit().await?;
         }
         Ok(note)
     }
@@ -184,19 +214,21 @@ impl Notes {
         workspace_id: WorkspaceId,
         note_id: NoteId,
     ) -> Result<Note, NoteError> {
-        let mut note = self.repo.find_by_id(note_id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Note(workspace_id, Some(note_id)),
+        )?;
+        let mut op = self.begin_op(workspace_id).await?;
+        let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
         if note.workspace_id != workspace_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
                 resource: AuthResource::Workspace(Some(workspace_id)),
             }));
         }
-        sub.can(
-            AuthVerb::Update,
-            AuthResource::Note(workspace_id, Some(note_id)),
-        )?;
         if note.unpin().did_execute() {
-            self.repo.update(&mut note).await?;
+            self.repo.update_in_op(&mut op, &mut note).await?;
+            op.commit().await?;
         }
         Ok(note)
     }

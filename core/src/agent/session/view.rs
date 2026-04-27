@@ -40,6 +40,16 @@ pub struct SystemView {
     pub(super) indexes: Vec<SystemBlockIndex>,
 }
 
+impl SystemView {
+    pub(super) fn from_indexes(indexes: Vec<SystemBlockIndex>) -> Self {
+        Self { indexes }
+    }
+
+    pub(super) fn indexes(&self) -> &[SystemBlockIndex] {
+        &self.indexes
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinitionsView {
     pub(super) indexes: Vec<ToolDefinitionIndex>,
@@ -69,6 +79,11 @@ pub(super) struct MaterializedSession<'a> {
     model_defaults: &'a ModelDefaults,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
+    /// For each kind ever pushed, the index of its most-recent block in
+    /// `system_blocks`. Used to resolve "latest content for kind X" without
+    /// scanning the flat list, and to detect stale views (a thread's
+    /// SystemView referencing an idx that's no longer the latest of its kind).
+    latest_idx_by_kind: std::collections::HashMap<SystemBlockKind, SystemBlockIndex>,
     tool_defs: Vec<&'a ToolDefinition>,
     tool_breakpoints: Vec<ToolDefinitionIndex>,
     block_count: usize,
@@ -83,6 +98,7 @@ impl<'a> MaterializedSession<'a> {
             model_defaults,
             system_blocks: Vec::new(),
             system_breakpoints: Vec::new(),
+            latest_idx_by_kind: std::collections::HashMap::new(),
             tool_defs: Vec::new(),
             tool_breakpoints: Vec::new(),
             block_count: 0,
@@ -92,10 +108,39 @@ impl<'a> MaterializedSession<'a> {
         }
     }
 
+    /// Push the initial set of system blocks (from the `Initialized` event).
+    /// Records a breakpoint and tracks the index of each kind so subsequent
+    /// updates can substitute by kind.
     pub fn push_system_blocks(&mut self, blocks: impl Iterator<Item = &'a SystemBlock>) {
         self.system_breakpoints
             .push(SystemBlockIndex(self.system_blocks.len()));
-        self.system_blocks.extend(blocks);
+        for block in blocks {
+            let idx = SystemBlockIndex(self.system_blocks.len());
+            self.system_blocks.push(block);
+            self.latest_idx_by_kind.insert(block.kind(), idx);
+        }
+    }
+
+    /// Push a single block update (from a `SystemBlockUpdated` event).
+    /// Appends to the flat list and updates the kind→idx mapping so the
+    /// next view build sees this as the latest content for that kind.
+    pub fn push_updated_system_block(&mut self, block: &'a SystemBlock) {
+        let idx = SystemBlockIndex(self.system_blocks.len());
+        self.system_blocks.push(block);
+        self.latest_idx_by_kind.insert(block.kind(), idx);
+    }
+
+    /// The most-recent idx for a given kind, or `None` if no block of that
+    /// kind has been pushed.
+    pub fn latest_idx_for_kind(&self, kind: SystemBlockKind) -> Option<SystemBlockIndex> {
+        self.latest_idx_by_kind.get(&kind).copied()
+    }
+
+    /// The most-recent block for a given kind, if any.
+    pub fn latest_block_of_kind(&self, kind: SystemBlockKind) -> Option<&'a SystemBlock> {
+        self.latest_idx_by_kind
+            .get(&kind)
+            .map(|idx| self.system_blocks[idx.0])
     }
 
     pub fn push_tool_defs(&mut self, defs: impl Iterator<Item = &'a ToolDefinition>) {
@@ -227,8 +272,35 @@ pub struct PromptDefinition {
 }
 
 impl PromptDefinition {
+    /// Construct a `PromptDefinition` for a freshly-spawned context-refreshed
+    /// thread. The thread inherits the prior thread's `messages` verbatim;
+    /// the `next_prompt` scan-back appends any pending UserInputAdded
+    /// events on top.
+    pub(super) fn for_refreshed_thread(
+        model_defaults: ModelDefaults,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        inherited_messages: Vec<MessageView>,
+    ) -> Self {
+        Self {
+            model: model_defaults.model,
+            max_tokens_per_response: model_defaults.max_tokens_per_response,
+            system_view,
+            tool_definitions_view,
+            messages: inherited_messages,
+            compaction: None,
+        }
+    }
+
     pub fn system_view(&self) -> &SystemView {
         &self.system_view
+    }
+
+    /// Read-only access to the prompt's message views. Used by tests and
+    /// by callers that need to inherit history (e.g. context refresh).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn messages(&self) -> &[MessageView] {
+        &self.messages
     }
 
     pub fn tool_definitions_view(&self) -> &ToolDefinitionsView {
@@ -265,8 +337,8 @@ impl PromptDefinition {
                     all_system_blocks.extend(system_blocks.iter().cloned());
                     all_tool_defs.extend(tool_defs.iter().cloned());
                 }
-                AgentSessionEvent::SystemBlocksUpdated { system_blocks } => {
-                    all_system_blocks.extend(system_blocks.iter().cloned());
+                AgentSessionEvent::SystemBlockUpdated { block } => {
+                    all_system_blocks.push(block.clone());
                 }
                 AgentSessionEvent::ToolDefsUpdated { tool_defs } => {
                     all_tool_defs.extend(tool_defs.iter().cloned());
@@ -405,7 +477,7 @@ mod tests {
     }
 
     fn system_block(text: &str) -> SystemBlock {
-        SystemBlock::Text {
+        SystemBlock::Base {
             text: text.to_string(),
         }
     }

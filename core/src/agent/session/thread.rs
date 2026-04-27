@@ -41,6 +41,19 @@ pub enum SessionThreadEvent {
         messages: Vec<MessageView>,
         follows_from: SessionThreadId,
     },
+    /// Thread spawned because workspace context (notes/skills/etc) changed.
+    /// Inherits the prior thread's messages verbatim — only the
+    /// `system_view` differs. Compaction can run separately on this thread
+    /// if the inherited messages exceed the budget.
+    InitializedFromRefresh {
+        id: SessionThreadId,
+        session_id: AgentSessionId,
+        model_defaults: ModelDefaults,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    },
     UserTurn {
         user_messages_view: UserMessagesView,
     },
@@ -133,6 +146,13 @@ impl SessionThread {
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
+                }
+                | SessionThreadEvent::InitializedFromRefresh {
+                    model_defaults,
+                    system_view: sv,
+                    tool_definitions_view: tdv,
+                    messages: init_messages,
+                    ..
                 } => {
                     model = model_defaults.model.clone();
                     max_tokens_per_response = model_defaults.max_tokens_per_response;
@@ -214,6 +234,29 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                     };
                     builder = builder.turn(turn);
                 }
+                SessionThreadEvent::InitializedFromRefresh {
+                    id,
+                    session_id,
+                    messages,
+                    follows_from,
+                    ..
+                } => {
+                    builder = builder.id(*id).session_id(*session_id).start_reason(
+                        ThreadStartReason::ContextRefreshed {
+                            from_thread: *follows_from,
+                        },
+                    );
+                    // Determine turn from last message in inherited history.
+                    // Same logic as compaction — the message ordering tells us
+                    // whose turn comes next.
+                    let turn = match messages.last() {
+                        Some(MessageView::User(_)) => NextTurn::Assistant,
+                        Some(MessageView::Assistant(_)) => NextTurn::User,
+                        Some(MessageView::ToolResults(_)) => NextTurn::Assistant,
+                        None => NextTurn::User,
+                    };
+                    builder = builder.turn(turn);
+                }
                 SessionThreadEvent::UserTurn { .. } => {
                     builder = builder.turn(NextTurn::Assistant);
                 }
@@ -253,6 +296,10 @@ enum ThreadInitData {
         messages: Vec<MessageView>,
         follows_from: SessionThreadId,
     },
+    Refreshed {
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    },
 }
 
 impl NewSessionThread {
@@ -287,6 +334,36 @@ impl NewSessionThread {
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Compacted {
+                messages,
+                follows_from,
+            },
+        }
+    }
+
+    /// Create a context-refreshed thread that inherits the prior thread's
+    /// messages verbatim — only the `system_view` is swapped to point at
+    /// the latest content for each `SystemBlockKind`. Tool definitions and
+    /// model defaults are inherited unchanged. Compaction can still run on
+    /// the resulting thread if the inherited messages exceed the budget.
+    pub fn refreshed(
+        id: SessionThreadId,
+        session_id: AgentSessionId,
+        model_defaults: ModelDefaults,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    ) -> Self {
+        Self {
+            id,
+            session_id,
+            start_reason: ThreadStartReason::ContextRefreshed {
+                from_thread: follows_from,
+            },
+            model_defaults,
+            system_view,
+            tool_definitions_view,
+            init: ThreadInitData::Refreshed {
                 messages,
                 follows_from,
             },
@@ -414,6 +491,18 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 messages,
                 follows_from,
             } => SessionThreadEvent::InitializedFromCompaction {
+                id: self.id,
+                session_id: self.session_id,
+                model_defaults: self.model_defaults,
+                system_view: self.system_view,
+                tool_definitions_view: self.tool_definitions_view,
+                messages,
+                follows_from,
+            },
+            ThreadInitData::Refreshed {
+                messages,
+                follows_from,
+            } => SessionThreadEvent::InitializedFromRefresh {
                 id: self.id,
                 session_id: self.session_id,
                 model_defaults: self.model_defaults,

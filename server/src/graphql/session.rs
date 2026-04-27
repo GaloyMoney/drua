@@ -23,6 +23,7 @@ pub enum ThreadTurn {
 pub enum ThreadStartReason {
     InitialThread,
     ToolDefsUpdated,
+    ContextRefreshed,
     Compaction,
     Orphan,
 }
@@ -255,6 +256,9 @@ impl SessionThread {
                 history::ThreadStartReasonKind::InitialThread => ThreadStartReason::InitialThread,
                 history::ThreadStartReasonKind::ToolDefsUpdated => {
                     ThreadStartReason::ToolDefsUpdated
+                }
+                history::ThreadStartReasonKind::ContextRefreshed => {
+                    ThreadStartReason::ContextRefreshed
                 }
                 history::ThreadStartReasonKind::Compaction => ThreadStartReason::Compaction,
                 history::ThreadStartReasonKind::Orphan => ThreadStartReason::Orphan,

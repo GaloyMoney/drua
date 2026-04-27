@@ -5,6 +5,7 @@ pub(crate) mod repo;
 
 use std::sync::Arc;
 
+use es_entity::AtomicOperation;
 use tracing::instrument;
 
 use crate::library::{DocType, GitFileHash, Library, RuntimeFile, SearchResult};
@@ -28,15 +29,43 @@ pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
     library: Option<Library>,
+    pool: Option<sqlx::PgPool>,
+    context_generation: ContextGeneration,
 }
 
 impl Skills {
-    pub fn new(pool: &sqlx::PgPool, sandboxes: Arc<Sandboxes>, library: Library) -> Self {
+    pub fn new(
+        pool: &sqlx::PgPool,
+        sandboxes: Arc<Sandboxes>,
+        library: Library,
+        context_generation: ContextGeneration,
+    ) -> Self {
         let repo = SkillRepo::new(pool, library.clone());
         Self {
             repo,
             sandboxes,
             library: Some(library),
+            pool: Some(pool.clone()),
+            context_generation,
+        }
+    }
+
+    /// Register a `ContextBumpHook` on the caller-provided op. Called from
+    /// `upsert_from_library_in_op`; the hook fires on commit and is a no-op
+    /// when this `Skills` instance has no `pool` (test contexts using
+    /// `new_without_library`).
+    fn register_context_bump<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        workspace_id: Option<WorkspaceId>,
+    ) {
+        let Some(pool) = self.pool.as_ref() else {
+            return;
+        };
+        let hook =
+            ContextBumpHook::new(self.context_generation.clone(), pool.clone(), workspace_id);
+        if op.add_commit_hook(hook).is_err() {
+            tracing::warn!("AtomicOperation rejected ContextBumpHook; context bump skipped");
         }
     }
 
@@ -354,7 +383,7 @@ impl Skills {
             _ => return Ok(()),
         };
 
-        if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
+        if let Some(mut existing) = self.repo.maybe_find_by_id_in_op(&mut *op, doc_id).await? {
             if existing
                 .update(
                     Some(name.clone()),
@@ -388,6 +417,10 @@ impl Skills {
             self.repo.create_in_op(op, new).await?;
             tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
+        // Hook fires after the caller commits the op. If multiple skills
+        // are upserted on the same op for the same workspace, `merge()`
+        // collapses them to a single bump+notify.
+        self.register_context_bump(op, workspace_id);
         Ok(())
     }
 }
@@ -415,6 +448,8 @@ impl Skills {
             repo,
             sandboxes,
             library: None,
+            pool: None,
+            context_generation: ContextGeneration::new(),
         }
     }
 }

@@ -29,6 +29,7 @@ use github_app::GitHubAppTokenProvider;
 use library::Library;
 use mcp_creds::McpCredentials;
 use note::Notes;
+use primitives::ContextGeneration;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
@@ -164,8 +165,20 @@ impl App {
         .await
         .map_err(|e| AppError::Library(e.to_string()))?;
 
+        // Shared "anything in workspace context changed" signal — bumped by
+        // Notes/Skills mutations (locally) and by PG NOTIFY (from peers in
+        // HA deployments). Read on the hot path of `Agents::send_message`
+        // to skip DB round-trips when nothing changed.
+        let context_generation = ContextGeneration::new();
+        spawn_context_generation_listener(pool.clone(), context_generation.clone());
+
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
-        let skills = Arc::new(Skills::new(pool, Arc::clone(&sandboxes), library.clone()));
+        let skills = Arc::new(Skills::new(
+            pool,
+            Arc::clone(&sandboxes),
+            library.clone(),
+            context_generation.clone(),
+        ));
 
         // Sandbox-backed tools (Bash, TextEditor) need the sandboxes
         // service to resolve the running pod for an attached agent —
@@ -181,7 +194,11 @@ impl App {
 
         // Notes service created before Agents so pinned notes can be
         // injected into agent system prompts at creation time.
-        let notes = Arc::new(Notes::new(pool, library.clone()));
+        let notes = Arc::new(Notes::new(
+            pool,
+            library.clone(),
+            context_generation.clone(),
+        ));
 
         let agents = Arc::new(Agents::new(
             pool,
@@ -191,6 +208,7 @@ impl App {
             Arc::clone(&sandboxes),
             Arc::clone(&skills),
             Some(Arc::clone(&notes)),
+            context_generation.clone(),
         ));
 
         // Register consolidated workspace-scoped management tools.
@@ -334,6 +352,41 @@ impl App {
             tracing::error!(error = %e, "job shutdown failed");
         }
     }
+}
+
+/// Background task that listens on the `context_changed` PG channel and
+/// bumps the shared `ContextGeneration` whenever a peer instance (or this
+/// instance) mutates notes or skills. The local mutation paths bump the
+/// atomic directly *and* fire `pg_notify`; this listener exists so other
+/// HA replicas pick up the change. Self-notifications are harmless — they
+/// just look like an extra bump that triggers one no-op cache check.
+fn spawn_context_generation_listener(pool: sqlx::PgPool, generation: ContextGeneration) {
+    tokio::spawn(async move {
+        loop {
+            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(error = %e, "context_changed listener: connect failed; retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            if let Err(e) = listener.listen("context_changed").await {
+                tracing::warn!(error = %e, "context_changed listener: LISTEN failed; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            loop {
+                match listener.recv().await {
+                    Ok(_notification) => generation.bump(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "context_changed listener: recv failed; reconnecting");
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[derive(thiserror::Error, Debug)]

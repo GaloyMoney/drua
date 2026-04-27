@@ -18,9 +18,18 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThreadStartReason {
+    /// First thread of the session — no prior thread to reference.
     InitialThread,
-    ToolDefsUpdated,
+    /// Tool definitions changed; new thread captures the updated set.
+    /// (Reserved — not yet emitted by any code path.)
+    ToolDefsUpdated { from_thread: SessionThreadId },
+    /// One or more system blocks changed (notes/skills updated, etc).
+    /// Spawned lazily inside `next_prompt` when the current thread's
+    /// `SystemView` is detected as stale.
+    ContextRefreshed { from_thread: SessionThreadId },
+    /// Conversation compacted to free context window space.
     Compaction { from_thread: SessionThreadId },
+    /// Idle-timeout reset; previous thread orphaned.
     Orphan { from_thread: SessionThreadId },
 }
 
@@ -39,8 +48,11 @@ pub enum AgentSessionEvent {
     ToolDefsUpdated {
         tool_defs: Vec<ToolDefinition>,
     },
-    SystemBlocksUpdated {
-        system_blocks: Vec<SystemBlock>,
+    /// Replace the current block of a given kind. Identified by the
+    /// `kind()` of the contained block; appends to the materialized flat
+    /// list and bumps `latest_idx_by_kind` for that kind.
+    SystemBlockUpdated {
+        block: SystemBlock,
     },
     UserInputAdded {
         target: TargetThread,
@@ -286,16 +298,16 @@ impl AgentSession {
         }
         pending_indexes.reverse();
 
-        // Build prompt definition from current thread WITHOUT adding
-        // the new user messages to the thread yet. We augment the
-        // prompt_definition directly so compaction can see the full
-        // context, but the old thread won't carry the user message
-        // if compaction creates a new thread (avoiding duplication).
-        let thread = self
+        // Build prompt definition from the current (still-old) thread and
+        // append the pending user messages. We augment the prompt_definition
+        // directly so compaction (and any context refresh below) sees the
+        // full context, but the old thread's event log is only updated with
+        // a UserTurn event when no new thread is spawned.
+        let mut prompt_definition = self
             .threads
             .get_persisted(&thread_id)
-            .ok_or(AgentSessionError::ThreadNotFound)?;
-        let mut prompt_definition = thread.prompt_definition();
+            .ok_or(AgentSessionError::ThreadNotFound)?
+            .prompt_definition();
 
         let pending_user_view = if !pending_indexes.is_empty() {
             let umv = UserMessagesView {
@@ -309,17 +321,41 @@ impl AgentSession {
             None
         };
 
+        // Lazy context refresh: spawn a fresh thread now that the augmented
+        // messages (history + pending user input) are assembled, so the
+        // refreshed thread inherits the COMPLETE conversation including the
+        // user turn that triggered this prompt. Without this, the refreshed
+        // thread's last inherited message would be the prior assistant
+        // response and hydration would set its turn to `User` — causing the
+        // upcoming assistant response to be rejected as `NotAssistantTurn`.
+        let (thread_id, prompt_definition) = if matches!(target, TargetThread::Main)
+            && self.thread_has_stale_system_view(thread_id)
+        {
+            let (new_id, new_pd) =
+                self.spawn_context_refreshed_thread(thread_id, prompt_definition.messages.clone());
+            (new_id, new_pd)
+        } else {
+            (thread_id, prompt_definition)
+        };
+
         // --- Compaction check ---
+        // Compaction runs on the (possibly just-refreshed) thread. A
+        // refresh inherits the prior thread's messages, so if those are
+        // over budget compaction will still prune them. The chain
+        // becomes: from_thread → refresh_thread → compaction_thread.
         let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
             Some(result) => result, // user messages carried to compacted thread
             None => {
-                // No compaction — now add user messages to the old thread
+                // No compaction — attach the pending user message to the
+                // current thread's event log when it lives in `entities`.
+                // For threads that were just spawned (refresh / compaction)
+                // and live in `new_entities`, the pending message is already
+                // baked into their `Initialized*` event so no UserTurn is
+                // needed.
                 if let Some(umv) = pending_user_view {
-                    let thread = self
-                        .threads
-                        .get_persisted_mut(&thread_id)
-                        .ok_or(AgentSessionError::ThreadNotFound)?;
-                    thread.add_user_message(umv);
+                    if let Some(thread) = self.threads.get_persisted_mut(&thread_id) {
+                        thread.add_user_message(umv);
+                    }
                 }
                 (thread_id, prompt_definition)
             }
@@ -345,9 +381,130 @@ impl AgentSession {
             .push(AgentSessionEvent::ToolDefsUpdated { tool_defs });
     }
 
-    pub fn update_system_blocks(&mut self, system_blocks: Vec<SystemBlock>) {
+    /// Push a single system block update. The `kind()` of the block
+    /// identifies which slot to replace in the materialized view; subsequent
+    /// thread builds will pick up the new content.
+    pub fn push_system_block(&mut self, block: SystemBlock) {
         self.events
-            .push(AgentSessionEvent::SystemBlocksUpdated { system_blocks });
+            .push(AgentSessionEvent::SystemBlockUpdated { block });
+    }
+
+    /// Apply a set of proposed system blocks. For each kind in the proposal,
+    /// compare against the current latest block of that kind; if the content
+    /// differs (or the kind isn't present yet), push a `SystemBlockUpdated`
+    /// event. Returns `Executed` if any block was actually updated,
+    /// `AlreadyApplied` otherwise.
+    ///
+    /// Thread creation is NOT done here — it happens lazily inside
+    /// `next_prompt` when the current thread's view is detected as stale.
+    pub fn apply_proposed_system_blocks(&mut self, proposed: Vec<SystemBlock>) -> Idempotent<()> {
+        // Compute the diff under an immutable borrow so we can decide
+        // up-front which blocks are new vs unchanged.
+        let to_push: Vec<SystemBlock> = {
+            let materialized = self.materialize();
+            proposed
+                .into_iter()
+                .filter(|block| {
+                    materialized
+                        .latest_block_of_kind(block.kind())
+                        .map(|current| current != block)
+                        .unwrap_or(true)
+                })
+                .collect()
+        };
+
+        if to_push.is_empty() {
+            return Idempotent::AlreadyApplied;
+        }
+
+        for block in to_push {
+            self.events
+                .push(AgentSessionEvent::SystemBlockUpdated { block });
+        }
+        Idempotent::Executed(())
+    }
+
+    /// Returns `true` if the given thread's `SystemView` no longer matches
+    /// the canonical "latest for each kind" view. Triggers when:
+    /// - an existing kind in the view has a newer idx (replacement), OR
+    /// - a kind newly appeared in `latest_idx_by_kind` that the view
+    ///   doesn't reference (addition — e.g. first note pinned).
+    fn thread_has_stale_system_view(&self, thread_id: SessionThreadId) -> bool {
+        let Some(thread) = self.threads.get_persisted(&thread_id) else {
+            return false;
+        };
+        let view = thread.prompt_definition().system_view().clone();
+        let refreshed = self.canonical_refreshed_view();
+        view.indexes() != refreshed.indexes()
+    }
+
+    /// Build the canonical "latest for each kind" `SystemView`, ordered
+    /// per `SystemBlockKind::ORDER`. Kinds not yet pushed are skipped.
+    fn canonical_refreshed_view(&self) -> SystemView {
+        let materialized = self.materialize();
+        let indexes: Vec<SystemBlockIndex> = SystemBlockKind::ORDER
+            .iter()
+            .filter_map(|kind| materialized.latest_idx_for_kind(*kind))
+            .collect();
+        SystemView::from_indexes(indexes)
+    }
+
+    /// Spawn a new thread whose `SystemView` references the latest content
+    /// for each kind. The new thread inherits the prior thread's message
+    /// history verbatim — only the system blocks are swapped out. Returns
+    /// the new thread's id and prompt definition so the caller can use
+    /// them directly without re-fetching (the new thread lives in
+    /// `new_entities` until the repo flushes — `get_persisted` won't
+    /// find it).
+    ///
+    /// Caller must have verified the current view is stale via
+    /// `thread_has_stale_system_view`.
+    /// Spawn a new thread whose `SystemView` references the latest content
+    /// for each kind. The new thread inherits the supplied `messages`
+    /// verbatim — typically the from_thread's full message history plus
+    /// any pending user input the caller has already appended. Returns
+    /// the new thread's id and prompt definition.
+    ///
+    /// Caller must have verified the current view is stale via
+    /// `thread_has_stale_system_view`.
+    fn spawn_context_refreshed_thread(
+        &mut self,
+        from_thread: SessionThreadId,
+        messages: Vec<MessageView>,
+    ) -> (SessionThreadId, PromptDefinition) {
+        let new_view = self.canonical_refreshed_view();
+        let tool_view = self
+            .threads
+            .get_persisted(&from_thread)
+            .expect("from_thread exists")
+            .prompt_definition()
+            .tool_definitions_view()
+            .clone();
+
+        let new_thread_id = SessionThreadId::new();
+        let new_thread = NewSessionThread::refreshed(
+            new_thread_id,
+            self.id,
+            self.model_defaults.clone(),
+            new_view.clone(),
+            tool_view.clone(),
+            messages.clone(),
+            from_thread,
+        );
+        self.threads.add_new(new_thread);
+        self.events.push(AgentSessionEvent::ThreadStarted {
+            thread_id: new_thread_id,
+            start_reason: ThreadStartReason::ContextRefreshed { from_thread },
+        });
+        self.current_main_thread = Some(new_thread_id);
+
+        let new_pd = PromptDefinition::for_refreshed_thread(
+            self.model_defaults.clone(),
+            new_view,
+            tool_view,
+            messages,
+        );
+        (new_thread_id, new_pd)
     }
 
     pub fn add_tool_results(
@@ -553,8 +710,8 @@ impl AgentSession {
                 AgentSessionEvent::ToolDefsUpdated { tool_defs } => {
                     materialized.push_tool_defs(tool_defs.iter());
                 }
-                AgentSessionEvent::SystemBlocksUpdated { system_blocks } => {
-                    materialized.push_system_blocks(system_blocks.iter());
+                AgentSessionEvent::SystemBlockUpdated { block } => {
+                    materialized.push_updated_system_block(block);
                 }
                 AgentSessionEvent::UserInputAdded { .. }
                 | AgentSessionEvent::SandboxNotificationAdded { .. } => {
@@ -632,7 +789,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::SandboxNotificationAdded { .. } => {}
                 AgentSessionEvent::AssistantResponseReceived { .. } => {}
                 AgentSessionEvent::ToolDefsUpdated { .. } => {}
-                AgentSessionEvent::SystemBlocksUpdated { .. } => {}
+                AgentSessionEvent::SystemBlockUpdated { .. } => {}
                 AgentSessionEvent::PromptSent { .. } => {}
                 AgentSessionEvent::ToolResultsAdded { .. } => {}
                 AgentSessionEvent::ToolResultsMasked { .. } => {}
@@ -1025,9 +1182,9 @@ mod tests {
     fn next_prompt_creates_thread_and_returns_prompt() {
         let mut session = new_session();
 
-        session.update_system_blocks(vec![SystemBlock::Text {
+        session.push_system_block(SystemBlock::Base {
             text: "You are helpful.".into(),
-        }]);
+        });
         session.update_tool_definitions(vec![ToolDefinition {
             name: "get_weather".into(),
             description: Some("Get weather".into()),
@@ -1058,7 +1215,7 @@ mod tests {
 
         assert_eq!(prompt.system.len(), 1);
         assert!(
-            matches!(&prompt.system[0], SystemBlock::Text { text } if text == "You are helpful.")
+            matches!(&prompt.system[0], SystemBlock::Base { text } if text == "You are helpful.")
         );
 
         assert_eq!(prompt.tools.len(), 1);
@@ -1103,7 +1260,7 @@ mod tests {
                 keep_recent_tool_results: keep_recent,
                 reset_time_delta_seconds: None,
             })
-            .system_blocks(vec![SystemBlock::Text {
+            .system_blocks(vec![SystemBlock::Base {
                 text: "You are helpful.".into(),
             }])
             .tool_defs(vec![ToolDefinition {
@@ -1567,5 +1724,357 @@ mod tests {
         let fake_id = SessionThreadId::new();
         let result = session.thread_messages(fake_id);
         assert!(matches!(result, Err(AgentSessionError::ThreadNotFound)));
+    }
+
+    // ─── apply_proposed_system_blocks + lazy refresh tests ─────────────────
+
+    fn notes(text: &str) -> SystemBlock {
+        SystemBlock::Notes { text: text.into() }
+    }
+
+    fn skills(text: &str) -> SystemBlock {
+        SystemBlock::Skills { text: text.into() }
+    }
+
+    fn role(text: &str) -> SystemBlock {
+        SystemBlock::Role { text: text.into() }
+    }
+
+    /// Drive the session to create an initial thread with the given blocks.
+    fn seed_initial_thread(session: &mut AgentSession, blocks: Vec<SystemBlock>) {
+        for b in blocks {
+            session.push_system_block(b);
+        }
+        session
+            .add_user_input(TargetThread::Main, user_source(), "hi".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(session);
+    }
+
+    fn resolved_blocks(session: &AgentSession, thread_id: SessionThreadId) -> Vec<SystemBlock> {
+        let thread = session.threads.get_persisted(&thread_id).unwrap();
+        let pd = thread.prompt_definition();
+        let prompt = pd
+            .into_prompt(TargetThread::Id(thread_id), &session.events)
+            .unwrap();
+        prompt.system
+    }
+
+    #[test]
+    fn apply_proposed_system_blocks_no_changes_returns_already_applied() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
+
+        let result = session.apply_proposed_system_blocks(vec![role("R"), notes("N"), skills("S")]);
+        assert!(matches!(result, Idempotent::AlreadyApplied));
+
+        // No SystemBlockUpdated events were pushed.
+        let updates = session
+            .events
+            .iter_all()
+            .filter(|e| matches!(e, AgentSessionEvent::SystemBlockUpdated { .. }))
+            .count();
+        // 3 from seed (push_system_block per block) + 0 new
+        assert_eq!(updates, 3);
+    }
+
+    #[test]
+    fn apply_proposed_system_blocks_records_changed_kinds_only() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
+        let updates_before = session
+            .events
+            .iter_all()
+            .filter(|e| matches!(e, AgentSessionEvent::SystemBlockUpdated { .. }))
+            .count();
+
+        // Notes changed; Role + Skills unchanged.
+        let result =
+            session.apply_proposed_system_blocks(vec![role("R"), notes("N'"), skills("S")]);
+        assert!(matches!(result, Idempotent::Executed(())));
+
+        let updates_after = session
+            .events
+            .iter_all()
+            .filter(|e| matches!(e, AgentSessionEvent::SystemBlockUpdated { .. }))
+            .count();
+        assert_eq!(
+            updates_after - updates_before,
+            1,
+            "exactly one block update should be recorded"
+        );
+
+        // The latest SystemBlockUpdated event carries the new Notes content.
+        let last_update = session
+            .events
+            .iter_all()
+            .filter_map(|e| match e {
+                AgentSessionEvent::SystemBlockUpdated { block } => Some(block),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert_eq!(last_update, &notes("N'"));
+    }
+
+    #[test]
+    fn next_prompt_lazily_spawns_refreshed_thread_when_block_changed() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
+        let thread_before = session.current_main_thread.unwrap();
+
+        // Record a change to Notes — no thread created yet.
+        let _ = session.apply_proposed_system_blocks(vec![notes("N'")]);
+        assert_eq!(
+            session.current_main_thread,
+            Some(thread_before),
+            "apply_proposed_system_blocks must not spawn a thread"
+        );
+
+        // Send another user message + next_prompt — refresh happens here.
+        session
+            .add_user_input(TargetThread::Main, user_source(), "again".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let thread_after = session.current_main_thread.unwrap();
+        assert_ne!(
+            thread_after, thread_before,
+            "next_prompt should have spawned a refreshed thread"
+        );
+
+        // The new thread's resolved system blocks include the updated Notes.
+        let resolved = resolved_blocks(&session, thread_after);
+        assert!(resolved.contains(&role("R")));
+        assert!(resolved.contains(&notes("N'")));
+        assert!(resolved.contains(&skills("S")));
+        assert!(!resolved.contains(&notes("N")));
+    }
+
+    #[test]
+    fn next_prompt_does_not_spawn_thread_when_view_is_fresh() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N"), skills("S")]);
+        let thread_before = session.current_main_thread.unwrap();
+
+        // Apply identical blocks — no updates recorded.
+        let result = session.apply_proposed_system_blocks(vec![role("R"), notes("N"), skills("S")]);
+        assert!(matches!(result, Idempotent::AlreadyApplied));
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "again".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+
+        assert_eq!(
+            session.current_main_thread,
+            Some(thread_before),
+            "no refresh — no new thread"
+        );
+    }
+
+    #[test]
+    fn refreshed_thread_carries_context_refreshed_reason_with_from_thread() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N")]);
+        let thread_before = session.current_main_thread.unwrap();
+
+        let _ = session.apply_proposed_system_blocks(vec![notes("N'")]);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "again".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+
+        let last_thread_started = session
+            .events
+            .iter_all()
+            .filter_map(|e| match e {
+                AgentSessionEvent::ThreadStarted { start_reason, .. } => Some(start_reason),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert!(matches!(
+            last_thread_started,
+            ThreadStartReason::ContextRefreshed { from_thread } if *from_thread == thread_before
+        ));
+    }
+
+    #[test]
+    fn refreshed_thread_inherits_full_message_history() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N")]);
+
+        // Build up a multi-turn conversation on the original thread.
+        // Turn 1: assistant text response → next user input
+        let thread_id = session.current_main_thread.unwrap();
+        let response = session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "answer 1".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response 1");
+        assert!(matches!(response, AgentSessionResponse::Done));
+        session
+            .add_user_input(TargetThread::Main, user_source(), "follow up".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        let response = session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "answer 2".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response 2");
+        assert!(matches!(response, AgentSessionResponse::Done));
+        hydrate_threads(&mut session);
+
+        // Snapshot the original thread's message-view count.
+        let original_thread = session.threads.get_persisted(&thread_id).unwrap();
+        let original_messages_len = original_thread.prompt_definition().messages().len();
+        assert!(
+            original_messages_len >= 4,
+            "test setup should have at least 4 message views (initial user + assistant + user + assistant), got {}",
+            original_messages_len
+        );
+
+        // Now refresh: change Notes, send another user message.
+        let _ = session.apply_proposed_system_blocks(vec![notes("N'")]);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "after refresh".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(new_thread_id, thread_id, "refresh should spawn new thread");
+
+        // The refreshed thread's PromptDefinition should include all of the
+        // original messages PLUS the new "after refresh" user input.
+        let new_thread = session.threads.get_persisted(&new_thread_id).unwrap();
+        let new_messages = new_thread.prompt_definition().messages().to_vec();
+        assert!(
+            new_messages.len() >= original_messages_len,
+            "refreshed thread must inherit prior history (original={}, new={})",
+            original_messages_len,
+            new_messages.len()
+        );
+    }
+
+    #[test]
+    fn refresh_spawns_thread_when_a_kind_is_added_to_the_proposal() {
+        // Reproduces a real-world bug: a session created without any
+        // pinned notes (4 blocks: Role/Tools/Behavioral/Base) needs to
+        // spawn a refreshed thread when the user pins their first note.
+        // The previous implementation only detected "kind in view has
+        // newer idx" (replacement) and missed addition.
+        let mut session = new_session();
+        // Seed only Role + a Base — no Notes yet.
+        seed_initial_thread(
+            &mut session,
+            vec![SystemBlock::Base { text: "B".into() }, role("R")],
+        );
+        let thread_before = session.current_main_thread.unwrap();
+
+        // Now propose blocks that include a NEW kind (Notes) for the
+        // first time. Existing kinds unchanged.
+        let result = session.apply_proposed_system_blocks(vec![
+            SystemBlock::Base { text: "B".into() },
+            role("R"),
+            notes("first pinned note"),
+        ]);
+        assert!(matches!(result, Idempotent::Executed(())));
+
+        // Drive a turn; refresh should spawn a new thread whose view
+        // includes the newly-added Notes kind.
+        session
+            .add_user_input(TargetThread::Main, user_source(), "any".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(
+            new_thread_id, thread_before,
+            "first-time-add of a kind must spawn a refreshed thread"
+        );
+
+        // The refreshed thread's resolved system blocks include Notes.
+        let resolved = resolved_blocks(&session, new_thread_id);
+        assert!(
+            resolved
+                .iter()
+                .any(|b| matches!(b, SystemBlock::Notes { .. })),
+            "Notes kind should be present in the refreshed view, got {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn refreshed_thread_accepts_assistant_response() {
+        // Reproduces: after a context refresh, the next assistant
+        // response was rejected with NotAssistantTurn because the
+        // refreshed thread's `turn` defaulted to User (last inherited
+        // message was an Assistant turn — the prior LLM response —
+        // so hydration assumed user-next). The fix bakes the pending
+        // user input into the new thread's `messages` so turn=Assistant.
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R")]);
+        let initial_thread = session.current_main_thread.unwrap();
+
+        // Complete one round-trip on the initial thread: assistant
+        // response → next pending user input would be the trigger.
+        let response = session
+            .assistant_response_received(
+                initial_thread,
+                vec![AssistantBlock::Text {
+                    text: "first answer".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response 1");
+        assert!(matches!(response, AgentSessionResponse::Done));
+        hydrate_threads(&mut session);
+
+        // Pin "first" Notes mid-session, then send a new user message.
+        let _ = session.apply_proposed_system_blocks(vec![role("R"), notes("N")]);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "after refresh".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(
+            new_thread_id, initial_thread,
+            "context refresh should have spawned a new thread"
+        );
+
+        // The LLM responds — must be accepted as the assistant's turn.
+        let response = session
+            .assistant_response_received(
+                new_thread_id,
+                vec![AssistantBlock::Text {
+                    text: "answer after refresh".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response on refreshed thread must succeed");
+        assert!(matches!(response, AgentSessionResponse::Done));
     }
 }
