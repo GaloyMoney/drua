@@ -61,7 +61,12 @@ fn default_max_tool_calls() -> usize {
 }
 
 fn default_max_tool_result_bytes() -> usize {
-    4 * 1024 * 1024
+    // 32 MiB. Sized to comfortably hold realistic Concourse build logs
+    // and similar large payloads. Compose's value proposition is reaching
+    // *uncapped* data so scripts can filter / cross-reference in JS — the
+    // cap exists for safety against pathological cases, not as a normal
+    // throttle.
+    32 * 1024 * 1024
 }
 
 fn default_max_return_bytes() -> usize {
@@ -73,7 +78,10 @@ fn default_max_console_bytes() -> usize {
 }
 
 fn default_memory_limit_bytes() -> usize {
-    8 * 1024 * 1024
+    // 64 MiB. Must remain a comfortable multiple of
+    // `max_tool_result_bytes` (≥ 2×) so scripts have working room for
+    // `.split()` / `.filter()` / sorting on top of the parsed payload.
+    64 * 1024 * 1024
 }
 
 fn default_stack_limit_bytes() -> usize {

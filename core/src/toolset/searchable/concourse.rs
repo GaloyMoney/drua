@@ -163,7 +163,11 @@ struct BuildStatusOutput {
     status: String,
     pipeline: Option<String>,
     job: Option<String>,
+    /// Build start time as Unix epoch **seconds** (multiply by 1000 for
+    /// `new Date(start_time * 1000)` in JavaScript).
     start_time: Option<i64>,
+    /// Build end time as Unix epoch **seconds** (multiply by 1000 for
+    /// `new Date(end_time * 1000)` in JavaScript).
     end_time: Option<i64>,
 }
 
@@ -193,8 +197,52 @@ struct BuildSummaryOutput {
     build_id: u64,
     name: String,
     status: String,
+    /// Build start time as Unix epoch **seconds** (multiply by 1000 for
+    /// `new Date(start_time * 1000)` in JavaScript).
     start_time: Option<i64>,
+    /// Build end time as Unix epoch **seconds** (multiply by 1000 for
+    /// `new Date(end_time * 1000)` in JavaScript).
     end_time: Option<i64>,
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// Doc comments on schemars-derived structs land in the rendered
+    /// JSON Schema's `description` field for that property. They flow
+    /// through to `compose_types` (TS signature for compose scripts) and
+    /// `describe_tool` (raw JSON Schema), so agents see the time-unit
+    /// guidance before writing scripts that touch these fields.
+    fn description_for(schema: &serde_json::Value, field: &str) -> String {
+        schema
+            .get("properties")
+            .and_then(|p| p.get(field))
+            .and_then(|f| f.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn build_summary_time_fields_carry_unit_descriptions() {
+        let schema = schema_for::<BuildSummaryOutput>();
+        assert!(
+            description_for(&schema, "start_time").contains("seconds"),
+            "start_time description missing 'seconds' guidance: {schema:#}"
+        );
+        assert!(
+            description_for(&schema, "end_time").contains("seconds"),
+            "end_time description missing 'seconds' guidance: {schema:#}"
+        );
+    }
+
+    #[test]
+    fn build_status_time_fields_carry_unit_descriptions() {
+        let schema = schema_for::<BuildStatusOutput>();
+        assert!(description_for(&schema, "start_time").contains("seconds"));
+        assert!(description_for(&schema, "end_time").contains("seconds"));
+    }
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
