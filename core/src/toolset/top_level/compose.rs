@@ -473,10 +473,27 @@ pub(super) fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Convert an output JSON Schema (root type "object") into a TypeScript
-/// inline object type, e.g. `{ temperature: number; humidity: number }`.
-/// Falls back to `any` for schemas that aren't simple object types.
+/// Convert an output JSON Schema into a TypeScript inline type.
+///
+/// Handles the two common shapes catalog tools produce:
+/// - `type: "object"` → `{ key: T; ... }`
+/// - `type: "array"` → `T[]` (recursing into `items` for object element types)
+///
+/// Falls back to `any` for schemas that don't match either shape.
 pub(super) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
+    // Array: render items type with [] suffix.
+    if schema.get("type").and_then(|t| t.as_str()) == Some("array") {
+        if let Some(items) = schema.get("items") {
+            // Object items → recurse for typed properties.
+            if items.get("properties").is_some() {
+                return format!("{}[]", output_schema_to_ts(items));
+            }
+            // Primitive items (string[], number[], etc.).
+            return format!("{}[]", json_schema_to_ts(items));
+        }
+        return "any[]".to_string();
+    }
+
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) if !p.is_empty() => p,
         _ => return "any".to_string(),
@@ -522,5 +539,44 @@ mod tests {
         let out = with_hint("concourse_list_builds", "Tool not found".to_string());
         assert!(out.contains("compose_types"));
         assert!(out.contains("concourse_*"));
+    }
+
+    #[test]
+    fn output_schema_array_of_objects() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "build_id": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "required": ["build_id", "name"]
+            }
+        });
+        let ts = output_schema_to_ts(&schema);
+        assert!(ts.contains("build_id: number"));
+        assert!(ts.contains("name: string"));
+        assert!(ts.ends_with("[]"));
+    }
+
+    #[test]
+    fn output_schema_array_of_primitives() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" }
+        });
+        assert_eq!(output_schema_to_ts(&schema), "string[]");
+    }
+
+    #[test]
+    fn output_schema_flat_object_still_works() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "logs": { "type": "string" } },
+            "required": ["logs"]
+        });
+        let ts = output_schema_to_ts(&schema);
+        assert!(ts.contains("logs: string"));
     }
 }
