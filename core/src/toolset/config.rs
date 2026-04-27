@@ -26,6 +26,11 @@ pub struct ComposeConfig {
     /// agent context stays clean.
     #[serde(default = "default_max_return_bytes")]
     pub max_return_bytes: usize,
+    /// Cap on the console buffer in bytes. Tail-truncated when exceeded
+    /// (oldest lines dropped first) so a runaway log loop never floods
+    /// the agent context. ~1% of context at 8 KB.
+    #[serde(default = "default_max_console_bytes")]
+    pub max_console_bytes: usize,
     #[serde(default = "default_memory_limit_bytes")]
     pub memory_limit_bytes: usize,
     #[serde(default = "default_stack_limit_bytes")]
@@ -42,6 +47,7 @@ impl Default for ComposeConfig {
             max_tool_calls: default_max_tool_calls(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
             max_return_bytes: default_max_return_bytes(),
+            max_console_bytes: default_max_console_bytes(),
             memory_limit_bytes: default_memory_limit_bytes(),
             stack_limit_bytes: default_stack_limit_bytes(),
             default_timeout_ms: default_default_timeout_ms(),
@@ -60,6 +66,10 @@ fn default_max_tool_result_bytes() -> usize {
 
 fn default_max_return_bytes() -> usize {
     100 * 1024
+}
+
+fn default_max_console_bytes() -> usize {
+    8 * 1024
 }
 
 fn default_memory_limit_bytes() -> usize {

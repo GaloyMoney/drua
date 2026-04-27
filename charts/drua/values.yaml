@@ -86,6 +86,9 @@ galoyAgents:
       maxToolResultBytes: "4194304"
       ## Final-return cap. Bounded so the agent context stays clean.
       maxReturnBytes: "102400"
+      ## Console buffer cap. Tail-truncated when exceeded — newest lines
+      ## kept, oldest dropped. ~1% of agent context at 8 KiB.
+      maxConsoleBytes: "8192"
       memoryLimitBytes: "8388608"
       stackLimitBytes: "524288"
       defaultTimeoutMs: 120000

@@ -77,6 +77,7 @@ data:
         max_tool_calls: {{ printf "%d" (int .maxToolCalls) }}
         max_tool_result_bytes: {{ printf "%d" (int .maxToolResultBytes) }}
         max_return_bytes: {{ printf "%d" (int .maxReturnBytes) }}
+        max_console_bytes: {{ printf "%d" (int .maxConsoleBytes) }}
         memory_limit_bytes: {{ printf "%d" (int .memoryLimitBytes) }}
         stack_limit_bytes: {{ printf "%d" (int .stackLimitBytes) }}
         default_timeout_ms: {{ printf "%d" (int .defaultTimeoutMs) }}
