@@ -1,6 +1,6 @@
 //! `workflow` — consolidated workspace-scoped workflow management.
 //!
-//! Single tool with a `command` discriminator (mirrors `agent`/`sandbox`):
+//! Single tool with a `command` discriminator (mirrors `notes`):
 //! `create`, `list`, `get`, `trigger`, `runs`.
 //!
 //! Read commands (`list`, `get`, `runs`) require `can_read_workspace`;
@@ -16,7 +16,8 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::WorkflowDefinitionId;
 use crate::workflow::{
-    WorkflowDefinition, WorkflowRun, WorkflowStepDef, WorkflowTrigger, Workflows,
+    StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowStepDef,
+    WorkflowTrigger, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -24,69 +25,139 @@ use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
-// Params
+// Params (tagged enum — no parameter sprawl)
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum WorkflowCommand {
+#[derive(Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum WorkflowParams {
     /// Create a new workflow definition (MVP: single-step webhook workflows).
-    Create,
+    Create {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        /// Webhook provider (e.g. `"honeycomb"`). Omit for a generic
+        /// `Authorization: Bearer <secret>` shared-token webhook. Pass
+        /// `manual: true` to opt out of the webhook entirely.
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        manual: bool,
+        skill: String,
+        #[serde(default)]
+        sandbox: Option<String>,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
     /// List workflow definitions in the workspace.
     List,
     /// Get a workflow definition by ID.
-    Get,
+    Get { definition_id: WorkflowDefinitionId },
     /// Manually trigger a workflow run.
-    Trigger,
+    Trigger {
+        definition_id: WorkflowDefinitionId,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
     /// List runs for a workflow definition.
-    Runs,
+    Runs { definition_id: WorkflowDefinitionId },
 }
 
-impl WorkflowCommand {
+impl WorkflowParams {
     fn audit_action(&self) -> &'static str {
         match self {
-            Self::Create => "workflow.create",
+            Self::Create { .. } => "workflow.create",
             Self::List => "workflow.list",
-            Self::Get => "workflow.get",
-            Self::Trigger => "workflow.trigger",
-            Self::Runs => "workflow.runs",
+            Self::Get { .. } => "workflow.get",
+            Self::Trigger { .. } => "workflow.trigger",
+            Self::Runs { .. } => "workflow.runs",
         }
     }
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
-struct WorkflowParams {
-    /// Which workflow operation to perform.
-    command: WorkflowCommand,
+// ---------------------------------------------------------------------------
+// Output shapes (schemars-derived; also used for serialization)
+// ---------------------------------------------------------------------------
 
-    // -- create fields --
-    /// Workflow display name (required for `create`).
-    name: Option<String>,
-    /// Optional human-readable description.
+/// Union output for all workflow subcommands. Only `command` is required;
+/// other fields are populated per subcommand.
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+struct WorkflowOutput {
+    /// Which command was executed.
+    command: String,
+    // -- single definition (create/get) --
+    #[serde(skip_serializing_if = "Option::is_none")]
+    definition: Option<WorkflowDefinitionOutput>,
+    // -- list of definitions (list) --
+    #[serde(skip_serializing_if = "Option::is_none")]
+    definitions: Option<Vec<WorkflowDefinitionOutput>>,
+    // -- single run (trigger) --
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run: Option<WorkflowRunOutput>,
+    // -- list of runs (runs) --
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runs: Option<Vec<WorkflowRunOutput>>,
+    // -- create-only fields --
+    /// Auto-generated webhook secret (only set on `create` for webhook
+    /// triggers — surfaced once so the caller can configure the upstream).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_secret: Option<String>,
+    /// Webhook URL (only set on `create` for webhook triggers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_url: Option<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct WorkflowDefinitionOutput {
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Webhook provider tag (e.g. "honeycomb"). When omitted defaults to a
-    /// generic `Authorization: Bearer <secret>` shared-token webhook. If
-    /// you want a `Manual` trigger, pass `manual: true` instead.
-    provider: Option<String>,
-    /// Set to `true` to create a manually-triggered workflow (no webhook).
-    #[serde(default)]
-    manual: bool,
-    /// Skill name for the single agent step (required for `create`).
-    skill: Option<String>,
-    /// Optional sandbox name to attach to the agent step.
+    workspace_id: String,
+    /// Trigger kind: `"manual"` or `"webhook"`.
+    trigger_type: String,
+    /// Webhook provider tag when `trigger_type` is `"webhook"` (e.g. `"honeycomb"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger_provider: Option<String>,
+    steps: Vec<WorkflowStepOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct WorkflowStepOutput {
+    name: String,
+    /// Step kind: `"agent_step"` for MVP.
+    step_type: String,
+    skill: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sandbox: Option<String>,
-    /// Optional per-step timeout in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     timeout_seconds: Option<u64>,
+}
 
-    // -- get / trigger / runs fields --
-    /// ID of the workflow definition (required for `get`, `trigger`, `runs`).
-    #[schemars(with = "Option<uuid::Uuid>")]
-    definition_id: Option<WorkflowDefinitionId>,
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct WorkflowRunOutput {
+    id: String,
+    definition_id: String,
+    workspace_id: String,
+    /// One of `pending` | `running` | `succeeded` | `failed`.
+    state: String,
+    started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    step_results: Vec<StepResultOutput>,
+}
 
-    // -- trigger field --
-    /// Optional JSON payload to use as the trigger context (defaults to
-    /// `{}`). Only used by `trigger`.
-    payload: Option<serde_json::Value>,
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct StepResultOutput {
+    name: String,
+    /// Step output as JSON (string, object, etc.) — `null` if not yet
+    /// completed or if the step failed.
+    output: Option<serde_json::Value>,
+    /// Error message when the step failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +181,60 @@ impl WorkflowTool {
     }
 }
 
-static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkflowParams>);
+static WORKFLOW_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<WorkflowOutput>);
+
+static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "enum": ["create", "list", "get", "trigger", "runs"],
+                "description": "Which workflow operation to perform."
+            },
+            "name": {
+                "type": "string",
+                "description": "Workflow display name (create)."
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional human-readable description (create)."
+            },
+            "provider": {
+                "type": "string",
+                "description": "Webhook provider tag, e.g. 'honeycomb' (create). Omit for a generic Bearer-token webhook."
+            },
+            "manual": {
+                "type": "boolean",
+                "description": "Opt out of webhooks entirely and create a manually-triggered workflow (create)."
+            },
+            "skill": {
+                "type": "string",
+                "description": "Skill name for the single agent step (create)."
+            },
+            "sandbox": {
+                "type": "string",
+                "description": "Optional sandbox name to attach to the agent step (create)."
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Per-step timeout in seconds (create). Defaults to 300."
+            },
+            "definition_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Workflow definition ID (get / trigger / runs)."
+            },
+            "payload": {
+                "description": "Trigger context payload (trigger). Defaults to {}."
+            }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+    })
+});
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkflowTool {
@@ -127,11 +251,21 @@ impl TopLevelTool for WorkflowTool {
     }
 
     fn input_schema(&self) -> &serde_json::Value {
-        &SCHEMA
+        &WORKFLOW_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&WORKFLOW_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         subject.can_read_workspace()
+    }
+
+    fn composable(&self) -> bool {
+        // Workflows spawn agents under a system subject and run
+        // asynchronously — same constraint as `agent` and `sandbox`.
+        false
     }
 
     async fn call(
@@ -142,26 +276,28 @@ impl TopLevelTool for WorkflowTool {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: WorkflowParams = parse_params(arguments)?;
 
-        Audit::record_action(params.command.audit_action());
+        Audit::record_action(params.audit_action());
 
-        match params.command {
-            WorkflowCommand::Create => {
+        let (text, out) = match params {
+            WorkflowParams::Create {
+                name,
+                description,
+                provider,
+                manual,
+                skill,
+                sandbox,
+                timeout_seconds,
+            } => {
                 if !subject.can_write_workspace() {
                     return Err(ToolSetsError::Unauthorized);
                 }
-                let name = params.name.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("name is required for create".into())
-                })?;
-                let skill = params.skill.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("skill is required for create".into())
-                })?;
 
-                let trigger = if params.manual {
+                let trigger = if manual {
                     WorkflowTrigger::Manual
                 } else {
                     // Empty secret → Workflows::create generates one.
                     WorkflowTrigger::Webhook {
-                        provider: params.provider.clone(),
+                        provider: provider.clone(),
                         secret: String::new(),
                     }
                 };
@@ -169,8 +305,8 @@ impl TopLevelTool for WorkflowTool {
                 let step = WorkflowStepDef::AgentStep {
                     name: "step".into(),
                     skill,
-                    sandbox: params.sandbox,
-                    timeout_seconds: params.timeout_seconds,
+                    sandbox,
+                    timeout_seconds,
                 };
 
                 let definition = self
@@ -179,104 +315,204 @@ impl TopLevelTool for WorkflowTool {
                         subject,
                         workspace_id,
                         name,
-                        params.description,
+                        description,
                         trigger,
                         vec![step],
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    self.format_create(&definition),
-                )]))
+                let (webhook_url, webhook_secret) = self.webhook_url_and_secret(&definition);
+                let text = self.format_create_text(&definition, &webhook_url, &webhook_secret);
+                let out = WorkflowOutput {
+                    command: "create".to_string(),
+                    definition: Some(definition_to_output(&definition)),
+                    webhook_url,
+                    webhook_secret,
+                    ..Default::default()
+                };
+                (text, out)
             }
 
-            WorkflowCommand::List => {
+            WorkflowParams::List => {
                 let definitions = self
                     .workflows
                     .list_for_workspace(subject, workspace_id)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_list(
-                    &definitions,
-                ))]))
+                let text = format_list_text(&definitions);
+                let out = WorkflowOutput {
+                    command: "list".to_string(),
+                    definitions: Some(definitions.iter().map(definition_to_output).collect()),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
-            WorkflowCommand::Get => {
-                let definition_id = params.definition_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("definition_id is required for get".into())
-                })?;
+            WorkflowParams::Get { definition_id } => {
                 let definition = self
                     .workflows
                     .find_by_id(subject, definition_id)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_get(
-                    &definition,
-                ))]))
+                let text = format_get_text(&definition);
+                let out = WorkflowOutput {
+                    command: "get".to_string(),
+                    definition: Some(definition_to_output(&definition)),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
-            WorkflowCommand::Trigger => {
+            WorkflowParams::Trigger {
+                definition_id,
+                payload,
+            } => {
                 if !subject.can_write_workspace() {
                     return Err(ToolSetsError::Unauthorized);
                 }
-                let definition_id = params.definition_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("definition_id is required for trigger".into())
-                })?;
-                let payload = params
-                    .payload
-                    .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                let payload =
+                    payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
                 let run = self
                     .workflows
                     .trigger_run(subject, definition_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Workflow run started.\n  run_id:        {}\n  definition_id: {}\n  state:         {:?}",
-                    run.id, run.definition_id, run.state
-                ))]))
+                let text = format!(
+                    "Workflow run started.\n  run_id:        {}\n  definition_id: {}\n  state:         {}",
+                    run.id,
+                    run.definition_id,
+                    run_state_str(run.state)
+                );
+                let out = WorkflowOutput {
+                    command: "trigger".to_string(),
+                    run: Some(run_to_output(&run)),
+                    ..Default::default()
+                };
+                (text, out)
             }
 
-            WorkflowCommand::Runs => {
-                let definition_id = params.definition_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("definition_id is required for runs".into())
-                })?;
+            WorkflowParams::Runs { definition_id } => {
                 let runs = self
                     .workflows
                     .list_runs(subject, definition_id)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_runs(
-                    &runs,
-                ))]))
+                let text = format_runs_text(&runs);
+                let out = WorkflowOutput {
+                    command: "runs".to_string(),
+                    runs: Some(runs.iter().map(run_to_output).collect()),
+                    ..Default::default()
+                };
+                (text, out)
             }
-        }
+        };
+
+        let structured = serde_json::to_value(&out).expect("WorkflowOutput serialization");
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(structured);
+        Ok(result)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Formatting helpers
+// Output mappers
+// ---------------------------------------------------------------------------
+
+fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
+    let (trigger_type, trigger_provider) = match &d.trigger {
+        WorkflowTrigger::Manual => ("manual".to_string(), None),
+        WorkflowTrigger::Webhook { provider, .. } => ("webhook".to_string(), provider.clone()),
+    };
+    WorkflowDefinitionOutput {
+        id: d.id.to_string(),
+        name: d.name.clone(),
+        description: d.description.clone(),
+        workspace_id: d.workspace_id.to_string(),
+        trigger_type,
+        trigger_provider,
+        steps: d.steps.iter().map(step_to_output).collect(),
+    }
+}
+
+fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
+    match s {
+        WorkflowStepDef::AgentStep {
+            name,
+            skill,
+            sandbox,
+            timeout_seconds,
+        } => WorkflowStepOutput {
+            name: name.clone(),
+            step_type: "agent_step".to_string(),
+            skill: skill.clone(),
+            sandbox: sandbox.clone(),
+            timeout_seconds: *timeout_seconds,
+        },
+    }
+}
+
+fn run_to_output(r: &WorkflowRun) -> WorkflowRunOutput {
+    WorkflowRunOutput {
+        id: r.id.to_string(),
+        definition_id: r.definition_id.to_string(),
+        workspace_id: r.workspace_id.to_string(),
+        state: run_state_str(r.state).to_string(),
+        started_at: r.started_at().to_rfc3339(),
+        completed_at: r.completed_at.map(|t| t.to_rfc3339()),
+        step_results: r.step_results.iter().map(step_result_to_output).collect(),
+    }
+}
+
+fn step_result_to_output(sr: &StepResult) -> StepResultOutput {
+    StepResultOutput {
+        name: sr.name.clone(),
+        output: sr.output.clone(),
+        error: sr.error.clone(),
+        completed_at: sr.completed_at.map(|t| t.to_rfc3339()),
+    }
+}
+
+fn run_state_str(state: WorkflowRunState) -> &'static str {
+    match state {
+        WorkflowRunState::Pending => "pending",
+        WorkflowRunState::Running => "running",
+        WorkflowRunState::Succeeded => "succeeded",
+        WorkflowRunState::Failed => "failed",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text formatting helpers (human-readable companion to structured_content)
 // ---------------------------------------------------------------------------
 
 impl WorkflowTool {
-    fn format_create(&self, def: &WorkflowDefinition) -> String {
-        let (trigger_label, secret) = match &def.trigger {
-            WorkflowTrigger::Manual => ("manual".to_string(), None),
-            WorkflowTrigger::Webhook { provider, secret } => {
-                let label = match provider {
-                    Some(p) => format!("webhook ({p})"),
-                    None => "webhook".to_string(),
+    fn webhook_url_and_secret(&self, def: &WorkflowDefinition) -> (Option<String>, Option<String>) {
+        match &def.trigger {
+            WorkflowTrigger::Manual => (None, None),
+            WorkflowTrigger::Webhook { secret, .. } => {
+                let url = match &self.public_host {
+                    Some(host) => format!("{host}/webhooks/{}", def.id),
+                    None => format!("/webhooks/{}", def.id),
                 };
-                (label, Some(secret.clone()))
+                (Some(url), Some(secret.clone()))
             }
+        }
+    }
+
+    fn format_create_text(
+        &self,
+        def: &WorkflowDefinition,
+        webhook_url: &Option<String>,
+        webhook_secret: &Option<String>,
+    ) -> String {
+        let trigger_label = match &def.trigger {
+            WorkflowTrigger::Manual => "manual".to_string(),
+            WorkflowTrigger::Webhook { provider, .. } => match provider {
+                Some(p) => format!("webhook ({p})"),
+                None => "webhook".to_string(),
+            },
         };
-        let webhook_url = secret.as_ref().map(|_| match &self.public_host {
-            Some(host) => format!("{host}/webhooks/{}", def.id),
-            None => format!(
-                "/webhooks/{} (set public host in config to render full URL)",
-                def.id
-            ),
-        });
 
         let mut out = String::new();
         out.push_str("Workflow created.\n");
@@ -284,14 +520,21 @@ impl WorkflowTool {
         out.push_str(&format!("  name:           {}\n", def.name));
         out.push_str(&format!("  trigger:        {trigger_label}\n"));
         if let Some(url) = webhook_url {
-            out.push_str(&format!("  webhook_url:    {url}\n"));
+            let suffix = if self.public_host.is_none() {
+                " (set public host in config to render full URL)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("  webhook_url:    {url}{suffix}\n"));
         }
-        if let Some(s) = secret {
+        if let Some(s) = webhook_secret {
             out.push_str(&format!("  webhook_secret: {s}\n"));
         }
         out.push_str("  status:         enabled\n");
-        if matches!(def.trigger, WorkflowTrigger::Webhook { provider: Some(ref p), .. } if p == "honeycomb")
-        {
+        if matches!(
+            def.trigger,
+            WorkflowTrigger::Webhook { provider: Some(ref p), .. } if p == "honeycomb"
+        ) {
             out.push_str(
                 "\nConfigure your Honeycomb webhook recipient with the URL and secret above.\n",
             );
@@ -300,7 +543,7 @@ impl WorkflowTool {
     }
 }
 
-fn format_list(defs: &[WorkflowDefinition]) -> String {
+fn format_list_text(defs: &[WorkflowDefinition]) -> String {
     if defs.is_empty() {
         return "No workflows found.".to_string();
     }
@@ -331,7 +574,7 @@ fn format_list(defs: &[WorkflowDefinition]) -> String {
     lines.join("\n")
 }
 
-fn format_get(d: &WorkflowDefinition) -> String {
+fn format_get_text(d: &WorkflowDefinition) -> String {
     let trigger = match &d.trigger {
         WorkflowTrigger::Manual => "manual".to_string(),
         WorkflowTrigger::Webhook { provider, secret } => {
@@ -367,7 +610,7 @@ fn format_get(d: &WorkflowDefinition) -> String {
     out
 }
 
-fn format_runs(runs: &[WorkflowRun]) -> String {
+fn format_runs_text(runs: &[WorkflowRun]) -> String {
     if runs.is_empty() {
         return "No runs found.".to_string();
     }
@@ -396,7 +639,7 @@ fn format_runs(runs: &[WorkflowRun]) -> String {
         lines.push(format!(
             "{:<38} {:<12} {:<28} {}",
             r.id,
-            format!("{:?}", r.state).to_lowercase(),
+            run_state_str(r.state),
             started,
             truncate(&output.replace('\n', " "), 60)
         ));
