@@ -96,7 +96,8 @@ impl TopLevelTool for ComposeTool {
          (e.g. `tools.honeycomb.list_environments({...})`). Flat prefixed names also work \
          (e.g. `tools.honeycomb_list_environments({...})`). \
          Use `return` for the final value. Top-level `await` and `Promise.all()` are supported. \
-         TypeScript declarations for available tools are included in the execution context.\n\n\
+         **Call `compose_types` first** to fetch exact tool signatures and parameter names \
+         — guessing leads to runtime errors that waste a round trip.\n\n\
          Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
          const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
          const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
@@ -235,10 +236,12 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
             let result = set
                 .call(&self.subject, &tool_name, inner_args)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| with_hint(name, e.to_string()))?;
 
             let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
-            let filtered = filter.apply(result).map_err(|e| e.to_string())?;
+            let filtered = filter
+                .apply(result)
+                .map_err(|e| with_hint(name, e.to_string()))?;
 
             if let Some(structured) = &filtered.structured_content {
                 return Ok(structured.clone());
@@ -296,7 +299,7 @@ impl CatalogDispatcher {
             map.get(name)
                 .filter(|t| t.composable() && t.is_visible(&self.subject))
                 .cloned()
-                .ok_or_else(|| format!("Tool not found: {name}"))?
+                .ok_or_else(|| with_hint(name, format!("Tool not found: {name}")))?
         };
 
         Audit::record_action(format!("compose > top_level: {name}"));
@@ -310,7 +313,7 @@ impl CatalogDispatcher {
         let result = tool
             .call(&self.subject, inner_args)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| with_hint(name, e.to_string()))?;
 
         // Prefer structured_content (typed JSON) over text parsing
         if let Some(structured) = &result.structured_content {
@@ -496,4 +499,28 @@ pub(super) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
         parts.push(format!("{name}{optional}: {ts_type}"));
     }
     format!("{{ {} }}", parts.join("; "))
+}
+
+/// Append a "call `compose_types` first" suggestion to a dispatcher error so
+/// the agent learns to fetch real signatures instead of re-guessing. The
+/// prefix is derived from the requested tool name (everything before the
+/// first underscore) so the hint scopes to the relevant namespace.
+fn with_hint(tool_name: &str, raw: String) -> String {
+    let prefix = tool_name.split('_').next().unwrap_or("*");
+    format!(
+        "{raw}\nHint: call compose_types({{tool_names:[\"{prefix}_*\"]}}) \
+         to see available signatures."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_hint_appends_compose_types_suggestion() {
+        let out = with_hint("concourse_list_builds", "Tool not found".to_string());
+        assert!(out.contains("compose_types"));
+        assert!(out.contains("concourse_*"));
+    }
 }
