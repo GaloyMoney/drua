@@ -18,8 +18,14 @@ pub struct ToolSetsConfig {
 pub struct ComposeConfig {
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
-    #[serde(default = "default_max_result_bytes")]
-    pub max_result_bytes: usize,
+    /// Cap on a single inner-tool result, in bytes. Lets scripts pull
+    /// large payloads (logs, manifests) and filter them before returning.
+    #[serde(default = "default_max_tool_result_bytes")]
+    pub max_tool_result_bytes: usize,
+    /// Cap on the script's final return value, in bytes. Bounded so the
+    /// agent context stays clean.
+    #[serde(default = "default_max_return_bytes")]
+    pub max_return_bytes: usize,
     #[serde(default = "default_memory_limit_bytes")]
     pub memory_limit_bytes: usize,
     #[serde(default = "default_stack_limit_bytes")]
@@ -34,7 +40,8 @@ impl Default for ComposeConfig {
     fn default() -> Self {
         Self {
             max_tool_calls: default_max_tool_calls(),
-            max_result_bytes: default_max_result_bytes(),
+            max_tool_result_bytes: default_max_tool_result_bytes(),
+            max_return_bytes: default_max_return_bytes(),
             memory_limit_bytes: default_memory_limit_bytes(),
             stack_limit_bytes: default_stack_limit_bytes(),
             default_timeout_ms: default_default_timeout_ms(),
@@ -47,7 +54,11 @@ fn default_max_tool_calls() -> usize {
     50
 }
 
-fn default_max_result_bytes() -> usize {
+fn default_max_tool_result_bytes() -> usize {
+    4 * 1024 * 1024
+}
+
+fn default_max_return_bytes() -> usize {
     100 * 1024
 }
 

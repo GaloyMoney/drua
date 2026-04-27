@@ -14,6 +14,8 @@ pub enum JsEngineError {
     MemoryLimit,
     #[error("JsEngineError - ToolCallLimit: script exceeded {max} tool calls")]
     ToolCallLimit { max: usize },
-    #[error("JsEngineError - ResultTooLarge: {size} bytes (max {max})")]
-    ResultTooLarge { size: usize, max: usize },
+    #[error("JsEngineError - ToolResultTooLarge: {size} bytes (max {max}). The tool returned more data than compose can hold in a single result. Try a more specific query (e.g. limit/filter parameters) or fall back to call_tool with output_filter.")]
+    ToolResultTooLarge { size: usize, max: usize },
+    #[error("JsEngineError - ReturnTooLarge: {size} bytes (max {max}). Filter or summarize in the script before returning — compose's job is to shrink large tool results into a small agent-readable answer.")]
+    ReturnTooLarge { size: usize, max: usize },
 }
