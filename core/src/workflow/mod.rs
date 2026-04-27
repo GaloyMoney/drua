@@ -12,6 +12,7 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
+use crate::library::{GitFileHash, Library, RuntimeFile};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -24,7 +25,10 @@ use crate::skill::Skills;
 pub use definition::{WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
 pub use error::*;
-pub use job::ExecuteRunJobInitializer;
+pub use job::{
+    ExecuteRunJobInitializer, SyncWorkflowsFromLibraryConfig,
+    SyncWorkflowsFromLibraryJobInitializer,
+};
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
 use job::ExecuteRunConfig;
@@ -43,10 +47,23 @@ pub struct Workflows {
 impl Workflows {
     pub fn new(
         pool: &sqlx::PgPool,
+        library: Library,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     ) -> Self {
         Self {
-            repo: WorkflowDefinitionRepo::new(pool),
+            repo: WorkflowDefinitionRepo::new(pool, library),
+            run_repo: WorkflowRunRepo::new(pool),
+            execute_run_spawner,
+        }
+    }
+
+    /// Test/dev constructor — bypasses library wiring (no git sync).
+    pub fn new_without_library(
+        pool: &sqlx::PgPool,
+        execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
+    ) -> Self {
+        Self {
+            repo: WorkflowDefinitionRepo::new_without_library(pool),
             run_repo: WorkflowRunRepo::new(pool),
             execute_run_spawner,
         }
@@ -71,11 +88,20 @@ impl Workflows {
         format!("whsec_{}", hex::encode(bytes))
     }
 
+    /// Create a new workflow definition.
+    ///
+    /// `workspace_name` is the cached workspace display name — needed
+    /// so the post-persist hook can render the canonical library file
+    /// path without an extra DB lookup. Pass an empty string for tests
+    /// that don't care about library-side naming (the file just won't
+    /// land under a workspace folder).
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "core.workflow.create", skip_all)]
     pub async fn create(
         &self,
         sub: &AuthSubject,
         workspace_id: WorkspaceId,
+        workspace_name: &str,
         name: String,
         description: Option<String>,
         trigger: WorkflowTrigger,
@@ -101,17 +127,113 @@ impl Workflows {
             other => other,
         };
 
-        let new = NewWorkflowDefinition::builder()
+        let mut builder = NewWorkflowDefinition::builder()
             .workspace_id(workspace_id)
             .name(name)
-            .description(description.unwrap_or_default())
             .trigger(trigger)
-            .steps(steps)
+            .steps(steps);
+        if !workspace_name.is_empty() {
+            builder = builder.workspace_name(workspace_name);
+        }
+        if let Some(desc) = description {
+            builder = builder.description(desc);
+        }
+        let new = builder
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
         let workflow = self.repo.create(new).await?;
         Ok(workflow)
+    }
+
+    /// Reverse-sync entry point: upsert a workflow from a library file
+    /// within an existing transaction. Mirrors `Skills::upsert_from_library_in_op`.
+    ///
+    /// On `Create`: stamps `original_path` so the next forward-sync
+    /// pass can rename / clean up the file. Generates a fresh webhook
+    /// secret when the file declares a webhook trigger.
+    /// On `Update`: preserves the existing DB-side webhook secret —
+    /// secrets never round-trip through the file.
+    #[instrument(name = "core.workflow.upsert_from_library_in_op", skip_all)]
+    pub(crate) async fn upsert_from_library_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        file: &RuntimeFile,
+        workspace_id: WorkspaceId,
+        file_hash: GitFileHash,
+    ) -> Result<(), WorkflowError> {
+        let (doc_id, name, description, trigger, steps, workspace_name, original_path) = match file
+        {
+            RuntimeFile::Workflow {
+                doc_id,
+                name,
+                description,
+                trigger,
+                steps,
+                workspace_name,
+                original_path,
+                ..
+            } => (
+                *doc_id,
+                name.clone(),
+                description.clone(),
+                trigger.clone(),
+                steps.clone(),
+                workspace_name.clone(),
+                original_path.clone(),
+            ),
+            _ => return Ok(()),
+        };
+
+        if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
+            if existing
+                .update_from_library(
+                    Some(name.clone()),
+                    Some(description.clone()),
+                    Some(trigger),
+                    Some(steps),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                self.repo.update_in_op(op, &mut existing).await?;
+            }
+            tracing::info!(id = %doc_id, name = %name, "updated workflow from library");
+        } else {
+            // New workflow from a hand-authored file: mint a fresh secret
+            // for webhook triggers.
+            let trigger = match trigger {
+                WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
+                    WorkflowTrigger::Webhook {
+                        provider,
+                        secret: Self::generate_webhook_secret(),
+                    }
+                }
+                other => other,
+            };
+
+            let mut builder = NewWorkflowDefinition::builder()
+                .id(doc_id)
+                .workspace_id(workspace_id)
+                .name(name.clone())
+                .trigger(trigger)
+                .steps(steps);
+            if let Some(ws) = workspace_name {
+                builder = builder.workspace_name(ws);
+            }
+            if let Some(desc) = description {
+                builder = builder.description(desc);
+            }
+            if let Some(path) = original_path {
+                builder = builder.original_path(path);
+            }
+            let new = builder
+                .build()
+                .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
+            self.repo.create_in_op(op, new).await?;
+            tracing::info!(id = %doc_id, name = %name, "created workflow from library");
+        }
+        Ok(())
     }
 
     #[instrument(name = "core.workflow.find_by_id", skip_all)]

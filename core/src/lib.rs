@@ -216,7 +216,7 @@ impl App {
         );
         let execute_run_spawner = jobs.add_initializer(execute_run_initializer);
 
-        let workflows = Arc::new(Workflows::new(pool, execute_run_spawner));
+        let workflows = Arc::new(Workflows::new(pool, library.clone(), execute_run_spawner));
 
         let workspaces = Arc::new(Workspaces::new(
             pool,
@@ -229,7 +229,11 @@ impl App {
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
-        toolsets.register_top_level(WorkflowTool::new(Arc::clone(&workflows), None));
+        toolsets.register_top_level(WorkflowTool::new(
+            Arc::clone(&workflows),
+            Arc::clone(&workspaces),
+            None,
+        ));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
@@ -253,6 +257,29 @@ impl App {
                 .spawn_with_queue_id(
                     job::JobId::new(),
                     SyncSkillsFromLibraryConfig {
+                        sync_interval_secs: config.library.skill_sync_interval_secs,
+                        last_sync_commit: None,
+                    },
+                    library::LIBRARY_LOCK_QUEUE,
+                )
+                .await
+                .map_err(|e| AppError::Job(e.to_string()))?;
+        }
+
+        // Reverse-sync for workflow YAML files. Same shape as the
+        // skill sync above — interval-poll the library, parse +
+        // upsert, share the library-lock queue.
+        {
+            let sync_init = workflow::SyncWorkflowsFromLibraryJobInitializer::new(
+                library.clone(),
+                Arc::clone(&workflows),
+                Arc::clone(&workspaces),
+            );
+            let sync_spawner = jobs.add_initializer(sync_init);
+            sync_spawner
+                .spawn_with_queue_id(
+                    job::JobId::new(),
+                    workflow::SyncWorkflowsFromLibraryConfig {
                         sync_interval_secs: config.library.skill_sync_interval_secs,
                         last_sync_commit: None,
                     },

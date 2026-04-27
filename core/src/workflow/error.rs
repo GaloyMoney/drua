@@ -3,7 +3,8 @@ use thiserror::Error;
 use crate::auth::error::AuthorizationError;
 
 use super::repo::{
-    WorkflowDefinitionCreateError, WorkflowDefinitionFindError, WorkflowDefinitionQueryError,
+    WorkflowDefinitionCreateError, WorkflowDefinitionFindError, WorkflowDefinitionModifyError,
+    WorkflowDefinitionQueryError,
 };
 use super::run::repo::{
     WorkflowRunCreateError, WorkflowRunFindError, WorkflowRunModifyError, WorkflowRunQueryError,
@@ -15,6 +16,8 @@ pub enum WorkflowError {
     DefinitionCreate(#[from] WorkflowDefinitionCreateError),
     #[error("WorkflowError - DefinitionFind: {0}")]
     DefinitionFind(#[from] WorkflowDefinitionFindError),
+    #[error("WorkflowError - DefinitionModify: {0}")]
+    DefinitionModify(#[from] WorkflowDefinitionModifyError),
     #[error("WorkflowError - DefinitionQuery: {0}")]
     DefinitionQuery(#[from] WorkflowDefinitionQueryError),
     #[error("WorkflowError - RunCreate: {0}")]

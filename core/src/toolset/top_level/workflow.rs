@@ -19,6 +19,7 @@ use crate::workflow::{
     StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowStepDef,
     WorkflowTrigger, Workflows,
 };
+use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -166,6 +167,7 @@ struct StepResultOutput {
 
 pub struct WorkflowTool {
     workflows: Arc<Workflows>,
+    workspaces: Arc<Workspaces>,
     /// Optional public-facing host (e.g. `https://drua.example.com`) used
     /// to render the webhook URL on `create` responses. When `None` the
     /// response shows just the path.
@@ -173,9 +175,14 @@ pub struct WorkflowTool {
 }
 
 impl WorkflowTool {
-    pub fn new(workflows: Arc<Workflows>, public_host: Option<String>) -> Self {
+    pub fn new(
+        workflows: Arc<Workflows>,
+        workspaces: Arc<Workspaces>,
+        public_host: Option<String>,
+    ) -> Self {
         Self {
             workflows,
+            workspaces,
             public_host,
         }
     }
@@ -309,11 +316,19 @@ impl TopLevelTool for WorkflowTool {
                     timeout_seconds,
                 };
 
+                let workspace_name = self
+                    .workspaces
+                    .find_by_id(subject, workspace_id)
+                    .await
+                    .map(|w| w.name)
+                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+
                 let definition = self
                     .workflows
                     .create(
                         subject,
                         workspace_id,
+                        &workspace_name,
                         name,
                         description,
                         trigger,
