@@ -10,6 +10,61 @@ pub struct ToolSetsConfig {
     pub concourse: ConcourseToolSetConfig,
     #[serde(default)]
     pub code_assistant: CodeAssistantToolSetConfig,
+    #[serde(default)]
+    pub compose: ComposeConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComposeConfig {
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: usize,
+    #[serde(default = "default_max_result_bytes")]
+    pub max_result_bytes: usize,
+    #[serde(default = "default_memory_limit_bytes")]
+    pub memory_limit_bytes: usize,
+    #[serde(default = "default_stack_limit_bytes")]
+    pub stack_limit_bytes: usize,
+    #[serde(default = "default_default_timeout_ms")]
+    pub default_timeout_ms: u64,
+    #[serde(default = "default_max_timeout_ms")]
+    pub max_timeout_ms: u64,
+}
+
+impl Default for ComposeConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: default_max_tool_calls(),
+            max_result_bytes: default_max_result_bytes(),
+            memory_limit_bytes: default_memory_limit_bytes(),
+            stack_limit_bytes: default_stack_limit_bytes(),
+            default_timeout_ms: default_default_timeout_ms(),
+            max_timeout_ms: default_max_timeout_ms(),
+        }
+    }
+}
+
+fn default_max_tool_calls() -> usize {
+    50
+}
+
+fn default_max_result_bytes() -> usize {
+    100 * 1024
+}
+
+fn default_memory_limit_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+fn default_stack_limit_bytes() -> usize {
+    512 * 1024
+}
+
+fn default_default_timeout_ms() -> u64 {
+    120_000
+}
+
+fn default_max_timeout_ms() -> u64 {
+    300_000
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

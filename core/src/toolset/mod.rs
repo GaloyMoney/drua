@@ -68,7 +68,11 @@ impl ToolSets {
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
-        let compose = Arc::new(ComposeTool::new(Arc::clone(&sets), Arc::clone(&top_level)));
+        let compose = Arc::new(ComposeTool::new(
+            Arc::clone(&sets),
+            Arc::clone(&top_level),
+            config.compose.clone(),
+        ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
         let whoami = Arc::new(WhoAmI::new());
 

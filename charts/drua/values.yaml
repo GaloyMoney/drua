@@ -72,6 +72,17 @@ galoyAgents:
       enabled: false
       url: ""
       team: ""
+    ## JS-engine sandbox limits for the `compose` top-level tool. Each
+    ## key maps 1:1 to a JsEngine setter; missing keys fall back to the
+    ## drua-core defaults (50 calls / 100 KiB / 8 MiB / 512 KiB / 120 s
+    ## default / 300 s max).
+    compose:
+      maxToolCalls: 50
+      maxResultBytes: 102400
+      memoryLimitBytes: 8388608
+      stackLimitBytes: 524288
+      defaultTimeoutMs: 120000
+      maxTimeoutMs: 300000
     mcpUpstreams: []
     # - name: honeycomb
     #   url: https://mcp.honeycomb.io/mcp

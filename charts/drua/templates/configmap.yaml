@@ -72,6 +72,15 @@ data:
         enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
         url: {{ .Values.galoyAgents.config.concourse.url | quote }}
         team: {{ .Values.galoyAgents.config.concourse.team | quote }}
+      {{- with .Values.galoyAgents.config.compose }}
+      compose:
+        max_tool_calls: {{ .maxToolCalls }}
+        max_result_bytes: {{ .maxResultBytes }}
+        memory_limit_bytes: {{ .memoryLimitBytes }}
+        stack_limit_bytes: {{ .stackLimitBytes }}
+        default_timeout_ms: {{ .defaultTimeoutMs }}
+        max_timeout_ms: {{ .maxTimeoutMs }}
+      {{- end }}
       {{- $hasUpstreams := .Values.galoyAgents.config.mcpUpstreams }}
       {{- $k8sMcp := index .Values "kubernetes-mcp-server" }}
       {{- $pgMcp := .Values.galoyAgents.postgresMcp }}

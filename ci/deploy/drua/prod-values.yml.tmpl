@@ -29,6 +29,13 @@ galoyAgents:
       enabled: true
       url: "https://ci.galoy.io"
       team: "dev"
+    compose:
+      maxToolCalls: 1000
+      maxResultBytes: 262144
+      memoryLimitBytes: 16777216
+      stackLimitBytes: 1048576
+      defaultTimeoutMs: 120000
+      maxTimeoutMs: 300000
     githubApp:
       enabled: true
       clientId: "Iv23liCAm3yHFqmGmayW"

@@ -16,14 +16,12 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
+use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
 use super::{parse_params, schema_for};
-
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
 // Params
@@ -48,14 +46,20 @@ struct ComposeParams {
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+    config: ComposeConfig,
 }
 
 impl ComposeTool {
     pub fn new(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+        config: ComposeConfig,
     ) -> Self {
-        Self { sets, top_level }
+        Self {
+            sets,
+            top_level,
+            config,
+        }
     }
 }
 
@@ -119,9 +123,11 @@ impl TopLevelTool for ComposeTool {
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: ComposeParams = parse_params(arguments)?;
 
+        let max_timeout = Duration::from_millis(self.config.max_timeout_ms);
+        let default_timeout = Duration::from_millis(self.config.default_timeout_ms);
         let timeout = match params.timeout_ms {
-            Some(ms) if ms > 0 => Duration::from_millis(ms as u64).min(MAX_TIMEOUT),
-            _ => DEFAULT_TIMEOUT,
+            Some(ms) if ms > 0 => Duration::from_millis(ms as u64).min(max_timeout),
+            _ => default_timeout,
         };
 
         Audit::record_action("compose".to_string());
@@ -147,7 +153,11 @@ impl TopLevelTool for ComposeTool {
             subject: subject.clone(),
         });
 
-        let engine = js_engine::JsEngine::new();
+        let engine = js_engine::JsEngine::new()
+            .with_max_tool_calls(self.config.max_tool_calls)
+            .with_max_result_bytes(self.config.max_result_bytes)
+            .with_memory_limit(self.config.memory_limit_bytes)
+            .with_stack_limit(self.config.stack_limit_bytes);
         let result = engine
             .execute(&script, dispatcher, timeout)
             .await

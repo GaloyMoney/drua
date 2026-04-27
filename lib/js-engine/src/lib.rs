@@ -63,6 +63,26 @@ impl JsEngine {
         }
     }
 
+    pub fn with_max_tool_calls(mut self, n: usize) -> Self {
+        self.max_tool_calls = n;
+        self
+    }
+
+    pub fn with_max_result_bytes(mut self, n: usize) -> Self {
+        self.max_result_bytes = n;
+        self
+    }
+
+    pub fn with_memory_limit(mut self, n: usize) -> Self {
+        self.memory_limit = n;
+        self
+    }
+
+    pub fn with_stack_limit(mut self, n: usize) -> Self {
+        self.stack_limit = n;
+        self
+    }
+
     #[tracing::instrument(name = "js_engine.execute", skip_all)]
     pub async fn execute(
         &self,
