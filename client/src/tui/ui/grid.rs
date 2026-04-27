@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::super::chat::{ChatRole, ContentBlock};
-use super::super::state::{CellKind, Focus, ScreenState};
+use super::super::state::{CellKind, Focus, GridSection, ScreenState};
 
 enum GridDisplayItem {
     Separator,
@@ -63,14 +63,18 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
         None => return,
     };
 
+    let (section_label, section_pos_len) = match grid.cursor_section {
+        GridSection::System => ("sys", grid.system_positions.len()),
+        GridSection::Messages => ("msg", grid.positions.len()),
+    };
     let title = format!(
-        " Thread Grid — pos {}/{} thread {}/{} ",
-        if grid.positions.is_empty() {
+        " Thread Grid — {section_label} {}/{} thread {}/{}  [Tab: switch section] ",
+        if section_pos_len == 0 {
             0
         } else {
             grid.cursor_col + 1
         },
-        grid.positions.len(),
+        section_pos_len,
         if grid.threads.is_empty() {
             0
         } else {
@@ -93,7 +97,18 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
 
     let label_width: usize = 12;
     let cell_width: usize = 4;
-    let grid_px = inner.width as usize - label_width.min(inner.width as usize);
+    // System + tools sections live to the left of the messages section and
+    // do not scroll horizontally. Their fixed widths are subtracted before
+    // computing the messages-section visible_cols.
+    let sys_section_w: usize = grid.system_positions.len() * cell_width;
+    let tool_section_w: usize = 8; // "⚙×NNN  " — pad to fixed width
+    let divider_w: usize = 3; // " │ "
+    let header_w = label_width
+        .saturating_add(sys_section_w)
+        .saturating_add(divider_w)
+        .saturating_add(tool_section_w)
+        .saturating_add(divider_w);
+    let grid_px = (inner.width as usize).saturating_sub(header_w);
     let visible_cols = grid_px.checked_div(cell_width).unwrap_or(0);
 
     grid.update_visible_cols(visible_cols);
@@ -188,6 +203,48 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                 let row_cells = &grid.grid[row_idx];
                 let mut spans = vec![label_span];
 
+                // ── System blocks section (positionally aligned, no scroll) ──
+                let sys_row = grid.system_grid.get(row_idx);
+                let last_sys_ne =
+                    sys_row.and_then(|r| r.iter().rposition(|c| !matches!(c, CellKind::Empty)));
+                let sys_active = grid.cursor_section == GridSection::System;
+                for sys_col in 0..grid.system_positions.len() {
+                    let cell = sys_row
+                        .and_then(|r| r.get(sys_col))
+                        .copied()
+                        .unwrap_or(CellKind::Empty);
+                    let has_rightward = !matches!(cell, CellKind::Empty)
+                        && last_sys_ne.map(|l| sys_col < l).unwrap_or(false);
+                    let conn_str = if has_rightward { "───" } else { "   " };
+                    let conn_style = Style::default().fg(Color::DarkGray);
+                    let is_cursor =
+                        sys_active && row_idx == grid.cursor_row && sys_col == grid.cursor_col;
+                    if matches!(cell, CellKind::Empty) {
+                        spans.push(Span::styled("    ", conn_style));
+                    } else {
+                        render_cell_span(&mut spans, cell, is_cursor, conn_str);
+                    }
+                }
+
+                // Section divider (system → tools)
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+
+                // ── Tool count section ──
+                let tool_count = grid.tool_def_counts.get(row_idx).copied().unwrap_or(0);
+                let tool_str = if tool_count > 0 {
+                    format!("⚙×{tool_count}")
+                } else {
+                    String::new()
+                };
+                let pad = tool_section_w.saturating_sub(tool_str.chars().count());
+                spans.push(Span::styled(tool_str, Style::default().fg(Color::Gray)));
+                if pad > 0 {
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+
+                // Section divider (tools → messages)
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+
                 if section == 0 {
                     // Section 0: globally aligned with horizontal scrolling.
                     let non_empty: Vec<usize> = row_cells
@@ -201,7 +258,9 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
 
                     for col in start_col..end_col {
                         let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
-                        let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+                        let is_cursor = grid.cursor_section == GridSection::Messages
+                            && row_idx == grid.cursor_row
+                            && col == grid.cursor_col;
 
                         let is_between = matches!(cell, CellKind::Empty)
                             && matches!((first_ne, last_ne), (Some(f), Some(l)) if f < col && col < l);
@@ -240,7 +299,9 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                     let ne_count = active.len();
                     for (i, &col) in active.iter().enumerate() {
                         let cell = row_cells.get(col).copied().unwrap_or(CellKind::Empty);
-                        let is_cursor = row_idx == grid.cursor_row && col == grid.cursor_col;
+                        let is_cursor = grid.cursor_section == GridSection::Messages
+                            && row_idx == grid.cursor_row
+                            && col == grid.cursor_col;
                         let has_rightward = i + 1 < ne_count;
 
                         if matches!(cell, CellKind::Empty) {
@@ -265,8 +326,9 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                             );
                             let conn_style = Style::default().fg(Color::DarkGray);
                             if between {
-                                let is_cursor =
-                                    row_idx == grid.cursor_row && col == grid.cursor_col;
+                                let is_cursor = grid.cursor_section == GridSection::Messages
+                                    && row_idx == grid.cursor_row
+                                    && col == grid.cursor_col;
                                 let skip_style = if is_cursor {
                                     Style::default().fg(Color::Black).bg(Color::Yellow)
                                 } else {
@@ -341,12 +403,23 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         }
     };
 
-    let pos = grid.positions.get(grid.cursor_col);
+    let (pos, total, label_kind) = match grid.cursor_section {
+        GridSection::System => (
+            grid.system_positions.get(grid.cursor_col),
+            grid.system_positions.len(),
+            "system block",
+        ),
+        GridSection::Messages => (
+            grid.positions.get(grid.cursor_col),
+            grid.positions.len(),
+            "block",
+        ),
+    };
     let title = match pos {
         Some(p) => format!(
-            " Position {}/{} (block #{}) ",
+            " Position {}/{} ({label_kind} #{}) ",
             grid.cursor_col + 1,
-            grid.positions.len(),
+            total,
             p
         ),
         None => " Position Detail ".to_string(),
@@ -358,6 +431,16 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         .border_style(Style::default().fg(border_color));
 
     let mut lines: Vec<Line> = Vec::new();
+
+    // System-section detail short-circuits the message-block rendering below.
+    if grid.cursor_section == GridSection::System {
+        render_system_detail(grid, &mut lines);
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+        return;
+    }
 
     // Show detail for the cursor's current row only.
     let cell = grid
@@ -457,6 +540,57 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
     frame.render_widget(paragraph, area);
 }
 
+/// Render the position-detail pane content for a system-section cursor.
+/// For Shared cells, resolves to the owner thread's content (the first
+/// thread with details registered at this column).
+fn render_system_detail(
+    grid: &super::super::state::ThreadGridState,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let cell = grid
+        .system_grid
+        .get(grid.cursor_row)
+        .and_then(|row| row.get(grid.cursor_col))
+        .copied()
+        .unwrap_or(CellKind::Empty);
+
+    if matches!(cell, CellKind::Empty) {
+        lines.push(Line::from(Span::styled(
+            " No system block at this position",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return;
+    }
+
+    let detail_owner = grid
+        .system_details
+        .get(&(grid.cursor_row, grid.cursor_col))
+        .or_else(|| {
+            // Shared cell — find the owner (first thread with details here).
+            (0..grid.threads.len()).find_map(|r| grid.system_details.get(&(r, grid.cursor_col)))
+        });
+
+    let header = match detail_owner {
+        Some(d) => format!(" {}", d.kind),
+        None => " (unknown)".to_string(),
+    };
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if let Some(d) = detail_owner {
+        for l in d.text.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("   {l}"),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+    }
+}
+
 /// Format a single content block for the position detail pane.
 fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'static>> {
     let role_color = match role {
@@ -524,11 +658,16 @@ fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
     match cell {
         CellKind::Unique(c) | CellKind::Summary(c) => {
             let color = match c {
+                // Message-block letters
                 'U' => Color::Cyan,
                 'A' => Color::White,
                 't' => Color::Gray,
                 'T' => Color::Yellow,
                 'R' => Color::Gray,
+                // System-block letters (S also reused for Sandbox messages — both green)
+                'B' => Color::Blue,
+                'H' => Color::Magenta,
+                'N' => Color::LightYellow,
                 'S' => Color::Green,
                 _ => Color::White,
             };

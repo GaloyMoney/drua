@@ -13,6 +13,12 @@ use super::{entity::AgentSessionEvent, error::AgentSessionError, message::*};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SystemBlockIndex(usize);
 
+impl SystemBlockIndex {
+    pub(super) fn index(&self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolDefinitionIndex(usize);
 

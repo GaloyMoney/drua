@@ -17,8 +17,8 @@ use crate::config::Config;
 use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
-    AgentItem, BlockDetail, CellKind, Focus, SandboxInfo, ScreenState, ThreadGridState, ThreadInfo,
-    UsageDetail, WorkspaceItem,
+    AgentItem, BlockDetail, CellKind, Focus, GridSection, SandboxInfo, ScreenState,
+    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkspaceItem,
 };
 use crate::tui::{handlers, ui};
 
@@ -261,6 +261,12 @@ const THREADS_QUERY: &str = r#"
                     isCurrent
                     nextTurn
                     startReason
+                    systemBlocks {
+                        index
+                        kind
+                        text
+                    }
+                    toolDefinitionsCount
                     messages {
                         role
                         blockIndexes
@@ -311,7 +317,19 @@ struct ThreadNode {
     is_current: bool,
     next_turn: String,
     start_reason: String,
+    #[serde(default)]
+    system_blocks: Vec<SystemBlockInfoNode>,
+    #[serde(default)]
+    tool_definitions_count: i32,
     messages: Vec<ThreadMessageNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SystemBlockInfoNode {
+    index: i32,
+    kind: String,
+    #[serde(default)]
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,7 +367,7 @@ enum ChatStreamEvent {
     /// Pre-fetched chat history for an agent (agent_id, messages).
     HistoryLoaded(String, Vec<ChatMessage>),
     /// Thread grid data loaded for an agent (agent_id, grid_state).
-    ThreadsLoaded(String, ThreadGridState),
+    ThreadsLoaded(String, Box<ThreadGridState>),
     /// Thread export completed — (path, result message).
     ExportComplete(String),
 }
@@ -576,6 +594,23 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         }
     }
 
+    // 1b. Collect system-block positions and ownership analogously.
+    let mut all_system_positions = BTreeSet::new();
+    let mut system_owner: HashMap<i32, usize> = HashMap::new();
+    for (thread_idx, node) in thread_nodes.iter().enumerate() {
+        for sb in &node.system_blocks {
+            all_system_positions.insert(sb.index);
+            system_owner.entry(sb.index).or_insert(thread_idx);
+        }
+    }
+    let system_positions: Vec<i32> = all_system_positions.into_iter().collect();
+    let sys_pos_map: HashMap<i32, usize> = system_positions
+        .iter()
+        .enumerate()
+        .map(|(i, &pos)| (pos, i))
+        .collect();
+    let num_system_positions = system_positions.len();
+
     let positions: Vec<i32> = all_positions.into_iter().collect();
     let pos_map: HashMap<i32, usize> = positions
         .iter()
@@ -588,6 +623,10 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
 
     // 2. Build grid and details (consuming thread_nodes).
     let mut grid: Vec<Vec<CellKind>> = vec![vec![CellKind::Empty; num_positions]; num_threads];
+    let mut system_grid: Vec<Vec<CellKind>> =
+        vec![vec![CellKind::Empty; num_system_positions]; num_threads];
+    let mut tool_def_counts: Vec<usize> = vec![0; num_threads];
+    let mut system_details: HashMap<(usize, usize), SystemBlockDetail> = HashMap::new();
     let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
     let mut thread_infos = Vec::new();
     // Track owner's content per block-index for condensed detection.
@@ -596,6 +635,28 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     for (thread_idx, node) in thread_nodes.into_iter().enumerate() {
         let is_compaction = node.start_reason == "COMPACTION";
         let msg_count = node.messages.len();
+
+        // Populate this row's system grid: owners get Unique(<kind letter>),
+        // subsequent referencers get Shared.
+        for sb in &node.system_blocks {
+            if let Some(&col) = sys_pos_map.get(&sb.index) {
+                let is_owner = system_owner.get(&sb.index) == Some(&thread_idx);
+                let cell = if is_owner {
+                    CellKind::Unique(system_kind_letter(&sb.kind))
+                } else {
+                    CellKind::Shared
+                };
+                system_grid[thread_idx][col] = cell;
+                system_details.insert(
+                    (thread_idx, col),
+                    SystemBlockDetail {
+                        kind: sb.kind.clone(),
+                        text: sb.text.clone(),
+                    },
+                );
+            }
+        }
+        tool_def_counts[thread_idx] = node.tool_definitions_count.max(0) as usize;
 
         thread_infos.push(ThreadInfo {
             id: node.id,
@@ -685,6 +746,136 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         cursor_row: current_thread_idx,
         scroll_col: 0,
         visible_cols: 0,
+        system_positions,
+        system_grid,
+        tool_def_counts,
+        cursor_section: GridSection::Messages,
+        system_details,
+    }
+}
+
+/// Map a SystemBlockKind GraphQL enum value (uppercase snake) to the single
+/// letter used in the grid: B=Base, T=Tools, H=beHavioral (avoids B clash),
+/// R=Role, N=Notes, S=Skills.
+fn system_kind_letter(kind: &str) -> char {
+    match kind {
+        "BASE" => 'B',
+        "TOOLS" => 'T',
+        "BEHAVIORAL" => 'H',
+        "ROLE" => 'R',
+        "NOTES" => 'N',
+        "SKILLS" => 'S',
+        _ => '?',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sys(index: i32, kind: &str) -> SystemBlockInfoNode {
+        SystemBlockInfoNode {
+            index,
+            kind: kind.to_string(),
+            text: String::new(),
+        }
+    }
+
+    fn make_thread(
+        id: &str,
+        is_current: bool,
+        start_reason: &str,
+        system_blocks: Vec<SystemBlockInfoNode>,
+        tool_count: i32,
+    ) -> ThreadNode {
+        ThreadNode {
+            id: id.to_string(),
+            is_current,
+            next_turn: "USER".to_string(),
+            start_reason: start_reason.to_string(),
+            system_blocks,
+            tool_definitions_count: tool_count,
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn system_grid_positions_are_sorted_global_indexes() {
+        let threads = vec![
+            make_thread(
+                "t1",
+                true,
+                "INITIAL_THREAD",
+                vec![sys(0, "BASE"), sys(1, "TOOLS"), sys(4, "NOTES")],
+                10,
+            ),
+            make_thread(
+                "t2",
+                false,
+                "CONTEXT_REFRESHED",
+                vec![sys(0, "BASE"), sys(1, "TOOLS"), sys(7, "NOTES")],
+                12,
+            ),
+        ];
+
+        let grid = build_thread_grid(threads);
+        assert_eq!(grid.system_positions, vec![0, 1, 4, 7]);
+    }
+
+    #[test]
+    fn first_thread_owns_shared_system_blocks() {
+        let threads = vec![
+            make_thread(
+                "t1",
+                true,
+                "INITIAL_THREAD",
+                vec![sys(0, "BASE"), sys(1, "TOOLS")],
+                5,
+            ),
+            make_thread(
+                "t2",
+                false,
+                "CONTEXT_REFRESHED",
+                vec![sys(0, "BASE"), sys(1, "TOOLS"), sys(2, "NOTES")],
+                5,
+            ),
+        ];
+
+        let grid = build_thread_grid(threads);
+
+        // positions: [0, 1, 2]
+        // t1 owns 0 and 1 — Unique with kind letter
+        assert!(matches!(grid.system_grid[0][0], CellKind::Unique('B')));
+        assert!(matches!(grid.system_grid[0][1], CellKind::Unique('T')));
+        assert!(matches!(grid.system_grid[0][2], CellKind::Empty));
+        // t2 shares 0 and 1, owns 2
+        assert!(matches!(grid.system_grid[1][0], CellKind::Shared));
+        assert!(matches!(grid.system_grid[1][1], CellKind::Shared));
+        assert!(matches!(grid.system_grid[1][2], CellKind::Unique('N')));
+    }
+
+    #[test]
+    fn tool_def_counts_per_thread() {
+        let threads = vec![
+            make_thread("t1", true, "INITIAL_THREAD", vec![sys(0, "BASE")], 17),
+            make_thread("t2", false, "TOOL_DEFS_UPDATED", vec![sys(0, "BASE")], 25),
+        ];
+
+        let grid = build_thread_grid(threads);
+        assert_eq!(grid.tool_def_counts, vec![17, 25]);
+    }
+
+    #[test]
+    fn cursor_section_defaults_to_messages() {
+        let threads = vec![make_thread(
+            "t1",
+            true,
+            "INITIAL_THREAD",
+            vec![sys(0, "BASE")],
+            5,
+        )];
+        let grid = build_thread_grid(threads);
+        assert_eq!(grid.cursor_section, GridSection::Messages);
     }
 }
 
@@ -762,7 +953,7 @@ fn spawn_threads_fetch(
         let client = GraphqlClient::new(&base_url, &token);
         match fetch_threads(&client, &agent_id).await {
             Ok(grid) => {
-                let _ = tx.send(ChatStreamEvent::ThreadsLoaded(agent_id, grid));
+                let _ = tx.send(ChatStreamEvent::ThreadsLoaded(agent_id, Box::new(grid)));
             }
             Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(format!(
@@ -807,7 +998,7 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
         ChatStreamEvent::ThreadsLoaded(agent_id, grid) => {
             if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
                 state.status_message = None;
-                state.thread_view = Some(grid);
+                state.thread_view = Some(*grid);
                 state.focus = Focus::Threads;
             }
         }

@@ -174,8 +174,13 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_jump_end();
             Action::None
         }
-        // Tab — jump to next unique/summary cell
+        // Tab — cycle section (System ↔ Messages)
         KeyCode::Tab => {
+            state.grid_cycle_section();
+            Action::None
+        }
+        // Shift+Tab — jump to next unique/summary cell within current section
+        KeyCode::BackTab => {
             state.grid_tab_next();
             Action::None
         }

@@ -609,6 +609,27 @@ impl Agents {
         Ok(self.sessions.thread_messages(agent_id, thread_id).await?)
     }
 
+    #[instrument(name = "domain.agent.thread_system_view", skip(self, sub))]
+    pub async fn thread_system_view(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+        thread_id: session::SessionThreadId,
+    ) -> Result<session::history::ThreadSystemView, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.thread_system_view");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        Ok(self
+            .sessions
+            .thread_system_view(agent_id, thread_id)
+            .await?)
+    }
+
     /// Export a thread of the given agent as Pi-compatible JSONL (v3 format).
     ///
     /// When `thread_id` is `None`, the current main thread is exported.

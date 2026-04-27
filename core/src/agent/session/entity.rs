@@ -759,6 +759,20 @@ impl AgentSession {
             &self.events,
         ))
     }
+
+    pub fn thread_system_view(
+        &self,
+        thread_id: SessionThreadId,
+    ) -> Result<history::ThreadSystemView, AgentSessionError> {
+        let thread = self
+            .threads
+            .get_persisted(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        Ok(history::build_thread_system_view(
+            thread.prompt_definition(),
+            &self.events,
+        ))
+    }
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {

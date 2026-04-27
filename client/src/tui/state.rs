@@ -82,6 +82,20 @@ pub struct ThreadInfo {
     pub message_count: usize,
 }
 
+/// Which section of the thread grid the cursor is currently in.
+/// The Tools section is non-navigable (it's a count, not a list).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GridSection {
+    System,
+    Messages,
+}
+
+/// Detail of a system block at a given (thread, system_position) cell.
+pub struct SystemBlockDetail {
+    pub kind: String,
+    pub text: String,
+}
+
 /// Classification of a cell in the thread × position grid.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
@@ -138,11 +152,25 @@ pub struct ThreadGridState {
     pub scroll_col: usize,
     /// Number of visible columns (updated from render path).
     pub visible_cols: usize,
+    /// Sorted global SystemBlockIndex positions across all threads.
+    pub system_positions: Vec<i32>,
+    /// Per-thread system grid: `system_grid[thread_idx][system_pos_idx]`.
+    /// First thread to reference a system idx owns it (Unique with kind letter);
+    /// subsequent threads share it.
+    pub system_grid: Vec<Vec<CellKind>>,
+    /// Per-thread count of tool definitions exposed to the LLM.
+    pub tool_def_counts: Vec<usize>,
+    /// Which section the cursor is currently in (Messages by default).
+    pub cursor_section: GridSection,
+    /// System-block details at each `(thread_idx, system_pos_idx)` — only for
+    /// non-empty owned cells (Shared cells inherit content from the owner).
+    pub system_details: HashMap<(usize, usize), SystemBlockDetail>,
 }
 
 impl ThreadGridState {
     pub fn ensure_cursor_visible(&mut self) {
-        if self.visible_cols == 0 {
+        // Horizontal scroll only applies to the messages section.
+        if self.cursor_section != GridSection::Messages || self.visible_cols == 0 {
             return;
         }
         if self.cursor_col < self.scroll_col {
@@ -156,27 +184,35 @@ impl ThreadGridState {
         self.visible_cols = cols;
     }
 
-    /// Returns true if the cell at (row, col) is non-empty.
+    /// The grid for the cursor's current section.
+    fn active_grid(&self) -> &Vec<Vec<CellKind>> {
+        match self.cursor_section {
+            GridSection::System => &self.system_grid,
+            GridSection::Messages => &self.grid,
+        }
+    }
+
+    /// Returns true if the cell at (row, col) is non-empty in the active section.
     fn is_non_empty(&self, row: usize, col: usize) -> bool {
-        self.grid
+        self.active_grid()
             .get(row)
             .and_then(|r| r.get(col))
             .map(|c| !matches!(c, CellKind::Empty))
             .unwrap_or(false)
     }
 
-    /// Snap `cursor_col` to the nearest non-empty cell on the current row.
-    /// Prefers the current column, then searches outward in both directions.
-    /// If the entire row is empty, stays put.
+    /// Snap `cursor_col` to the nearest non-empty cell on the current row
+    /// of the active section. Prefers the current column, then searches
+    /// outward in both directions. If the entire row is empty, stays put.
     pub fn snap_to_nearest_non_empty(&mut self) {
         let row = self.cursor_row;
-        if row >= self.grid.len() {
+        if row >= self.active_grid().len() {
             return;
         }
         if self.is_non_empty(row, self.cursor_col) {
             return;
         }
-        let cols = self.grid[row].len();
+        let cols = self.active_grid()[row].len();
         // Search outward: check col-1, col+1, col-2, col+2, ...
         for delta in 1..cols {
             if self.cursor_col >= delta && self.is_non_empty(row, self.cursor_col - delta) {
@@ -195,17 +231,17 @@ impl ThreadGridState {
     /// Find the next non-empty column to the right of the current position.
     pub fn next_non_empty_right(&self) -> Option<usize> {
         let row = self.cursor_row;
-        if row >= self.grid.len() {
+        if row >= self.active_grid().len() {
             return None;
         }
-        let cols = self.grid[row].len();
+        let cols = self.active_grid()[row].len();
         ((self.cursor_col + 1)..cols).find(|&col| self.is_non_empty(row, col))
     }
 
     /// Find the next non-empty column to the left of the current position.
     pub fn next_non_empty_left(&self) -> Option<usize> {
         let row = self.cursor_row;
-        if row >= self.grid.len() {
+        if row >= self.active_grid().len() {
             return None;
         }
         (0..self.cursor_col)
@@ -213,26 +249,24 @@ impl ThreadGridState {
             .find(|&col| self.is_non_empty(row, col))
     }
 
-    /// Find the first non-empty column on the current row.
+    /// Find the first non-empty column on the current row of the active section.
     pub fn first_non_empty(&self) -> Option<usize> {
         let row = self.cursor_row;
-        if row >= self.grid.len() {
+        let g = self.active_grid();
+        if row >= g.len() {
             return None;
         }
-        self.grid[row]
-            .iter()
-            .position(|c| !matches!(c, CellKind::Empty))
+        g[row].iter().position(|c| !matches!(c, CellKind::Empty))
     }
 
-    /// Find the last non-empty column on the current row.
+    /// Find the last non-empty column on the current row of the active section.
     pub fn last_non_empty(&self) -> Option<usize> {
         let row = self.cursor_row;
-        if row >= self.grid.len() {
+        let g = self.active_grid();
+        if row >= g.len() {
             return None;
         }
-        self.grid[row]
-            .iter()
-            .rposition(|c| !matches!(c, CellKind::Empty))
+        g[row].iter().rposition(|c| !matches!(c, CellKind::Empty))
     }
 }
 
@@ -513,10 +547,11 @@ impl ScreenState {
                 g.ensure_cursor_visible();
             } else {
                 // At end of line — try jumping to next row that has content to the right
+                let cursor_col = g.cursor_col;
                 for next_row in (g.cursor_row + 1)..g.threads.len() {
-                    let has_content_right = g.grid.get(next_row).is_some_and(|row| {
+                    let has_content_right = g.active_grid().get(next_row).is_some_and(|row| {
                         row.iter()
-                            .skip(g.cursor_col + 1)
+                            .skip(cursor_col + 1)
                             .any(|c| !matches!(c, CellKind::Empty))
                     });
                     if has_content_right {
@@ -601,7 +636,9 @@ impl ScreenState {
                 // Already on top row — jump to beginning
                 if let Some(col) = g.first_non_empty() {
                     g.cursor_col = col;
-                    g.scroll_col = 0;
+                    if g.cursor_section == GridSection::Messages {
+                        g.scroll_col = 0;
+                    }
                 }
             }
         }
@@ -611,7 +648,9 @@ impl ScreenState {
         if let Some(ref mut g) = self.thread_view {
             if let Some(col) = g.first_non_empty() {
                 g.cursor_col = col;
-                g.scroll_col = 0;
+                if g.cursor_section == GridSection::Messages {
+                    g.scroll_col = 0;
+                }
             }
         }
     }
@@ -625,30 +664,83 @@ impl ScreenState {
         }
     }
 
-    /// Jump to the next unique/summary cell on the current row (wraps).
+    /// Jump to the next unique/summary cell on the current row (wraps),
+    /// scoped to the cursor's current section.
     pub fn grid_tab_next(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             let row = g.cursor_row;
-            if row >= g.grid.len() {
+            let active = g.active_grid();
+            if row >= active.len() {
                 return;
             }
-            let cols = g.grid[row].len();
+            let cursor_col = g.cursor_col;
             // Search forward
-            for col in (g.cursor_col + 1)..cols {
-                if matches!(g.grid[row][col], CellKind::Unique(_) | CellKind::Summary(_)) {
-                    g.cursor_col = col;
-                    g.ensure_cursor_visible();
-                    return;
-                }
+            let forward = active[row]
+                .iter()
+                .enumerate()
+                .skip(cursor_col + 1)
+                .find(|(_, c)| matches!(c, CellKind::Unique(_) | CellKind::Summary(_)))
+                .map(|(i, _)| i);
+            if let Some(col) = forward {
+                g.cursor_col = col;
+                g.ensure_cursor_visible();
+                return;
             }
             // Wrap around
-            for col in 0..g.cursor_col {
-                if matches!(g.grid[row][col], CellKind::Unique(_) | CellKind::Summary(_)) {
-                    g.cursor_col = col;
-                    g.ensure_cursor_visible();
-                    return;
-                }
+            let wrap = active[row]
+                .iter()
+                .take(cursor_col)
+                .enumerate()
+                .find(|(_, c)| matches!(c, CellKind::Unique(_) | CellKind::Summary(_)))
+                .map(|(i, _)| i);
+            if let Some(col) = wrap {
+                g.cursor_col = col;
+                g.ensure_cursor_visible();
             }
+        }
+    }
+
+    /// Cycle the cursor between System and Messages sections. On entry,
+    /// land on the leftmost non-empty cell of the new section on the
+    /// current row (or row 0 if the current row has no content there).
+    /// If the target section is empty entirely, stays in the current section.
+    pub fn grid_cycle_section(&mut self) {
+        if let Some(ref mut g) = self.thread_view {
+            let target = match g.cursor_section {
+                GridSection::Messages => GridSection::System,
+                GridSection::System => GridSection::Messages,
+            };
+            // Switch section first so first_non_empty consults the new grid.
+            let prev_section = g.cursor_section;
+            g.cursor_section = target;
+            let target_grid = g.active_grid();
+            if target_grid
+                .iter()
+                .all(|row| row.iter().all(|c| matches!(c, CellKind::Empty)))
+            {
+                // Target section is entirely empty — stay where we were.
+                g.cursor_section = prev_section;
+                return;
+            }
+            // Try current row first, then row 0, then the first row with content.
+            let row = g.cursor_row;
+            let landing = g.first_non_empty().or_else(|| {
+                g.active_grid()
+                    .iter()
+                    .position(|r| r.iter().any(|c| !matches!(c, CellKind::Empty)))
+                    .and_then(|r| {
+                        g.cursor_row = r;
+                        g.first_non_empty()
+                    })
+            });
+            if let Some(col) = landing {
+                g.cursor_col = col;
+            } else {
+                // Shouldn't happen given the empty-check above, but stay safe.
+                g.cursor_section = prev_section;
+                g.cursor_row = row;
+            }
+            g.ensure_cursor_visible();
         }
     }
 
