@@ -197,6 +197,16 @@ impl Sessions {
         session.thread_messages(thread_id)
     }
 
+    #[instrument(name = "domain.agent_session.thread_system_view", skip(self))]
+    pub async fn thread_system_view(
+        &self,
+        agent_id: AgentId,
+        thread_id: SessionThreadId,
+    ) -> Result<history::ThreadSystemView, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        session.thread_system_view(thread_id)
+    }
+
     #[instrument(name = "domain.agent_session.current_thread_id", skip(self))]
     pub async fn current_thread_id(
         &self,

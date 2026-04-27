@@ -2,7 +2,9 @@ use es_entity::EntityEvents;
 use serde::Serialize;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
-use super::message::{AssistantBlock, SandboxOperation, ToolResultInput};
+use super::message::{
+    AssistantBlock, SandboxOperation, SystemBlock, SystemBlockKind, ToolResultInput,
+};
 use super::metadata::AssistantResponseMetadata;
 use super::thread::{SessionThread as SessionThreadEntity, SessionThreadId};
 use super::view::{MessageView, PromptDefinition};
@@ -109,6 +111,51 @@ pub struct ThreadMessageUsage {
     pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub total_cost: f64,
+}
+
+/// Semantic kind of a system block, mirrored for the history layer so it can
+/// be exposed via GraphQL without forcing GraphQL-layer code to depend on
+/// `agent::session::message`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadSystemBlockKind {
+    Base,
+    Tools,
+    Behavioral,
+    Role,
+    Notes,
+    Skills,
+}
+
+impl From<SystemBlockKind> for ThreadSystemBlockKind {
+    fn from(k: SystemBlockKind) -> Self {
+        match k {
+            SystemBlockKind::Base => ThreadSystemBlockKind::Base,
+            SystemBlockKind::Tools => ThreadSystemBlockKind::Tools,
+            SystemBlockKind::Behavioral => ThreadSystemBlockKind::Behavioral,
+            SystemBlockKind::Role => ThreadSystemBlockKind::Role,
+            SystemBlockKind::Notes => ThreadSystemBlockKind::Notes,
+            SystemBlockKind::Skills => ThreadSystemBlockKind::Skills,
+        }
+    }
+}
+
+/// A single system block referenced by a thread, resolved against the session
+/// history. The `index` is the global SystemBlockIndex (position in the flat
+/// per-session list of all blocks ever pushed) — comparable across threads
+/// to detect shared columns in the TUI grid.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadSystemBlock {
+    pub index: usize,
+    pub kind: ThreadSystemBlockKind,
+    pub text: String,
+}
+
+/// Per-thread snapshot of system blocks and tool-definition count.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadSystemView {
+    pub system_blocks: Vec<ThreadSystemBlock>,
+    pub tool_definitions_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -369,6 +416,51 @@ pub(super) fn build_thread_messages(
             )
         })
         .collect()
+}
+
+/// Resolves a thread's `system_view` and `tool_definitions_view` indexes
+/// against the session's flat list of all system blocks and tool defs ever
+/// pushed. Mirrors the event-scan pattern used by `PromptDefinition::into_prompt`
+/// but only walks the events relevant to system content.
+pub(super) fn build_thread_system_view(
+    prompt_def: PromptDefinition,
+    events: &EntityEvents<AgentSessionEvent>,
+) -> ThreadSystemView {
+    let mut all_system_blocks: Vec<SystemBlock> = Vec::new();
+
+    for event in events.iter_all() {
+        match event {
+            AgentSessionEvent::Initialized { system_blocks, .. } => {
+                all_system_blocks.extend(system_blocks.iter().cloned());
+            }
+            AgentSessionEvent::SystemBlockUpdated { block } => {
+                all_system_blocks.push(block.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let system_blocks = prompt_def
+        .system_view()
+        .indexes()
+        .iter()
+        .filter_map(|idx| {
+            all_system_blocks
+                .get(idx.index())
+                .map(|block| ThreadSystemBlock {
+                    index: idx.index(),
+                    kind: block.kind().into(),
+                    text: block.text().to_string(),
+                })
+        })
+        .collect();
+
+    let tool_definitions_count = prompt_def.tool_definitions_view().indexes.len();
+
+    ThreadSystemView {
+        system_blocks,
+        tool_definitions_count,
+    }
 }
 
 // ─── Private helpers ─────────────────────────────────────────────────────────

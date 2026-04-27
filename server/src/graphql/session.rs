@@ -28,6 +28,17 @@ pub enum ThreadStartReason {
     Orphan,
 }
 
+/// The semantic role of a system prompt block.
+#[derive(Enum, Clone, Copy, PartialEq, Eq)]
+pub enum SystemBlockKind {
+    Base,
+    Tools,
+    Behavioral,
+    Role,
+    Notes,
+    Skills,
+}
+
 // ─── Content blocks (union) ────────────────────────────────────────���─────────
 
 #[derive(Union, Clone)]
@@ -117,6 +128,44 @@ impl SessionThread {
             .await?;
         Ok(messages.into_iter().map(ThreadMessageEntry::from).collect())
     }
+
+    /// System prompt blocks referenced by this thread, in canonical order.
+    /// Each entry carries its global SystemBlockIndex so the TUI can detect
+    /// shared columns across threads (same idx → same content).
+    async fn system_blocks(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<Vec<SystemBlockInfo>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let view = app
+            .agents()
+            .thread_system_view(sub, self.agent_id, self.id)
+            .await?;
+        Ok(view
+            .system_blocks
+            .into_iter()
+            .map(SystemBlockInfo::from)
+            .collect())
+    }
+
+    /// Number of tool definitions exposed to the LLM on this thread.
+    async fn tool_definitions_count(&self, ctx: &Context<'_>) -> async_graphql::Result<i32> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let view = app
+            .agents()
+            .thread_system_view(sub, self.agent_id, self.id)
+            .await?;
+        Ok(view.tool_definitions_count as i32)
+    }
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct SystemBlockInfo {
+    /// Global SystemBlockIndex (position in the per-session flat list of all
+    /// system blocks ever pushed). Equal indexes across threads = same content.
+    pub index: i32,
+    pub kind: SystemBlockKind,
+    pub text: String,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -264,6 +313,23 @@ impl SessionThread {
                 history::ThreadStartReasonKind::Orphan => ThreadStartReason::Orphan,
             },
             agent_id,
+        }
+    }
+}
+
+impl From<history::ThreadSystemBlock> for SystemBlockInfo {
+    fn from(b: history::ThreadSystemBlock) -> Self {
+        Self {
+            index: b.index as i32,
+            kind: match b.kind {
+                history::ThreadSystemBlockKind::Base => SystemBlockKind::Base,
+                history::ThreadSystemBlockKind::Tools => SystemBlockKind::Tools,
+                history::ThreadSystemBlockKind::Behavioral => SystemBlockKind::Behavioral,
+                history::ThreadSystemBlockKind::Role => SystemBlockKind::Role,
+                history::ThreadSystemBlockKind::Notes => SystemBlockKind::Notes,
+                history::ThreadSystemBlockKind::Skills => SystemBlockKind::Skills,
+            },
+            text: b.text,
         }
     }
 }
