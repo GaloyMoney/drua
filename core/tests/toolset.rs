@@ -12,8 +12,6 @@ async fn init_toolsets() {
     };
 
     let config = ToolSetsConfig {
-        concourse: Default::default(),
-        code_assistant: Default::default(),
         mcp_upstreams: vec![McpUpstreamConfig {
             name: "honeycomb".to_string(),
             url: "https://mcp.honeycomb.io/mcp".to_string(),
@@ -26,6 +24,7 @@ async fn init_toolsets() {
             allowed_tools: None,
             required_scopes: None,
         }],
+        ..Default::default()
     };
     let toolsets = ToolSets::init(config).await.unwrap();
 
