@@ -43,6 +43,8 @@ pub enum WorkflowError {
     Skill(String),
     #[error("WorkflowError - Sandbox: {0}")]
     Sandbox(String),
+    #[error("WorkflowError - Job: {0}")]
+    Job(String),
     #[error("WorkflowError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
 }

@@ -205,12 +205,18 @@ impl App {
         ));
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
-        let workflows = Arc::new(Workflows::new(
+        // Register the workflow `execute-run` job initializer with the
+        // job system and obtain the spawner so `Workflows` can enqueue
+        // background runs that survive deploys.
+        let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
             Arc::clone(&agents),
             Arc::clone(&skills),
             Arc::clone(&sandboxes),
-        ));
+        );
+        let execute_run_spawner = jobs.add_initializer(execute_run_initializer);
+
+        let workflows = Arc::new(Workflows::new(pool, execute_run_spawner));
 
         let workspaces = Arc::new(Workspaces::new(
             pool,

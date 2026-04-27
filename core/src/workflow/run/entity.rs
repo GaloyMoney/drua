@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 
 use crate::primitives::*;
-use crate::workflow::entity::WorkflowStepDef;
+use crate::workflow::definition::WorkflowStepDef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,7 +80,20 @@ impl WorkflowRun {
     }
 
     /// Record that a step has started executing.
-    pub fn step_started(&mut self, step_name: String) {
+    ///
+    /// Idempotent: if any event for this step name (start or terminal)
+    /// is already recorded, this is a no-op. Critical for at-least-once
+    /// job retries.
+    pub fn step_started(&mut self, step_name: String) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::StepStarted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepFailed { step_name: n, .. } if n == &step_name,
+        );
         let now = Utc::now();
         if !self.step_results.iter().any(|r| r.name == step_name) {
             self.step_results.push(StepResult {
@@ -97,10 +110,25 @@ impl WorkflowRun {
             step_name,
             started_at: now,
         });
+        Idempotent::Executed(())
     }
 
     /// Record a successful step completion with the captured output.
-    pub fn step_completed(&mut self, step_name: String, output: serde_json::Value) {
+    ///
+    /// Idempotent on `(step_name, terminal-event)`: if this step has
+    /// already finished (succeeded or failed), this is a no-op.
+    pub fn step_completed(
+        &mut self,
+        step_name: String,
+        output: serde_json::Value,
+    ) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepFailed { step_name: n, .. } if n == &step_name,
+        );
         let now = Utc::now();
         if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
             r.output = Some(output.clone());
@@ -118,10 +146,21 @@ impl WorkflowRun {
             output,
             completed_at: now,
         });
+        Idempotent::Executed(())
     }
 
     /// Record a step failure.
-    pub fn step_failed(&mut self, step_name: String, error: String) {
+    ///
+    /// Idempotent on `(step_name, terminal-event)`: if this step has
+    /// already finished (succeeded or failed), this is a no-op.
+    pub fn step_failed(&mut self, step_name: String, error: String) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::StepFailed { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+        );
         let now = Utc::now();
         if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
             r.error = Some(error.clone());
@@ -139,10 +178,18 @@ impl WorkflowRun {
             error,
             completed_at: now,
         });
+        Idempotent::Executed(())
     }
 
     /// Record terminal run completion (Succeeded or Failed).
-    pub fn run_completed(&mut self, state: WorkflowRunState) {
+    ///
+    /// Idempotent: a second call after the run already completed is a
+    /// no-op, regardless of the requested state.
+    pub fn run_completed(&mut self, state: WorkflowRunState) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: WorkflowRunEvent::RunCompleted { .. },
+        );
         let now = Utc::now();
         self.state = state;
         self.completed_at = Some(now);
@@ -150,6 +197,7 @@ impl WorkflowRun {
             state,
             completed_at: now,
         });
+        Idempotent::Executed(())
     }
 }
 

@@ -1,6 +1,8 @@
+pub mod definition;
 pub mod entity;
 pub mod error;
 pub mod executor;
+pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
 
@@ -14,10 +16,18 @@ use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
 
+// `agents` / `skills` / `sandboxes` are owned by the
+// `workflow.execute-run` job runner (see `Workflows::execute_run_job_initializer`),
+// not by `Workflows` directly — the service only persists the run and
+// enqueues the job, the runner does the actual work.
+
+pub use definition::{WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
 pub use error::*;
+pub use job::ExecuteRunJobInitializer;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
+use job::ExecuteRunConfig;
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
 
@@ -25,25 +35,33 @@ use run::entity::NewWorkflowRun;
 pub struct Workflows {
     repo: WorkflowDefinitionRepo,
     run_repo: WorkflowRunRepo,
-    agents: Arc<Agents>,
-    skills: Arc<Skills>,
-    sandboxes: Arc<Sandboxes>,
+    /// Job spawner for the `workflow.execute-run` background job — wired
+    /// up at [`crate::App::init`] time after the job system is online.
+    execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
 }
 
 impl Workflows {
     pub fn new(
         pool: &sqlx::PgPool,
-        agents: Arc<Agents>,
-        skills: Arc<Skills>,
-        sandboxes: Arc<Sandboxes>,
+        execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new(pool),
             run_repo: WorkflowRunRepo::new(pool),
-            agents,
-            skills,
-            sandboxes,
+            execute_run_spawner,
         }
+    }
+
+    /// Job initializer for `workflow.execute-run`. Build this at App
+    /// startup, register it with `Jobs::add_initializer`, and pass the
+    /// returned spawner to [`Workflows::new`].
+    pub fn execute_run_job_initializer(
+        pool: &sqlx::PgPool,
+        agents: Arc<Agents>,
+        skills: Arc<Skills>,
+        sandboxes: Arc<Sandboxes>,
+    ) -> ExecuteRunJobInitializer {
+        ExecuteRunJobInitializer::new(WorkflowRunRepo::new(pool), agents, skills, sandboxes)
     }
 
     /// Auto-generate a webhook secret of the form `whsec_<32 hex chars>`.
@@ -194,17 +212,17 @@ impl Workflows {
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
         let run = self.run_repo.create(new).await?;
-        let run_id = run.id;
 
-        let runs = self.run_repo.clone();
-        let agents = Arc::clone(&self.agents);
-        let skills = Arc::clone(&self.skills);
-        let sandboxes = Arc::clone(&self.sandboxes);
-        tokio::spawn(async move {
-            if let Err(e) = executor::execute_run(runs, agents, skills, sandboxes, run_id).await {
-                tracing::error!(error = %e, %run_id, "workflow execution failed to record terminal state");
-            }
-        });
+        // Enqueue the `workflow.execute-run` job. The job system
+        // persists the request in PostgreSQL, so even if the process
+        // crashes between this call and the runner picking it up the
+        // executor will still run after restart. Combined with the
+        // idempotent mutations on [`WorkflowRun`], this gives
+        // at-least-once execution semantics that survive deploys.
+        self.execute_run_spawner
+            .spawn(::job::JobId::new(), ExecuteRunConfig { run_id: run.id })
+            .await
+            .map_err(|e| WorkflowError::Job(e.to_string()))?;
 
         Ok(run)
     }

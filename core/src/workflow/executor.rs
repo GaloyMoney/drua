@@ -18,9 +18,9 @@ use crate::skill::Skills;
 
 use crate::primitives::ChatOutputEvent;
 
-use super::entity::WorkflowStepDef;
+use super::definition::WorkflowStepDef;
 use super::error::WorkflowError;
-use super::run::{WorkflowRunRepo, WorkflowRunState};
+use super::run::{WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
 /// Run an existing [`WorkflowRun`] to completion.
 ///
@@ -30,6 +30,11 @@ use super::run::{WorkflowRunRepo, WorkflowRunState};
 /// the function returns `Ok(())` whenever it managed to record a
 /// terminal state, and only `Err(_)` when the run cannot even be loaded
 /// or persisted.
+///
+/// **Resumable.** All entity mutations are idempotent (see
+/// [`WorkflowRun::step_started`] etc.) and steps that already finished
+/// in a prior attempt are skipped, so the function is safe to invoke
+/// repeatedly by the job runner after a crash or restart.
 #[tracing::instrument(name = "core.workflow.execute_run", skip_all, fields(run_id = %run_id))]
 pub async fn execute_run(
     runs: WorkflowRunRepo,
@@ -39,16 +44,34 @@ pub async fn execute_run(
     run_id: WorkflowRunId,
 ) -> Result<(), WorkflowError> {
     let mut run = runs.find_by_id(run_id).await?;
+
+    // If a prior attempt already wrote the terminal `RunCompleted`
+    // event there's nothing left to do — the job runner can mark this
+    // attempt as complete and move on.
+    if matches!(
+        run.state,
+        WorkflowRunState::Succeeded | WorkflowRunState::Failed
+    ) {
+        return Ok(());
+    }
+
     let workspace_id = run.workspace_id;
     let trigger_context = run.trigger_context.clone();
     let steps = run.steps_snapshot.clone();
 
-    let mut any_failed = false;
+    let mut any_failed = step_results_have_failure(&run);
 
     for step in &steps {
         let step_name = step.name().to_string();
-        run.step_started(step_name.clone());
-        runs.update(&mut run).await?;
+
+        // Skip steps that already terminated in a prior execution attempt.
+        if step_already_terminal(&run, &step_name) {
+            continue;
+        }
+
+        if run.step_started(step_name.clone()).did_execute() {
+            runs.update(&mut run).await?;
+        }
 
         let outcome = execute_step(
             &agents,
@@ -63,13 +86,15 @@ pub async fn execute_run(
 
         match outcome {
             Ok(output) => {
-                run.step_completed(step_name, output);
-                runs.update(&mut run).await?;
+                if run.step_completed(step_name, output).did_execute() {
+                    runs.update(&mut run).await?;
+                }
             }
             Err(err) => {
                 any_failed = true;
-                run.step_failed(step_name, err.to_string());
-                runs.update(&mut run).await?;
+                if run.step_failed(step_name, err.to_string()).did_execute() {
+                    runs.update(&mut run).await?;
+                }
                 break;
             }
         }
@@ -80,9 +105,20 @@ pub async fn execute_run(
     } else {
         WorkflowRunState::Succeeded
     };
-    run.run_completed(terminal);
-    runs.update(&mut run).await?;
+    if run.run_completed(terminal).did_execute() {
+        runs.update(&mut run).await?;
+    }
     Ok(())
+}
+
+fn step_already_terminal(run: &WorkflowRun, step_name: &str) -> bool {
+    run.step_results
+        .iter()
+        .any(|r| r.name == step_name && r.completed_at.is_some())
+}
+
+fn step_results_have_failure(run: &WorkflowRun) -> bool {
+    run.step_results.iter().any(|r| r.error.is_some())
 }
 
 async fn execute_step(
