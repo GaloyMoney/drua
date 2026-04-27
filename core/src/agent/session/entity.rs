@@ -346,16 +346,11 @@ impl AgentSession {
         };
 
         // --- Compaction check ---
-        // Skip compaction immediately after a context refresh — the new
-        // thread has no message history to prune.
-        let pruned = if prompt_definition.compaction.is_none()
-            && self.threads.get_persisted(&thread_id).is_some()
-        {
-            self.try_prune(thread_id, &prompt_definition)
-        } else {
-            None
-        };
-        let (thread_id, prompt_definition) = match pruned {
+        // Compaction runs on the (possibly just-refreshed) thread. A
+        // refresh inherits the prior thread's messages, so if those are
+        // over budget compaction will still prune them. The chain
+        // becomes: from_thread → refresh_thread → compaction_thread.
+        let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
             Some(result) => result, // user messages carried to compacted thread
             None => {
                 // No compaction — attach user messages to the existing
@@ -470,9 +465,11 @@ impl AgentSession {
     }
 
     /// Spawn a new thread whose `SystemView` references the latest content
-    /// for each kind. Returns the new thread's id and prompt definition so
-    /// the caller can use them directly without re-fetching (the new thread
-    /// lives in `new_entities` until the repo flushes — `get_persisted` won't
+    /// for each kind. The new thread inherits the prior thread's message
+    /// history verbatim — only the system blocks are swapped out. Returns
+    /// the new thread's id and prompt definition so the caller can use
+    /// them directly without re-fetching (the new thread lives in
+    /// `new_entities` until the repo flushes — `get_persisted` won't
     /// find it).
     ///
     /// Caller must have verified the current view is stale via
@@ -490,18 +487,21 @@ impl AgentSession {
             .expect("from_thread exists")
             .prompt_definition();
         let tool_view = from_pd.tool_definitions_view().clone();
+        // Carry the prior thread's messages forward verbatim — only the
+        // system blocks differ between threads. Compaction can still run
+        // on the new thread if these inherited messages exceed budget.
+        let inherited_messages: Vec<MessageView> = from_pd.messages().to_vec();
 
         let new_thread_id = SessionThreadId::new();
-        let new_thread = NewSessionThread::builder()
-            .id(new_thread_id)
-            .session_id(self.id)
-            .start_reason(ThreadStartReason::ContextRefreshed { from_thread })
-            .model_defaults(self.model_defaults.clone())
-            .system_view(new_view.clone())
-            .tool_definitions_view(tool_view.clone())
-            .initial_user_messages(UserMessagesView::empty())
-            .build()
-            .expect("NewSessionThread build");
+        let new_thread = NewSessionThread::refreshed(
+            new_thread_id,
+            self.id,
+            self.model_defaults.clone(),
+            new_view.clone(),
+            tool_view.clone(),
+            inherited_messages.clone(),
+            from_thread,
+        );
         self.threads.add_new(new_thread);
         self.events.push(AgentSessionEvent::ThreadStarted {
             thread_id: new_thread_id,
@@ -509,14 +509,14 @@ impl AgentSession {
         });
         self.current_main_thread = Some(new_thread_id);
 
-        // Build the new thread's PromptDefinition directly. It starts with
-        // an empty user-messages view; the next_prompt scan-back attaches
-        // any pending user inputs (which target `Main` and now resolve to
-        // this new thread).
+        // Build the new thread's PromptDefinition directly with the
+        // inherited messages. The next_prompt scan-back then appends any
+        // pending UserInputAdded events on top.
         let new_pd = PromptDefinition::for_refreshed_thread(
             self.model_defaults.clone(),
             new_view,
             tool_view,
+            inherited_messages,
         );
         (new_thread_id, new_pd)
     }
@@ -1914,5 +1914,75 @@ mod tests {
             last_thread_started,
             ThreadStartReason::ContextRefreshed { from_thread } if *from_thread == thread_before
         ));
+    }
+
+    #[test]
+    fn refreshed_thread_inherits_full_message_history() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R"), notes("N")]);
+
+        // Build up a multi-turn conversation on the original thread.
+        // Turn 1: assistant text response → next user input
+        let thread_id = session.current_main_thread.unwrap();
+        let response = session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "answer 1".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response 1");
+        assert!(matches!(response, AgentSessionResponse::Done));
+        session
+            .add_user_input(TargetThread::Main, user_source(), "follow up".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        let response = session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "answer 2".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant response 2");
+        assert!(matches!(response, AgentSessionResponse::Done));
+        hydrate_threads(&mut session);
+
+        // Snapshot the original thread's message-view count.
+        let original_thread = session.threads.get_persisted(&thread_id).unwrap();
+        let original_messages_len = original_thread.prompt_definition().messages().len();
+        assert!(
+            original_messages_len >= 4,
+            "test setup should have at least 4 message views (initial user + assistant + user + assistant), got {}",
+            original_messages_len
+        );
+
+        // Now refresh: change Notes, send another user message.
+        let _ = session.apply_proposed_system_blocks(vec![notes("N'")]);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "after refresh".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(new_thread_id, thread_id, "refresh should spawn new thread");
+
+        // The refreshed thread's PromptDefinition should include all of the
+        // original messages PLUS the new "after refresh" user input.
+        let new_thread = session.threads.get_persisted(&new_thread_id).unwrap();
+        let new_messages = new_thread.prompt_definition().messages().to_vec();
+        assert!(
+            new_messages.len() >= original_messages_len,
+            "refreshed thread must inherit prior history (original={}, new={})",
+            original_messages_len,
+            new_messages.len()
+        );
     }
 }

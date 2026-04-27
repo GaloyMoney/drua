@@ -60,14 +60,6 @@ pub struct UserMessagesView {
     pub(super) indexes: Vec<MessageBlockIndex>,
 }
 
-impl UserMessagesView {
-    pub(super) fn empty() -> Self {
-        Self {
-            indexes: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessageView {
     pub(super) indexes: Vec<MessageBlockIndex>,
@@ -288,25 +280,33 @@ pub struct PromptDefinition {
 
 impl PromptDefinition {
     /// Construct a `PromptDefinition` for a freshly-spawned context-refreshed
-    /// thread. The thread starts with no message history of its own; pending
-    /// user inputs are attached by the `next_prompt` scan-back path.
+    /// thread. The thread inherits the prior thread's `messages` verbatim;
+    /// the `next_prompt` scan-back appends any pending UserInputAdded
+    /// events on top.
     pub(super) fn for_refreshed_thread(
         model_defaults: ModelDefaults,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
+        inherited_messages: Vec<MessageView>,
     ) -> Self {
         Self {
             model: model_defaults.model,
             max_tokens_per_response: model_defaults.max_tokens_per_response,
             system_view,
             tool_definitions_view,
-            messages: vec![MessageView::User(UserMessagesView { indexes: vec![] })],
+            messages: inherited_messages,
             compaction: None,
         }
     }
 
     pub fn system_view(&self) -> &SystemView {
         &self.system_view
+    }
+
+    /// Read-only access to the prompt's message views. Used by callers
+    /// that need to inherit history (e.g. context refresh).
+    pub(super) fn messages(&self) -> &[MessageView] {
+        &self.messages
     }
 
     pub fn tool_definitions_view(&self) -> &ToolDefinitionsView {
