@@ -74,12 +74,12 @@ data:
         team: {{ .Values.galoyAgents.config.concourse.team | quote }}
       {{- with .Values.galoyAgents.config.compose }}
       compose:
-        max_tool_calls: {{ .maxToolCalls }}
-        max_result_bytes: {{ .maxResultBytes }}
-        memory_limit_bytes: {{ .memoryLimitBytes }}
-        stack_limit_bytes: {{ .stackLimitBytes }}
-        default_timeout_ms: {{ .defaultTimeoutMs }}
-        max_timeout_ms: {{ .maxTimeoutMs }}
+        max_tool_calls: {{ int .maxToolCalls }}
+        max_result_bytes: {{ int .maxResultBytes }}
+        memory_limit_bytes: {{ int .memoryLimitBytes }}
+        stack_limit_bytes: {{ int .stackLimitBytes }}
+        default_timeout_ms: {{ int .defaultTimeoutMs }}
+        max_timeout_ms: {{ int .maxTimeoutMs }}
       {{- end }}
       {{- $hasUpstreams := .Values.galoyAgents.config.mcpUpstreams }}
       {{- $k8sMcp := index .Values "kubernetes-mcp-server" }}
