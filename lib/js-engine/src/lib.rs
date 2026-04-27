@@ -257,50 +257,133 @@ impl JsEngine {
 
 /// Register `console.log`, `console.warn`, `console.error`, `console.info`
 /// as native functions that capture output to a shared buffer.
+///
+/// All four methods accept arbitrary JS values (strings, numbers, booleans,
+/// null, undefined, functions, objects, arrays). Values are stringified per
+/// real JS-runtime semantics — strings unquoted, primitives via their
+/// natural representation, objects/arrays via `JSON.stringify`, circular
+/// references gracefully fall back to `[Circular]`. Arguments are joined
+/// with a single space. Never throws on the value side.
 fn register_console(
     ctx: &rquickjs::Ctx<'_>,
     buf: Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Result<(), rquickjs::Error> {
     let console = Object::new(ctx.clone())?;
 
+    // Helper function: takes Ctx + Rest with the same 'js lifetime, forcing
+    // the calling closure to unify them (closure literals would otherwise
+    // assign separate anonymous lifetimes per parameter).
+    fn log_with<'js>(
+        ctx: rquickjs::Ctx<'js>,
+        args: Rest<rquickjs::Value<'js>>,
+        prefix: &str,
+        buf: &std::sync::Mutex<Vec<String>>,
+    ) {
+        let msg = format_console_args(&ctx, &args.0, prefix);
+        buf.lock().unwrap().push(msg);
+    }
+
     let b = Arc::clone(&buf);
     console.set(
         "log",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = args.0.join(" ");
-            b.lock().unwrap().push(msg);
-        })?,
+        Function::new(ctx.clone(), move |ctx, args| log_with(ctx, args, "", &b))?,
     )?;
 
     let b = Arc::clone(&buf);
     console.set(
         "info",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = args.0.join(" ");
-            b.lock().unwrap().push(msg);
-        })?,
+        Function::new(ctx.clone(), move |ctx, args| log_with(ctx, args, "", &b))?,
     )?;
 
     let b = Arc::clone(&buf);
     console.set(
         "warn",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = format!("[WARN] {}", args.0.join(" "));
-            b.lock().unwrap().push(msg);
+        Function::new(ctx.clone(), move |ctx, args| {
+            log_with(ctx, args, "[WARN]", &b)
         })?,
     )?;
 
     let b = Arc::clone(&buf);
     console.set(
         "error",
-        Function::new(ctx.clone(), move |args: Rest<String>| {
-            let msg = format!("[ERROR] {}", args.0.join(" "));
-            b.lock().unwrap().push(msg);
+        Function::new(ctx.clone(), move |ctx, args| {
+            log_with(ctx, args, "[ERROR]", &b)
         })?,
     )?;
 
     ctx.globals().set("console", console)?;
     Ok(())
+}
+
+/// Stringify each console arg, join with single space, prefix optional.
+fn format_console_args<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    args: &[rquickjs::Value<'js>],
+    prefix: &str,
+) -> String {
+    let parts: Vec<String> = args.iter().map(|v| console_arg_to_string(ctx, v)).collect();
+    let joined = parts.join(" ");
+    if prefix.is_empty() {
+        joined
+    } else {
+        format!("{prefix} {joined}")
+    }
+}
+
+/// Coerce a single JS value to its console-friendly string representation,
+/// matching real JS-runtime semantics (strings unquoted, objects via JSON,
+/// circular references → `[Circular]`).
+fn console_arg_to_string<'js>(ctx: &rquickjs::Ctx<'js>, v: &rquickjs::Value<'js>) -> String {
+    if v.is_undefined() {
+        return "undefined".into();
+    }
+    if v.is_null() {
+        return "null".into();
+    }
+    if v.is_bool() {
+        return v
+            .as_bool()
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "false".into());
+    }
+    if v.is_string() {
+        return v
+            .as_string()
+            .and_then(|s| s.to_string().ok())
+            .unwrap_or_default();
+    }
+    if v.is_number() {
+        // Covers both int and float tags. Special-case ±Infinity to match
+        // JS output (Rust's f64::Display writes "inf"/"-inf").
+        let n = v.as_number().unwrap_or(0.0);
+        if n.is_infinite() {
+            return if n.is_sign_negative() {
+                "-Infinity".into()
+            } else {
+                "Infinity".into()
+            };
+        }
+        return n.to_string();
+    }
+    if v.is_function() {
+        return "[Function]".into();
+    }
+    if v.is_symbol() {
+        return "[Symbol]".into();
+    }
+    // Objects, arrays — stringify via JSON. Circular references make
+    // JSON.stringify throw a TypeError; fall back gracefully so console
+    // calls never abort the script.
+    json_stringify(ctx, v).unwrap_or_else(|_| "[Circular]".into())
+}
+
+fn json_stringify<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    v: &rquickjs::Value<'js>,
+) -> rquickjs::Result<String> {
+    let json: Object = ctx.globals().get("JSON")?;
+    let stringify: Function = json.get("stringify")?;
+    stringify.call((v.clone(),))
 }
 
 /// Register `__call_tool_raw(name, args_json)` → Promise<string> as the
@@ -522,6 +605,78 @@ mod tests {
             result.console_output,
             vec!["hello", "[WARN] careful", "[ERROR] oops"]
         );
+    }
+
+    #[tokio::test]
+    async fn console_log_accepts_objects() {
+        let result = engine()
+            .execute(
+                r#"console.log("build:", { id: 5905454, status: "failed" }); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.console_output.len(), 1);
+        assert!(result.console_output[0].starts_with("build: "));
+        assert!(result.console_output[0].contains("\"id\":5905454"));
+        assert!(result.console_output[0].contains("\"status\":\"failed\""));
+    }
+
+    #[tokio::test]
+    async fn console_log_accepts_mixed_types() {
+        let result = engine()
+            .execute(
+                r#"console.log("count:", 42, true, null, undefined); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.console_output, vec!["count: 42 true null undefined"]);
+    }
+
+    #[tokio::test]
+    async fn console_log_accepts_arrays() {
+        let result = engine()
+            .execute(
+                r#"console.log("ids:", [1, 2, 3]); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.console_output, vec!["ids: [1,2,3]"]);
+    }
+
+    #[tokio::test]
+    async fn console_log_handles_circular_reference() {
+        let result = engine()
+            .execute(
+                r#"const a = {}; a.self = a; console.log(a); return "ok";"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value, serde_json::json!("ok"));
+        // Should not have aborted — circular reference handled gracefully
+        assert!(!result.console_output.is_empty());
+        assert_eq!(result.console_output[0], "[Circular]");
+    }
+
+    #[tokio::test]
+    async fn console_warn_keeps_prefix_with_object_arg() {
+        let result = engine()
+            .execute(
+                r#"console.warn("careful:", { issue: "x" }); return null;"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+        assert!(result.console_output[0].starts_with("[WARN] careful: "));
+        assert!(result.console_output[0].contains("\"issue\":\"x\""));
     }
 
     #[tokio::test]
