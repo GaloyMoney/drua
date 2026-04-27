@@ -61,22 +61,24 @@ impl ComposeTool {
 
 static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ComposeParams>);
 
-static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "result": { "description": "The value returned by the script" },
-            "console": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Console output captured during execution"
-            },
-            "tool_calls": { "type": "integer", "description": "Number of tool calls made" },
-            "execution_time_ms": { "type": "integer", "description": "Execution time in milliseconds" }
-        },
-        "required": ["result", "console", "tool_calls", "execution_time_ms"]
-    })
-});
+// ---------------------------------------------------------------------------
+// Output shape (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ComposeOutput {
+    /// The value returned by the script.
+    result: serde_json::Value,
+    /// Console output captured during execution.
+    console: Vec<String>,
+    /// Number of tool calls made.
+    tool_calls: usize,
+    /// Execution time in milliseconds.
+    execution_time_ms: u64,
+}
+
+static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<ComposeOutput>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for ComposeTool {
@@ -179,12 +181,13 @@ impl TopLevelTool for ComposeTool {
         ));
 
         let text = sections.join("\n\n");
-        let structured = serde_json::json!({
-            "result": result.value,
-            "console": result.console_output,
-            "tool_calls": result.tool_calls_made,
-            "execution_time_ms": result.execution_time.as_millis() as u64,
-        });
+        let out = ComposeOutput {
+            result: result.value,
+            console: result.console_output,
+            tool_calls: result.tool_calls_made,
+            execution_time_ms: result.execution_time.as_millis() as u64,
+        };
+        let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");
         let mut ctr = CallToolResult::success(vec![Content::text(text)]);
         ctr.structured_content = Some(structured);
         Ok(ctr)

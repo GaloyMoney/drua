@@ -20,6 +20,7 @@ use crate::auth::AuthSubject;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
+use super::schema_for;
 
 // ---------------------------------------------------------------------------
 // CatalogEntry (shared data shape)
@@ -159,27 +160,49 @@ static SEARCH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "tools": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "Prefixed tool name for use with describe_tool/call_tool" },
-                        "category": { "type": "string" },
-                        "description": { "type": "string" }
-                    },
-                    "required": ["name", "category", "description"]
-                }
-            },
-            "total": { "type": "integer", "description": "Number of tools returned" }
-        },
-        "required": ["tools", "total"]
-    })
-});
+// ---------------------------------------------------------------------------
+// Output shapes (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct SearchToolsOutput {
+    /// Matching tools.
+    tools: Vec<SearchToolEntry>,
+    /// Number of tools returned.
+    total: usize,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct SearchToolEntry {
+    /// Prefixed tool name for use with describe_tool / call_tool.
+    name: String,
+    /// Tool category (e.g. "ci", "observability").
+    category: String,
+    /// Brief description of the tool.
+    description: String,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct DescribeToolOutput {
+    /// Prefixed tool name.
+    name: String,
+    /// Upstream service name.
+    upstream: String,
+    /// Tool category.
+    category: String,
+    /// Full description of the tool.
+    description: String,
+    /// JSON Schema for tool parameters.
+    input_schema: serde_json::Value,
+    /// JSON Schema for tool output (if declared).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_schema: Option<serde_json::Value>,
+    /// Default output filter description.
+    default_output_filter: String,
+}
+
+static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<SearchToolsOutput>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for SearchCatalog {
@@ -210,14 +233,18 @@ impl TopLevelTool for SearchCatalog {
             .and_then(|v| v.as_str());
         let results = self.execute_search(subject, query, category);
         let text = Self::format_results(&results);
-        let structured = json!({
-            "tools": results.iter().map(|e| json!({
-                "name": e.prefixed_name,
-                "category": e.category,
-                "description": e.brief_description,
-            })).collect::<Vec<_>>(),
-            "total": results.len(),
-        });
+        let out = SearchToolsOutput {
+            total: results.len(),
+            tools: results
+                .iter()
+                .map(|e| SearchToolEntry {
+                    name: e.prefixed_name.clone(),
+                    category: e.category.clone(),
+                    description: e.brief_description.clone(),
+                })
+                .collect(),
+        };
+        let structured = serde_json::to_value(&out).expect("SearchToolsOutput serialization");
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         result.structured_content = Some(structured);
         Ok(result)
@@ -292,21 +319,8 @@ static DESCRIBE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-static DESCRIBE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "name": { "type": "string", "description": "Prefixed tool name" },
-            "upstream": { "type": "string", "description": "Upstream service name" },
-            "category": { "type": "string" },
-            "description": { "type": "string" },
-            "input_schema": { "type": "object", "description": "JSON Schema for tool parameters" },
-            "output_schema": { "type": "object", "description": "JSON Schema for tool output (if declared)" },
-            "default_output_filter": { "type": "string", "description": "Default output filter description" }
-        },
-        "required": ["name", "upstream", "category", "description", "input_schema", "default_output_filter"]
-    })
-});
+static DESCRIBE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<DescribeToolOutput>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for DescribeCatalogTool {
@@ -345,18 +359,20 @@ impl TopLevelTool for DescribeCatalogTool {
                         OutputFilter::global_default().describe()
                     ),
                 };
-                let mut structured = json!({
-                    "name": entry.prefixed_name,
-                    "upstream": entry.upstream_name,
-                    "category": entry.category,
-                    "description": tool.description.as_deref().unwrap_or(""),
-                    "input_schema": serde_json::Value::Object(tool.input_schema.as_ref().clone()),
-                    "default_output_filter": filter_desc,
-                });
-                if let Some(output_schema) = &tool.output_schema {
-                    structured["output_schema"] =
-                        serde_json::Value::Object(output_schema.as_ref().clone());
-                }
+                let out = DescribeToolOutput {
+                    name: entry.prefixed_name,
+                    upstream: entry.upstream_name,
+                    category: entry.category,
+                    description: tool.description.as_deref().unwrap_or("").to_string(),
+                    input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
+                    output_schema: tool
+                        .output_schema
+                        .as_ref()
+                        .map(|s| serde_json::Value::Object(s.as_ref().clone())),
+                    default_output_filter: filter_desc,
+                };
+                let structured =
+                    serde_json::to_value(&out).expect("DescribeToolOutput serialization");
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
                 result.structured_content = Some(structured);
                 Ok(result)

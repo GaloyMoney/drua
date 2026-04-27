@@ -9,6 +9,7 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
+use super::schema_for;
 
 pub struct WhoAmI;
 
@@ -32,26 +33,31 @@ static WHOAMI_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "type": {
-                "type": "string",
-                "description": "Identity type: user, exported_agent, agent, agent_on_behalf_of_user, or anonymous"
-            },
-            "user_id": { "type": "string" },
-            "creds_id": { "type": "string" },
-            "workspace_id": { "type": "string" },
-            "agent_id": { "type": "string" },
-            "scopes": {
-                "type": "array",
-                "items": { "type": "string" }
-            }
-        },
-        "required": ["type"]
-    })
-});
+// ---------------------------------------------------------------------------
+// Output shape (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+struct WhoAmIOutput {
+    /// Identity type: user, exported_agent, agent, agent_on_behalf_of_user, or anonymous.
+    #[serde(rename = "type")]
+    identity_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creds_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scopes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<WhoAmIOutput>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for WhoAmI {
@@ -75,66 +81,58 @@ impl TopLevelTool for WhoAmI {
         matches!(subject, AuthSubject::ExportedAgent(_, _, _))
     }
 
+    fn composable(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
         _arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let mut info = serde_json::Map::new();
+        let scopes_list = |scopes: &[crate::auth::AuthScope]| -> Vec<String> {
+            scopes.iter().map(|s| s.to_string()).collect()
+        };
 
-        match subject {
-            AuthSubject::User(user_id) => {
-                info.insert("type".into(), "user".into());
-                info.insert("user_id".into(), user_id.to_string().into());
-                info.insert("note".into(), "Users implicitly have all scopes".into());
-            }
-            AuthSubject::ExportedAgent(user_id, creds_id, scopes) => {
-                info.insert("type".into(), "exported_agent".into());
-                info.insert("user_id".into(), user_id.to_string().into());
-                info.insert("creds_id".into(), creds_id.to_string().into());
-                info.insert(
-                    "scopes".into(),
-                    scopes
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
-            }
-            AuthSubject::Agent(workspace_id, agent_id, scopes) => {
-                info.insert("type".into(), "agent".into());
-                info.insert("workspace_id".into(), workspace_id.to_string().into());
-                info.insert("agent_id".into(), agent_id.to_string().into());
-                info.insert(
-                    "scopes".into(),
-                    scopes
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
-            }
+        let out = match subject {
+            AuthSubject::User(user_id) => WhoAmIOutput {
+                identity_type: "user".into(),
+                user_id: Some(user_id.to_string()),
+                note: Some("Users implicitly have all scopes".into()),
+                ..Default::default()
+            },
+            AuthSubject::ExportedAgent(user_id, creds_id, scopes) => WhoAmIOutput {
+                identity_type: "exported_agent".into(),
+                user_id: Some(user_id.to_string()),
+                creds_id: Some(creds_id.to_string()),
+                scopes: Some(scopes_list(scopes)),
+                ..Default::default()
+            },
+            AuthSubject::Agent(workspace_id, agent_id, scopes) => WhoAmIOutput {
+                identity_type: "agent".into(),
+                workspace_id: Some(workspace_id.to_string()),
+                agent_id: Some(agent_id.to_string()),
+                scopes: Some(scopes_list(scopes)),
+                ..Default::default()
+            },
             AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, scopes) => {
-                info.insert("type".into(), "agent_on_behalf_of_user".into());
-                info.insert("user_id".into(), user_id.to_string().into());
-                info.insert("workspace_id".into(), workspace_id.to_string().into());
-                info.insert("agent_id".into(), agent_id.to_string().into());
-                info.insert(
-                    "scopes".into(),
-                    scopes
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
+                WhoAmIOutput {
+                    identity_type: "agent_on_behalf_of_user".into(),
+                    user_id: Some(user_id.to_string()),
+                    workspace_id: Some(workspace_id.to_string()),
+                    agent_id: Some(agent_id.to_string()),
+                    scopes: Some(scopes_list(scopes)),
+                    ..Default::default()
+                }
             }
-            AuthSubject::Anonymous => {
-                info.insert("type".into(), "anonymous".into());
-            }
-        }
+            AuthSubject::Anonymous => WhoAmIOutput {
+                identity_type: "anonymous".into(),
+                ..Default::default()
+            },
+        };
 
-        let text = serde_json::to_string_pretty(&info).unwrap_or_else(|_| format!("{info:?}"));
-        let structured = serde_json::Value::Object(info);
+        let structured = serde_json::to_value(&out).expect("WhoAmIOutput serialization");
+        let text = serde_json::to_string_pretty(&structured).unwrap_or_else(|_| "{}".to_string());
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         result.structured_content = Some(structured);
         Ok(result)

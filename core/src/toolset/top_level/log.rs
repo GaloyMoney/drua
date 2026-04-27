@@ -121,11 +121,32 @@ struct AuditEntryOutput {
     entrypoint: String,
     action: String,
     outcome: String,
+    /// Whether this entry was an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<bool>,
     duration_ms: Option<i64>,
+    /// Acting user UUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acting_user_id: Option<String>,
+    /// Acting agent UUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acting_agent_id: Option<String>,
+    /// User on whose behalf the agent acted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of_user_id: Option<String>,
+    /// Resource IDs involved (workspace_id, sandbox_id, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_ids: Option<serde_json::Value>,
 }
 
 impl From<&AuditEntry> for AuditEntryOutput {
     fn from(e: &AuditEntry) -> Self {
+        let resource_ids = match &e.resource_ids {
+            serde_json::Value::Object(m) if !m.is_empty() => {
+                Some(serde_json::Value::Object(m.clone()))
+            }
+            _ => None,
+        };
         Self {
             id: i64::from(e.id),
             recorded_at: e.recorded_at.to_rfc3339(),
@@ -133,7 +154,12 @@ impl From<&AuditEntry> for AuditEntryOutput {
             entrypoint: e.entrypoint.clone().unwrap_or_default(),
             action: e.action.clone(),
             outcome: e.outcome.clone(),
+            error: e.error,
             duration_ms: e.duration_ms,
+            acting_user_id: e.acting_user_id.map(|id| id.to_string()),
+            acting_agent_id: e.acting_agent_id.map(|id| id.to_string()),
+            on_behalf_of_user_id: e.on_behalf_of_user_id.map(|id| id.to_string()),
+            resource_ids,
         }
     }
 }

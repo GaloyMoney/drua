@@ -48,27 +48,22 @@ impl ComposeTypes {
 static COMPOSE_TYPES_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<ComposeTypesParams>);
 
-static COMPOSE_TYPES_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "declarations": {
-                "type": "string",
-                "description": "TypeScript declarations for the requested tools"
-            },
-            "tool_count": {
-                "type": "integer",
-                "description": "Number of tools included in the declarations"
-            },
-            "not_found": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Tool names that were not found"
-            }
-        },
-        "required": ["declarations", "tool_count", "not_found"]
-    })
-});
+// ---------------------------------------------------------------------------
+// Output shape (schemars-derived, also used for serialization)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ComposeTypesOutput {
+    /// TypeScript declarations for the requested tools.
+    declarations: String,
+    /// Number of tools included in the declarations.
+    tool_count: usize,
+    /// Tool names that were not found.
+    not_found: Vec<String>,
+}
+
+static COMPOSE_TYPES_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<ComposeTypesOutput>);
 
 #[async_trait::async_trait]
 impl TopLevelTool for ComposeTypes {
@@ -78,7 +73,9 @@ impl TopLevelTool for ComposeTypes {
 
     fn description(&self) -> &str {
         "Get TypeScript declarations for specific tools, for use with compose. \
-         Returns typed function signatures with input parameters and output types."
+         Returns typed function signatures with input parameters and output types. \
+         Tools with `Promise<any>` return type have no declared output schema — \
+         their result may be string or JSON depending on the tool."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -208,11 +205,12 @@ impl TopLevelTool for ComposeTypes {
             text.push_str(&format!("\n\n// Not found: {}", not_found.join(", ")));
         }
 
-        let structured = serde_json::json!({
-            "declarations": dts,
-            "tool_count": tool_count,
-            "not_found": not_found,
-        });
+        let out = ComposeTypesOutput {
+            declarations: dts,
+            tool_count,
+            not_found,
+        };
+        let structured = serde_json::to_value(&out).expect("ComposeTypesOutput serialization");
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         result.structured_content = Some(structured);
         Ok(result)
