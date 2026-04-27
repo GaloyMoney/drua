@@ -20,7 +20,6 @@ use crate::auth::AuthSubject;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::compose::{output_schema_to_ts, schema_to_ts_params};
 use super::schema_for;
 
 // ---------------------------------------------------------------------------
@@ -302,13 +301,13 @@ impl DescribeCatalogTool {
         // `compose_types` round trip. `compose_types` remains useful for
         // batch / prefix-glob lookups.
         let input_schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
-        let input_ts = schema_to_ts_params(&input_schema_value);
+        let input_ts = json_schema_ts::schema_to_ts_params(&input_schema_value);
         let output_ts = tool
             .output_schema
             .as_ref()
             .map(|s| {
                 let v = serde_json::Value::Object(s.as_ref().clone());
-                output_schema_to_ts(&v)
+                json_schema_ts::schema_to_ts(&v)
             })
             .unwrap_or_else(|| "any".to_string());
         let ts_signature = format!(

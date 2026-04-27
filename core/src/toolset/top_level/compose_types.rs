@@ -12,7 +12,6 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::compose::{output_schema_to_ts, schema_to_ts_params};
 use super::{parse_params, schema_for};
 
 // ---------------------------------------------------------------------------
@@ -113,10 +112,10 @@ impl TopLevelTool for ComposeTypes {
             if !want_all && !params.tool_names.contains(name) {
                 continue;
             }
-            let params_ts = schema_to_ts_params(tool.input_schema());
+            let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
             let return_ts = tool
                 .output_schema()
-                .map(output_schema_to_ts)
+                .map(json_schema_ts::schema_to_ts)
                 .unwrap_or_else(|| "any".to_string());
             top_fns.push((name.clone(), params_ts, return_ts));
             matched.push(name.clone());
@@ -139,14 +138,14 @@ impl TopLevelTool for ComposeTypes {
 
                 let schema_val =
                     serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
-                let params_ts = schema_to_ts_params(&schema_val);
+                let params_ts = json_schema_ts::schema_to_ts_params(&schema_val);
                 let return_ts = entry
                     .description
                     .output_schema
                     .as_ref()
                     .map(|s| {
                         let schema_val = serde_json::Value::Object(s.as_ref().clone());
-                        output_schema_to_ts(&schema_val)
+                        json_schema_ts::schema_to_ts(&schema_val)
                     })
                     .unwrap_or_else(|| "any".to_string());
 
