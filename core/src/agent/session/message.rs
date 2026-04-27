@@ -55,6 +55,23 @@ pub enum SystemBlockKind {
     Skills,
 }
 
+impl SystemBlockKind {
+    /// Canonical ordering of system blocks in a prompt. Matches the order
+    /// produced by `system_prompt::system_blocks_for_role` followed by
+    /// notes/skills injection in `Agents::send_message`. Used by the
+    /// session entity to build refreshed views — the entity can't ask the
+    /// agent module what order it wants, so the order lives here as the
+    /// shared contract.
+    pub const ORDER: &'static [SystemBlockKind] = &[
+        SystemBlockKind::Base,
+        SystemBlockKind::Tools,
+        SystemBlockKind::Behavioral,
+        SystemBlockKind::Role,
+        SystemBlockKind::Notes,
+        SystemBlockKind::Skills,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SystemBlock {

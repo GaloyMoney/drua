@@ -429,39 +429,29 @@ impl AgentSession {
         Idempotent::Executed(())
     }
 
-    /// Returns `true` if the given thread's `SystemView` references an
-    /// index that's no longer the latest for its kind — i.e. there's a
-    /// pending `SystemBlockUpdated` event the thread hasn't picked up yet.
+    /// Returns `true` if the given thread's `SystemView` no longer matches
+    /// the canonical "latest for each kind" view. Triggers when:
+    /// - an existing kind in the view has a newer idx (replacement), OR
+    /// - a kind newly appeared in `latest_idx_by_kind` that the view
+    ///   doesn't reference (addition — e.g. first note pinned).
     fn thread_has_stale_system_view(&self, thread_id: SessionThreadId) -> bool {
         let Some(thread) = self.threads.get_persisted(&thread_id) else {
             return false;
         };
         let view = thread.prompt_definition().system_view().clone();
-        let materialized = self.materialize();
-        view.indexes().iter().any(|idx| {
-            let block = materialized.system_block_at(*idx);
-            materialized.latest_idx_for_kind(block.kind()) != Some(*idx)
-        })
+        let refreshed = self.canonical_refreshed_view();
+        view.indexes() != refreshed.indexes()
     }
 
-    /// Build a new `SystemView` for `thread_id` that swaps each idx for the
-    /// latest idx of its kind. Indexes for kinds that haven't been updated
-    /// remain unchanged.
-    fn refreshed_system_view(&self, thread_id: SessionThreadId) -> Option<SystemView> {
-        let thread = self.threads.get_persisted(&thread_id)?;
-        let view = thread.prompt_definition().system_view().clone();
+    /// Build the canonical "latest for each kind" `SystemView`, ordered
+    /// per `SystemBlockKind::ORDER`. Kinds not yet pushed are skipped.
+    fn canonical_refreshed_view(&self) -> SystemView {
         let materialized = self.materialize();
-        let new_indexes: Vec<SystemBlockIndex> = view
-            .indexes()
+        let indexes: Vec<SystemBlockIndex> = SystemBlockKind::ORDER
             .iter()
-            .map(|idx| {
-                let block = materialized.system_block_at(*idx);
-                materialized
-                    .latest_idx_for_kind(block.kind())
-                    .unwrap_or(*idx)
-            })
+            .filter_map(|kind| materialized.latest_idx_for_kind(*kind))
             .collect();
-        Some(SystemView::from_indexes(new_indexes))
+        SystemView::from_indexes(indexes)
     }
 
     /// Spawn a new thread whose `SystemView` references the latest content
@@ -478,9 +468,7 @@ impl AgentSession {
         &mut self,
         from_thread: SessionThreadId,
     ) -> (SessionThreadId, PromptDefinition) {
-        let new_view = self
-            .refreshed_system_view(from_thread)
-            .expect("from_thread exists (caller checked)");
+        let new_view = self.canonical_refreshed_view();
         let from_pd = self
             .threads
             .get_persisted(&from_thread)
@@ -1983,6 +1971,55 @@ mod tests {
             "refreshed thread must inherit prior history (original={}, new={})",
             original_messages_len,
             new_messages.len()
+        );
+    }
+
+    #[test]
+    fn refresh_spawns_thread_when_a_kind_is_added_to_the_proposal() {
+        // Reproduces a real-world bug: a session created without any
+        // pinned notes (4 blocks: Role/Tools/Behavioral/Base) needs to
+        // spawn a refreshed thread when the user pins their first note.
+        // The previous implementation only detected "kind in view has
+        // newer idx" (replacement) and missed addition.
+        let mut session = new_session();
+        // Seed only Role + a Base — no Notes yet.
+        seed_initial_thread(
+            &mut session,
+            vec![SystemBlock::Base { text: "B".into() }, role("R")],
+        );
+        let thread_before = session.current_main_thread.unwrap();
+
+        // Now propose blocks that include a NEW kind (Notes) for the
+        // first time. Existing kinds unchanged.
+        let result = session.apply_proposed_system_blocks(vec![
+            SystemBlock::Base { text: "B".into() },
+            role("R"),
+            notes("first pinned note"),
+        ]);
+        assert!(matches!(result, Idempotent::Executed(())));
+
+        // Drive a turn; refresh should spawn a new thread whose view
+        // includes the newly-added Notes kind.
+        session
+            .add_user_input(TargetThread::Main, user_source(), "any".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(
+            new_thread_id, thread_before,
+            "first-time-add of a kind must spawn a refreshed thread"
+        );
+
+        // The refreshed thread's resolved system blocks include Notes.
+        let resolved = resolved_blocks(&session, new_thread_id);
+        assert!(
+            resolved
+                .iter()
+                .any(|b| matches!(b, SystemBlock::Notes { .. })),
+            "Notes kind should be present in the refreshed view, got {:?}",
+            resolved
         );
     }
 }

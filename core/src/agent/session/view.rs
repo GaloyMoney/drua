@@ -143,13 +143,6 @@ impl<'a> MaterializedSession<'a> {
             .map(|idx| self.system_blocks[idx.0])
     }
 
-    /// Resolve a `SystemBlockIndex` to its block.
-    /// Panics if the index is out of range — callers must only pass indexes
-    /// they obtained from this same materialized state.
-    pub fn system_block_at(&self, idx: SystemBlockIndex) -> &SystemBlock {
-        self.system_blocks[idx.0]
-    }
-
     pub fn push_tool_defs(&mut self, defs: impl Iterator<Item = &'a ToolDefinition>) {
         self.tool_breakpoints
             .push(ToolDefinitionIndex(self.tool_defs.len()));
