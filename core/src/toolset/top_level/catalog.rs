@@ -20,6 +20,7 @@ use crate::auth::AuthSubject;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
+use super::compose::{output_schema_to_ts, schema_to_ts_params};
 use super::schema_for;
 
 // ---------------------------------------------------------------------------
@@ -295,14 +296,35 @@ impl DescribeCatalogTool {
             .and_then(|s| serde_json::to_string_pretty(s.as_ref()).ok())
             .map(|s| format!("\n\n### Output schema\n```json\n{s}\n```"))
             .unwrap_or_default();
+
+        // Embed a TypeScript signature so agents writing `compose` scripts
+        // can read the typed shape directly here, without a follow-up
+        // `compose_types` round trip. `compose_types` remains useful for
+        // batch / prefix-glob lookups.
+        let input_schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+        let input_ts = schema_to_ts_params(&input_schema_value);
+        let output_ts = tool
+            .output_schema
+            .as_ref()
+            .map(|s| {
+                let v = serde_json::Value::Object(s.as_ref().clone());
+                output_schema_to_ts(&v)
+            })
+            .unwrap_or_else(|| "any".to_string());
+        let ts_signature = format!(
+            "\n\n### TypeScript signature (for use in `compose`)\n```ts\nfunction {tool}(args: {{ {input_ts} }}): Promise<{output_ts}>;\n```",
+            tool = entry.tool_name,
+        );
+
         format!(
-            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}{}\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
             entry.prefixed_name,
             entry.upstream_name,
             entry.category,
             description,
             schema,
             output_section,
+            ts_signature,
             filter_desc,
             entry.prefixed_name,
         )
@@ -580,6 +602,36 @@ mod tests {
                     .collect(),
             }
         }
+
+        /// Build a stub with explicit input/output JSON Schemas, used to
+        /// exercise the TypeScript signature embed in `describe_tool`.
+        fn with_typed_tool(
+            name: &str,
+            description: &str,
+            input_schema: serde_json::Value,
+            output_schema: serde_json::Value,
+        ) -> Self {
+            let input: JsonObject = match input_schema {
+                serde_json::Value::Object(m) => m,
+                _ => Default::default(),
+            };
+            let out = match output_schema {
+                serde_json::Value::Object(m) => Some(Arc::new(m)),
+                _ => None,
+            };
+            let mut tool = Tool::default();
+            tool.name = name.to_string().into();
+            tool.description = Some(description.to_string().into());
+            tool.input_schema = Arc::new(input);
+            tool.output_schema = out;
+            Self {
+                entries: vec![ToolSetEntry {
+                    name: name.to_string(),
+                    description: tool,
+                    default_output_filter: None,
+                }],
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -677,6 +729,68 @@ mod tests {
 
         let results = catalog.execute_search(&AuthSubject::Anonymous, Some("nonexistent"), None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn describe_tool_includes_ts_signature() {
+        // Tool with both an input and output schema; describe_tool's
+        // formatted output should embed the TypeScript signature so
+        // agents writing compose scripts get the typed shape inline.
+        let stub = StubToolSet::with_typed_tool(
+            "list_envs",
+            "List environments.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "count": { "type": "integer" }
+                },
+                "required": ["id", "count"]
+            }),
+        );
+
+        let sets: Vec<Arc<dyn SearchableToolSet>> =
+            vec![Arc::new(stub) as Arc<dyn SearchableToolSet>];
+        let describe = DescribeCatalogTool::new(Arc::new(RwLock::new(sets)));
+        let entry = describe
+            .execute_describe(&AuthSubject::Anonymous, "stub_list_envs")
+            .expect("entry should be visible");
+        let formatted = DescribeCatalogTool::format_entry(&entry);
+
+        assert!(
+            formatted.contains("### TypeScript signature"),
+            "missing TS signature heading in:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("function list_envs(args: {"),
+            "missing function declaration in:\n{formatted}"
+        );
+        // Required fields render without `?`, optional fields with `?`.
+        assert!(
+            formatted.contains("name: string"),
+            "missing required string param in:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("limit?: number"),
+            "missing optional number param in:\n{formatted}"
+        );
+        // Output schema → inline object type with `Promise<...>` wrapper.
+        assert!(
+            formatted.contains("Promise<{"),
+            "missing Promise wrapper in:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("id: string"),
+            "missing return field in:\n{formatted}"
+        );
     }
 
     #[test]

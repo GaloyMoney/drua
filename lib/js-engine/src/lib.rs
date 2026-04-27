@@ -44,7 +44,13 @@ pub struct JsEngine {
     memory_limit: usize,
     stack_limit: usize,
     max_tool_calls: usize,
-    max_result_bytes: usize,
+    /// Cap on a single inner-tool result, in bytes. Scripts can pull large
+    /// payloads (logs, manifests) and filter them before returning.
+    max_tool_result_bytes: usize,
+    /// Cap on the script's final return value, in bytes. Bounded so the
+    /// agent context stays clean; compose's job is to shrink large tool
+    /// results into small agent-readable answers.
+    max_return_bytes: usize,
 }
 
 impl Default for JsEngine {
@@ -59,7 +65,8 @@ impl JsEngine {
             memory_limit: 8 * 1024 * 1024, // 8 MB
             stack_limit: 512 * 1024,       // 512 KB
             max_tool_calls: 50,
-            max_result_bytes: 100 * 1024, // 100 KB
+            max_tool_result_bytes: 4 * 1024 * 1024, // 4 MB per inner tool result
+            max_return_bytes: 100 * 1024,           // 100 KB final return
         }
     }
 
@@ -68,8 +75,15 @@ impl JsEngine {
         self
     }
 
-    pub fn with_max_result_bytes(mut self, n: usize) -> Self {
-        self.max_result_bytes = n;
+    /// Set the cap on a single inner-tool result (in bytes).
+    pub fn with_max_tool_result_bytes(mut self, n: usize) -> Self {
+        self.max_tool_result_bytes = n;
+        self
+    }
+
+    /// Set the cap on the script's final return value (in bytes).
+    pub fn with_max_return_bytes(mut self, n: usize) -> Self {
+        self.max_return_bytes = n;
         self
     }
 
@@ -92,7 +106,8 @@ impl JsEngine {
     ) -> Result<ExecutionResult, JsEngineError> {
         let start = Instant::now();
         let max_tool_calls = self.max_tool_calls;
-        let max_result_bytes = self.max_result_bytes;
+        let max_tool_result_bytes = self.max_tool_result_bytes;
+        let max_return_bytes = self.max_return_bytes;
         let memory_limit = self.memory_limit;
         let stack_limit = self.stack_limit;
 
@@ -141,7 +156,7 @@ impl JsEngine {
                     Arc::clone(&dispatcher),
                     Arc::clone(&tool_call_count_inner),
                     max_tool_calls,
-                    max_result_bytes,
+                    max_tool_result_bytes,
                 )
                 .map_err(|e| JsEngineError::Runtime(format!("tool bridge registration: {e}")))?;
 
@@ -215,12 +230,14 @@ impl JsEngine {
         let value: serde_json::Value =
             serde_json::from_str(&value_json).unwrap_or(serde_json::Value::Null);
 
-        // Check result size
+        // Check final-return size against the small return cap. This is
+        // distinct from `max_tool_result_bytes` (per inner tool result):
+        // scripts can pull large payloads but must filter before returning.
         let result_size = value_json.len();
-        if result_size > max_result_bytes {
-            return Err(JsEngineError::ResultTooLarge {
+        if result_size > max_return_bytes {
+            return Err(JsEngineError::ReturnTooLarge {
                 size: result_size,
-                max: max_result_bytes,
+                max: max_return_bytes,
             });
         }
 
@@ -296,7 +313,7 @@ fn register_tool_bridge(
     dispatcher: Arc<dyn ToolDispatcher>,
     tool_call_count: Arc<AtomicUsize>,
     max_tool_calls: usize,
-    max_result_bytes: usize,
+    max_tool_result_bytes: usize,
 ) -> Result<(), rquickjs::Error> {
     ctx.globals().set(
         "__call_tool_raw",
@@ -323,9 +340,12 @@ fn register_tool_bridge(
                     Ok(result) => {
                         let result_json =
                             serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
-                        if result_json.len() > max_result_bytes {
+                        if result_json.len() > max_tool_result_bytes {
                             return encode_error(&format!(
-                                "Tool result too large ({} bytes, max {max_result_bytes})",
+                                "Tool result too large ({} bytes, max {max_tool_result_bytes}). \
+                                 The tool returned more data than compose can hold in a single \
+                                 result. Try a more specific query (e.g. limit/filter parameters) \
+                                 or fall back to call_tool with output_filter.",
                                 result_json.len()
                             ));
                         }
@@ -671,6 +691,68 @@ mod tests {
             .unwrap();
         // Without an explicit return, the async IIFE returns undefined → null
         assert!(result.value.is_null());
+    }
+
+    /// Per-tool-result cap is independent of the final-return cap: a script
+    /// can pull a large inner result, summarize it, and return a small value.
+    #[tokio::test]
+    async fn separate_caps_let_script_filter_large_tool_results() {
+        // Dispatcher returns ~500 KB of data
+        struct LargeDispatcher;
+        #[async_trait::async_trait]
+        impl ToolDispatcher for LargeDispatcher {
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _args: serde_json::Value,
+            ) -> Result<serde_json::Value, String> {
+                let big = "x".repeat(500 * 1024);
+                Ok(serde_json::json!({ "data": big }))
+            }
+        }
+
+        let engine = JsEngine::new()
+            .with_max_tool_result_bytes(1024 * 1024)
+            .with_max_return_bytes(1024);
+
+        let result = engine
+            .execute(
+                r#"
+                const r = await tools.big_tool({});
+                // Summarize the large payload to a tiny return value
+                return { len: r.data.length };
+                "#,
+                Arc::new(LargeDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.value, serde_json::json!({ "len": 500 * 1024 }));
+        assert_eq!(result.tool_calls_made, 1);
+    }
+
+    /// The return cap blocks oversized script output even when no tool
+    /// calls happen. Distinct error variant from the per-tool cap.
+    #[tokio::test]
+    async fn return_cap_blocks_oversized_script_output() {
+        let engine = JsEngine::new().with_max_return_bytes(1024);
+
+        let result = engine
+            .execute(
+                r#"return "x".repeat(5 * 1024);"#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await;
+
+        match result.unwrap_err() {
+            JsEngineError::ReturnTooLarge { size, max } => {
+                assert!(size > max);
+                assert_eq!(max, 1024);
+            }
+            other => panic!("expected ReturnTooLarge, got: {other}"),
+        }
     }
 
     #[tokio::test]

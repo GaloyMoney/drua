@@ -156,7 +156,8 @@ impl TopLevelTool for ComposeTool {
 
         let engine = js_engine::JsEngine::new()
             .with_max_tool_calls(self.config.max_tool_calls)
-            .with_max_result_bytes(self.config.max_result_bytes)
+            .with_max_tool_result_bytes(self.config.max_tool_result_bytes)
+            .with_max_return_bytes(self.config.max_return_bytes)
             .with_memory_limit(self.config.memory_limit_bytes)
             .with_stack_limit(self.config.stack_limit_bytes);
         let result = engine
@@ -358,7 +359,7 @@ fn extract_text(result: &CallToolResult) -> String {
 ///
 /// When a tool has an `output_schema`, the return type is derived from that
 /// schema instead of the default `any`.
-pub(super) fn generate_dts(
+pub(crate) fn generate_dts(
     subject: &AuthSubject,
     sets: &[Arc<dyn SearchableToolSet>],
     top_level: &HashMap<String, Arc<dyn TopLevelTool>>,
@@ -435,7 +436,7 @@ pub(super) fn generate_dts(
 /// object types. Arrays become `T[]`.
 ///
 /// Example output: `repo: string; state?: string; limit?: number`
-pub(super) fn schema_to_ts_params(schema: &serde_json::Value) -> String {
+pub(crate) fn schema_to_ts_params(schema: &serde_json::Value) -> String {
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => return "...args: any".to_string(),
@@ -461,7 +462,7 @@ pub(super) fn schema_to_ts_params(schema: &serde_json::Value) -> String {
 }
 
 /// Convert a single JSON Schema type definition to a TypeScript type string.
-pub(super) fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
+pub(crate) fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("string") => "string",
         Some("number" | "integer") => "number",
@@ -480,7 +481,7 @@ pub(super) fn json_schema_to_ts(schema: &serde_json::Value) -> &'static str {
 /// - `type: "array"` → `T[]` (recursing into `items` for object element types)
 ///
 /// Falls back to `any` for schemas that don't match either shape.
-pub(super) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
+pub(crate) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
     // Array: render items type with [] suffix.
     if schema.get("type").and_then(|t| t.as_str()) == Some("array") {
         if let Some(items) = schema.get("items") {
@@ -493,6 +494,7 @@ pub(super) fn output_schema_to_ts(schema: &serde_json::Value) -> String {
         }
         return "any[]".to_string();
     }
+
 
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) if !p.is_empty() => p,

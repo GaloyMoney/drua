@@ -39,8 +39,10 @@ data off the conversation context. Reserve individual call_tool for \
 one-off lookups or when you need to inspect output before deciding \
 what to do next.
 
-Before writing the script, call `compose_types({tool_names: ['<prefix>_*']})` \
-to fetch typed signatures — never guess tool or parameter names.
+Before writing the script, fetch typed signatures via \
+`compose_types({tool_names: ['<prefix>_*']})` for batch lookups, or \
+`describe_tool({tool_name: '<name>'})` for a single-tool deep-dive — \
+never guess tool or parameter names.
 </use_compose_for_efficiency>
 
 <workspace_notes>
@@ -191,6 +193,7 @@ mod tests {
         assert!(blocks[2].text().contains("use_parallel_tool_calls"));
         assert!(blocks[2].text().contains("use_compose_for_efficiency"));
         assert!(blocks[2].text().contains("compose_types"));
+        assert!(blocks[2].text().contains("describe_tool"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("workspace lead"));
     }
@@ -215,6 +218,7 @@ mod tests {
         assert!(blocks[2].text().contains("use_parallel_tool_calls"));
         assert!(blocks[2].text().contains("use_compose_for_efficiency"));
         assert!(blocks[2].text().contains("compose_types"));
+        assert!(blocks[2].text().contains("describe_tool"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("task agent"));
         assert!(blocks[3].text().contains("default_to_action"));
