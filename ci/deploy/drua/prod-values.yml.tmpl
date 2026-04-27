@@ -31,7 +31,8 @@ galoyAgents:
       team: "dev"
     compose:
       maxToolCalls: 1000
-      maxResultBytes: "262144"
+      maxToolResultBytes: "8388608"
+      maxReturnBytes: "262144"
       memoryLimitBytes: "16777216"
       stackLimitBytes: "1048576"
       defaultTimeoutMs: 120000
