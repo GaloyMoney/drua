@@ -756,6 +756,102 @@ fn system_kind_letter(kind: &str) -> char {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sys(index: i32, kind: &str) -> SystemBlockInfoNode {
+        SystemBlockInfoNode {
+            index,
+            kind: kind.to_string(),
+        }
+    }
+
+    fn make_thread(
+        id: &str,
+        is_current: bool,
+        start_reason: &str,
+        system_blocks: Vec<SystemBlockInfoNode>,
+        tool_count: i32,
+    ) -> ThreadNode {
+        ThreadNode {
+            id: id.to_string(),
+            is_current,
+            next_turn: "USER".to_string(),
+            start_reason: start_reason.to_string(),
+            system_blocks,
+            tool_definitions_count: tool_count,
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn system_grid_positions_are_sorted_global_indexes() {
+        let threads = vec![
+            make_thread(
+                "t1",
+                true,
+                "INITIAL_THREAD",
+                vec![sys(0, "BASE"), sys(1, "TOOLS"), sys(4, "NOTES")],
+                10,
+            ),
+            make_thread(
+                "t2",
+                false,
+                "CONTEXT_REFRESHED",
+                vec![sys(0, "BASE"), sys(1, "TOOLS"), sys(7, "NOTES")],
+                12,
+            ),
+        ];
+
+        let grid = build_thread_grid(threads);
+        assert_eq!(grid.system_positions, vec![0, 1, 4, 7]);
+    }
+
+    #[test]
+    fn first_thread_owns_shared_system_blocks() {
+        let threads = vec![
+            make_thread(
+                "t1",
+                true,
+                "INITIAL_THREAD",
+                vec![sys(0, "BASE"), sys(1, "TOOLS")],
+                5,
+            ),
+            make_thread(
+                "t2",
+                false,
+                "CONTEXT_REFRESHED",
+                vec![sys(0, "BASE"), sys(1, "TOOLS"), sys(2, "NOTES")],
+                5,
+            ),
+        ];
+
+        let grid = build_thread_grid(threads);
+
+        // positions: [0, 1, 2]
+        // t1 owns 0 and 1 — Unique with kind letter
+        assert!(matches!(grid.system_grid[0][0], CellKind::Unique('B')));
+        assert!(matches!(grid.system_grid[0][1], CellKind::Unique('T')));
+        assert!(matches!(grid.system_grid[0][2], CellKind::Empty));
+        // t2 shares 0 and 1, owns 2
+        assert!(matches!(grid.system_grid[1][0], CellKind::Shared));
+        assert!(matches!(grid.system_grid[1][1], CellKind::Shared));
+        assert!(matches!(grid.system_grid[1][2], CellKind::Unique('N')));
+    }
+
+    #[test]
+    fn tool_def_counts_per_thread() {
+        let threads = vec![
+            make_thread("t1", true, "INITIAL_THREAD", vec![sys(0, "BASE")], 17),
+            make_thread("t2", false, "TOOL_DEFS_UPDATED", vec![sys(0, "BASE")], 25),
+        ];
+
+        let grid = build_thread_grid(threads);
+        assert_eq!(grid.tool_def_counts, vec![17, 25]);
+    }
+}
+
 fn content_type_char(content: &ContentBlock, role: ChatRole) -> char {
     match content {
         ContentBlock::Text(_) => match role {
