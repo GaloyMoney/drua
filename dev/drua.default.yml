@@ -25,10 +25,10 @@ toolsets:
     db_path: ''
   compose:
     max_tool_calls: 50
-    max_tool_result_bytes: 4194304
+    max_tool_result_bytes: 33554432
     max_return_bytes: 102400
     max_console_bytes: 8192
-    memory_limit_bytes: 8388608
+    memory_limit_bytes: 67108864
     stack_limit_bytes: 524288
     default_timeout_ms: 120000
     max_timeout_ms: 300000

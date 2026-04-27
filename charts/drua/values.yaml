@@ -74,22 +74,25 @@ galoyAgents:
       team: ""
     ## JS-engine sandbox limits for the `compose` top-level tool. Each
     ## key maps 1:1 to a JsEngine setter; missing keys fall back to the
-    ## drua-core defaults (50 calls / 4 MiB per inner tool result /
-    ## 100 KiB final return / 8 MiB / 512 KiB / 120 s default / 300 s max).
+    ## drua-core defaults (50 calls / 32 MiB per inner tool result /
+    ## 100 KiB final return / 64 MiB / 512 KiB / 120 s default / 300 s max).
     ## Byte-valued limits are quoted to keep YAML from auto-promoting them
     ## to float64 — Helm's serializer otherwise renders e.g. 16777216 as
     ## "1.6777216e+07", which Rust serde rejects for usize fields.
     compose:
       maxToolCalls: 50
       ## Per inner-tool-result cap. Scripts may pull large payloads
-      ## (logs, manifests) and filter them before returning.
-      maxToolResultBytes: "4194304"
+      ## (logs, manifests) and filter them before returning. Sized to
+      ## hold realistic Concourse build logs (95–99th percentile).
+      maxToolResultBytes: "33554432"
       ## Final-return cap. Bounded so the agent context stays clean.
       maxReturnBytes: "102400"
       ## Console buffer cap. Tail-truncated when exceeded — newest lines
       ## kept, oldest dropped. ~1% of agent context at 8 KiB.
       maxConsoleBytes: "8192"
-      memoryLimitBytes: "8388608"
+      ## JS heap. Must be ≥ 2× maxToolResultBytes so scripts have working
+      ## headroom for split / filter / sort over the parsed payload.
+      memoryLimitBytes: "67108864"
       stackLimitBytes: "524288"
       defaultTimeoutMs: 120000
       maxTimeoutMs: 300000
