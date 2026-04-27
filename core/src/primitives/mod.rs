@@ -18,7 +18,9 @@ es_entity::entity_id! {
     SandboxId,
     WorkspaceSecretId,
     SkillId,
-    NoteId;
+    NoteId,
+    WorkflowDefinitionId,
+    WorkflowRunId;
 
     UserId => McpCredsOwnerId,
     AgentId => McpCredsOwnerId

@@ -36,6 +36,8 @@ pub enum ToolSetsError {
     Skill(String),
     #[error("ToolSetsError - Compose: {0}")]
     Compose(String),
+    #[error("ToolSetsError - Workflow: {0}")]
+    Workflow(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

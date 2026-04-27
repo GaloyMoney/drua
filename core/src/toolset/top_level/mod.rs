@@ -111,6 +111,7 @@ mod sandbox;
 mod text_editor;
 mod use_skill;
 mod whoami;
+mod workflow;
 
 pub use agent::WorkspaceAgent;
 pub use bash::Bash;
@@ -127,3 +128,4 @@ pub use sandbox::WorkspaceSandbox;
 pub use text_editor::TextEditor;
 pub use use_skill::UseSkillTool;
 pub use whoami::WhoAmI;
+pub use workflow::WorkflowTool;
