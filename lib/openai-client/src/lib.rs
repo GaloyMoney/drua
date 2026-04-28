@@ -1,9 +1,5 @@
-//! OpenAI Chat Completions API client.
-//!
-//! Accepts the provider-agnostic types from `lib/llm` at the public boundary
-//! and uses OpenAI-specific types internally. Streams SSE events and converts
-//! them to the unified `StreamDelta` format that the prompt executor and agent
-//! loop expect.
+//! OpenAI Chat Completions client. Accepts provider-agnostic `lib/llm`
+//! types at the boundary and yields `StreamDelta` from the SSE stream.
 
 mod convert;
 mod responses;
@@ -47,9 +43,6 @@ impl From<SseError> for OpenAiChatCompletionsError {
     }
 }
 
-/// OpenAI Chat Completions API client. Converts provider-agnostic `Prompt`
-/// values into OpenAI-specific wire types, streams the SSE response, and
-/// yields `StreamDelta` events.
 #[derive(Clone)]
 pub struct OpenAiClient {
     http: reqwest::Client,
@@ -74,8 +67,7 @@ impl OpenAiClient {
         self
     }
 
-    /// Issue a streaming Chat Completions request and return the
-    /// fully-accumulated assistant reply.
+    /// Streams the Chat Completions API and returns the accumulated reply.
     #[instrument(name = "openai_client.send_prompt", skip_all)]
     pub async fn send_prompt(
         &self,
@@ -94,8 +86,6 @@ impl OpenAiClient {
         Ok(accumulator.finish())
     }
 
-    /// Issue a streaming Chat Completions request, yielding provider-agnostic
-    /// `StreamDelta`s via channel.
     #[instrument(name = "openai_client.send_prompt_streaming", skip_all)]
     async fn send_prompt_streaming_internal(
         &self,
@@ -171,7 +161,6 @@ impl LlmProvider for OpenAiClient {
             .await
             .map_err(|e| PromptError::Provider(e.to_string()))?;
 
-        // Re-map the error type from OpenAiChatCompletionsError to PromptError.
         let (tx, out_rx) = tokio::sync::mpsc::channel(128);
         tokio::spawn(async move {
             let mut rx = rx;

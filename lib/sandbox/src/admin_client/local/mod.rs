@@ -21,17 +21,15 @@ const SANDBOXES_DIR_NAME: &str = ".sandboxes";
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A running sandbox process owned by the client. The child is killed on drop.
+/// Child is killed on drop (kill_on_drop=true).
 struct RunningSandbox {
     child: Child,
     view: SandboxView,
 }
 
-/// Spawns and tracks sandbox tool server processes locally.
-///
-/// Each sandbox lives in `<repo_root>/.sandboxes/<id>/` with a `workspace/`
-/// subdir mounted as `WORKSPACE_ROOT` and a `secrets/github-token` path the
-/// `/initialize` endpoint can write to.
+/// Spawns sandbox tool server processes locally. Each lives under
+/// `<repo_root>/.sandboxes/<id>/` with a `workspace/` mounted as
+/// `WORKSPACE_ROOT` and a `secrets/github-token` path.
 #[derive(Clone)]
 pub struct LocalAdminClient {
     config: LocalSandboxConfig,
@@ -41,8 +39,6 @@ pub struct LocalAdminClient {
 }
 
 impl LocalAdminClient {
-    /// Create a new client. Sandboxes will be placed under
-    /// `<repo_root>/.sandboxes/`.
     pub fn new(config: LocalSandboxConfig, repo_root: impl AsRef<Path>) -> Self {
         let sandboxes_root = std::fs::canonicalize(repo_root.as_ref())
             .unwrap_or_else(|_| repo_root.as_ref().to_path_buf())
@@ -55,14 +51,12 @@ impl LocalAdminClient {
         }
     }
 
-    /// Override how long [`Self::create_sandbox`] waits for the spawned
-    /// process to start accepting TCP connections (default: 30s).
+    /// Default 30s.
     pub fn with_ready_timeout(mut self, timeout: Duration) -> Self {
         self.ready_timeout = timeout;
         self
     }
 
-    /// Root directory where per-sandbox state is kept.
     pub fn sandboxes_root(&self) -> &Path {
         &self.sandboxes_root
     }
@@ -77,8 +71,7 @@ impl LocalAdminClient {
         name: &str,
         specs: &SandboxSpecs,
     ) -> Result<SandboxView, AdminError> {
-        // Specs are recorded in the span fields above for visibility but
-        // are not enforced by the local backend.
+        // Specs are recorded in span fields but not enforced locally.
         let _ = specs;
         {
             let sandboxes = self.sandboxes.lock().await;
@@ -91,8 +84,6 @@ impl LocalAdminClient {
         let workspace = sandbox_dir.join("workspace");
         let secrets_dir = sandbox_dir.join("secrets");
         let github_token_path = secrets_dir.join("github-token");
-        // Suppress unused warning when the child spawn fails — the dir is
-        // still useful context for error messages.
         let _ = sandbox_dir;
 
         create_dir_all(&workspace).await?;
@@ -101,11 +92,9 @@ impl LocalAdminClient {
         let port = allocate_port()?;
         let base_url = format!("http://127.0.0.1:{port}");
 
-        // Intentionally don't override `current_dir`: inheriting the
-        // parent's cwd lets the default `cargo run -q -p sandbox-tool-server`
-        // spawn command find the Cargo workspace when drua is run
-        // from the repo root. The server locates its workspace via the
-        // `WORKSPACE_ROOT` env var rather than cwd.
+        // Inherit cwd so the default `cargo run -q -p sandbox-tool-server`
+        // command finds the Cargo workspace when drua runs from the repo
+        // root. The server uses `WORKSPACE_ROOT` env var, not cwd.
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(&self.config.sandbox_spawn_cmd)
@@ -148,7 +137,6 @@ impl LocalAdminClient {
         let mut sb = sandboxes
             .remove(name)
             .ok_or_else(|| AdminError::NotFound(name.to_string()))?;
-        // Best-effort: ignore errors if the child already exited.
         let _ = sb.child.kill().await;
         tracing::info!(sandbox = %name, "Local sandbox stopped");
         Ok(())
@@ -190,8 +178,7 @@ impl AdminClient for LocalAdminClient {
         Ok(LocalAdminClient::list_sandboxes(self).await)
     }
 
-    /// For the local backend `create_sandbox` already blocks until ready, so
-    /// this is effectively a no-op lookup.
+    /// `create_sandbox` already blocks until ready locally; this is just a lookup.
     async fn wait_sandbox_ready(
         &self,
         name: &str,
@@ -209,9 +196,8 @@ impl AdminClient for LocalAdminClient {
     }
 }
 
-/// Allocate a free TCP port by binding to port 0. There's a small race window
-/// between drop and the spawned child binding, but it's acceptable for local
-/// dev/test usage.
+/// Bind to port 0 to claim a free port. Race window between drop and child
+/// bind is acceptable for local dev/test.
 fn allocate_port() -> Result<u16, AdminError> {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").map_err(AdminError::PortAllocation)?;
@@ -231,7 +217,6 @@ async fn create_dir_all(path: &Path) -> Result<(), AdminError> {
         })
 }
 
-/// Poll the port until it accepts a TCP connection or the timeout elapses.
 async fn wait_ready(port: u16, timeout: Duration) -> Result<(), ()> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {

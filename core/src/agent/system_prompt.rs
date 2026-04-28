@@ -6,14 +6,9 @@ use crate::toolset::ToolSets;
 use super::entity::AgentRole;
 use super::session::message::SystemBlock;
 
-/// Identity line shared by every agent role. The workspace name is
-/// interpolated at construction time via [`build_base_block`].
 const BASE_PROMPT_PREFIX: &str = "You are an AI agent operating inside the \
 Galoy Agents platform, in workspace";
 
-/// Behavioral guidelines shared by every agent role. These are
-/// high-ROI directives drawn from Anthropic's official prompting
-/// best-practices and published system-prompt patterns.
 const BEHAVIORAL_GUIDELINES: &str = "\
 <investigate_before_answering>
 Never speculate about sandbox contents you have not read. Always use \
@@ -78,7 +73,6 @@ sparingly. Unpin when the context is no longer urgent; the note remains \
 searchable.
 </workspace_notes>";
 
-/// Role-specific context for the workspace lead.
 const WORKSPACE_LEAD_ROLE: &str = "\
 You are the workspace lead. You coordinate work across the workspace, \
 delegate tasks to other agents, and answer user questions directly. \
@@ -86,7 +80,6 @@ You cannot attach to sandboxes, but you can inspect any sandbox in \
 the workspace using the sandbox tool (command: inspect). For code \
 changes and command execution, delegate to other agents.";
 
-/// Role-specific context for a task agent.
 const AGENT_ROLE: &str = "\
 You are a task agent. You start without a sandbox attached. When a \
 sandbox is attached or detached during the conversation, you will \
@@ -101,17 +94,8 @@ Implement changes rather than only suggesting them. Use tools to \
 discover missing details instead of asking for clarification.
 </default_to_action>";
 
-/// Build the system blocks for a given agent role.
-///
-/// Returns four [`SystemBlock`]s:
-/// 1. **Base** — identity line (cacheable).
-/// 2. **Tools** — dynamic list of top-level tools and the progressive
-///    disclosure pattern for upstream toolsets.
-/// 3. **Behavioral** — shared behavioral guidelines (cacheable).
-/// 4. **Role** — role-specific instructions.
-///
-/// Keeping them as separate blocks (rather than one concatenated
-/// string) allows cache-control breakpoints at the LLM layer.
+/// Returns four `SystemBlock`s (Base, Tools, Behavioral, Role) kept
+/// separate to allow cache-control breakpoints at the LLM layer.
 pub fn system_blocks_for_role(
     role: AgentRole,
     toolsets: &Arc<ToolSets>,
@@ -137,11 +121,8 @@ pub fn system_blocks_for_role(
     ]
 }
 
-/// Build the tools-context section. Does NOT re-list top-level tools
-/// (those are already in the prompt's `tools` array with full schemas).
-/// Instead, explains things the model can't infer from the tools array:
-/// sandbox-tool prerequisites (for task agents) and the progressive-
-/// disclosure pattern for upstream toolsets.
+/// Tools section: does NOT re-list top-level tools (already in `tools`
+/// array). Covers sandbox prerequisites and progressive disclosure.
 fn build_tools_section(
     role: AgentRole,
     toolsets: &Arc<ToolSets>,
@@ -156,7 +137,6 @@ fn build_tools_section(
         );
     }
 
-    // Progressive disclosure for upstream/searchable toolsets.
     let gateway_info = toolsets.mcp_gateway_info();
     if !gateway_info.is_empty() {
         section.push_str("\n# Additional tools (progressive disclosure)\n\n");

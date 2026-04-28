@@ -18,30 +18,18 @@ use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
 use crate::primitives::{AgentId, SandboxId, UserId};
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AuditLogParams {
-    /// Substring filter on entrypoint (e.g. 'api', 'mcp', 'graphql').
     entrypoint: Option<String>,
-    /// Substring filter on action (e.g. 'workspace.create', 'catalog:').
     action: Option<String>,
-    /// Substring filter on outcome (e.g. 'success', 'error').
     outcome: Option<String>,
-    /// When true, return only entries that resulted in an error.
     errors_only: Option<bool>,
-    /// Filter by acting user ID.
     #[schemars(with = "Option<uuid::Uuid>")]
     user_id: Option<UserId>,
-    /// Filter by acting agent ID.
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
-    /// Filter by sandbox ID.
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
-    /// Max entries to return (1-100, default 20).
     #[serde(
         default = "default_limit",
         deserialize_with = "super::liberal::deserialize_i64"
@@ -83,10 +71,6 @@ impl AuditLogParams {
     }
 }
 
-// ---------------------------------------------------------------------------
-// workspace_log
-// ---------------------------------------------------------------------------
-
 pub struct WorkspaceLog {
     audit: Arc<Audit>,
 }
@@ -100,15 +84,9 @@ impl WorkspaceLog {
 static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<AuditLogParams>);
 
-// ---------------------------------------------------------------------------
-// Output shapes (schemars-derived, also used for serialization)
-// ---------------------------------------------------------------------------
-
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct AuditLogOutput {
-    /// Audit log entries (most recent first).
     entries: Vec<AuditEntryOutput>,
-    /// Number of entries returned.
     count: usize,
 }
 
@@ -121,23 +99,18 @@ struct AuditEntryOutput {
     entrypoint: String,
     action: String,
     outcome: String,
-    /// Whether this entry was an error.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<bool>,
     /// Error message text for failed interactions (truncated to 4 KiB).
     #[serde(skip_serializing_if = "Option::is_none")]
     error_message: Option<String>,
     duration_ms: Option<i64>,
-    /// Acting user UUID.
     #[serde(skip_serializing_if = "Option::is_none")]
     acting_user_id: Option<String>,
-    /// Acting agent UUID.
     #[serde(skip_serializing_if = "Option::is_none")]
     acting_agent_id: Option<String>,
-    /// User on whose behalf the agent acted.
     #[serde(skip_serializing_if = "Option::is_none")]
     on_behalf_of_user_id: Option<String>,
-    /// Resource IDs involved (workspace_id, sandbox_id, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_ids: Option<serde_json::Value>,
 }
@@ -221,11 +194,6 @@ impl TopLevelTool for WorkspaceLog {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Format audit entries as a human-/LLM-readable text table.
 fn format_entries(entries: &[AuditEntry]) -> String {
     if entries.is_empty() {
         return "No audit entries found.".to_string();

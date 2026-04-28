@@ -72,10 +72,6 @@ impl GraphqlClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// GraphQL subscription over SSE (POST /graphql/stream)
-// ---------------------------------------------------------------------------
-
 const AGENT_MESSAGE_SUBSCRIPTION: &str = r#"
 subscription AgentMessage($agentId: AgentId!, $prompt: String!) {
   agentSendMessage(agentId: $agentId, prompt: $prompt) {
@@ -95,8 +91,6 @@ subscription AgentMessage($agentId: AgentId!, $prompt: String!) {
 }
 "#;
 
-/// Stream agent message events over a GraphQL subscription (SSE).
-///
 /// POSTs the subscription query to `/graphql/stream` and parses the SSE
 /// event stream. Each `next` event carries a GraphQL response; the
 /// `complete` event signals end of stream.
@@ -163,7 +157,6 @@ where
             if event_type == "next" && !data.is_empty() {
                 let gql_resp: serde_json::Value = serde_json::from_str(&data)?;
 
-                // Check for GraphQL errors
                 if let Some(errors) = gql_resp.get("errors").and_then(|e| e.as_array()) {
                     if let Some(first) = errors.first() {
                         let msg = first

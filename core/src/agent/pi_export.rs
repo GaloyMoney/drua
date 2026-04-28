@@ -1,11 +1,7 @@
 //! Pi-compatible JSONL session export (v3 format).
 //!
-//! The Pi session format uses newline-delimited JSON where:
-//! - Line 1 is a [`PiSessionHeader`] with `type: "session"`, version 3
-//! - Lines 2+ are [`PiEntry`] variants discriminated on `type`
-//!
-//! The only public entry point is [`export_to_jsonl`], which takes a
-//! format-agnostic [`ExportableThread`] and produces the JSONL string.
+//! Line 1: `PiSessionHeader` (`type: "session"`, version 3).
+//! Lines 2+: `PiEntry` variants discriminated on `type`.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -17,11 +13,6 @@ use super::session::{
     AgentSessionId,
 };
 
-// ============================================================================
-// Public entry point
-// ============================================================================
-
-/// Convert a format-agnostic [`ExportableThread`] into a Pi-compatible JSONL string.
 pub fn export_to_jsonl(thread: &ExportableThread) -> String {
     let now = chrono::Utc::now();
     let header = build_header(thread.session_id, now);
@@ -31,7 +22,6 @@ pub fn export_to_jsonl(thread: &ExportableThread) -> String {
     let base_ts = thread.base_timestamp.timestamp_millis();
     let mut ts_offset: i64 = 0;
 
-    // Emit model_change and thinking_level_change before messages.
     let ts = ts_from_ms(base_ts, ts_offset);
     entries.push(build_model_change(&mut id_gen, None, ts, &thread.model));
     ts_offset += 1;
@@ -83,11 +73,6 @@ pub fn export_to_jsonl(thread: &ExportableThread) -> String {
     to_jsonl(&header, &entries)
 }
 
-// ============================================================================
-// Top-level JSONL types
-// ============================================================================
-
-/// Line 1 of every Pi session export.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PiSessionHeader {
@@ -101,7 +86,6 @@ struct PiSessionHeader {
     parent_session: Option<String>,
 }
 
-/// Model-change entry emitted before messages.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PiModelChangeEntry {
@@ -114,7 +98,6 @@ struct PiModelChangeEntry {
     model_id: String,
 }
 
-/// Thinking-level-change entry emitted after model change.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PiThinkingLevelEntry {
@@ -126,7 +109,6 @@ struct PiThinkingLevelEntry {
     thinking_level: String,
 }
 
-/// Message entry — wraps a single user, assistant, or tool-result message.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PiSessionEntry {
@@ -138,7 +120,6 @@ struct PiSessionEntry {
     message: PiAgentMessage,
 }
 
-/// Unified enum for all Pi entries (excluding the header).
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum PiEntry {
@@ -157,11 +138,6 @@ impl PiEntry {
     }
 }
 
-// ============================================================================
-// Message types (discriminated on `role`)
-// ============================================================================
-
-/// A single message in Pi format, discriminated on `role`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 enum PiAgentMessage {
@@ -183,7 +159,6 @@ enum PiAgentMessage {
     },
 }
 
-/// Content block inside a message.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum PiContentBlock {
@@ -204,7 +179,6 @@ enum PiContentBlock {
     },
 }
 
-/// Token usage in Pi format.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PiUsage {
@@ -216,7 +190,6 @@ struct PiUsage {
     cost: PiCost,
 }
 
-/// Cost breakdown in Pi format (nested inside usage).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PiCost {
@@ -227,10 +200,6 @@ struct PiCost {
     total: f64,
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn format_ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -239,11 +208,6 @@ fn ts_from_ms(base_ms: i64, offset: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(base_ms + offset).unwrap_or_default()
 }
 
-// ============================================================================
-// Builders
-// ============================================================================
-
-/// Incrementing hex-ID generator for Pi entries.
 struct PiIdGenerator {
     counter: u32,
 }
@@ -253,7 +217,7 @@ impl PiIdGenerator {
         Self { counter: 0 }
     }
 
-    /// Returns an 8-character hex string.
+    /// 8-character hex string.
     fn next_id(&mut self) -> String {
         let id = format!("{:08x}", self.counter);
         self.counter += 1;
@@ -387,11 +351,6 @@ fn build_assistant_entry(
     })
 }
 
-// ============================================================================
-// JSONL serialization
-// ============================================================================
-
-/// Serialize a header and entries into a JSONL string.
 fn to_jsonl(header: &PiSessionHeader, entries: &[PiEntry]) -> String {
     let mut lines = Vec::with_capacity(1 + entries.len());
     lines.push(serde_json::to_string(header).expect("header serialization"));
@@ -563,7 +522,6 @@ mod tests {
 
         assert_eq!(lines.len(), 4);
 
-        // Verify each line is valid JSON with correct type
         let h: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(h["type"], "session");
         assert_eq!(h["cwd"], "/tmp/test");

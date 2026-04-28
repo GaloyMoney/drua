@@ -40,7 +40,6 @@ impl Sandbox {
         &self.entity.specs.disk_size
     }
 
-    /// Agents currently attached to this sandbox.
     async fn attached_agents(&self) -> Vec<SandboxAgentAttachment> {
         self.entity
             .attached_agents

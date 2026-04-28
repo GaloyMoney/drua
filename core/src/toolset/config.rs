@@ -18,12 +18,10 @@ pub struct ToolSetsConfig {
 pub struct ComposeConfig {
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
-    /// Cap on a single inner-tool result, in bytes. Lets scripts pull
-    /// large payloads (logs, manifests) and filter them before returning.
+    /// Cap on a single inner-tool result, in bytes.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
-    /// Cap on the script's final return value, in bytes. Bounded so the
-    /// agent context stays clean.
+    /// Cap on the script's final return value, in bytes.
     #[serde(default = "default_max_return_bytes")]
     pub max_return_bytes: usize,
     /// Cap on the console buffer in bytes. Tail-truncated when exceeded
@@ -110,21 +108,19 @@ pub struct McpUpstreamConfig {
     pub auth_header: String,
     #[serde(default = "default_auth_header_name")]
     pub auth_header_name: String,
-    /// When true (default), the upstream requires authentication and init
-    /// will fail early if the auth header env var is missing.
+    /// When true (default), init fails if the auth header env var is missing.
     #[serde(default = "default_auth_required")]
     pub auth_required: bool,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub category_description: Option<String>,
-    /// Optional prefix for tool names (defaults to `name` if unset).
+    /// Defaults to `name` if unset.
     #[serde(default)]
     pub tool_prefix: Option<String>,
-    /// Optional whitelist of tool names to expose from this upstream.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
-    /// Scopes required to access this upstream. Empty means unrestricted.
+    /// Empty means unrestricted.
     #[serde(default)]
     pub required_scopes: Option<Vec<AuthScope>>,
 }

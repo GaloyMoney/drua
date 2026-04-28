@@ -6,13 +6,10 @@ use super::error::AgentError;
 use super::session::CompactionConfig;
 use super::AgentRole;
 
-/// Every `AgentRole` variant that must be present in
-/// [`AgentsConfig::builtin_roles`] for the service to start. Add new
-/// variants to the enum AND to this list — the compiler won't help, but
-/// [`AgentsConfig::validate`] will fail fast at startup.
+/// Roles that must be present in `builtin_roles`. New variants must be
+/// added here too — `validate` fails fast at startup if missing.
 const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::WorkspaceLead, AgentRole::Agent];
 
-/// Per-role defaults applied when an agent with that role is created.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleConfig {
     pub model: String,
@@ -20,16 +17,12 @@ pub struct RoleConfig {
     pub compaction: CompactionConfig,
 }
 
-/// Model-level defaults populated from the top-level `providers` config.
-/// Carries the model name alongside token limits so it can be threaded
-/// through session and thread entities as a single struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDefaults {
     pub model: String,
     pub max_tokens_per_response: u32,
     pub context_window_tokens: u64,
-    /// Provider prompt-cache TTL in seconds. Anthropic ≈ 300 s; providers
-    /// without caching should set this to 0.
+    /// Anthropic ≈ 300s; providers without caching should set 0.
     pub cache_ttl_seconds: u64,
 }
 
@@ -48,15 +41,12 @@ impl Default for ModelDefaults {
 pub struct AgentsConfig {
     #[serde(default)]
     pub builtin_roles: HashMap<AgentRole, RoleConfig>,
-    /// Populated by the CLI from the `providers:` YAML section.
     #[serde(default)]
     pub models: HashMap<String, ModelDefaults>,
 }
 
 impl AgentsConfig {
-    /// Verify that every built-in `AgentRole` has a `RoleConfig` and that
-    /// every referenced model name exists in `self.models`. Called from
-    /// `App::init` so a misconfigured deployment fails loudly at startup.
+    /// Called from `App::init` to fail loudly at startup.
     pub fn validate(&self) -> Result<(), AgentError> {
         for role in REQUIRED_ROLES {
             if !self.builtin_roles.contains_key(role) {

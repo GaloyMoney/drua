@@ -21,7 +21,6 @@ impl std::fmt::Display for GitFileHash {
     }
 }
 
-/// Discriminator for document types stored in the library search index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
     Note,
@@ -37,7 +36,6 @@ impl DocType {
     }
 }
 
-/// Fields extracted from a `RuntimeFile` for search indexing.
 pub struct SearchableFields {
     pub doc_id: uuid::Uuid,
     pub doc_type: DocType,
@@ -79,25 +77,21 @@ pub enum RuntimeFile {
         updated_at: String,
         slug: String,
         id_prefix: String,
-        /// When set, the original file path on disk before canonicalisation.
-        /// The `WriteToRuntime` job will remove this path if it differs from
-        /// the canonical `relative_path()`.
+        /// Original on-disk path before canonicalisation. The `WriteToRuntime`
+        /// job removes this path if it differs from canonical `relative_path()`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         original_path: Option<String>,
     },
     GitKeep {
         workspace_name: String,
-        /// Subdirectory under the workspace folder (e.g. `"notes"`, `"skills"`).
         subdir: String,
     },
-    /// Queued when a workspace is deleted. The job runner removes the entire
-    /// `runtime/workspaces/{workspace_name}/` directory from the library
-    /// repo and pushes.
+    /// Job runner removes the entire `runtime/workspaces/{workspace_name}/`
+    /// directory from the library repo and pushes.
     WorkspaceCleanup { workspace_name: String },
 }
 
 impl RuntimeFile {
-    /// Build a `RuntimeFile::Note` from raw note fields.
     #[allow(clippy::too_many_arguments)]
     pub fn for_note(
         note_id: NoteId,
@@ -123,7 +117,6 @@ impl RuntimeFile {
         }
     }
 
-    /// Build a `RuntimeFile::Skill` from raw skill fields.
     #[allow(clippy::too_many_arguments)]
     pub fn for_skill(
         skill_id: SkillId,
@@ -148,8 +141,6 @@ impl RuntimeFile {
         )
     }
 
-    /// Build a `RuntimeFile::Skill` with an optional `original_path` for
-    /// files that need renaming on disk.
     #[allow(clippy::too_many_arguments)]
     pub fn for_skill_with_original_path(
         skill_id: SkillId,
@@ -246,7 +237,6 @@ impl RuntimeFile {
         }
     }
 
-    /// Render the file content on-the-fly from structured fields.
     pub(crate) fn content(&self) -> String {
         match self {
             RuntimeFile::Note {
@@ -311,7 +301,6 @@ impl RuntimeFile {
         }
     }
 
-    /// The original file path before canonicalisation, if set.
     pub(crate) fn original_path(&self) -> Option<&str> {
         match self {
             RuntimeFile::Skill { original_path, .. } => original_path.as_deref(),
@@ -319,15 +308,13 @@ impl RuntimeFile {
         }
     }
 
-    /// Set the original file path (for files that need renaming after import).
     pub(crate) fn set_original_path(&mut self, path: String) {
         if let RuntimeFile::Skill { original_path, .. } = self {
             *original_path = Some(path);
         }
     }
 
-    /// Compute the git blob SHA-1 hash for the file content, identical to
-    /// what `git hash-object` would produce.
+    /// Identical to `git hash-object`.
     pub fn file_hash(&self) -> GitFileHash {
         let content = self.content();
         let header = format!("blob {}\0", content.len());
@@ -338,28 +325,17 @@ impl RuntimeFile {
     }
 }
 
-/// Result of parsing a skill markdown file.
 pub struct ParsedSkillFile {
     pub file: RuntimeFile,
-    /// When `true` the file on disk lacks proper frontmatter (or an `id:` field)
-    /// and should be rewritten with canonical headers after entity creation.
+    /// File lacks proper frontmatter (or `id:`) and should be rewritten
+    /// with canonical headers after entity creation.
     pub needs_rewrite: bool,
 }
 
-/// Parse a skill markdown file back into a `RuntimeFile::Skill` variant.
-///
-/// `path` is the file's relative path in the library repo (e.g.
-/// `runtime/skills/my-skill-abcd1234.md`). The function derives
-/// `workspace_name` from the path and always stores `path` as
-/// `original_path` on the returned `RuntimeFile`.
-///
 /// Handles three formats:
-/// 1. **Full frontmatter** (as produced by `RuntimeFile::Skill::content()`) —
-///    `id:`, `created:`, `updated:` present. `needs_rewrite = false`.
-/// 2. **Frontmatter without `id:`** — timestamps may be present but no id.
-///    Generates a new `SkillId`. `needs_rewrite = true`.
-/// 3. **No frontmatter** — human-authored file starting with `# Name`.
-///    Generates a new `SkillId`. `needs_rewrite = true`.
+/// 1. Full frontmatter (canonical) — `needs_rewrite = false`.
+/// 2. Frontmatter without `id:` — generates a new `SkillId`, `needs_rewrite = true`.
+/// 3. No frontmatter (human-authored) — generates a new `SkillId`, `needs_rewrite = true`.
 ///
 /// Returns `None` only if the content has no recognisable `# heading`.
 pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile> {
@@ -380,7 +356,6 @@ pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile
     Some(parsed)
 }
 
-/// Typed frontmatter parsed from skill markdown files via serde.
 #[derive(serde::Deserialize, Default)]
 struct SkillFrontmatter {
     #[serde(default)]
@@ -395,12 +370,10 @@ struct SkillFrontmatter {
     updated: Option<String>,
 }
 
-/// Parse a skill file that has frontmatter (starts with `---`).
-///
 /// Name/description priority:
-/// 1. Frontmatter `name:`/`description:` fields (canonical format)
-/// 2. `# Heading` / first paragraph in content (legacy format)
-/// 3. Filename for name (last resort)
+/// 1. Frontmatter `name:`/`description:` (canonical)
+/// 2. `# Heading` / first paragraph (legacy)
+/// 3. Filename (last resort)
 fn parse_with_frontmatter(
     content: &str,
     workspace_name: Option<String>,
@@ -419,16 +392,14 @@ fn parse_with_frontmatter(
     let has_fm_name = fm.name.is_some();
 
     let (name, description, body) = if let Some(fm_name) = fm.name {
-        // Canonical format: name+description in frontmatter, body after.
         let desc = fm.description.unwrap_or_default();
         let body = after_fm.trim().to_string();
         (fm_name, desc, body)
     } else if let Some((h_name, h_desc, h_body)) = parse_heading_and_body(after_fm) {
-        // Legacy format: name from heading, description from first paragraph.
+        // Legacy: name from heading, description from first paragraph.
         let desc = fm.description.unwrap_or(h_desc);
         (h_name, desc, h_body)
     } else {
-        // Last resort: name from filename.
         let name = name_from_filename(path)?;
         let desc = fm.description.unwrap_or_default();
         let body = after_fm.trim().to_string();
@@ -452,7 +423,7 @@ fn parse_with_frontmatter(
         original_path: None,
     };
 
-    // Canonical only when id + name in frontmatter AND path already matches.
+    // Canonical only when id + name in frontmatter AND path matches.
     let needs_rewrite = !has_id || !has_fm_name || file.relative_path() != path;
 
     Some(ParsedSkillFile {
@@ -461,8 +432,6 @@ fn parse_with_frontmatter(
     })
 }
 
-/// Parse a skill file with no frontmatter (human-authored).
-///
 /// Name priority: `# Heading` → filename.
 fn parse_without_frontmatter(
     content: &str,
@@ -472,7 +441,6 @@ fn parse_without_frontmatter(
     let (name, description, body) = if let Some(parsed) = parse_heading_and_body(content) {
         parsed
     } else {
-        // No heading — derive name from filename, treat entire content as body.
         let name = name_from_filename(path)?;
         (name, String::new(), content.trim().to_string())
     };
@@ -499,8 +467,6 @@ fn parse_without_frontmatter(
     })
 }
 
-/// Extract `(name, description, body)` from content after any frontmatter.
-///
 /// Expects `# Name` heading, optional description, optional `---` body separator.
 fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
     let content = content.trim_start_matches('\n');
@@ -522,13 +488,10 @@ fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
     Some((name, description, body))
 }
 
-/// Extract the workspace name from a skill file's relative path.
-///
-/// - `runtime/workspaces/{ws_name}/skills/*.md` → `Some(ws_name)`
-/// - `runtime/skills/*.md` → `None` (global skill)
+/// `runtime/workspaces/{ws}/skills/*.md` → `Some(ws)`;
+/// `runtime/skills/*.md` → `None` (global skill).
 pub fn workspace_name_from_skill_path(relative_path: &str) -> Option<String> {
     let parts: Vec<&str> = relative_path.split('/').collect();
-    // runtime/workspaces/{ws_name}/skills/{file}.md
     if parts.len() >= 5 && parts[0] == "runtime" && parts[1] == "workspaces" && parts[3] == "skills"
     {
         Some(parts[2].to_string())
@@ -537,17 +500,12 @@ pub fn workspace_name_from_skill_path(relative_path: &str) -> Option<String> {
     }
 }
 
-/// Derive a human-readable name from a skill file's path.
-///
-/// Strips the `.md` extension and any trailing `-{8-hex-char}` id prefix,
-/// then title-cases hyphen-separated words.
-///
-/// `runtime/skills/ci-check-019dc56a.md` → `"Ci Check"`
+/// `runtime/skills/ci-check-019dc56a.md` → `"Ci Check"`. Strips `.md` and
+/// trailing `-{8-hex}` id prefix, then title-cases hyphen-separated words.
 fn name_from_filename(path: &str) -> Option<String> {
     let filename = path.rsplit('/').next()?;
     let stem = filename.strip_suffix(".md").unwrap_or(filename);
 
-    // Strip id-prefix suffix: "slug-abcd1234" → "slug"
     let base = if let Some((prefix, suffix)) = stem.rsplit_once('-') {
         if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
             prefix
@@ -562,7 +520,6 @@ fn name_from_filename(path: &str) -> Option<String> {
         return None;
     }
 
-    // Title-case: "ci-check" → "Ci Check"
     let name = base
         .split('-')
         .filter(|s| !s.is_empty())

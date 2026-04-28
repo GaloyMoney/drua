@@ -8,23 +8,19 @@ use crate::client::{format_epoch, ConcourseClient};
 use crate::error::ConcourseError;
 use crate::types::BuildEventEnvelope;
 
-/// How long a buffer can remain unaccessed before being eligible for cleanup.
+/// Idle TTL before a buffer becomes eligible for cleanup.
 const STALE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-/// Response from an offset-based log read.
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildLogResponse {
-    /// Log lines for the requested range.
     pub lines: Vec<String>,
-    /// The offset to use for the next poll.
     pub next_offset: usize,
-    /// Whether the SSE stream has ended (build finished).
+    /// True once the SSE stream has ended.
     pub is_complete: bool,
-    /// Current build status string (e.g. "started", "succeeded", "failed").
+    /// e.g. "started", "succeeded", "failed".
     pub build_status: String,
 }
 
-/// Internal buffer for a single build's log output.
 struct BuildLogBuffer {
     lines: Vec<String>,
     is_complete: bool,
@@ -43,11 +39,9 @@ impl BuildLogBuffer {
     }
 }
 
-/// Manages in-memory log buffers for live build tailing.
-///
-/// On first request for a build_id, opens an SSE connection via a background
-/// tokio task that continuously appends log lines. Subsequent calls return
-/// slices from the buffer using offset/limit pagination.
+/// In-memory log buffers for live build tailing. The first read for a
+/// `build_id` spawns a background task that streams SSE events; subsequent
+/// reads return slices using offset/limit pagination.
 pub struct BuildLogStore {
     buffers: RwLock<HashMap<i64, Arc<RwLock<BuildLogBuffer>>>>,
 }
@@ -65,11 +59,8 @@ impl BuildLogStore {
         }
     }
 
-    /// Read log lines for a build with offset-based pagination.
-    ///
-    /// On the first call for a given `build_id`, spawns a background task to
-    /// stream SSE events from Concourse and buffer log lines. Returns
-    /// immediately with whatever lines are available.
+    /// Returns immediately with whatever lines are available; the first call
+    /// for a `build_id` spawns the background SSE consumer.
     #[tracing::instrument(name = "build_log_store.read_logs", skip_all, fields(%build_id))]
     pub async fn read_logs(
         &self,
@@ -98,13 +89,11 @@ impl BuildLogStore {
         })
     }
 
-    /// Get an existing buffer or start streaming for this build.
     async fn get_or_start(
         &self,
         build_id: i64,
         client: &Arc<ConcourseClient>,
     ) -> Result<Arc<RwLock<BuildLogBuffer>>, ConcourseError> {
-        // Fast path: buffer already exists
         {
             let buffers = self.buffers.read().await;
             if let Some(buf) = buffers.get(&build_id) {
@@ -112,10 +101,9 @@ impl BuildLogStore {
             }
         }
 
-        // Slow path: create buffer and start streaming
         let mut buffers = self.buffers.write().await;
 
-        // Double-check after acquiring write lock
+        // Re-check after acquiring the write lock.
         if let Some(buf) = buffers.get(&build_id) {
             return Ok(Arc::clone(buf));
         }
@@ -123,7 +111,6 @@ impl BuildLogStore {
         let buf = Arc::new(RwLock::new(BuildLogBuffer::new()));
         buffers.insert(build_id, Arc::clone(&buf));
 
-        // Spawn background SSE consumer
         let client = Arc::clone(client);
         let buf_clone = Arc::clone(&buf);
         tokio::spawn(async move {
@@ -133,21 +120,19 @@ impl BuildLogStore {
         Ok(buf)
     }
 
-    /// Remove buffers that haven't been accessed within the TTL.
     async fn cleanup_stale(&self) {
         let mut buffers = self.buffers.write().await;
         let now = std::time::Instant::now();
         buffers.retain(|_build_id, buf| {
-            // Try to read-lock without blocking; if locked, keep the entry
+            // If the buffer is currently locked it's actively in use — keep it.
             match buf.try_read() {
                 Ok(guard) => now.duration_since(guard.last_accessed) < STALE_TTL,
-                Err(_) => true, // Buffer is actively in use
+                Err(_) => true,
             }
         });
     }
 }
 
-/// Background task: opens SSE stream and appends log lines to the buffer.
 async fn stream_build_events(
     client: Arc<ConcourseClient>,
     build_id: i64,
@@ -190,7 +175,6 @@ async fn stream_build_events(
                 break;
             }
             Ok(None) => {
-                // Stream ended
                 let mut buf = buffer.write().await;
                 let events = parser.flush();
                 for envelope in events {
@@ -200,7 +184,6 @@ async fn stream_build_events(
                 break;
             }
             Err(_) => {
-                // Timeout — mark complete with what we have
                 let mut buf = buffer.write().await;
                 let events = parser.flush();
                 for envelope in events {
@@ -213,7 +196,6 @@ async fn stream_build_events(
     }
 }
 
-/// Process a single SSE event envelope into the buffer.
 fn process_envelope(envelope: &BuildEventEnvelope, buf: &mut BuildLogBuffer) {
     match envelope.event.as_str() {
         "log" => {
@@ -224,7 +206,6 @@ fn process_envelope(envelope: &BuildEventEnvelope, buf: &mut BuildLogBuffer) {
                         .get("time")
                         .and_then(|v| v.as_i64())
                         .map(|ts| format!("[{}] ", format_epoch(ts)));
-                    // Split multi-line payloads into individual lines
                     for line in text.split('\n') {
                         if !line.is_empty() {
                             match &prefix {
@@ -250,7 +231,6 @@ fn process_envelope(envelope: &BuildEventEnvelope, buf: &mut BuildLogBuffer) {
     }
 }
 
-/// Incremental SSE parser that processes chunks of text into complete events.
 struct SseParser {
     buffer: String,
     current_data: String,
@@ -266,7 +246,6 @@ impl SseParser {
         }
     }
 
-    /// Feed a chunk of text and return any complete events.
     fn feed(&mut self, text: &str) -> Vec<BuildEventEnvelope> {
         if self.saw_end_event {
             return Vec::new();
@@ -276,7 +255,6 @@ impl SseParser {
         self.extract_events()
     }
 
-    /// Flush any remaining buffered data as events.
     fn flush(&mut self) -> Vec<BuildEventEnvelope> {
         if self.current_data.is_empty() {
             return Vec::new();
@@ -298,7 +276,7 @@ impl SseParser {
             self.buffer.drain(..=newline_pos);
 
             if line.is_empty() {
-                // Empty line = end of SSE frame, dispatch event
+                // Empty line ends an SSE frame.
                 if !self.current_data.is_empty() {
                     let data = std::mem::take(&mut self.current_data);
                     if let Ok(env) = serde_json::from_str::<BuildEventEnvelope>(&data) {
@@ -320,7 +298,6 @@ impl SseParser {
                 }
                 self.current_data.push_str(value.trim());
             }
-            // Ignore id:, comment lines, and unknown fields
         }
 
         events

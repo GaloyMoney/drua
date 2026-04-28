@@ -1,29 +1,22 @@
 use super::{error::AuthorizationError, AuthResource, AuthScope, AuthVerb};
 use crate::primitives::{AgentId, McpCredsId, SandboxId, UserId, UserMessageSource, WorkspaceId};
 
-/// Unified authentication subject resolved from session or bearer token.
+/// Authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
 pub enum AuthSubject {
-    /// Authenticated via session cookie (human user in browser).
     User(UserId),
-    /// Authenticated via bearer token issued to a user (exported agent credential).
+    /// Bearer token issued to a user (exported agent credential).
     ExportedAgent(UserId, McpCredsId, Vec<AuthScope>),
-    /// Agent acting within its workspace without user attribution.
     Agent(WorkspaceId, AgentId, Vec<AuthScope>),
-    /// Agent acting within its workspace on behalf of a known user — used
-    /// when the agent's tool calls are triggered by a request that itself
-    /// originated from a `User` or `ExportedAgent`. Carries enough context
-    /// to attribute downstream actions back to the originating user.
+    /// Agent acting on behalf of a `User` or `ExportedAgent` originator,
+    /// so downstream actions are attributable back to the user.
     AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<AuthScope>),
-    /// No authentication provided.
     Anonymous,
 }
 
 impl AuthSubject {
-    /// Check whether this subject is allowed to perform `verb` on `resource`.
-    /// Users (session-based) are implicitly permitted everything. For scoped
-    /// subjects the check delegates to [`AuthScope::permits`] — if any
-    /// carried scope grants the action, the call succeeds.
+    /// Users are implicitly permitted everything. Scoped subjects succeed
+    /// if any carried [`AuthScope`] permits the action.
     pub fn can(&self, verb: AuthVerb, resource: AuthResource) -> Result<(), AuthorizationError> {
         match self {
             AuthSubject::User(_) => Ok(()),
@@ -48,8 +41,6 @@ impl AuthSubject {
         }
     }
 
-    /// Return the user that this subject ultimately acts for, if any. Covers
-    /// direct `User`, `ExportedAgent`, and `AgentOnBehalfOfUser`. Returns
     /// `None` for unattributed `Agent` and `Anonymous`.
     pub fn originating_user_id(&self) -> Option<UserId> {
         match self {
@@ -60,7 +51,6 @@ impl AuthSubject {
         }
     }
 
-    /// Return the workspace this subject is acting within, if any.
     pub fn workspace_id(&self) -> Option<WorkspaceId> {
         match self {
             AuthSubject::Agent(workspace_id, _, _) => Some(*workspace_id),
@@ -69,7 +59,6 @@ impl AuthSubject {
         }
     }
 
-    /// Return the agent that is acting, if any.
     pub fn acting_agent_id(&self) -> Option<AgentId> {
         match self {
             AuthSubject::Agent(_, agent_id, _) => Some(*agent_id),
@@ -78,7 +67,6 @@ impl AuthSubject {
         }
     }
 
-    /// Return the scopes associated with this auth subject.
     pub fn scopes(&self) -> &[AuthScope] {
         match self {
             AuthSubject::ExportedAgent(_, _, scopes)
@@ -88,30 +76,24 @@ impl AuthSubject {
         }
     }
 
-    /// True if the subject has the `Admin` scope.
     pub fn is_admin(&self) -> bool {
         self.has_scope(&AuthScope::Admin)
     }
 
-    /// True if the subject is an admin of its workspace. Currently used
-    /// as the single workspace-level permission check by every workspace
-    /// management tool — `WorkspaceRead` / `WorkspaceWrite` were
-    /// collapsed into [`AuthScope::WorkspaceAdmin`] for simplicity.
+    /// `WorkspaceRead`/`WorkspaceWrite` were collapsed into
+    /// [`AuthScope::WorkspaceAdmin`]; this is the single workspace-level check.
     pub fn can_read_workspace(&self) -> bool {
         self.workspace_id()
             .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceAdmin(ws)))
     }
 
-    /// Identical to [`Self::can_read_workspace`] for now — both gate on
-    /// the lead scope. Kept as a separate name so call sites that mean
-    /// "this is a write-side check" stay readable; can diverge later if
-    /// we re-introduce a finer-grained scope.
+    /// Currently identical to [`Self::can_read_workspace`]; kept distinct so
+    /// write-side call sites stay readable and can diverge later.
     pub fn can_write_workspace(&self) -> bool {
         self.can_read_workspace()
     }
 
-    /// Check whether this auth subject carries the given scope.
-    /// Users (session-based) implicitly have all scopes.
+    /// Users implicitly have all scopes.
     pub fn has_scope(&self, scope: &AuthScope) -> bool {
         match self {
             AuthSubject::User(_) => true,
@@ -122,9 +104,6 @@ impl AuthSubject {
         }
     }
 
-    /// True when the subject is an agent — i.e. `Agent` or
-    /// `AgentOnBehalfOfUser`. Used by sandbox-backed tools to decide
-    /// visibility (other subject kinds should never see sandbox tools).
     pub fn is_agent(&self) -> bool {
         matches!(
             self,
@@ -132,19 +111,15 @@ impl AuthSubject {
         )
     }
 
-    /// True when the subject carries an [`AuthScope::WorkspaceAdmin`]
-    /// for any workspace. Used by sandbox-backed tools to hide
-    /// themselves from admins (admins orchestrate; they don't run
-    /// inside sandboxes).
+    /// Used by sandbox-backed tools to hide themselves from admins
+    /// (admins orchestrate; they don't run inside sandboxes).
     pub fn is_workspace_admin(&self) -> bool {
         self.scopes()
             .iter()
             .any(|s| matches!(s, AuthScope::WorkspaceAdmin(_)))
     }
 
-    /// First sandbox the subject can read from. `SandboxUse` always
-    /// implies read capability, so we accept either. Returns `None`
-    /// when the subject has no sandbox attachment at all.
+    /// `SandboxUse` implies read; first match wins.
     pub fn readable_sandbox_id(&self) -> Option<SandboxId> {
         self.scopes().iter().find_map(|s| match s {
             AuthScope::SandboxUse(id) | AuthScope::SandboxRead(id) => Some(*id),
@@ -152,9 +127,7 @@ impl AuthSubject {
         })
     }
 
-    /// Convert the subject into the principal that should be recorded as the
-    /// originator of a message. Panics for `Anonymous` (callers must
-    /// authenticate before sending messages).
+    /// Panics for `Anonymous` (callers must authenticate first).
     pub fn to_message_source(&self) -> UserMessageSource {
         match self {
             AuthSubject::User(user_id) => UserMessageSource::User { user_id: *user_id },

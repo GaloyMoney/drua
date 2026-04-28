@@ -9,10 +9,6 @@ use crate::skill::Skills;
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 fn default_search_limit() -> usize {
     10
 }
@@ -99,10 +95,6 @@ static USE_SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
-
-// ---------------------------------------------------------------------------
-// UseSkillTool
-// ---------------------------------------------------------------------------
 
 pub struct UseSkillTool {
     skills: Arc<Skills>,

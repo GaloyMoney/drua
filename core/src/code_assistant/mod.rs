@@ -7,7 +7,6 @@ pub use config::CodeAssistantConfig;
 pub use error::CodeAssistantError;
 pub(crate) use request_logger::RequestLogger;
 
-// Re-exports from code-assistant-core
 pub use code_assistant_core::request_log::RequestLogEntry;
 pub use code_assistant_core::search::SearchEngine;
 pub use code_assistant_core::store::{LabelOriginCounts, SearchResult, KNOWN_PRIMARY_LABELS};
@@ -33,7 +32,6 @@ pub struct SearchCodeParams {
     pub label: Option<String>,
 }
 
-/// Code assistant service — holds the search engine and logger.
 #[derive(Clone)]
 pub struct CodeAssistant {
     search_engine: Arc<SearchEngine>,
@@ -48,10 +46,8 @@ impl std::fmt::Debug for CodeAssistant {
     }
 }
 
-/// Initialise the code assistant from config.
-///
-/// Returns `Ok(None)` when `db_path` is empty (code assistant disabled).
-/// Accepts a shared embedder to avoid loading the ONNX model twice.
+/// Returns `Ok(None)` when `db_path` is empty (assistant disabled).
+/// Takes a shared embedder to avoid loading the ONNX model twice.
 pub fn init(
     pool: &sqlx::PgPool,
     config: &CodeAssistantConfig,
@@ -98,14 +94,13 @@ impl CodeAssistant {
         &self.logs
     }
 
-    /// Count labelled chunks grouped by their origin (human / model / heuristic).
     pub fn label_origin_counts(&self) -> Result<LabelOriginCounts, CodeAssistantError> {
         self.search_engine
             .label_origin_counts()
             .map_err(|e| CodeAssistantError::Search(e.to_string()))
     }
 
-    /// Run a search and return the raw results (for the web dashboard).
+    /// Returns raw results (for the web dashboard).
     pub async fn search_raw(
         &self,
         query: &str,
@@ -120,9 +115,7 @@ impl CodeAssistant {
         Ok(results)
     }
 
-    /// Execute a `search_code` query, returning formatted text.
     pub async fn search(&self, params: SearchCodeParams) -> Result<String, CodeAssistantError> {
-        // Validate label filter before querying
         if let Some(ref label) = params.label {
             if label != "none" && !KNOWN_PRIMARY_LABELS.contains(&label.as_str()) {
                 let valid: Vec<&str> = KNOWN_PRIMARY_LABELS
@@ -207,7 +200,6 @@ impl CodeAssistant {
     }
 }
 
-/// Generate an ISO 8601 UTC timestamp string.
 fn iso8601_now() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
@@ -225,7 +217,6 @@ fn iso8601_now() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
 
-/// Convert days since Unix epoch to (year, month, day).
 fn days_to_date(days: u64) -> (u64, u64, u64) {
     let z = days + 719468;
     let era = z / 146097;

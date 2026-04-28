@@ -10,7 +10,6 @@ use tracing::instrument;
 
 use super::error::AuthError;
 
-/// Validates K8s ServiceAccount tokens and resolves them to agent identities.
 #[derive(Clone)]
 pub struct SaTokenValidator {
     kube_client: kube::Client,
@@ -18,9 +17,7 @@ pub struct SaTokenValidator {
 }
 
 impl SaTokenValidator {
-    /// Create a validator using in-cluster config.
-    ///
-    /// Returns `None` if not running inside a K8s cluster (e.g. local dev).
+    /// Returns `None` outside a K8s cluster (e.g. local dev).
     pub async fn try_from_env(audience: impl Into<String>) -> Option<Self> {
         let client = kube::Client::try_default().await.ok()?;
         Some(Self {
@@ -29,10 +26,7 @@ impl SaTokenValidator {
         })
     }
 
-    /// Validate a bearer token as a K8s SA token.
-    ///
-    /// On success, returns the full agent UUID parsed from the bound pod name
-    /// (format: `agent-{uuid}`).
+    /// Returns the agent UUID parsed from the bound pod name (`agent-{uuid}`).
     #[instrument(name = "web.auth.sa_token.validate", skip_all)]
     pub async fn validate(&self, raw_token: &str) -> Result<String, AuthError> {
         let review = TokenReview {
@@ -61,7 +55,7 @@ impl SaTokenValidator {
         let id_str = pod_name
             .strip_prefix("agent-")
             .ok_or(AuthError::InvalidToken)?;
-        // Validate as a full UUID to prevent ambiguous prefix lookups
+        // Full UUID required to prevent ambiguous prefix lookups.
         id_str
             .parse::<uuid::Uuid>()
             .map_err(|_| AuthError::InvalidToken)?;
@@ -69,8 +63,6 @@ impl SaTokenValidator {
     }
 }
 
-/// Extract the pod name from TokenReview status extra claims.
-///
 /// Kubelet includes `authentication.kubernetes.io/pod-name` in the bound
 /// token's extra fields (nested under `status.user.extra`).
 fn extract_pod_name(status: &TokenReviewStatus) -> Result<String, AuthError> {

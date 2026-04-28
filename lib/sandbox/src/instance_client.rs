@@ -1,8 +1,5 @@
-//! HTTP client for a single running sandbox instance.
-//!
-//! Wraps the sandbox tool server's `/initialize` and `/execute` endpoints.
-//! Wire types here mirror the request/response shapes defined in
-//! `images/sandbox/server/src/main.rs` — keep the two in sync.
+//! HTTP client for a single sandbox tool server. Wire types must mirror
+//! `images/sandbox/server/src/main.rs`.
 
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -10,7 +7,6 @@ use tracing::instrument;
 use crate::error::InstanceError;
 use crate::types::{Sandbox, SandboxMode};
 
-/// HTTP client bound to a single sandbox base URL.
 #[derive(Clone)]
 pub struct InstanceClient {
     base_url: String,
@@ -18,7 +14,6 @@ pub struct InstanceClient {
 }
 
 impl InstanceClient {
-    /// Build a client targeting `base_url` (e.g. `http://127.0.0.1:34567`).
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -26,8 +21,7 @@ impl InstanceClient {
         }
     }
 
-    /// Build a client from a [`Sandbox`] handle, returning `None` if the
-    /// sandbox isn't ready yet (no `base_url` populated).
+    /// Returns `None` if the sandbox isn't ready yet (no `base_url`).
     pub fn from_sandbox(sandbox: &Sandbox) -> Option<Self> {
         sandbox.base_url.as_ref().map(Self::new)
     }
@@ -36,7 +30,6 @@ impl InstanceClient {
         &self.base_url
     }
 
-    /// `GET /health` — returns Ok if the server responds with 2xx.
     #[instrument(name = "sandbox.instance.health", skip(self))]
     pub async fn health(&self) -> Result<(), InstanceError> {
         let resp = self
@@ -48,8 +41,6 @@ impl InstanceClient {
         Ok(())
     }
 
-    /// `POST /initialize` — set up the sandbox workspace (scratch or repo
-    /// mode) and optionally write the GitHub token.
     #[instrument(name = "sandbox.instance.initialize", skip_all)]
     pub async fn initialize(
         &self,
@@ -71,7 +62,6 @@ impl InstanceClient {
         Ok(resp)
     }
 
-    /// `POST /execute` — invoke a tool inside the sandbox.
     #[instrument(name = "sandbox.instance.execute", skip_all, fields(tool = %req.tool))]
     pub async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, InstanceError> {
         let resp = self
@@ -87,10 +77,6 @@ impl InstanceClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wire types — mirror images/sandbox/server/src/main.rs
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize)]
 pub struct InitializeRequest {
     pub mode: String,
@@ -103,8 +89,7 @@ pub struct InitializeRequest {
 }
 
 impl InitializeRequest {
-    /// Build a request from a [`SandboxMode`], optionally including a
-    /// GitHub token to be written to `GITHUB_TOKEN_PATH` inside the sandbox.
+    /// `github_token` is written to `GITHUB_TOKEN_PATH` inside the sandbox.
     pub fn from_mode(mode: &SandboxMode, github_token: Option<String>) -> Self {
         match mode {
             SandboxMode::Scratch => Self {
@@ -144,7 +129,7 @@ pub struct ExportedFile {
 pub struct ExportedSkill {
     pub name: String,
     pub content: String,
-    /// Short description extracted from SKILL.md frontmatter, if present.
+    /// From SKILL.md frontmatter, if present.
     #[serde(default)]
     pub description: Option<String>,
 }

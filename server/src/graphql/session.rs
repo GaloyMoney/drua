@@ -4,8 +4,6 @@ use drua_core::agent::session::history;
 
 use super::primitives::*;
 
-// ─── Enums ──────────────────────���────────────────────────────────────────────
-
 #[derive(Enum, Clone, Copy, PartialEq, Eq)]
 pub enum ChatMessageRole {
     User,
@@ -28,7 +26,6 @@ pub enum ThreadStartReason {
     Orphan,
 }
 
-/// The semantic role of a system prompt block.
 #[derive(Enum, Clone, Copy, PartialEq, Eq)]
 pub enum SystemBlockKind {
     Base,
@@ -38,8 +35,6 @@ pub enum SystemBlockKind {
     Notes,
     Skills,
 }
-
-// ─── Content blocks (union) ────────────────────────────────────────���─────────
 
 #[derive(Union, Clone)]
 pub enum ChatContentBlock {
@@ -88,8 +83,6 @@ pub enum SandboxNotificationOperation {
     Detach,
 }
 
-// ─── ChatMessage (flat history) ──────────────────────────────────────────────
-
 #[derive(SimpleObject, Clone)]
 pub struct ChatMessage {
     /// Ordinal position in the full message history (0-based).
@@ -97,8 +90,6 @@ pub struct ChatMessage {
     pub role: ChatMessageRole,
     pub content: Vec<ChatContentBlock>,
 }
-
-// ─── Thread Graph types ───────────────────────────��──────────────────────────
 
 #[derive(SimpleObject, Clone)]
 #[graphql(complex)]
@@ -193,8 +184,6 @@ pub struct ThreadMessageUsage {
     pub total_cost: f64,
 }
 
-// ─── AgentSession ��─────────────────────────────��────────────────────────��────
-
 pub struct AgentSession {
     pub(super) agent_id: AgentId,
 }
@@ -227,8 +216,6 @@ impl AgentSession {
             .collect())
     }
 }
-
-// ─── Conversions ─────────��────────────────────────────��──────────────────────
 
 impl From<history::ChatHistoryMessage> for ChatMessage {
     fn from(m: history::ChatHistoryMessage) -> Self {

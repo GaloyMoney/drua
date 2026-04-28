@@ -16,8 +16,6 @@ pub use sandbox::{SandboxMode, SandboxSpecs};
 use crate::audit::Audit;
 use crate::github_app::GitHubAppTokenProvider;
 
-/// How long [`Sandboxes::spawn_sandbox_creation`] waits for the admin
-/// backend to report the sandbox as ready before giving up.
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub use config::{SandboxBackendConfig, SandboxConfig};
@@ -29,11 +27,6 @@ use crate::primitives::*;
 
 use crate::auth::AuthSubject;
 
-/// Service for managing sandbox lifecycle. Wraps a backend-agnostic
-/// [`AdminClient`] (k8s or local) and persists per-sandbox lifecycle state
-/// in the `sandboxes` table. Optionally holds a [`GitHubAppTokenProvider`]
-/// used to mint a fresh installation token for each `/initialize` call
-/// (so the sandbox can clone private repos).
 #[derive(Clone)]
 pub struct Sandboxes {
     repo: SandboxRepo,
@@ -62,10 +55,7 @@ impl Sandboxes {
                 mount_path,
             } => {
                 let mut client = K8sAdminClient::try_from_env(namespace, template_name).await?;
-                // Wire persistence so sandbox pods get a PVC-backed
-                // /workspace (or configured mount_path). Without this the
-                // pods use ephemeral storage and workspace state doesn't
-                // survive restarts.
+                // PVC-backed mount; without it pods use ephemeral storage.
                 if let (Some(sc), Some(mp)) = (storage_class, mount_path) {
                     client =
                         client.with_persistence(sandbox::admin_client::k8s::PersistenceConfig {
@@ -101,18 +91,13 @@ impl Sandboxes {
             .create_in_op(&mut op, workspace_id, name, specs, mode)
             .await?;
         op.commit().await?;
-        // Hand off the slow remote work (admin create → wait ready → call
-        // /initialize → state transitions) to a background task so callers
-        // get a Provisioning sandbox back immediately.
+        // Background task so callers get a Provisioning sandbox immediately.
         self.spawn_sandbox_creation(sandbox.id);
         Ok(sandbox)
     }
 
-    /// Composable variant of [`Self::create`]. Persists a new sandbox in
-    /// [`SandboxState::Provisioning`]; the admin/instance work is **not**
-    /// performed here. Callers that compose this into a larger op are
-    /// responsible for invoking [`Self::spawn_sandbox_creation`] after
-    /// their outer op commits.
+    /// Persists in `Provisioning`; caller must invoke `spawn_sandbox_creation`
+    /// after the outer op commits.
     #[instrument(name = "domain.sandbox.create_in_op", skip(self, op))]
     pub async fn create_in_op(
         &self,
@@ -139,18 +124,8 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Spawn the background lifecycle for a freshly persisted sandbox:
-    ///
-    /// 1. `admin.create_sandbox(name, specs)`
-    /// 2. `admin.wait_sandbox_ready(name, PROVISION_TIMEOUT)` →
-    ///    transition entity to [`SandboxState::Initializing`]
-    /// 3. `instance.initialize(mode)` → transition to
-    ///    [`SandboxState::Ready`]
-    ///
-    /// Any failure routes through [`Self::record_error`] which transitions
-    /// the entity to [`SandboxState::Errored`] and persists the failing
-    /// step + reason as a [`SandboxEvent::ProvisioningFailed`]. The UI
-    /// surfaces `last_error` whenever `state == Errored`.
+    /// Lifecycle: create → wait_ready (→ Initializing) → initialize (→ Ready).
+    /// Failures route through `record_error` → `Errored` + `ProvisioningFailed`.
     pub fn spawn_sandbox_creation(&self, id: SandboxId) {
         let me = self.clone();
         tokio::spawn(async move {
@@ -158,10 +133,8 @@ impl Sandboxes {
         });
     }
 
-    /// Background lifecycle. `#[instrument]` gives the spawned task its
-    /// own root span so the per-step `tracing::error!`s land in Honeycomb
-    /// instead of disappearing into stderr (the `tokio::spawn` detaches
-    /// from the caller's span context).
+    /// `#[instrument]` gives the spawned task its own root span so per-step
+    /// `tracing::error!`s land in Honeycomb (tokio::spawn detaches the span).
     #[instrument(
         name = "domain.sandbox.run_creation_lifecycle",
         skip(self),
@@ -171,24 +144,16 @@ impl Sandboxes {
         let sandbox = match self.repo.find_by_id(id).await {
             Ok(s) => s,
             Err(e) => {
-                // No name yet, so just record the error against the id.
                 tracing::error!(sandbox_id = %id, error = %e, "could not load sandbox for lifecycle");
                 return;
             }
         };
-        // Use the entity-id-derived `resource_name` (e.g. `sb-019d…`) for
-        // the admin client so the K8s CR / local sandbox dir is uniquely
-        // named. The user-facing `sandbox.name` stays in the entity for
-        // display only.
+        // resource_name (`sb-019d…`) is unique; sandbox.name is display-only.
         let name = sandbox.resource_name();
         tracing::Span::current().record("sandbox_name", name.as_str());
 
-        // Always attempt to delete first so the lifecycle is idempotent:
-        // re-running it (restart / upgrade / retry-after-failure) wipes
-        // any half-baked CR/pod from a previous attempt before we
-        // re-create. PVCs / local workspace dirs survive delete by
-        // design, so workspace state is preserved across the cycle.
-        // `NotFound` is the expected case on first-time create — ignore.
+        // Pre-create delete makes lifecycle idempotent. PVCs/workspace dirs
+        // survive delete by design. `NotFound` is the first-create case.
         match self.admin.delete_sandbox(&name).await {
             Ok(()) => {
                 tracing::info!(sandbox = %name, "pre-create delete: removed existing sandbox")
@@ -237,10 +202,7 @@ impl Sandboxes {
             return;
         };
         let instance = InstanceClient::new(base_url);
-        // Mint a fresh GitHub App installation token for this initialize
-        // call when the provider is configured. Without it, `/initialize`
-        // can't `git clone` private repos. Token failures are surfaced
-        // through the same `record_error` path as other lifecycle steps.
+        // Without the token, `/initialize` can't clone private repos.
         let github_token = match self.github_app.as_ref() {
             Some(provider) => match provider.generate_token().await {
                 Ok(t) => Some(t.token),
@@ -282,7 +244,6 @@ impl Sandboxes {
         Ok(())
     }
 
-    /// Idempotent transition into [`SandboxState::Initializing`].
     async fn run_initializing(&self, id: SandboxId) -> Result<(), SandboxError> {
         let mut op = self.repo.begin_op().await?;
         let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
@@ -293,12 +254,8 @@ impl Sandboxes {
         Ok(())
     }
 
-    /// Persist a provisioning failure: transition to `Errored`, push a
-    /// `ProvisioningFailed` event with `step` + `reason`, and emit a
-    /// matching `tracing::error!` so the failure shows up in Honeycomb.
-    /// Failures inside this method itself are logged and otherwise
-    /// swallowed — there's nothing useful to do beyond that since the
-    /// caller is the lifecycle background task.
+    /// Transition to `Errored`, push `ProvisioningFailed`, log error.
+    /// Inner failures are logged and swallowed — no useful recovery path.
     async fn record_error(&self, id: SandboxId, name: &str, step: &'static str, reason: String) {
         tracing::error!(sandbox = %name, step, error = %reason, "sandbox provisioning step failed");
         if let Err(e) = self.persist_errored(id, step, &reason).await {
@@ -338,10 +295,7 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Like [`Self::find_by_id`] but returns `Ok(None)` instead of an
-    /// error when no sandbox with that id exists. Used by callers that
-    /// treat absence as a normal control-flow signal (e.g. skill lookup
-    /// falling back across sandboxes).
+    /// `Ok(None)` instead of error when not found.
     #[instrument(name = "domain.sandbox.maybe_find_by_id", skip(self))]
     pub async fn maybe_find_by_id(
         &self,
@@ -350,11 +304,7 @@ impl Sandboxes {
         Ok(self.repo.maybe_find_by_id(id.into()).await?)
     }
 
-    /// Collect exported skills from all ready sandboxes in a workspace.
-    ///
-    /// Used internally by the skills context builder to include
-    /// sandbox-exported skills in the agent's system prompt listing.
-    /// No auth check — this is a `pub(crate)` helper.
+    /// `pub(crate)` helper used by the skills context builder; no auth check.
     #[instrument(name = "domain.sandbox.exported_skills_for_workspace", skip(self))]
     pub(crate) async fn exported_skills_for_workspace(
         &self,
@@ -378,13 +328,7 @@ impl Sandboxes {
         Ok(skills)
     }
 
-    /// Resolve a live [`InstanceClient`] for the sandbox identified by `id`.
-    ///
-    /// Loads the entity, asks the admin client for the current
-    /// `base_url`, and wraps it. Returns [`SandboxError::NotReady`] when
-    /// the entity isn't in [`SandboxState::Ready`] (the only state where
-    /// a `base_url` is guaranteed). Used by tools that act inside the
-    /// sandbox (e.g. the `bash` top-level tool).
+    /// Returns `NotReady` unless `state == Ready` (only state with `base_url`).
     #[instrument(name = "domain.sandbox.instance_client_for", skip(self, sub))]
     pub async fn instance_client_for(
         &self,
@@ -394,8 +338,7 @@ impl Sandboxes {
         self.instance_client_with_verb(sub, id, AuthVerb::Use).await
     }
 
-    /// Like [`instance_client_for`] but requires only `Read` permission.
-    /// Use this for read-only sandbox tools (ls, read, grep, glob).
+    /// For read-only sandbox tools (ls, read, grep, glob).
     #[instrument(name = "domain.sandbox.instance_client_for_read", skip(self, sub))]
     pub async fn instance_client_for_read(
         &self,
@@ -463,12 +406,8 @@ impl Sandboxes {
         Ok(all)
     }
 
-    /// Bring a [`SandboxState::Suspended`] sandbox back to life. Transitions
-    /// the entity to `Provisioning` and re-runs the creation lifecycle:
-    /// admin recreates the pod/process (reusing the retained PVC / local
-    /// workspace dir), then `/initialize` is called again. The server's
-    /// `/initialize` is idempotent — it overwrites the GitHub token and
-    /// skips re-cloning when the repo is already on disk.
+    /// Re-runs the creation lifecycle reusing the retained PVC/workspace dir.
+    /// Server `/initialize` is idempotent: overwrites token, skips re-clone.
     #[instrument(name = "domain.sandbox.restart", skip(self, sub))]
     pub async fn restart(
         &self,
@@ -490,16 +429,12 @@ impl Sandboxes {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
         op.commit().await?;
-        // Re-use the same background lifecycle the initial create goes
-        // through — admin.create_sandbox → wait_ready → /initialize → Ready.
         self.spawn_sandbox_creation(id);
         Ok(sandbox)
     }
 
-    /// Attach `agent_id` to the sandbox in `mode`. Verifies the sandbox
-    /// belongs to `workspace_id` (else returns
-    /// [`SandboxError::WrongWorkspace`]) and delegates to
-    /// [`Sandbox::attach_agent`] which enforces single-writer.
+    /// Verifies workspace match (`WrongWorkspace` else); delegates to
+    /// `Sandbox::attach_agent` which enforces single-writer.
     #[instrument(
         name = "domain.sandbox.attach_to_agent_in_op",
         skip(self, op),
@@ -526,8 +461,7 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Detach `agent_id` from the sandbox. Idempotent at the entity level
-    /// (no-op if not attached).
+    /// Idempotent (no-op if not attached).
     #[instrument(
         name = "domain.sandbox.detach_from_agent_in_op",
         skip(self, op),
@@ -548,11 +482,7 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Suspend all sandboxes belonging to a workspace within an existing
-    /// transaction. Each sandbox's pod/process is torn down via the admin
-    /// client (best-effort) and the entity transitions to
-    /// [`SandboxState::Suspended`]. Failures on individual sandboxes are
-    /// logged and skipped so the overall workspace teardown can proceed.
+    /// Best-effort: per-sandbox failures are logged and skipped.
     #[instrument(name = "domain.sandbox.suspend_for_workspace_in_op", skip(self, op))]
     pub async fn suspend_for_workspace_in_op(
         &self,
@@ -607,12 +537,8 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Composable variant of [`Self::suspend`]. Tears down the underlying
-    /// container/process via the admin client and transitions the entity
-    /// to [`SandboxState::Suspended`] (the entity is retained — call
-    /// `create` again to recreate). The admin call is best-effort: if it
-    /// fails we still record the state transition with a warning so callers
-    /// can retry/reconcile.
+    /// Admin delete is best-effort: failure logs a warning but still records
+    /// the state transition so callers can retry/reconcile.
     #[instrument(name = "domain.sandbox.suspend_in_op", skip(self, op))]
     pub async fn suspend_in_op(
         &self,

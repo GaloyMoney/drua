@@ -40,10 +40,8 @@ impl Bash {
 static BASH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<TextOutput>);
 
 static BASH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    // Mirrors Anthropic's built-in bash tool (bash_20250124): a single
-    // optional `command` string and an optional `restart` flag. The
-    // server forwards the entire object as the tool input, so anything
-    // beyond these two fields is ignored.
+    // Mirrors Anthropic's bash_20250124. Server forwards the object
+    // verbatim; extra fields are ignored.
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -60,11 +58,9 @@ static BASH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-/// First [`SandboxId`] from a `SandboxUse` scope on the subject — i.e.
-/// the sandbox the agent is currently attached to as a writer. We expect
-/// at most one such scope per agent today (the entity enforces a single
-/// active attachment); first one wins regardless. Read-only attachments
-/// don't qualify because `bash` can mutate state.
+/// First `SandboxUse` scope (writer attachment). Read-only attachments don't
+/// qualify because `bash` can mutate state. Entity enforces a single active
+/// attachment per agent, but first-wins regardless.
 fn sandbox_use_id(subject: &AuthSubject) -> Option<SandboxId> {
     subject.scopes().iter().find_map(|s| match s {
         AuthScope::SandboxUse(id) => Some(*id),
@@ -95,10 +91,8 @@ impl TopLevelTool for Bash {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from workspace admins — they orchestrate other agents
-        // and never attach a sandbox themselves, so a sandbox-backed
-        // tool is dead weight on their prompt. Other agents see it
-        // whether or not they're attached, so the model can ask to attach.
+        // Hidden from workspace admins (they don't attach sandboxes).
+        // Other agents see it whether attached or not so the model can ask to attach.
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
@@ -122,11 +116,8 @@ impl TopLevelTool for Bash {
             input: serde_json::Value::Object(arguments.unwrap_or_default()),
         };
 
-        // Map every transport / server failure to `is_error: true` text
-        // so the model sees one consistent shape instead of an opaque
-        // `ToolSetsError`. Genuine bash failures (non-zero exit) come
-        // back from the server with `is_error: true` already; we just
-        // forward the flag.
+        // Map transport/server failures to `is_error: true` text so the model
+        // sees a consistent shape. Non-zero exits arrive with `is_error` set already.
         match client.execute(&req).await {
             Ok(resp) => {
                 let out = TextOutput {

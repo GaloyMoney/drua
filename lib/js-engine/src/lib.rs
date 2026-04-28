@@ -1,8 +1,6 @@
-//! Lightweight JS engine wrapper around rquickjs for composing MCP tool calls.
-//!
-//! Provides a sandboxed JavaScript execution environment with async tool
-//! dispatch via the [`ToolDispatcher`] trait. Each execution gets a fresh
-//! runtime (no state carryover) with configurable resource limits.
+//! Sandboxed JavaScript runtime wrapper around rquickjs for composing MCP
+//! tool calls. Each execution gets a fresh runtime (no state carryover) with
+//! configurable resource limits and async tool dispatch via [`ToolDispatcher`].
 
 mod error;
 
@@ -17,7 +15,6 @@ use rquickjs::function::Rest;
 use rquickjs::prelude::Promised;
 use rquickjs::{async_with, AsyncContext, AsyncRuntime, CatchResultExt, Function, Object};
 
-/// Trait for dispatching tool calls from JS to the host.
 #[async_trait::async_trait]
 pub trait ToolDispatcher: Send + Sync + 'static {
     async fn call_tool(
@@ -27,7 +24,6 @@ pub trait ToolDispatcher: Send + Sync + 'static {
     ) -> Result<serde_json::Value, String>;
 }
 
-/// Result of executing a JS script.
 #[derive(Debug)]
 pub struct ExecutionResult {
     pub value: serde_json::Value,
@@ -36,21 +32,17 @@ pub struct ExecutionResult {
     pub execution_time: Duration,
 }
 
-/// Lightweight JS engine wrapper around rquickjs.
-///
 /// Creates a fresh `AsyncRuntime` + `AsyncContext` per execution with
-/// configurable memory, stack, and tool-call limits. The runtime is
-/// dropped after each execution — no state carries over.
+/// configurable memory, stack, and tool-call limits.
 pub struct JsEngine {
     memory_limit: usize,
     stack_limit: usize,
     max_tool_calls: usize,
     /// Cap on a single inner-tool result, in bytes. Scripts can pull large
-    /// payloads (logs, manifests) and filter them before returning.
+    /// payloads and filter them before returning.
     max_tool_result_bytes: usize,
-    /// Cap on the script's final return value, in bytes. Bounded so the
-    /// agent context stays clean; compose's job is to shrink large tool
-    /// results into small agent-readable answers.
+    /// Cap on the script's final return value, in bytes — bounded so the
+    /// agent context stays clean.
     max_return_bytes: usize,
     /// Cap on the console buffer in bytes. Drops oldest entries (tail
     /// truncation) when exceeded. Console is a debug sidecar, not primary
@@ -68,12 +60,12 @@ impl Default for JsEngine {
 impl JsEngine {
     pub fn new() -> Self {
         Self {
-            memory_limit: 8 * 1024 * 1024, // 8 MB
-            stack_limit: 512 * 1024,       // 512 KB
+            memory_limit: 8 * 1024 * 1024,
+            stack_limit: 512 * 1024,
             max_tool_calls: 50,
-            max_tool_result_bytes: 4 * 1024 * 1024, // 4 MB per inner tool result
-            max_return_bytes: 100 * 1024,           // 100 KB final return
-            max_console_bytes: 8 * 1024,            // 8 KB console tail (~2k tokens)
+            max_tool_result_bytes: 4 * 1024 * 1024,
+            max_return_bytes: 100 * 1024,
+            max_console_bytes: 8 * 1024,
         }
     }
 
@@ -82,13 +74,11 @@ impl JsEngine {
         self
     }
 
-    /// Set the cap on a single inner-tool result (in bytes).
     pub fn with_max_tool_result_bytes(mut self, n: usize) -> Self {
         self.max_tool_result_bytes = n;
         self
     }
 
-    /// Set the cap on the script's final return value (in bytes).
     pub fn with_max_return_bytes(mut self, n: usize) -> Self {
         self.max_return_bytes = n;
         self
@@ -126,7 +116,6 @@ impl JsEngine {
         let stack_limit = self.stack_limit;
         let max_console_bytes = self.max_console_bytes;
 
-        // Shared state between Rust host and JS guest
         let console_buf: Arc<std::sync::Mutex<ConsoleBuf>> =
             Arc::new(std::sync::Mutex::new(ConsoleBuf::new(max_console_bytes)));
         let tool_call_count = Arc::new(AtomicUsize::new(0));
@@ -161,11 +150,9 @@ impl JsEngine {
             let tool_call_count_inner = Arc::clone(&tool_call_count);
 
             let value_json: String = async_with!(ctx => |ctx| {
-                // ── Register console ────────────────────────────────────
                 register_console(&ctx, Arc::clone(&console_buf_inner))
                     .map_err(|e| JsEngineError::Runtime(format!("console registration: {e}")))?;
 
-                // ── Register tool bridge ────────────────────────────────
                 register_tool_bridge(
                     &ctx,
                     Arc::clone(&dispatcher),
@@ -175,18 +162,14 @@ impl JsEngine {
                 )
                 .map_err(|e| JsEngineError::Runtime(format!("tool bridge registration: {e}")))?;
 
-                // ── Eval bootstrap + wrapped user script ────────────────
                 let full_script = build_full_script(&script);
 
-                // Eval the script. The async IIFE returns a Promise; MaybePromise
-                // handles both promise and non-promise results transparently.
                 let maybe_promise: rquickjs::promise::MaybePromise<'_> =
                     match ctx.eval(full_script).catch(&ctx) {
                         Ok(v) => v,
                         Err(caught) => {
                             let msg = format_caught_error(&caught);
-                            // The interrupt handler raises "interrupted" when
-                            // the timeout fires during synchronous execution.
+                            // Interrupt handler raises "interrupted" on timeout.
                             if msg.contains("interrupted") {
                                 return Err(JsEngineError::Timeout(timeout));
                             }
@@ -194,7 +177,6 @@ impl JsEngine {
                         }
                     };
 
-                // Await if it's a promise (it always is due to async IIFE)
                 let final_val: rquickjs::Value<'_> =
                     match maybe_promise.into_future().await.catch(&ctx) {
                         Ok(v) => v,
@@ -207,7 +189,6 @@ impl JsEngine {
                         }
                     };
 
-                // Serialize the result to JSON string inside the JS context
                 let json_stringify: Function = ctx
                     .globals()
                     .get::<_, Object>("JSON")
@@ -223,31 +204,24 @@ impl JsEngine {
             })
             .await?;
 
-            // Drive any remaining pending jobs
             rt.idle().await;
 
             Ok::<String, JsEngineError>(value_json)
         })
         .await;
 
-        // Handle timeout
         let value_json = match result {
             Ok(inner) => inner?,
             Err(_elapsed) => return Err(JsEngineError::Timeout(timeout)),
         };
 
-        // Check interrupt-based timeout
         if timed_out.load(Ordering::Relaxed) {
             return Err(JsEngineError::Timeout(timeout));
         }
 
-        // Parse the JSON result
         let value: serde_json::Value =
             serde_json::from_str(&value_json).unwrap_or(serde_json::Value::Null);
 
-        // Check final-return size against the small return cap. This is
-        // distinct from `max_tool_result_bytes` (per inner tool result):
-        // scripts can pull large payloads but must filter before returning.
         let result_size = value_json.len();
         if result_size > max_return_bytes {
             return Err(JsEngineError::ReturnTooLarge {
@@ -270,15 +244,9 @@ impl JsEngine {
     }
 }
 
-// ─── Internal helpers ────────────────────────────────────────────────────────
-
-/// Bounded ring buffer for console output. Drops the oldest entries (tail
-/// truncation) when total bytes exceed `max_bytes`. Tracks how many were
-/// dropped so a marker line can be emitted when the buffer is read.
-///
-/// Tail truncation (not head): the last log lines carry the most signal
-/// — final state on success, the operation just before a crash on failure.
-/// Mirrors the convention of every other log handler in the codebase.
+/// Bounded ring buffer for console output. Drops oldest entries (tail
+/// truncation) when bytes exceed `max_bytes`; the last lines carry the
+/// most signal (final state, or the op just before a crash).
 struct ConsoleBuf {
     lines: VecDeque<String>,
     bytes: usize,
@@ -297,13 +265,12 @@ impl ConsoleBuf {
     }
 
     fn push(&mut self, msg: String) {
-        let added = msg.len() + 1; // +1 for the implicit newline between lines
+        let added = msg.len() + 1; // +1 for implicit newline
         self.bytes += added;
         self.lines.push_back(msg);
 
-        // Drop oldest until we fit. Always keep at least one line so the
-        // most recent push is never the one we drop (a single oversized
-        // line is preferable to silently dropping it).
+        // Always keep at least one line so a single oversized push isn't
+        // silently dropped.
         while self.bytes > self.max_bytes && self.lines.len() > 1 {
             if let Some(oldest) = self.lines.pop_front() {
                 self.bytes -= oldest.len() + 1;
@@ -312,8 +279,8 @@ impl ConsoleBuf {
         }
     }
 
-    /// Snapshot the buffer into a Vec (without consuming). Prepends a
-    /// `[... N earlier lines dropped]` marker if any entries were dropped.
+    /// Snapshot without consuming; prepends a `[... N earlier lines dropped]`
+    /// marker if any entries were dropped.
     fn snapshot(&self) -> Vec<String> {
         let mut out: Vec<String> = self.lines.iter().cloned().collect();
         if self.dropped > 0 {
@@ -323,15 +290,9 @@ impl ConsoleBuf {
     }
 }
 
-/// Register `console.log`, `console.warn`, `console.error`, `console.info`
-/// as native functions that capture output to a shared bounded ring buffer.
-///
-/// All four methods accept arbitrary JS values (strings, numbers, booleans,
-/// null, undefined, functions, objects, arrays). Values are stringified per
-/// real JS-runtime semantics — strings unquoted, primitives via their
-/// natural representation, objects/arrays via `JSON.stringify`, circular
-/// references gracefully fall back to `[Circular]`. Arguments are joined
-/// with a single space. Never throws on the value side.
+/// Capture `console.log/info/warn/error` output to a shared bounded buffer.
+/// Values stringify per JS-runtime semantics (strings unquoted, objects via
+/// `JSON.stringify`, circular refs → `[Circular]`); never throws.
 fn register_console(
     ctx: &rquickjs::Ctx<'_>,
     buf: Arc<std::sync::Mutex<ConsoleBuf>>,
@@ -383,7 +344,6 @@ fn register_console(
     Ok(())
 }
 
-/// Stringify each console arg, join with single space, prefix optional.
 fn format_console_args<'js>(
     ctx: &rquickjs::Ctx<'js>,
     args: &[rquickjs::Value<'js>],
@@ -398,9 +358,8 @@ fn format_console_args<'js>(
     }
 }
 
-/// Coerce a single JS value to its console-friendly string representation,
-/// matching real JS-runtime semantics (strings unquoted, objects via JSON,
-/// circular references → `[Circular]`).
+/// Coerce a JS value to its console-friendly string, matching JS-runtime
+/// semantics (strings unquoted, objects via JSON, circular → `[Circular]`).
 fn console_arg_to_string<'js>(ctx: &rquickjs::Ctx<'js>, v: &rquickjs::Value<'js>) -> String {
     if v.is_undefined() {
         return "undefined".into();
@@ -421,8 +380,8 @@ fn console_arg_to_string<'js>(ctx: &rquickjs::Ctx<'js>, v: &rquickjs::Value<'js>
             .unwrap_or_default();
     }
     if v.is_number() {
-        // Covers both int and float tags. Special-case ±Infinity to match
-        // JS output (Rust's f64::Display writes "inf"/"-inf").
+        // Special-case ±Infinity to match JS output (Rust's f64::Display
+        // writes "inf"/"-inf").
         let n = v.as_number().unwrap_or(0.0);
         if n.is_infinite() {
             return if n.is_sign_negative() {
@@ -439,9 +398,8 @@ fn console_arg_to_string<'js>(ctx: &rquickjs::Ctx<'js>, v: &rquickjs::Value<'js>
     if v.is_symbol() {
         return "[Symbol]".into();
     }
-    // Objects, arrays — stringify via JSON. Circular references make
-    // JSON.stringify throw a TypeError; fall back gracefully so console
-    // calls never abort the script.
+    // Circular refs make JSON.stringify throw TypeError; fall back so
+    // console calls never abort the script.
     json_stringify(ctx, v).unwrap_or_else(|_| "[Circular]".into())
 }
 
@@ -454,11 +412,9 @@ fn json_stringify<'js>(
     stringify.call((v.clone(),))
 }
 
-/// Register `__call_tool_raw(name, args_json)` → Promise<string> as the
-/// native bridge between JS and the host's [`ToolDispatcher`].
-///
-/// Returns a JSON-encoded envelope: `{"ok":true,"value":...}` or
-/// `{"ok":false,"error":"..."}`. The JS bootstrap code unwraps this.
+/// `__call_tool_raw(name, args_json)` → Promise<string>. Returns the
+/// JSON-encoded envelope `{"ok":true,"value":...}` or
+/// `{"ok":false,"error":"..."}`; the JS bootstrap unwraps it.
 fn register_tool_bridge(
     ctx: &rquickjs::Ctx<'_>,
     dispatcher: Arc<dyn ToolDispatcher>,
@@ -472,7 +428,6 @@ fn register_tool_bridge(
             let d = Arc::clone(&dispatcher);
             let tc = Arc::clone(&tool_call_count);
             Promised(async move {
-                // Enforce tool-call limit
                 let count = tc.fetch_add(1, Ordering::Relaxed);
                 if count >= max_tool_calls {
                     return encode_error(&format!(
@@ -480,13 +435,11 @@ fn register_tool_bridge(
                     ));
                 }
 
-                // Parse args
                 let args: serde_json::Value = match serde_json::from_str(&args_json) {
                     Ok(v) => v,
                     Err(e) => return encode_error(&format!("Invalid arguments JSON: {e}")),
                 };
 
-                // Dispatch
                 match d.call_tool(&name, args).await {
                     Ok(result) => {
                         let result_json =
@@ -515,18 +468,10 @@ fn encode_error(msg: &str) -> String {
     format!(r#"{{"ok":false,"error":"{escaped}"}}"#)
 }
 
-/// Build the full script: bootstrap (tools proxy) + user code wrapped in an
-/// async IIFE for top-level await + return support.
-///
-/// The tools proxy supports two calling conventions:
-/// - Flat: `tools.prefixed_name(args)` → `__call_tool_raw("prefixed_name", ...)`
-/// - Nested: `tools.server.toolName(args)` → `__call_tool_raw("server_toolName", ...)`
-///
-/// The nested proxy is implemented via a two-level Proxy chain. The outer
-/// proxy intercepts property access and returns an inner proxy per server
-/// namespace. The inner proxy intercepts tool calls and prepends the server
-/// prefix. If the outer property is called directly as a function, it falls
-/// back to flat dispatch.
+/// Bootstrap (tools proxy) + user code wrapped in an async IIFE for
+/// top-level `await` and `return`. The tools proxy supports both flat
+/// (`tools.prefixed_name(args)`) and nested (`tools.server.toolName(args)`)
+/// calling conventions via a two-level `Proxy` chain.
 fn build_full_script(user_script: &str) -> String {
     format!(
         r#"// ── tool dispatch helper ─────────────────────────────

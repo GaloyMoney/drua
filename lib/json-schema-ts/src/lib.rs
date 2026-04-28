@@ -1,79 +1,44 @@
-//! `json-schema-ts` — convert a JSON Schema document into a TypeScript type
-//! expression suitable for emission inside a `.d.ts` declaration block.
+//! Convert a JSON Schema document into a TypeScript type expression.
 //!
-//! Designed for runtime use inside drua's `compose` toolset: takes a
-//! [`serde_json::Value`] and returns a `String` containing the corresponding
-//! TypeScript type. The walker is **defensive** — any unknown or malformed
-//! shape collapses to `any` rather than panicking. This matters because
-//! upstream MCP schemas can be arbitrary JSON Schema (draft-07, draft-2020,
-//! homemade dialects, etc.).
+//! Used at runtime by drua's `compose` toolset. The walker is defensive —
+//! any unknown or malformed shape collapses to `any` rather than panicking,
+//! since upstream MCP schemas can be arbitrary JSON Schema (draft-07,
+//! draft-2020, homemade dialects, etc.).
 //!
 //! Two entry points:
-//! - [`schema_to_ts`] — emits a complete TS type expression
-//!   (e.g. `"{ a: string; b: number | null }"`).
-//! - [`schema_to_ts_params`] — emits the *body* of an object type without
-//!   surrounding braces (e.g. `"a: string; b?: number"`), for use inside
-//!   `function f(args: { ... })`.
+//! - [`schema_to_ts`] — emits a complete TS type expression.
+//! - [`schema_to_ts_params`] — emits the body of an object type without
+//!   surrounding braces, for splicing into `function f(args: { ... })`.
 //!
-//! Both functions resolve `$ref` against the schema's own
-//! `definitions` / `$defs` block, with cycle detection and a hard
-//! [`MAX_DEPTH`] budget that falls back to `any` on overflow.
-//!
-//! # Supported features
-//!
-//! ## Phase 1 (MVP)
-//! - Primitives: `string`, `number`/`integer`, `boolean`, `null`.
-//! - Nullable unions: `{"type":["string","null"]}` → `string | null`.
-//! - Const enums: `{"type":"string","enum":["a","b"]}` → `"a" | "b"`.
-//! - Nested objects (full recursion via `properties`).
-//! - Arrays: `{"type":"array","items":T}` → `T[]`; tuple form
-//!   `{"items":[A,B]}` → `[A, B]`.
-//! - HashMap-like: `{"type":"object","additionalProperties":T}` → `Record<string, T>`.
-//!
-//! ## Phase 2 (robustness)
-//! - `oneOf` / `anyOf` → TS union of mapped children.
-//! - `allOf` → TS intersection of mapped children.
-//! - `$ref` resolution against root `definitions` / `$defs`.
-//! - Cycle detection + `max_depth=8` `any` fallback.
-//!
-//! Anything else degrades to `any`.
+//! Both resolve `$ref` against the schema's own `definitions` / `$defs`
+//! block with cycle detection and a [`MAX_DEPTH`] budget.
 
 use serde_json::Value;
 
-/// Hard recursion budget. Beyond this, we emit `any` rather than risk a
-/// runaway walker on a pathological upstream schema.
+/// Hard recursion budget. Beyond this we emit `any` to avoid runaway walking.
 pub const MAX_DEPTH: u8 = 8;
 
-/// Convert a JSON Schema document to a TypeScript type expression.
-///
-/// The schema is the entry node; its own `definitions` / `$defs` block is
-/// used as the resolution scope for any nested `$ref`s.
+/// Convert a JSON Schema document to a TypeScript type expression. The
+/// schema's own `definitions` / `$defs` block is the resolution scope for
+/// any nested `$ref`s.
 pub fn schema_to_ts(schema: &Value) -> String {
     let defs = extract_defs(schema);
     let mut ctx = Ctx::new(defs);
     emit(schema, &mut ctx)
 }
 
-/// Convert a JSON Schema *object* to a TypeScript object-body string —
-/// i.e. the content that appears between the surrounding braces.
-///
-/// Falls back to `"...args: any"` when the schema is not a recognizable
-/// object (no `properties`, not an `object` type), so that the caller can
-/// always splice it into `args: { ... }`.
+/// Emit the body of an object type without braces, for splicing into
+/// `args: { ... }`. Falls back to `"...args: any"` for non-object schemas.
 pub fn schema_to_ts_params(schema: &Value) -> String {
     let defs = extract_defs(schema);
     let mut ctx = Ctx::new(defs);
     emit_object_body(schema, &mut ctx).unwrap_or_else(|| "...args: any".to_string())
 }
 
-// ─── Internal walker ─────────────────────────────────────────────────────────
-
-/// Resolution context: definitions block + recursion budget + cycle set.
 struct Ctx<'a> {
     defs: Option<&'a serde_json::Map<String, Value>>,
     depth: u8,
-    /// `$ref` paths currently being resolved, e.g. `"#/definitions/Tree"`.
-    /// On revisit we emit `any` rather than recursing forever.
+    /// `$ref` paths currently being resolved; revisits emit `any`.
     visiting: Vec<String>,
 }
 
@@ -87,9 +52,8 @@ impl<'a> Ctx<'a> {
     }
 }
 
-/// Pull the root `definitions` or `$defs` block, if any. Either key is valid
-/// — schemars 0.8 emits `definitions` (draft-07), schemars 1.x and most
-/// modern dialects emit `$defs` (draft-2020).
+/// schemars 0.8 emits `definitions` (draft-07); schemars 1.x and most modern
+/// dialects emit `$defs` (draft-2020). Either key is accepted.
 fn extract_defs(schema: &Value) -> Option<&serde_json::Map<String, Value>> {
     schema
         .get("$defs")
@@ -97,29 +61,25 @@ fn extract_defs(schema: &Value) -> Option<&serde_json::Map<String, Value>> {
         .and_then(|v| v.as_object())
 }
 
-/// Emit a TS type for `schema`, honoring `ctx.depth` and `ctx.visiting`.
 fn emit(schema: &Value, ctx: &mut Ctx<'_>) -> String {
     if ctx.depth >= MAX_DEPTH {
         return "any".into();
     }
 
-    // Boolean schemas: `true` is wildcard, `false` is empty set.
+    // `true` is wildcard, `false` is the empty set.
     if let Some(b) = schema.as_bool() {
         return if b { "any".into() } else { "never".into() };
     }
 
     let obj = match schema.as_object() {
         Some(o) => o,
-        // Non-object, non-bool: malformed schema → any.
         None => return "any".into(),
     };
 
-    // 1. $ref — resolve against root defs with cycle detection.
     if let Some(r) = obj.get("$ref").and_then(|v| v.as_str()) {
         return resolve_ref(r, ctx);
     }
 
-    // 2. allOf — intersection. `&` in TS.
     if let Some(arr) = obj.get("allOf").and_then(|v| v.as_array()) {
         let parts = map_subschemas(arr, ctx);
         return match parts.len() {
@@ -129,7 +89,6 @@ fn emit(schema: &Value, ctx: &mut Ctx<'_>) -> String {
         };
     }
 
-    // 3. oneOf / anyOf — union. `|` in TS.
     for key in ["oneOf", "anyOf"] {
         if let Some(arr) = obj.get(key).and_then(|v| v.as_array()) {
             let parts = map_subschemas(arr, ctx);
@@ -141,25 +100,22 @@ fn emit(schema: &Value, ctx: &mut Ctx<'_>) -> String {
         }
     }
 
-    // 4. const — literal value.
     if let Some(c) = obj.get("const") {
         return literal(c);
     }
 
-    // 5. Top-level enum without type → union of literals.
+    // Top-level enum without `type` → union of literals.
     if let Some(arr) = obj.get("enum").and_then(|v| v.as_array()) {
         if obj.get("type").is_none() {
             return enum_union(arr);
         }
     }
 
-    // 6. Inspect `type`. May be a string or an array of strings (nullable).
     let type_field = obj.get("type");
     match type_field {
         Some(Value::Array(types)) => emit_type_array(types, obj, ctx),
         Some(Value::String(s)) => emit_typed(s, obj, ctx),
         _ => {
-            // No type field. If we have `properties`, treat as object.
             if obj.contains_key("properties")
                 || obj.contains_key("additionalProperties")
                 || obj.contains_key("required")
@@ -171,7 +127,6 @@ fn emit(schema: &Value, ctx: &mut Ctx<'_>) -> String {
     }
 }
 
-/// Map each subschema in an array to its TS type, dedup-preserving order.
 fn map_subschemas(arr: &[Value], ctx: &mut Ctx<'_>) -> Vec<String> {
     let mut seen: Vec<String> = Vec::with_capacity(arr.len());
     for item in arr {
@@ -183,11 +138,9 @@ fn map_subschemas(arr: &[Value], ctx: &mut Ctx<'_>) -> Vec<String> {
     seen
 }
 
-/// Resolve a JSON Pointer-style `$ref` against `ctx.defs`. Only supports
-/// the common `#/definitions/Name` and `#/$defs/Name` forms — anything
-/// fancier (URI, nested pointer) collapses to `any`.
+/// Supports only `#/definitions/Name` and `#/$defs/Name`; anything fancier
+/// (URI, nested pointer) collapses to `any`.
 fn resolve_ref(r: &str, ctx: &mut Ctx<'_>) -> String {
-    // Cycle: the same ref is already on the stack → bail to `any`.
     if ctx.visiting.iter().any(|v| v == r) {
         return "any".into();
     }
@@ -211,8 +164,8 @@ fn resolve_ref(r: &str, ctx: &mut Ctx<'_>) -> String {
     out
 }
 
-/// Handle `type: [...]` which is most often a nullable union but can in
-/// principle hold any combination of primitive type names.
+/// `type: [...]` — most often a nullable union, but may hold any combination
+/// of primitive type names.
 fn emit_type_array(
     types: &[Value],
     obj: &serde_json::Map<String, Value>,
@@ -223,12 +176,10 @@ fn emit_type_array(
         return "any".into();
     }
 
+    // Re-enter `emit_typed` so e.g. enum + array-type still work.
     let parts: Vec<String> = names
         .iter()
-        .map(|name| {
-            // Re-enter `emit_typed` so e.g. enum + array-type still work.
-            emit_typed(name, obj, ctx)
-        })
+        .map(|name| emit_typed(name, obj, ctx))
         .collect();
     let mut out: Vec<String> = Vec::new();
     for p in parts {
@@ -243,8 +194,6 @@ fn emit_type_array(
     }
 }
 
-/// Emit the TS for a single primitive `type` string, with object/array
-/// recursion when the keyword is `"object"` / `"array"`.
 fn emit_typed(name: &str, obj: &serde_json::Map<String, Value>, ctx: &mut Ctx<'_>) -> String {
     match name {
         "string" => {
@@ -269,14 +218,12 @@ fn emit_typed(name: &str, obj: &serde_json::Map<String, Value>, ctx: &mut Ctx<'_
     }
 }
 
-/// Emit a TS array type from an `"array"` schema. `items` may be missing
-/// (→ `any[]`), a single subschema (→ `T[]`), or an array of subschemas
-/// (→ tuple `[A, B, C]`).
+/// `items` may be missing (→ `any[]`), a single subschema (→ `T[]`), or an
+/// array of subschemas (→ tuple `[A, B, C]`).
 fn emit_array(obj: &serde_json::Map<String, Value>, ctx: &mut Ctx<'_>) -> String {
     match obj.get("items") {
         None => "any[]".into(),
         Some(Value::Array(arr)) => {
-            // Tuple form.
             ctx.depth += 1;
             let parts: Vec<String> = arr.iter().map(|s| emit(s, ctx)).collect();
             ctx.depth -= 1;
@@ -297,36 +244,26 @@ fn emit_array(obj: &serde_json::Map<String, Value>, ctx: &mut Ctx<'_>) -> String
     }
 }
 
-/// Emit a TS object type. Three shapes:
-/// - Has `properties` → inline object literal `{ k: T; ... }`. Extra
-///   `additionalProperties: T` becomes a `[key: string]: T` index signature.
-/// - Has only `additionalProperties: T` → `Record<string, T>`.
-/// - Has only `additionalProperties: false` (or nothing) → `{}` /
-///   `Record<string, any>`.
 fn emit_object(obj: &serde_json::Map<String, Value>, ctx: &mut Ctx<'_>) -> String {
     let body = emit_object_body(&Value::Object(obj.clone()), ctx);
     match body {
         Some(b) if b.is_empty() => "{}".into(),
         Some(b) => format!("{{ {b} }}"),
-        None => {
-            // No `properties` — fall back to additionalProperties or Record.
-            match obj.get("additionalProperties") {
-                Some(Value::Bool(false)) => "{}".into(),
-                Some(v) => {
-                    ctx.depth += 1;
-                    let inner = emit(v, ctx);
-                    ctx.depth -= 1;
-                    format!("Record<string, {inner}>")
-                }
-                None => "Record<string, any>".into(),
+        None => match obj.get("additionalProperties") {
+            Some(Value::Bool(false)) => "{}".into(),
+            Some(v) => {
+                ctx.depth += 1;
+                let inner = emit(v, ctx);
+                ctx.depth -= 1;
+                format!("Record<string, {inner}>")
             }
-        }
+            None => "Record<string, any>".into(),
+        },
     }
 }
 
-/// Emit the body (between braces) of an object schema, or `None` if the
-/// schema has no `properties`. Includes an index signature when the schema
-/// also carries `additionalProperties: T`.
+/// Returns `None` if the schema has no `properties`. Includes an index
+/// signature when the schema also carries `additionalProperties: T`.
 fn emit_object_body(schema: &Value, ctx: &mut Ctx<'_>) -> Option<String> {
     let obj = schema.as_object()?;
     let properties = obj.get("properties").and_then(|v| v.as_object())?;
@@ -351,15 +288,12 @@ fn emit_object_body(schema: &Value, ctx: &mut Ctx<'_>) -> Option<String> {
         parts.push(format!("{key}{optional}: {ts}"));
     }
 
-    // Optional index signature for additional properties.
     if let Some(extra) = obj.get("additionalProperties") {
         if !matches!(extra, Value::Bool(false)) {
             ctx.depth += 1;
             let inner = emit(extra, ctx);
             ctx.depth -= 1;
-            // `true` and `{}` both mean "any extra value", which is just
-            // `any` in TS — and an index sig of `any` is harmless even when
-            // properties are present.
+            // Skip a redundant `[key: string]: any` when there are no other props.
             if !parts.is_empty() || inner != "any" {
                 parts.push(format!("[key: string]: {inner}"));
             }
@@ -369,8 +303,7 @@ fn emit_object_body(schema: &Value, ctx: &mut Ctx<'_>) -> Option<String> {
     Some(parts.join("; "))
 }
 
-/// Quote a property name when it isn't a bare JS identifier, so the emitted
-/// TS stays parseable. `foo-bar` → `"foo-bar"`, `function` → `"function"`.
+/// Quote when the name is not a bare JS identifier (e.g. `foo-bar`, `function`).
 fn format_key(name: &str) -> String {
     if is_valid_identifier(name) {
         name.to_string()
@@ -379,8 +312,6 @@ fn format_key(name: &str) -> String {
     }
 }
 
-/// JS identifier rules (conservative subset): first char alpha/underscore/$,
-/// rest alpha-numeric/underscore/$, and not a reserved word.
 fn is_valid_identifier(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -396,8 +327,6 @@ fn is_valid_identifier(name: &str) -> bool {
     !is_reserved(name)
 }
 
-/// JS reserved words that would parse as keywords if used as bare property
-/// keys in an object type. Quoting them preserves intent.
 fn is_reserved(name: &str) -> bool {
     matches!(
         name,
@@ -441,9 +370,6 @@ fn is_reserved(name: &str) -> bool {
     )
 }
 
-/// Render a JSON `Value` as a TS literal. Strings get JSON-style quoting,
-/// other primitives stringify directly, complex values (object/array) fall
-/// back to `any`.
 fn literal(v: &Value) -> String {
     match v {
         Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
@@ -454,7 +380,6 @@ fn literal(v: &Value) -> String {
     }
 }
 
-/// Convert an `enum: [..]` array into a `"a" | "b" | 1 | true` TS union.
 fn enum_union(arr: &[Value]) -> String {
     if arr.is_empty() {
         return "never".into();

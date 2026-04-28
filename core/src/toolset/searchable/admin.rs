@@ -21,10 +21,6 @@ use crate::workspace::{Workspace, Workspaces};
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn parse_params<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
 ) -> Result<T, ToolSetsError> {
@@ -42,8 +38,7 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        // Note: `definitions` intentionally retained for $ref resolution
-        // by the compose TS generator.
+        // `definitions` retained for $ref resolution by the compose TS generator.
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),
@@ -68,22 +63,12 @@ fn deserialize_liberal_i64<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-// ===========================================================================
-// Param structs — consolidated with command discriminators
-// ===========================================================================
-
-// -- agent ------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum AgentCommand {
-    /// Create a new agent in a workspace.
     Create,
-    /// List all agents in a workspace.
     List,
-    /// Attach a sandbox to an agent.
     AttachSandbox,
-    /// Detach a sandbox from an agent.
     DetachSandbox,
 }
 
@@ -106,102 +91,65 @@ struct AgentParams {
     mode: Option<SandboxAgentMode>,
 }
 
-// -- sandbox ----------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SandboxCommand {
-    /// Create a new sandbox in a workspace.
     Create,
-    /// List all sandboxes in a workspace.
     List,
-    /// Get sandbox details by ID.
     Get,
-    /// Run a read-only tool (grep, glob, read, ls) against a sandbox.
     Inspect,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SandboxCreateMode {
-    /// Empty workspace.
     Scratch,
-    /// Clone a repository.
     Repo,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum InspectTool {
-    /// Search file contents.
     Grep,
-    /// Find files by pattern.
     Glob,
-    /// Read file contents.
     Read,
-    /// List directory entries.
     Ls,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SandboxParams {
-    /// Which sandbox operation to perform.
     command: SandboxCommand,
 
-    // -- create / list fields --
-    /// Workspace ID (required for `create` and `list`).
     #[schemars(with = "Option<uuid::Uuid>")]
     workspace_id: Option<WorkspaceId>,
-    /// Display name for the new sandbox (required for `create`).
     name: Option<String>,
-    /// Sandbox mode: 'scratch' or 'repo' (required for `create`).
     mode: Option<SandboxCreateMode>,
-    /// Repository URL to clone (required when mode is 'repo').
     repo_url: Option<String>,
-    /// Git branch to check out after cloning (optional).
     branch: Option<String>,
-    /// CPU resource spec (e.g. '500m'). Defaults to '500m'.
     cpu: Option<String>,
-    /// Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'.
     memory: Option<String>,
-    /// Disk size spec (e.g. '10Gi'). Defaults to '10Gi'.
     disk_size: Option<String>,
 
-    // -- get / inspect fields --
-    /// ID of the sandbox (required for `get` and `inspect`).
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
 
-    // -- inspect fields --
-    /// Read-only tool to run against the sandbox (required for `inspect`): grep, glob, read, ls.
     tool: Option<InspectTool>,
-    /// Tool-specific arguments for `inspect`. grep: {pattern, path?, glob?, output_mode?, ...}. glob: {pattern, path?}. read: {path, offset?, limit?}. ls: {path, ignore?}.
     #[serde(default)]
     tool_args: Option<JsonObject>,
 }
 
-// -- log --------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LogParams {
-    /// Substring filter on entrypoint (e.g. 'api', 'mcp', 'graphql').
     entrypoint: Option<String>,
-    /// Substring filter on action (e.g. 'workspace.create', 'catalog:').
     action: Option<String>,
-    /// Substring filter on outcome (e.g. 'success', 'error').
     outcome: Option<String>,
-    /// When true, return only entries that resulted in an error.
     errors_only: Option<bool>,
-    /// Filter by acting user ID.
     #[schemars(with = "Option<uuid::Uuid>")]
     user_id: Option<UserId>,
-    /// Filter by acting agent ID.
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
-    /// Filter by sandbox ID.
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
-    /// Max entries to return (1-100, default 20).
     #[serde(
         default = "default_audit_limit",
         deserialize_with = "deserialize_liberal_i64"
@@ -243,39 +191,25 @@ impl LogParams {
     }
 }
 
-// -- workspace --------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum WorkspaceCommand {
     /// Create a new workspace (also seeds a WorkspaceLead agent named 'lead').
     Create,
-    /// List all workspaces in the system.
     List,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WorkspaceParams {
-    /// Which workspace operation to perform.
     command: WorkspaceCommand,
-    /// Display name for the new workspace (required for `create`).
     name: Option<String>,
-    /// Optional freeform description (for `create`).
     description: Option<String>,
 }
-
-// ===========================================================================
-// Static schemas
-// ===========================================================================
 
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
 static SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SandboxParams>);
 static LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LogParams>);
 static WORKSPACE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkspaceParams>);
-
-// ===========================================================================
-// Tool descriptors
-// ===========================================================================
 
 struct ToolDef {
     name: &'static str,
@@ -313,10 +247,6 @@ static TOOLS: &[ToolDef] = &[
         schema: &WORKSPACE_SCHEMA,
     },
 ];
-
-// ===========================================================================
-// AdminToolSet
-// ===========================================================================
 
 pub struct AdminToolSet {
     entries: Vec<ToolSetEntry>,
@@ -394,13 +324,7 @@ impl SearchableToolSet for AdminToolSet {
     }
 }
 
-// ===========================================================================
-// Tool implementations
-// ===========================================================================
-
 impl AdminToolSet {
-    // -- agent --------------------------------------------------------------
-
     async fn agent(
         &self,
         subject: &AuthSubject,
@@ -486,8 +410,6 @@ impl AdminToolSet {
             }
         }
     }
-
-    // -- sandbox ------------------------------------------------------------
 
     async fn sandbox(
         &self,
@@ -584,8 +506,6 @@ impl AdminToolSet {
         }
     }
 
-    // -- log ----------------------------------------------------------------
-
     async fn log(&self, arguments: Option<JsonObject>) -> Result<CallToolResult, ToolSetsError> {
         let params: LogParams = parse_params(arguments)?;
         let query = params.into_query();
@@ -594,8 +514,6 @@ impl AdminToolSet {
             format_audit_entries(&entries),
         )]))
     }
-
-    // -- workspace ----------------------------------------------------------
 
     async fn workspace(
         &self,
@@ -637,10 +555,6 @@ impl AdminToolSet {
         }
     }
 }
-
-// ===========================================================================
-// Inspect helpers
-// ===========================================================================
 
 async fn execute_inspect(
     sub: &AuthSubject,
@@ -757,10 +671,6 @@ fn build_ls_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError> 
     })
 }
 
-// ===========================================================================
-// Formatting helpers
-// ===========================================================================
-
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -768,8 +678,6 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..max]
     }
 }
-
-// -- agent ------------------------------------------------------------------
 
 fn format_agent(a: &Agent) -> String {
     let role = match a.agent_role {
@@ -818,8 +726,6 @@ fn format_agents(agents: &[Agent]) -> String {
 
     lines.join("\n")
 }
-
-// -- sandbox ----------------------------------------------------------------
 
 fn format_sandbox(s: &Sandbox) -> String {
     let agents: Vec<String> = s
@@ -872,8 +778,6 @@ fn format_sandboxes(sandboxes: &[Sandbox]) -> String {
     lines.join("\n")
 }
 
-// -- audit ------------------------------------------------------------------
-
 fn format_audit_entries(entries: &[AuditEntry]) -> String {
     if entries.is_empty() {
         return "No audit entries found.".to_string();
@@ -904,8 +808,6 @@ fn format_audit_entries(entries: &[AuditEntry]) -> String {
 
     lines.join("\n")
 }
-
-// -- workspace --------------------------------------------------------------
 
 fn format_workspace_created(w: &Workspace) -> String {
     let description = w.description.as_deref().unwrap_or("\u{2014}");

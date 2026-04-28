@@ -9,8 +9,6 @@ use super::metadata::AssistantResponseMetadata;
 use super::thread::{SessionThread as SessionThreadEntity, SessionThreadId};
 use super::view::{MessageView, PromptDefinition};
 
-// ─── Chat History (flat view) ────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatHistoryRole {
@@ -39,7 +37,7 @@ pub enum ChatHistoryBlock {
     SandboxNotification {
         sandbox_name: String,
         operation: SandboxNotificationOp,
-        /// The rendered `<sandbox>` XML injected into the prompt.
+        /// Rendered `<sandbox>` XML injected into the prompt.
         text: String,
     },
 }
@@ -73,8 +71,6 @@ impl ChatHistoryBlock {
     }
 }
 
-// ─── Thread Graph ────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadTurnState {
@@ -101,7 +97,6 @@ pub struct SessionThreadInfo {
     pub start_reason: ThreadStartReasonKind,
 }
 
-/// Token usage summary for an assistant response turn.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadMessageUsage {
     pub model: String,
@@ -113,9 +108,7 @@ pub struct ThreadMessageUsage {
     pub total_cost: f64,
 }
 
-/// Semantic kind of a system block, mirrored for the history layer so it can
-/// be exposed via GraphQL without forcing GraphQL-layer code to depend on
-/// `agent::session::message`.
+/// Mirrors `SystemBlockKind` for GraphQL exposure without crate coupling.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadSystemBlockKind {
@@ -140,9 +133,7 @@ impl From<SystemBlockKind> for ThreadSystemBlockKind {
     }
 }
 
-/// A single system block referenced by a thread, resolved against the session
-/// history. The `index` is the global SystemBlockIndex (position in the flat
-/// per-session list of all blocks ever pushed) — comparable across threads
+/// `index` is the global SystemBlockIndex; comparable across threads
 /// to detect shared columns in the TUI grid.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadSystemBlock {
@@ -151,7 +142,6 @@ pub struct ThreadSystemBlock {
     pub text: String,
 }
 
-/// Per-thread snapshot of system blocks and tool-definition count.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadSystemView {
     pub system_blocks: Vec<ThreadSystemBlock>,
@@ -162,16 +152,12 @@ pub struct ThreadSystemView {
 pub struct ThreadMessage {
     pub role: ChatHistoryRole,
     pub blocks: Vec<ChatHistoryBlock>,
-    /// Global MessageBlockIndex values for this message turn.
-    /// Compare across threads to identify shared content nodes.
+    /// Global MessageBlockIndex values; compare across threads for shared nodes.
     pub block_indexes: Vec<usize>,
-    /// Usage metadata (only present for assistant messages).
+    /// Only present for assistant messages.
     pub usage: Option<ThreadMessageUsage>,
-    /// Timestamp of the event that produced this message.
     pub recorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
-
-// ─── Builder functions (delegated from AgentSession) ─────────────────────────
 
 pub(super) fn build_chat_history<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
@@ -244,9 +230,7 @@ pub(super) fn build_thread_infos<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     current_main_thread: Option<SessionThreadId>,
 ) -> Vec<SessionThreadInfo> {
-    // Build maps of thread_id -> (start_reason, creation_order) from session events.
-    // Event order is the definitive creation order since iter_persisted() comes from
-    // a HashMap whose iteration order is arbitrary.
+    // Event order is the definitive creation order; iter_persisted() is HashMap-ordered.
     let mut start_reasons: std::collections::HashMap<SessionThreadId, ThreadStartReason> =
         std::collections::HashMap::new();
     let mut creation_order: std::collections::HashMap<SessionThreadId, usize> =
@@ -302,27 +286,18 @@ pub(super) fn build_thread_infos<'a>(
         .collect()
 }
 
-/// Resolves a thread's prompt definition into a list of messages, each carrying
-/// its own block indexes. The global block content list is built by scanning
-/// session events, then each `MessageView` is resolved independently.
-///
-/// For compacted threads whose views contain remapped replacement indexes,
-/// this function reverse-maps them back to the original block indexes in the
-/// GQL output so that both threads reference the same positions — enabling
-/// positional alignment in the thread grid.
+/// Reverse-maps replacement indexes back to original positions for GQL
+/// output so both threads align in the thread grid.
 pub(super) fn build_thread_messages(
     prompt_def: PromptDefinition,
     events: &EntityEvents<AgentSessionEvent>,
 ) -> Vec<ThreadMessage> {
-    // Build the global block content list from session events
-    // (mirrors the event scan in PromptDefinition::into_prompt).
-    // Uses iter_all() so unpersisted events (e.g. in tests) are included.
+    // iter_all() so unpersisted events (e.g. tests) are included.
     let mut all_blocks: Vec<BlockContent> = Vec::new();
-    // Reverse map: replacement block index → original block index.
-    // Used to report original positions in the GQL block_indexes output.
+    // replacement → original block index
     let mut reverse_remap: std::collections::HashMap<usize, usize> =
         std::collections::HashMap::new();
-    // Map: first block index of each assistant response → metadata.
+    // first block index of each assistant response → metadata
     let mut assistant_metadata: std::collections::HashMap<usize, AssistantResponseMetadata> =
         std::collections::HashMap::new();
 
@@ -368,7 +343,7 @@ pub(super) fn build_thread_messages(
         }
     }
 
-    // Build timestamp map from persisted events (new events won't have timestamps).
+    // Persisted events only; new events lack timestamps.
     let mut block_timestamps: std::collections::HashMap<usize, chrono::DateTime<chrono::Utc>> =
         std::collections::HashMap::new();
     let mut block_idx = 0usize;
@@ -402,7 +377,6 @@ pub(super) fn build_thread_messages(
         }
     }
 
-    // Resolve each MessageView into a ThreadMessage with per-message block_indexes
     prompt_def
         .messages
         .iter()
@@ -418,10 +392,6 @@ pub(super) fn build_thread_messages(
         .collect()
 }
 
-/// Resolves a thread's `system_view` and `tool_definitions_view` indexes
-/// against the session's flat list of all system blocks and tool defs ever
-/// pushed. Mirrors the event-scan pattern used by `PromptDefinition::into_prompt`
-/// but only walks the events relevant to system content.
 pub(super) fn build_thread_system_view(
     prompt_def: PromptDefinition,
     events: &EntityEvents<AgentSessionEvent>,
@@ -462,8 +432,6 @@ pub(super) fn build_thread_system_view(
         tool_definitions_count,
     }
 }
-
-// ─── Private helpers ─────────────────────────────────────────────────────────
 
 enum BlockContent {
     UserText(String),
@@ -537,7 +505,6 @@ fn resolve_message_view(
                     _ => panic!("Assistant view index does not point to AssistantBlock"),
                 })
                 .collect();
-            // Look up metadata by the first block index in this assistant turn.
             let usage = block_indexes.first().and_then(|&first_idx| {
                 assistant_metadata
                     .get(&first_idx)
@@ -560,8 +527,7 @@ fn resolve_message_view(
             }
         }
         MessageView::ToolResults(v) => {
-            // Resolve content from the actual view indexes (which may be
-            // replacement indexes for compacted threads).
+            // View indexes may be replacement indexes for compacted threads.
             let raw_indexes: Vec<usize> = v.indexes.iter().map(|i| i.index()).collect();
             let recorded_at = raw_indexes
                 .first()
@@ -580,8 +546,7 @@ fn resolve_message_view(
                     }
                 })
                 .collect();
-            // Reverse-map replacement indexes back to original positions for GQL
-            // output so both threads reference the same column in the grid.
+            // Reverse-map to original positions for grid alignment in GQL.
             let block_indexes = raw_indexes
                 .iter()
                 .map(|&idx| reverse_remap.get(&idx).copied().unwrap_or(idx))

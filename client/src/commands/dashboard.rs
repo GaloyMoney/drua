@@ -22,10 +22,6 @@ use crate::tui::state::{
 };
 use crate::tui::{handlers, ui};
 
-// ---------------------------------------------------------------------------
-// GraphQL response types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 struct MeResponse {
     me: Option<MeUser>,
@@ -134,10 +130,6 @@ struct WorkspaceCreatePayload {
 struct CreatedWorkspace {
     name: String,
 }
-
-// ---------------------------------------------------------------------------
-// Chat history (GQL)
-// ---------------------------------------------------------------------------
 
 const CHAT_HISTORY_QUERY: &str = r#"
     query ChatHistory($agentId: AgentId!) {
@@ -248,10 +240,6 @@ impl ChatHistoryContentBlock {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Threads (GQL)
-// ---------------------------------------------------------------------------
-
 const THREADS_QUERY: &str = r#"
     query Threads($agentId: AgentId!) {
         agent(id: $agentId) {
@@ -354,21 +342,14 @@ struct ThreadMessageUsageNode {
     total_cost: f64,
 }
 
-// ---------------------------------------------------------------------------
-// Chat streaming
-// ---------------------------------------------------------------------------
-
 enum ChatStreamEvent {
     Delta(String),
     ToolUse(String),
     ToolResult(String),
     Error(String),
     Done,
-    /// Pre-fetched chat history for an agent (agent_id, messages).
     HistoryLoaded(String, Vec<ChatMessage>),
-    /// Thread grid data loaded for an agent (agent_id, grid_state).
     ThreadsLoaded(String, Box<ThreadGridState>),
-    /// Thread export completed — (path, result message).
     ExportComplete(String),
 }
 
@@ -390,7 +371,7 @@ fn spawn_chat_stream(
                 if let Some(evt) = evt {
                     return tx.send(evt).is_ok();
                 }
-                true // continue for ignored event types
+                true
             },
         )
         .await;
@@ -409,7 +390,7 @@ fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
             let text = event.get("text")?.as_str()?;
             Some(ChatStreamEvent::Delta(text.to_string()))
         }
-        // assistant_text is the complete message — skip if we already got deltas
+        // skip the complete message; we already got deltas
         "AssistantTextEvent" => None,
         "ToolCallStartEvent" => {
             let name = event.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
@@ -436,14 +417,9 @@ fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
             Some(ChatStreamEvent::Error(msg.to_string()))
         }
         "AssistantDoneEvent" => Some(ChatStreamEvent::Done),
-        // Ignore events we don't need to display
         _ => None,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Data fetching
-// ---------------------------------------------------------------------------
 
 async fn create_workspace(client: &GraphqlClient, name: &str, description: &str) -> Result<String> {
     let mut input = serde_json::json!({ "name": name });
@@ -574,14 +550,11 @@ async fn fetch_threads(client: &GraphqlClient, agent_id: &str) -> Result<ThreadG
     Ok(build_thread_grid(thread_nodes))
 }
 
-/// Build a positionally-aligned grid from raw thread data.
-///
 /// Columns = unique block indexes (sorted). Rows = threads.
 /// First thread to reference a block index "owns" it (Unique).
 /// Subsequent threads referencing the same index get Shared.
 /// Unique blocks in COMPACTION threads are marked Summary.
 fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
-    // 1. Collect all unique block indexes and determine ownership.
     let mut all_positions = BTreeSet::new();
     let mut owner: HashMap<i32, usize> = HashMap::new();
 
@@ -594,7 +567,6 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         }
     }
 
-    // 1b. Collect system-block positions and ownership analogously.
     let mut all_system_positions = BTreeSet::new();
     let mut system_owner: HashMap<i32, usize> = HashMap::new();
     for (thread_idx, node) in thread_nodes.iter().enumerate() {
@@ -621,7 +593,6 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let num_positions = positions.len();
     let num_threads = thread_nodes.len();
 
-    // 2. Build grid and details (consuming thread_nodes).
     let mut grid: Vec<Vec<CellKind>> = vec![vec![CellKind::Empty; num_positions]; num_threads];
     let mut system_grid: Vec<Vec<CellKind>> =
         vec![vec![CellKind::Empty; num_system_positions]; num_threads];
@@ -629,15 +600,14 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     let mut system_details: HashMap<(usize, usize), SystemBlockDetail> = HashMap::new();
     let mut details: HashMap<(usize, usize), BlockDetail> = HashMap::new();
     let mut thread_infos = Vec::new();
-    // Track owner's content per block-index for condensed detection.
+    // Owner's content per block-index, for condensed detection.
     let mut owner_content: HashMap<i32, ContentBlock> = HashMap::new();
 
     for (thread_idx, node) in thread_nodes.into_iter().enumerate() {
         let is_compaction = node.start_reason == "COMPACTION";
         let msg_count = node.messages.len();
 
-        // Populate this row's system grid: owners get Unique(<kind letter>),
-        // subsequent referencers get Shared.
+        // Owners get Unique(<kind letter>), subsequent referencers get Shared.
         for sb in &node.system_blocks {
             if let Some(&col) = sys_pos_map.get(&sb.index) {
                 let is_owner = system_owner.get(&sb.index) == Some(&thread_idx);
@@ -672,7 +642,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                 _ => ChatRole::Assistant,
             };
 
-            // Convert usage once per message — shared by all blocks in this turn.
+            // Shared by all blocks in this turn.
             let msg_usage = msg.usage.map(|u| UsageDetail {
                 model: u.model,
                 input_tokens: u.input_tokens,
@@ -702,7 +672,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
                         CellKind::Unique(type_char)
                     }
                 } else {
-                    // Compare with owner's content — different means condensed/masked.
+                    // Different from owner's content => condensed/masked.
                     match owner_content.get(&bi) {
                         Some(owner_c) if *owner_c != content => CellKind::Condensed,
                         _ => CellKind::Shared,
@@ -723,7 +693,6 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
         }
     }
 
-    // Initial cursor: current thread, first unique/summary block.
     let current_thread_idx = thread_infos.iter().position(|t| t.is_current).unwrap_or(0);
     let initial_col = grid
         .get(current_thread_idx)
@@ -754,9 +723,7 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     }
 }
 
-/// Map a SystemBlockKind GraphQL enum value (uppercase snake) to the single
-/// letter used in the grid: B=Base, T=Tools, H=beHavioral (avoids B clash),
-/// R=Role, N=Notes, S=Skills.
+/// B=Base, T=Tools, H=beHavioral (avoids B clash), R=Role, N=Notes, S=Skills.
 fn system_kind_letter(kind: &str) -> char {
     match kind {
         "BASE" => 'B',
@@ -843,12 +810,9 @@ mod tests {
 
         let grid = build_thread_grid(threads);
 
-        // positions: [0, 1, 2]
-        // t1 owns 0 and 1 — Unique with kind letter
         assert!(matches!(grid.system_grid[0][0], CellKind::Unique('B')));
         assert!(matches!(grid.system_grid[0][1], CellKind::Unique('T')));
         assert!(matches!(grid.system_grid[0][2], CellKind::Empty));
-        // t2 shares 0 and 1, owns 2
         assert!(matches!(grid.system_grid[1][0], CellKind::Shared));
         assert!(matches!(grid.system_grid[1][1], CellKind::Shared));
         assert!(matches!(grid.system_grid[1][2], CellKind::Unique('N')));
@@ -891,10 +855,6 @@ fn content_type_char(content: &ContentBlock, role: ChatRole) -> char {
         ContentBlock::Sandbox { .. } => 'S',
     }
 }
-
-// ---------------------------------------------------------------------------
-// Thread export
-// ---------------------------------------------------------------------------
 
 const EXPORT_THREAD_QUERY: &str = r#"
     query ExportThread($agentId: AgentId!) {
@@ -964,10 +924,6 @@ fn spawn_threads_fetch(
     });
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch stream events → AssistantChat
-// ---------------------------------------------------------------------------
-
 fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
     match evt {
         ChatStreamEvent::Delta(text) => {
@@ -989,7 +945,6 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
             state.chat_view.assistant.finish_streaming();
         }
         ChatStreamEvent::HistoryLoaded(agent_id, messages) => {
-            // Only apply if the agent is still the one we're looking at
             if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
                 state.chat_view.assistant.load_history(messages);
                 state.chat_view.reset_scroll();
@@ -1008,12 +963,8 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Auth bootstrap — delegate to login flow when credentials are missing/stale
-// ---------------------------------------------------------------------------
-
+/// Delegates to login flow when credentials are missing/stale.
 async fn ensure_authenticated(server: Option<String>) -> Result<(Config, GraphqlClient, String)> {
-    // Try existing config first
     if let Ok(config) = Config::load() {
         let client = GraphqlClient::new(&config.server_url, &config.auth_token);
         if let Ok(user_name) = fetch_user_name(&client).await {
@@ -1032,10 +983,6 @@ async fn ensure_authenticated(server: Option<String>) -> Result<(Config, Graphql
     let user_name = fetch_user_name(&client).await?;
     Ok((config, client, user_name))
 }
-
-// ---------------------------------------------------------------------------
-// Entry point & event loop
-// ---------------------------------------------------------------------------
 
 pub async fn run(server: Option<String>) -> Result<()> {
     let (config, client, user_name) = ensure_authenticated(server).await?;
@@ -1135,12 +1082,10 @@ async fn run_event_loop(
                             }
                             handlers::Action::ToggleThreads => {
                                 if state.thread_view.is_some() {
-                                    // Close thread view → reload flat history
                                     state.thread_view = None;
                                     state.focus = Focus::Chat;
                                     state.loaded_agent_id = None; // triggers reactive reload below
                                 } else if let Some(agent_id) = state.selected_agent_id() {
-                                    // Open thread view → fetch threads
                                     state.status_message = Some("Loading threads…".to_string());
                                     spawn_threads_fetch(
                                         config.server_url.clone(),
@@ -1163,8 +1108,7 @@ async fn run_event_loop(
             _ = tokio::time::sleep(timeout) => {}
         }
 
-        // ── Reactive history load ────────────────────────────────────
-        // When the selected agent changes (and we're not streaming), fetch history.
+        // Fetch history when the selected agent changes (and we're not streaming).
         let current_agent = state.selected_agent_id();
         if current_agent != state.loaded_agent_id && !state.chat_view.assistant.streaming {
             state.loaded_agent_id = current_agent.clone();

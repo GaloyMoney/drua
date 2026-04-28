@@ -13,10 +13,6 @@ use tokio::process::Command;
 
 use session::{BashSession, SharedSession};
 
-// ---------------------------------------------------------------------------
-// Request / Response types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 struct ExecuteRequest {
     tool: String,
@@ -63,10 +59,6 @@ struct ExportedSkill {
     description: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
 async fn health() -> &'static str {
     "ok"
 }
@@ -95,14 +87,8 @@ async fn execute(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bash tool (Anthropic bash_20250124) — persistent session
-//
-// Input: { command: string, restart?: bool }
-//
-// Commands are piped through a long-lived shell session so background
-// processes (postgres, docker-compose, nix services) survive between calls.
-// ---------------------------------------------------------------------------
+// Bash tool (Anthropic bash_20250124): commands run through a long-lived
+// shell session so background processes survive between calls.
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
@@ -110,7 +96,6 @@ async fn execute_bash(
     session: &SharedSession,
     input: &serde_json::Value,
 ) -> Result<String, String> {
-    // Handle restart: kill and recreate the persistent session
     if input
         .get("restart")
         .and_then(|v| v.as_bool())
@@ -134,20 +119,13 @@ async fn execute_bash(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Path validation — Layer 1 isolation for text_editor
-//
-// Rejects any path that resolves outside the workspace root after symlink
-// resolution. For new files that don't exist yet, the parent directory is
-// resolved instead.
-// ---------------------------------------------------------------------------
-
+// Layer 1 isolation: rejects any path that resolves outside the workspace
+// root after symlink resolution.
 fn validate_path(path: &str) -> Result<PathBuf, String> {
     let workspace = PathBuf::from(workspace_root());
     let workspace_canonical =
         std::fs::canonicalize(&workspace).map_err(|e| format!("Cannot resolve workspace: {e}"))?;
 
-    // Resolve relative paths against the workspace root.
     let abs_path = if PathBuf::from(path).is_relative() {
         workspace.join(path)
     } else {
@@ -157,7 +135,6 @@ fn validate_path(path: &str) -> Result<PathBuf, String> {
     let canonical = match std::fs::canonicalize(&abs_path) {
         Ok(p) => p,
         Err(_) => {
-            // File doesn't exist yet — resolve the parent and append filename
             let parent = abs_path
                 .parent()
                 .ok_or_else(|| format!("Invalid path: no parent directory for '{path}'"))?;
@@ -181,12 +158,6 @@ fn validate_path(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-// ---------------------------------------------------------------------------
-// Text editor tool (Anthropic text_editor_20250728)
-//
-// Commands: view, create, str_replace, insert
-// ---------------------------------------------------------------------------
-
 async fn execute_text_editor(input: &serde_json::Value) -> Result<String, String> {
     let command = input
         .get("command")
@@ -202,7 +173,6 @@ async fn execute_text_editor(input: &serde_json::Value) -> Result<String, String
     }
 }
 
-/// View a file (with optional line range) or list a directory.
 async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
     let raw_path = input
         .get("path")
@@ -216,7 +186,6 @@ async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
         .map_err(|e| format!("Error: {e}"))?;
 
     if meta.is_dir() {
-        // List directory contents
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(path)
             .await
@@ -238,7 +207,6 @@ async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
         entries.sort();
         Ok(entries.join("\n"))
     } else {
-        // Read file contents
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| format!("Error: {e}"))?;
@@ -267,7 +235,6 @@ async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-/// Create a new file with the given content.
 async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
     let raw_path = input
         .get("path")
@@ -278,7 +245,7 @@ async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing 'file_text' field")?;
 
-    // Create parent dirs first so validate_path can canonicalize the parent
+    // Create parent dirs first so validate_path can canonicalize the parent.
     if let Some(parent) = std::path::Path::new(raw_path).parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -294,7 +261,6 @@ async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
     Ok(format!("File created successfully at: {path}"))
 }
 
-/// Replace exactly one occurrence of `old_str` with `new_str` in a file.
 async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String> {
     let raw_path = input
         .get("path")
@@ -335,7 +301,7 @@ async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String>
     }
 }
 
-/// Insert text after a given line number (0 = beginning of file).
+/// `insert_line == 0` means insert at the beginning of the file.
 async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
     let raw_path = input
         .get("path")
@@ -360,14 +326,12 @@ async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
     let mut lines: Vec<&str> = content.lines().collect();
     let insert_at = insert_line.min(lines.len());
 
-    // Split the insert text into lines and insert them
     let new_lines: Vec<&str> = insert_text.lines().collect();
     for (i, line) in new_lines.iter().enumerate() {
         lines.insert(insert_at + i, line);
     }
 
     let new_content = lines.join("\n");
-    // Preserve trailing newline if original had one
     let new_content = if content.ends_with('\n') {
         format!("{new_content}\n")
     } else {
@@ -384,13 +348,6 @@ async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Grep tool — content search via ripgrep
-//
-// Input: { pattern, path?, glob?, type?, output_mode?, -i?, -n?, -A?, -B?,
-//          -C?, head_limit?, multiline? }
-// ---------------------------------------------------------------------------
-
 async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
     let pattern = input
         .get("pattern")
@@ -399,7 +356,6 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
 
     let mut args: Vec<String> = vec!["--no-heading".to_string(), "--color=never".to_string()];
 
-    // Output mode
     let output_mode = input
         .get("output_mode")
         .and_then(|v| v.as_str())
@@ -408,16 +364,14 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
     match output_mode {
         "files_with_matches" => args.push("--files-with-matches".to_string()),
         "count" => args.push("--count".to_string()),
-        "content" => {} // default rg output
+        "content" => {}
         other => return Err(format!("Unknown output_mode: {other}")),
     }
 
-    // Case insensitive
     if input.get("-i").and_then(|v| v.as_bool()).unwrap_or(false) {
         args.push("--ignore-case".to_string());
     }
 
-    // Line numbers (only meaningful for content mode)
     if output_mode == "content" {
         let show_line_numbers = input.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
         if show_line_numbers {
@@ -425,7 +379,6 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
         }
     }
 
-    // Context lines
     if let Some(n) = input.get("-A").and_then(|v| v.as_u64()) {
         args.push(format!("--after-context={n}"));
     }
@@ -436,7 +389,6 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
         args.push(format!("--context={n}"));
     }
 
-    // Multiline
     if input
         .get("multiline")
         .and_then(|v| v.as_bool())
@@ -446,21 +398,17 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
         args.push("--multiline-dotall".to_string());
     }
 
-    // File type filter
     if let Some(ty) = input.get("type").and_then(|v| v.as_str()) {
         args.push(format!("--type={ty}"));
     }
 
-    // Glob filter
     if let Some(glob) = input.get("glob").and_then(|v| v.as_str()) {
         args.push(format!("--glob={glob}"));
     }
 
-    // Pattern
     args.push("--".to_string());
     args.push(pattern.to_string());
 
-    // Search path
     let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     args.push(search_path.to_string());
 
@@ -480,7 +428,6 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
         Some(0) | Some(1) => {
             let mut result = stdout.into_owned();
 
-            // Apply head_limit if specified
             if let Some(limit) = input.get("head_limit").and_then(|v| v.as_u64()) {
                 let limit = limit as usize;
                 let lines: Vec<&str> = result.lines().take(limit).collect();
@@ -493,12 +440,6 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Glob tool — file pattern matching via ripgrep --files -g
-//
-// Input: { pattern, path? }
-// ---------------------------------------------------------------------------
-
 async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
     let pattern = input
         .get("pattern")
@@ -507,8 +448,6 @@ async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
 
     let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
-    // Use `rg --files -g <pattern> <path>` to list matching files.
-    // Then sort by mtime (most recent first) using `ls -t`.
     let output = tokio::time::timeout(
         Duration::from_millis(DEFAULT_TIMEOUT_MS),
         Command::new("rg")
@@ -532,12 +471,6 @@ async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
         _ => Err(format!("rg --files failed: {stderr}")),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Initialize endpoint
-//
-// POST /initialize { mode: "scratch"|"repo", repo_url?: string }
-// ---------------------------------------------------------------------------
 
 const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
 const DEFAULT_GITHUB_TOKEN_PATH: &str = "/run/secrets/github-token";
@@ -646,7 +579,7 @@ async fn write_workspace_git_credentials(token: &str) -> Result<(), String> {
             .await
             .map_err(|e| format!("Failed to chmod git credentials: {e}"))?;
 
-        // chown to agent:agent (1000:1000) so the UID-dropped process can read it
+        // chown to agent:agent (1000:1000) so the UID-dropped process can read it.
         let output = std::process::Command::new("chown")
             .args(["1000:1000", &cred_path])
             .output();
@@ -655,7 +588,6 @@ async fn write_workspace_git_credentials(token: &str) -> Result<(), String> {
         }
     }
 
-    // Configure git to use the credential store
     let output = std::process::Command::new("git")
         .args([
             "config",
@@ -701,10 +633,8 @@ async fn initialize_repo(
         .await
         .map_err(|e| format!("Failed to create repos directory: {e}"))?;
 
-    // Idempotent: skip the clone if the target dir already contains the
-    // repo (e.g. after a sandbox restart with a retained workspace). Only
-    // considered "already cloned" when `.git` exists inside — a stray empty
-    // dir still triggers a fresh clone.
+    // Idempotent across sandbox restarts: only treat as already cloned when
+    // `.git` exists; a stray empty dir still triggers a fresh clone.
     let already_cloned = clone_dir.join(".git").is_dir();
     if !already_cloned {
         let mut args = vec!["clone"];
@@ -736,7 +666,6 @@ async fn initialize_repo(
     })
 }
 
-/// Extract repo name from URL — last path segment, stripped of `.git` suffix.
 fn extract_repo_name(url: &str) -> Result<String, String> {
     let path = url.trim_end_matches('/');
     let name = path
@@ -756,7 +685,6 @@ fn extract_repo_name(url: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-/// Read CLAUDE.md at the repo root, if present.
 async fn scan_claude_md(repo_dir: &Path) -> Option<ExportedFile> {
     let path = repo_dir.join("CLAUDE.md");
     tokio::fs::read_to_string(&path)
@@ -783,7 +711,6 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
     let mut skills: Vec<ExportedSkill> = Vec::new();
     let claude_dir = repo_dir.join(".claude");
 
-    // Layout 1: .claude/skills/<name>/SKILL.md
     let skills_dir = claude_dir.join("skills");
     if let Ok(mut dir) = tokio::fs::read_dir(&skills_dir).await {
         while let Ok(Some(entry)) = dir.next_entry().await {
@@ -809,8 +736,7 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
         }
     }
 
-    // Layout 2: .claude/commands/*.md (legacy; skipped if the name was
-    // already captured from layout 1)
+    // Layout 2 (legacy): .claude/commands/*.md, skipped if already in layout 1.
     let commands_dir = claude_dir.join("commands");
     if let Ok(mut dir) = tokio::fs::read_dir(&commands_dir).await {
         while let Ok(Some(entry)) = dir.next_entry().await {
@@ -838,18 +764,14 @@ async fn scan_skills(repo_dir: &Path) -> Vec<ExportedSkill> {
     skills
 }
 
-/// Typed frontmatter parsed from a SKILL.md file via serde.
 #[derive(serde::Deserialize, Default)]
 struct SkillFrontmatter {
     #[serde(default)]
     description: Option<String>,
 }
 
-/// Parse YAML-style frontmatter from a SKILL.md file.
-///
-/// Extracts the `description` field from a `---` delimited frontmatter block.
 /// Returns `(description, body_without_frontmatter)`. If there is no
-/// frontmatter, returns `(None, original_content)`.
+/// `---`-delimited frontmatter, returns `(None, original_content)`.
 fn parse_skill_frontmatter(raw: &str) -> (Option<String>, String) {
     let trimmed = raw.trim_start();
     let Some(rest) = trimmed.strip_prefix("---") else {
@@ -865,10 +787,6 @@ fn parse_skill_frontmatter(raw: &str) -> (Option<String>, String) {
 
     (fm.description.filter(|d| !d.is_empty()), body)
 }
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() {
@@ -895,10 +813,6 @@ async fn main() {
         .expect("failed to bind");
     axum::serve(listener, app).await.expect("server error");
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

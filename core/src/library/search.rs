@@ -4,7 +4,6 @@ use sqlx::PgPool;
 use super::error::LibraryError;
 use super::file::{DocType, SearchableFields};
 
-/// Search result returned by hybrid search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub doc_id: uuid::Uuid,
@@ -26,7 +25,7 @@ impl std::fmt::Display for SearchResult {
     }
 }
 
-/// Generic search store operating on `library_search_data`.
+/// Operates on the `library_search_data` table.
 #[derive(Clone)]
 pub(super) struct SearchStore {
     pool: PgPool,
@@ -37,7 +36,6 @@ impl SearchStore {
         Self { pool: pool.clone() }
     }
 
-    /// Insert or update the search data row for a document within an atomic op.
     #[tracing::instrument(name = "library.search_store.upsert_in_op", skip_all)]
     pub async fn upsert_in_op(
         &self,
@@ -65,7 +63,6 @@ impl SearchStore {
         Ok(())
     }
 
-    /// Store a pre-computed embedding for a document.
     #[tracing::instrument(name = "library.search_store.set_embedding", skip_all)]
     pub async fn set_embedding(
         &self,
@@ -85,8 +82,7 @@ impl SearchStore {
         Ok(())
     }
 
-    /// Remove all search data rows belonging to a workspace within an
-    /// atomic operation. Called during workspace cascade deletion.
+    /// Called during workspace cascade deletion.
     #[tracing::instrument(name = "library.search_store.delete_for_workspace_in_op", skip_all)]
     pub async fn delete_for_workspace_in_op(
         &self,
@@ -100,7 +96,7 @@ impl SearchStore {
         Ok(())
     }
 
-    /// Hybrid search: FTS + vector similarity fused via Reciprocal Rank Fusion.
+    /// FTS + vector similarity fused via Reciprocal Rank Fusion.
     #[tracing::instrument(name = "library.search_store.search", skip_all)]
     pub async fn search(
         &self,
@@ -113,7 +109,7 @@ impl SearchStore {
         let over_fetch = (limit * 3).max(10) as i64;
         let doc_type_filter = doc_type.map(|dt| dt.as_str().to_string());
 
-        // FTS results — include both workspace-scoped and global (nil UUID) documents.
+        // Include workspace-scoped + global (nil UUID) documents.
         let global_id = uuid::Uuid::nil();
         let fts_rows: Vec<FtsRow> = sqlx::query_as!(
             FtsRow,
@@ -134,7 +130,6 @@ impl SearchStore {
         .fetch_all(&self.pool)
         .await?;
 
-        // Vector results (only if we have an embedding) — include global documents.
         let vec_rows: Vec<VecRow> = if let Some(emb) = query_embedding {
             let vec = Vector::from(emb);
             sqlx::query_as!(
@@ -159,15 +154,10 @@ impl SearchStore {
             Vec::new()
         };
 
-        // Reciprocal Rank Fusion (k = 60)
         let results = rrf_fuse(fts_rows, vec_rows, limit);
         Ok(results)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Internal types & RRF
-// ---------------------------------------------------------------------------
 
 struct FtsRow {
     doc_id: uuid::Uuid,
@@ -207,7 +197,7 @@ fn parse_doc_type(s: &str) -> DocType {
     }
 }
 
-/// Reciprocal Rank Fusion: combine two ranked lists into one scored list.
+/// Reciprocal Rank Fusion (k = 60).
 fn rrf_fuse(fts_rows: Vec<FtsRow>, vec_rows: Vec<VecRow>, limit: usize) -> Vec<SearchResult> {
     use std::collections::HashMap;
 

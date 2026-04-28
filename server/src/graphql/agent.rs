@@ -22,7 +22,6 @@ pub struct Agent {
 
 #[ComplexObject]
 impl Agent {
-    /// The sandbox this agent is attached to, if any.
     async fn attached_sandbox(
         &self,
         ctx: &Context<'_>,
@@ -40,7 +39,6 @@ impl Agent {
         }))
     }
 
-    /// The agent's conversation session.
     async fn session(&self) -> super::session::AgentSession {
         super::session::AgentSession {
             agent_id: self.entity.id,
@@ -105,8 +103,6 @@ impl From<SandboxAttachmentMode> for SandboxAgentMode {
         }
     }
 }
-
-// ── Mutation inputs & payloads ──────────────────────────────────────────
 
 #[derive(InputObject)]
 pub struct AgentCreateInput {

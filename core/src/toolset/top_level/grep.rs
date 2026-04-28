@@ -109,7 +109,7 @@ impl TopLevelTool for Grep {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // See bash.rs: hidden from workspace admins.
+        // See bash.rs.
         subject.is_agent() && !subject.is_workspace_admin()
     }
 

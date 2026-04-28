@@ -21,19 +21,16 @@ use crate::types::{Sandbox as SandboxView, SandboxSpecs};
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "drua";
 
-/// Cluster-level storage class config for the workspace PVC. Per-sandbox
-/// disk size comes from [`SandboxSpecs::disk_size`].
+/// Per-sandbox disk size comes from [`SandboxSpecs::disk_size`].
 #[derive(Clone, Debug)]
 pub struct PersistenceConfig {
     pub storage_class: String,
     pub mount_path: String,
 }
 
-/// Default port the sandbox tool server binds to inside the pod (matches the
-/// `ExposedPorts` in `images/sandbox/default.nix`).
+/// Matches `ExposedPorts` in `images/sandbox/default.nix`.
 const DEFAULT_SANDBOX_PORT: u16 = 3000;
 
-/// High-level client for managing Agent Sandbox resources.
 #[derive(Clone)]
 pub struct K8sAdminClient {
     client: Client,
@@ -45,7 +42,6 @@ pub struct K8sAdminClient {
 }
 
 impl K8sAdminClient {
-    /// Create a new sandbox client for the given namespace and template.
     pub fn new(client: Client, namespace: String, template_name: String) -> Self {
         Self {
             client,
@@ -57,31 +53,27 @@ impl K8sAdminClient {
         }
     }
 
-    /// Enable persistent storage for sandboxes.
     pub fn with_persistence(mut self, config: PersistenceConfig) -> Self {
         self.persistence = Some(config);
         self
     }
 
-    /// Inject extra environment variables into every sandbox container
-    /// created by this client.
+    /// Injected into the first container of every sandbox created by this client.
     pub fn with_extra_env(mut self, env: Vec<(String, String)>) -> Self {
         self.extra_env = env;
         self
     }
 
-    /// Override the port used to construct `base_url` (default 3000).
     pub fn with_sandbox_port(mut self, port: u16) -> Self {
         self.sandbox_port = port;
         self
     }
 
-    /// The namespace this client manages sandboxes in.
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
 
-    /// Build a client from in-cluster or kubeconfig environment.
+    /// In-cluster config or local kubeconfig.
     pub async fn try_from_env(
         namespace: String,
         template_name: String,
@@ -90,11 +82,6 @@ impl K8sAdminClient {
         Ok(Self::new(client, namespace, template_name))
     }
 
-    // -----------------------------------------------------------------------
-    // Sandbox management
-    // -----------------------------------------------------------------------
-
-    /// Read the SandboxTemplate to get the pod template.
     #[instrument(name = "sandbox.admin.k8s.read_template", skip_all)]
     async fn read_template(&self) -> Result<SandboxTemplate, AdminError> {
         let templates: Api<SandboxTemplate> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -104,8 +91,7 @@ impl K8sAdminClient {
             .map_err(AdminError::Kube)
     }
 
-    /// Ensure a standalone PVC exists for the given sandbox name.
-    /// Creates the PVC if it doesn't exist; no-ops if it already does.
+    /// Idempotent: no-op if the PVC already exists.
     #[instrument(name = "sandbox.admin.k8s.ensure_pvc", skip_all, fields(%name, %disk_size))]
     async fn ensure_pvc(
         &self,
@@ -157,11 +143,8 @@ impl K8sAdminClient {
         Ok(pvc_name)
     }
 
-    /// Create a Sandbox with persistent storage.
-    ///
-    /// Creates a standalone PVC (if it doesn't already exist) and mounts it
-    /// into the pod. The PVC lifecycle is independent of the Sandbox — it
-    /// survives sandbox deletion and is reused on recreation with the same name.
+    /// PVC lifecycle is independent of the Sandbox — it survives sandbox
+    /// deletion and is reused on recreation with the same name.
     #[instrument(name = "sandbox.admin.k8s.create_sandbox", skip_all, fields(%name))]
     pub async fn create_sandbox(
         &self,
@@ -171,7 +154,6 @@ impl K8sAdminClient {
         let template = self.read_template().await?;
         let mut pod_template = template.spec.pod_template;
 
-        // Inject extra environment variables into the first container
         if !self.extra_env.is_empty() {
             if let Some(ref mut spec) = pod_template.spec {
                 if let Some(container) = spec.containers.first_mut() {
@@ -191,7 +173,6 @@ impl K8sAdminClient {
             let pvc_name = self.ensure_pvc(name, persistence, &specs.disk_size).await?;
 
             if let Some(ref mut spec) = pod_template.spec {
-                // Add PVC as a volume
                 let mut volumes = spec.volumes.take().unwrap_or_default();
                 volumes.push(Volume {
                     name: "workspace".to_string(),
@@ -203,7 +184,6 @@ impl K8sAdminClient {
                 });
                 spec.volumes = Some(volumes);
 
-                // Add volumeMount to the first container
                 if let Some(container) = spec.containers.first_mut() {
                     let mut mounts = container.volume_mounts.take().unwrap_or_default();
                     mounts.push(VolumeMount {
@@ -214,7 +194,7 @@ impl K8sAdminClient {
                     container.volume_mounts = Some(mounts);
                 }
 
-                // Set fsGroup so the mounted PVC is writable by the sandbox user
+                // fsGroup so the mounted PVC is writable by the sandbox user.
                 let sc = spec
                     .security_context
                     .get_or_insert_with(PodSecurityContext::default);
@@ -224,7 +204,6 @@ impl K8sAdminClient {
             }
         }
 
-        // Apply per-call resource specs to the first container.
         if let Some(ref mut spec) = pod_template.spec {
             if let Some(container) = spec.containers.first_mut() {
                 container.resources = Some(ResourceRequirements {
@@ -268,9 +247,7 @@ impl K8sAdminClient {
         })
     }
 
-    /// Check if a sandbox's container image matches the current template.
-    ///
-    /// Returns `true` if the sandbox is up-to-date, `false` if it needs recreation.
+    /// Returns `true` when the sandbox image matches the template image.
     #[instrument(name = "sandbox.admin.k8s.is_sandbox_current", skip_all, fields(%name))]
     pub async fn is_sandbox_current(&self, name: &str) -> Result<bool, AdminError> {
         let template = self.read_template().await?;
@@ -307,15 +284,12 @@ impl K8sAdminClient {
         Ok(current)
     }
 
-    /// Delete a Sandbox. The PVC is retained for recreation.
+    /// PVC is retained for recreation.
     #[instrument(name = "sandbox.admin.k8s.delete_sandbox", skip_all, fields(%name))]
     pub async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
-        // Mirror the 404→NotFound mapping in `get_sandbox` /
-        // `wait_sandbox_ready` so callers can distinguish "wasn't there"
-        // from genuine API failures. Skipping this caused the
-        // delete-then-create lifecycle to surface 404 as a generic
-        // `AdminError::Kube` and abort every fresh provisioning attempt.
+        // Mirror the 404→NotFound mapping in get_sandbox/wait_sandbox_ready;
+        // skipping this aborts every fresh delete-then-create lifecycle.
         sandboxes
             .delete(name, &DeleteParams::default())
             .await
@@ -329,7 +303,7 @@ impl K8sAdminClient {
         Ok(())
     }
 
-    /// List sandboxes created by this client (filtered by managed-by label).
+    /// Filtered by the managed-by label.
     #[instrument(name = "sandbox.admin.k8s.list_sandboxes", skip_all)]
     pub async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -342,7 +316,6 @@ impl K8sAdminClient {
             .collect())
     }
 
-    /// Get a single Sandbox by name.
     #[instrument(name = "sandbox.admin.k8s.get_sandbox", skip_all, fields(%name))]
     pub async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -353,7 +326,6 @@ impl K8sAdminClient {
         Ok(self.view_from_sandbox(&sandbox))
     }
 
-    /// Poll a Sandbox until it becomes ready or the timeout expires.
     #[instrument(name = "sandbox.admin.k8s.wait_sandbox_ready", skip_all, fields(%name))]
     pub async fn wait_sandbox_ready(
         &self,
@@ -373,7 +345,6 @@ impl K8sAdminClient {
         }
     }
 
-    /// Resolve the running pod for a Sandbox by reading its label selector.
     #[instrument(name = "sandbox.admin.k8s.resolve_sandbox_pod", skip_all, fields(%sandbox_name))]
     pub async fn resolve_sandbox_pod(&self, sandbox_name: &str) -> Result<String, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -409,7 +380,6 @@ impl K8sAdminClient {
             .ok_or_else(|| AdminError::NoPod(sandbox_name.to_string()))
     }
 
-    /// Exec into a Sandbox pod with TTY.
     #[instrument(name = "sandbox.admin.k8s.exec_sandbox", skip_all, fields(%sandbox_name))]
     pub async fn exec_sandbox(
         &self,
@@ -431,11 +401,9 @@ impl K8sAdminClient {
         Ok(attached)
     }
 
-    /// Read the cluster-internal service FQDN for a Sandbox.
-    ///
-    /// The sandbox controller creates a headless Service for every Sandbox
-    /// and records its DNS name in `status.serviceFQDN`.  This is how the
-    /// drua server reaches the harness HTTP server inside the pod.
+    /// The sandbox controller records the headless Service DNS name in
+    /// `status.serviceFQDN`; the drua server uses this to reach the harness
+    /// HTTP server inside the pod.
     #[instrument(name = "sandbox.admin.k8s.get_service_fqdn", skip_all, fields(%sandbox_name))]
     pub async fn get_service_fqdn(&self, sandbox_name: &str) -> Result<String, AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -496,12 +464,10 @@ impl K8sAdminClient {
         }
     }
 
-    /// Gather diagnostic info about the sandbox infrastructure.
     #[instrument(name = "sandbox.admin.k8s.debug_status", skip_all)]
     pub async fn debug_status(&self) -> Result<serde_json::Value, AdminError> {
         use k8s_openapi::api::core::v1::Event;
 
-        // List all sandboxes
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
         let sandbox_list = sandboxes.list(&ListParams::default()).await?;
         let sandbox_summaries: Vec<serde_json::Value> = sandbox_list
@@ -516,7 +482,6 @@ impl K8sAdminClient {
             })
             .collect();
 
-        // List sandbox templates
         let templates: Api<SandboxTemplate> = Api::namespaced(self.client.clone(), &self.namespace);
         let template_list = templates.list(&ListParams::default()).await?;
         let template_names: Vec<Option<String>> = template_list
@@ -525,7 +490,6 @@ impl K8sAdminClient {
             .map(|t| t.metadata.name.clone())
             .collect();
 
-        // List pods in namespace
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let pod_list = pods.list(&ListParams::default()).await?;
         let pod_summaries: Vec<serde_json::Value> = pod_list
@@ -542,7 +506,6 @@ impl K8sAdminClient {
             })
             .collect();
 
-        // Recent events in namespace
         let events: Api<Event> = Api::namespaced(self.client.clone(), &self.namespace);
         let event_list = events.list(&ListParams::default()).await?;
         let recent_events: Vec<serde_json::Value> = event_list
@@ -572,8 +535,7 @@ impl K8sAdminClient {
     }
 }
 
-/// Default workspace root inside the sandbox container, matching the
-/// `WORKSPACE_ROOT` default in `images/sandbox/server/src/main.rs`.
+/// Matches `WORKSPACE_ROOT` default in `images/sandbox/server/src/main.rs`.
 const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
 
 #[async_trait]

@@ -40,10 +40,8 @@ pub struct AppConfigYaml(pub Yaml);
 
 pub type AgentsSchema = Schema<Query, Mutation, Subscription>;
 
-/// Build the GraphQL schema.
-///
-/// Follows lana-bank's pattern: `app` is optional so that the `write_sdl`
-/// binary can generate the SDL without a live database connection.
+/// `app` is optional so the `write_sdl` binary can generate the SDL without
+/// a live database connection.
 pub fn schema(app: Option<domain::App>) -> AgentsSchema {
     let mut builder = Schema::build(Query, Mutation, Subscription).extension(extensions::Tracing);
 
@@ -54,7 +52,6 @@ pub fn schema(app: Option<domain::App>) -> AgentsSchema {
     builder.finish()
 }
 
-/// Axum router for the GraphQL endpoint.
 pub fn router() -> Router<AppState> {
     let gql_schema = schema(None);
 
@@ -71,32 +68,26 @@ async fn graphql_handler(
     req: GraphQLRequest,
 ) -> GraphQLResponse {
     let mut request = req.into_inner();
-
-    // Inject App from shared state so resolvers can access domain services.
     request = request.data(state.app.clone());
 
-    // Inject the per-request auth subject resolved by the auth middleware.
     let auth_subject = auth
         .map(|Extension(sub)| sub)
         .unwrap_or(domain::auth::AuthSubject::Anonymous);
     request = request.data(auth_subject);
 
-    // Inject the serialized app config YAML so the `appConfig` query can return it.
     request = request.data(AppConfigYaml(state.app_config_yaml.clone()));
 
-    // Override the REST middleware's generic "api: POST /graphql" entrypoint
-    // with the concrete operation name so audit entries are useful.
+    // Replace the REST middleware's generic "api: POST /graphql" entrypoint
+    // with the concrete operation name for useful audit entries.
     let op_name = request.operation_name.as_deref().unwrap_or("anonymous");
     drua_core::audit::Audit::record_entrypoint(format!("graphql: {}", op_name));
 
     schema.execute(request).await.into()
 }
 
-/// SSE handler for GraphQL subscriptions.
-///
 /// Clients POST a standard GraphQL request body (containing a subscription
 /// query) and receive an SSE stream of `next` events, followed by a final
-/// `complete` event. Same pattern as lana-bank's admin-server.
+/// `complete` event.
 async fn graphql_sse_handler(
     State(state): State<AppState>,
     Extension(schema): Extension<AgentsSchema>,

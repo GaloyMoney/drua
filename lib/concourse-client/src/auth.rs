@@ -5,8 +5,7 @@ use url::Url;
 use crate::error::ConcourseError;
 use crate::types::TokenResponse;
 
-/// Manages authentication state with interior mutability via RwLock,
-/// allowing `&self` access from the client.
+/// `RwLock`-based interior mutability so the client can use `&self`.
 pub(crate) struct AuthManager {
     username: String,
     password: String,
@@ -22,7 +21,6 @@ impl AuthManager {
         }
     }
 
-    /// Ensure we have a bearer token, fetching one if needed.
     pub async fn ensure_token(
         &self,
         http: &reqwest::Client,
@@ -36,7 +34,6 @@ impl AuthManager {
         }
 
         let mut token = self.token.write().await;
-        // Double-check after acquiring write lock
         if token.is_some() {
             return Ok(());
         }
@@ -69,13 +66,11 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Clear cached token (used on 401 to trigger re-auth).
     pub async fn clear_token(&self) {
         let mut token = self.token.write().await;
         *token = None;
     }
 
-    /// Return headers with the `Authorization: Bearer …` header set.
     pub async fn auth_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let token = self.token.read().await;

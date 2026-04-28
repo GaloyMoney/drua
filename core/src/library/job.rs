@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use super::file::RuntimeFile;
 use super::upstream::Upstream;
 
-/// Shared queue ID that serializes all git operations on the library repo.
-/// Both forward-sync (WriteToRuntime) and reverse-sync (SyncSkillsFromLibrary)
-/// jobs use this queue to prevent concurrent access to the working directory.
+/// Serializes all git ops on the library repo (both forward-sync
+/// WriteToRuntime and reverse-sync SyncSkillsFromLibrary use this queue).
 pub const LIBRARY_LOCK_QUEUE: &str = "library-lock";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,8 +57,7 @@ impl JobRunner for WriteToRuntimeRunner {
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         self.upstream.pull().await?;
 
-        // Workspace cleanup: remove the entire workspace directory from
-        // the git repo. No hash comparison — always execute.
+        // Workspace cleanup: always execute, no hash comparison.
         if let RuntimeFile::WorkspaceCleanup { workspace_name } = &self.file {
             let dir_path = format!("runtime/workspaces/{workspace_name}");
             let message = format!("workspace: delete {workspace_name}");
@@ -115,9 +113,8 @@ impl WriteToRuntimeRunner {
             .write_file(&canonical_path, &self.file.content())
             .await?;
 
-        // If the file was imported under a non-canonical name and the
-        // original still exists on disk (i.e. first write after import),
-        // remove it and commit both changes together.
+        // First write after non-canonical import: remove original and
+        // commit both changes together.
         let original = self.file.original_path();
         let needs_rename = original.is_some_and(|p| p != canonical_path);
         if needs_rename {
@@ -128,8 +125,7 @@ impl WriteToRuntimeRunner {
                     .commit_paths(&[&canonical_path, old_path], &self.file.commit_message())
                     .await?;
             } else {
-                // Original already gone (previous attempt or never cloned) —
-                // just commit the canonical file.
+                // Original already gone — just commit the canonical file.
                 self.upstream
                     .add_and_commit(&canonical_path, &self.file.commit_message())
                     .await?;

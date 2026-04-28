@@ -1,15 +1,7 @@
-//! OpenAI Chat Completions API wire types.
-//!
-//! These types model the OpenAI wire format for both requests and streaming
-//! responses. They are used internally by `OpenAiClient` and are NOT exposed
-//! to callers — the public boundary uses the provider-agnostic types from
-//! `lib/llm`.
+//! OpenAI Chat Completions wire types. The public boundary uses the
+//! provider-agnostic types from `lib/llm`.
 
 use serde::{Deserialize, Serialize};
-
-// ============================================================================
-// Request Types
-// ============================================================================
 
 #[derive(Debug, Serialize)]
 pub(crate) struct OpenAiRequest {
@@ -87,10 +79,6 @@ pub(crate) enum OpenAiToolChoice {
 pub(crate) struct OpenAiToolChoiceFunction {
     pub name: String,
 }
-
-// ============================================================================
-// Streaming Response Types
-// ============================================================================
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OpenAiStreamChunk {

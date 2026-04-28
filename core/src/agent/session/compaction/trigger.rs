@@ -4,11 +4,9 @@ pub enum CompactionAction {
     None,
     /// Idle timeout exceeded — start a brand-new thread.
     Orphan,
-    /// Cache cold, under threshold — prune opportunistically.
-    /// Pruning is "free" when the cached prefix has already expired.
+    /// Cache cold, under threshold — pruning is free.
     PruneOpportunistic,
-    /// Over threshold — prune first, then summarize if still over.
-    /// Phase 1: degrades to prune-only (summarization is Phase 2).
+    /// Over threshold; phase 1 degrades to prune-only (summarization TBD).
     PruneThenSummarize,
 }
 
@@ -49,7 +47,6 @@ mod tests {
     #[test]
     fn none_when_under_threshold_and_cache_hot() {
         let cfg = config();
-        // 60_000 < 120_000 threshold, 60s < 300s cache_ttl
         assert_eq!(
             cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(60)),
             CompactionAction::None
@@ -59,7 +56,6 @@ mod tests {
     #[test]
     fn prune_opportunistic_when_under_threshold_and_cache_cold() {
         let cfg = config();
-        // 60_000 < 120_000, but 600s > 300s cache_ttl
         assert_eq!(
             cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(600)),
             CompactionAction::PruneOpportunistic
@@ -69,7 +65,6 @@ mod tests {
     #[test]
     fn prune_then_summarize_when_over_threshold_cache_hot() {
         let cfg = config();
-        // 150_000 > 120_000, 60s < 300s
         assert_eq!(
             cfg.determine_action(150_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(60)),
             CompactionAction::PruneThenSummarize
@@ -79,7 +74,6 @@ mod tests {
     #[test]
     fn prune_then_summarize_when_over_threshold_cache_cold() {
         let cfg = config();
-        // 150_000 > 120_000, 600s > 300s
         assert_eq!(
             cfg.determine_action(150_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(600)),
             CompactionAction::PruneThenSummarize
@@ -94,7 +88,6 @@ mod tests {
             reset_time_delta_seconds: Some(ResetTimeDeltaSeconds(600)),
             ..config()
         };
-        // Under token threshold, but idle > 600s → Orphan
         assert_eq!(
             cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(700)),
             CompactionAction::Orphan
@@ -109,7 +102,7 @@ mod tests {
             reset_time_delta_seconds: Some(ResetTimeDeltaSeconds(600)),
             ..config()
         };
-        // Over token threshold AND idle > 600s → Orphan (not PruneThenSummarize)
+        // Orphan wins over PruneThenSummarize.
         assert_eq!(
             cfg.determine_action(150_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(700)),
             CompactionAction::Orphan
@@ -124,7 +117,6 @@ mod tests {
             reset_time_delta_seconds: Some(ResetTimeDeltaSeconds(600)),
             ..config()
         };
-        // Under token threshold AND idle < 600s → None (not Orphan)
         assert_eq!(
             cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(60)),
             CompactionAction::None

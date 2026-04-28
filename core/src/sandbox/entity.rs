@@ -7,11 +7,7 @@ use sandbox::{SandboxMode, SandboxSpecs};
 
 use crate::primitives::*;
 
-/// How an agent is attached to a sandbox.
-///
-/// Multiple agents may attach in [`SandboxAgentMode::Read`]; at most one
-/// agent may attach in [`SandboxAgentMode::Write`] at a time. The entity
-/// enforces this invariant in [`Sandbox::attach_agent`].
+/// Many readers; at most one writer. Enforced in `attach_agent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxAgentMode {
@@ -19,28 +15,15 @@ pub enum SandboxAgentMode {
     Write,
 }
 
-/// Tracked lifecycle state of the remote sandbox (k8s pod or local process).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxState {
-    /// Admin client has been asked to create the sandbox; the underlying
-    /// container/process isn't ready yet.
     Provisioning,
-    /// The sandbox container/process is up and the `/initialize` endpoint
-    /// is being invoked (clone repo, write github token, etc.).
     Initializing,
-    /// `/initialize` has run successfully — the sandbox is ready to accept
-    /// `/execute` calls.
     Ready,
-    /// The sandbox has been suspended via the admin client — the underlying
-    /// pod/process has been deleted, but workspace state survives (k8s: the
-    /// PVC is retained; local: the `.sandboxes/<name>/` directory is left
-    /// in place). Recreating with the same name resumes from that state.
+    /// Pod/process deleted but workspace state (PVC / local dir) survives.
     Suspended,
-    /// A step in the provisioning / restart lifecycle failed. The failure
-    /// reason is recorded on the entity as `last_error` and emitted as a
-    /// [`SandboxEvent::ProvisioningFailed`]. Calling `restart()` clears
-    /// this and re-runs the lifecycle.
+    /// Reason persisted as `last_error` and `ProvisioningFailed` event.
     Errored,
 }
 
@@ -72,28 +55,22 @@ pub enum SandboxEvent {
     StateChanged {
         state: SandboxState,
     },
-    /// Captured the result of a successful `/initialize` call when the
-    /// sandbox is in repo mode and the cloned repo exposed a CLAUDE.md
-    /// system prompt and/or `.claude/commands/*.md` skills.
+    /// Repo-mode initialize result (CLAUDE.md / `.claude/commands/*.md`).
     ExportsUpdated {
         exported_system_prompt: Option<ExportedFile>,
         exported_skills: Vec<ExportedSkill>,
     },
-    /// A step in the provisioning / restart lifecycle failed. `step` names
-    /// the failing step (`create_sandbox`, `wait_ready`, `initialize`, …)
-    /// so we can group failures in observability without parsing `reason`.
+    /// `step` (e.g. `create_sandbox`, `wait_ready`, `initialize`) groups
+    /// failures in observability without parsing `reason`.
     ProvisioningFailed {
         step: String,
         reason: String,
     },
-    /// An agent is now attached to this sandbox in `mode`. If the agent was
-    /// previously attached in a different mode, this event captures the new
-    /// state (upgrade/downgrade).
+    /// Captures upgrade/downgrade if previously attached.
     AgentAttached {
         agent_id: AgentId,
         mode: SandboxAgentMode,
     },
-    /// An agent that was previously attached has been detached.
     AgentDetached {
         agent_id: AgentId,
     },
@@ -107,19 +84,14 @@ pub struct Sandbox {
     pub name: String,
     pub specs: SandboxSpecs,
     pub mode: SandboxMode,
-    /// Absolute path to the workspace directory inside the sandbox,
-    /// cached at creation time from the admin client.
+    /// Cached at creation from the admin client.
     pub mount_path: String,
     pub state: SandboxState,
-    /// Reason for the most recent failed provisioning step, set by
-    /// [`Self::errored`] and rendered in the UI when `state == Errored`.
-    /// Cleared back to `None` when the sandbox transitions out of
-    /// `Errored` (e.g. via `provisioning()` on restart).
+    /// Set by `errored()`; cleared on transition out of `Errored`.
     pub last_error: Option<String>,
     pub exported_system_prompt: Option<ExportedFile>,
     pub exported_skills: Vec<ExportedSkill>,
-    /// Agents currently attached to this sandbox. At most one entry may
-    /// have [`SandboxAgentMode::Write`] (enforced by [`Self::attach_agent`]).
+    /// At most one Write entry, enforced by `attach_agent`.
     pub attached_agents: Vec<(AgentId, SandboxAgentMode)>,
     events: EntityEvents<SandboxEvent>,
 }
@@ -131,21 +103,12 @@ impl Sandbox {
             .expect("entity_first_persisted_at not found")
     }
 
-    /// Stable identifier used for the underlying admin-client resource —
-    /// the K8s Sandbox CR name in `K8sAdminClient` and the local sandbox
-    /// directory name in `LocalAdminClient`. Derived from the entity id so
-    /// it's globally unique and obeys k8s name constraints, regardless of
-    /// the user-provided display `name`.
+    /// K8s CR name / local sandbox dir name. Derived from id for k8s-safe uniqueness.
     pub fn resource_name(&self) -> String {
         format!("sb-{}", self.id)
     }
 
-    /// Look up an exported skill by name and return its body. Exported
-    /// skills are populated by `/initialize` from the cloned repo's
-    /// `.claude/commands/*.md`; this is the read-side counterpart used
-    /// by [`Skills::find_by_name`](super::super::skill::Skills::find_by_name)
-    /// to fall back to in-sandbox skills when no DB-registered match
-    /// exists.
+    /// Read-side fallback for `Skills::find_by_name` over `.claude/commands/*.md`.
     pub fn find_skill(&self, name: &str) -> Option<String> {
         self.exported_skills
             .iter()
@@ -153,29 +116,20 @@ impl Sandbox {
             .map(|s| s.content.clone())
     }
 
-    /// Idempotent transition to [`SandboxState::Provisioning`]. Used when
-    /// `restart()` re-runs the lifecycle from a `Suspended` or `Errored`
-    /// sandbox; clears `last_error` so a stale failure isn't shown after
-    /// the next attempt succeeds.
     pub(super) fn provisioning(&mut self) -> Idempotent<()> {
         self.transition_in_event(SandboxState::Provisioning)
     }
 
-    /// Idempotent transition to [`SandboxState::Initializing`].
     pub(super) fn initializing(&mut self) -> Idempotent<()> {
         self.transition_in_event(SandboxState::Initializing)
     }
 
-    /// Idempotent transition to [`SandboxState::Suspended`].
     pub(super) fn suspended(&mut self) -> Idempotent<()> {
         self.transition_in_event(SandboxState::Suspended)
     }
 
-    /// Mark the sandbox as failed at `step` with `reason`. Always pushes a
-    /// [`SandboxEvent::ProvisioningFailed`] (so we have a record of every
-    /// attempt) and idempotently transitions to [`SandboxState::Errored`].
-    /// Returns [`Idempotent::AlreadyApplied`] only if the entity is already
-    /// `Errored` *and* the reason hasn't changed.
+    /// Always pushes `ProvisioningFailed`; `AlreadyApplied` only when
+    /// already `Errored` with the same reason.
     pub(super) fn errored(
         &mut self,
         step: impl Into<String>,
@@ -192,18 +146,14 @@ impl Sandbox {
         self.last_error = Some(reason.clone());
         self.events
             .push(SandboxEvent::ProvisioningFailed { step, reason });
-        // Also emit a state change so existing consumers that only
-        // hydrate from StateChanged keep working.
+        // Emit StateChanged for consumers that only hydrate from it.
         self.events.push(SandboxEvent::StateChanged {
             state: SandboxState::Errored,
         });
         Idempotent::Executed(())
     }
 
-    /// Shared body for the success-path transitions above. Pushes a
-    /// `StateChanged` event when the state actually changes; clears
-    /// `last_error` whenever we move *out* of `Errored` so the UI doesn't
-    /// keep showing a stale failure after a successful retry.
+    /// Clears `last_error` on transition out of `Errored`.
     fn transition_in_event(&mut self, next_state: SandboxState) -> Idempotent<()> {
         if self.state == next_state {
             return Idempotent::AlreadyApplied;
@@ -215,10 +165,7 @@ impl Sandbox {
         Idempotent::Executed(())
     }
 
-    /// Apply the result of a successful `/initialize` call: transition to
-    /// [`SandboxState::Ready`] and, when the sandbox is in repo mode and
-    /// the response actually carried any exports, persist an
-    /// [`SandboxEvent::ExportsUpdated`] event.
+    /// Transitions to `Ready` and (repo-mode + non-empty) emits `ExportsUpdated`.
     pub(super) fn initialized(&mut self, response: &InitializeResponse) -> Idempotent<()> {
         let state_changed = self.transition_in_event(SandboxState::Ready).did_execute();
 
@@ -242,18 +189,9 @@ impl Sandbox {
         }
     }
 
-    /// Attach `agent_id` in `mode`, enforcing the workspace and
-    /// single-writer invariants.
-    ///
-    /// - The supplied `workspace_id` must match the sandbox's own
-    ///   workspace — else returns
-    ///   [`super::error::SandboxError::WrongWorkspace`].
-    /// - Same agent already attached in the same mode → [`Idempotent::AlreadyApplied`].
-    /// - Same agent already attached in a different mode → upgrade or downgrade
-    ///   (a downgrade to Read always succeeds; an upgrade to Write only succeeds
-    ///   when no other agent currently holds Write).
-    /// - Attaching as Write while another agent already holds Write returns
-    ///   [`super::error::SandboxError::WriteSlotTaken`].
+    /// Workspace mismatch → `WrongWorkspace`. Write while another writer
+    /// exists → `WriteSlotTaken`. Same mode is idempotent; different mode
+    /// is in-place upgrade/downgrade.
     pub(super) fn attach_agent(
         &mut self,
         agent_id: AgentId,
@@ -303,7 +241,7 @@ impl Sandbox {
         Ok(Idempotent::Executed(()))
     }
 
-    /// Detach `agent_id`. Idempotent: no-op if the agent isn't attached.
+    /// Idempotent if not attached.
     pub(super) fn detach_agent(&mut self, agent_id: AgentId) -> Idempotent<()> {
         let len_before = self.attached_agents.len();
         self.attached_agents.retain(|(id, _)| *id != agent_id);
@@ -330,10 +268,7 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
         let mut builder = SandboxBuilder::default();
         let mut attached_agents: Vec<(AgentId, SandboxAgentMode)> = Vec::new();
 
-        // We accumulate `last_error` as we walk the events: a
-        // `ProvisioningFailed` sets it; any subsequent successful
-        // `StateChanged` (i.e. *out* of `Errored`) clears it. This mirrors
-        // the live mutators in the entity.
+        // ProvisioningFailed sets; non-Errored StateChanged clears.
         let mut last_error: Option<String> = None;
 
         for event in events.iter_all() {
@@ -502,8 +437,6 @@ mod tests {
         assert!(!res.did_execute());
     }
 
-    // ── attach_agent / detach_agent ────────────────────────────────
-
     #[test]
     fn attach_agent_records_new_reader() {
         let mut sb = new_sandbox();
@@ -599,8 +532,7 @@ mod tests {
         let _ = sb
             .attach_agent(writer_a, ws, SandboxAgentMode::Write)
             .unwrap();
-        // Map Ok to () so we can rely on the Debug impl for expect_err —
-        // `Idempotent` doesn't derive Debug.
+        // Map Ok to () for Debug since Idempotent doesn't derive Debug.
         let err = sb
             .attach_agent(writer_b, ws, SandboxAgentMode::Write)
             .map(|_| ())
@@ -611,7 +543,6 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-        // The attach list is unchanged.
         assert_eq!(
             sb.attached_agents,
             vec![(writer_a, SandboxAgentMode::Write)]
@@ -683,9 +614,6 @@ mod tests {
 
     #[test]
     fn hydration_replays_attach_detach_history() {
-        // Synthesize a stream of events and verify try_from_events folds
-        // them into the expected attached_agents state. Each AgentAttached
-        // upserts the (agent_id, mode); AgentDetached removes the entry.
         let sandbox_id = SandboxId::new();
         let workspace_id = WorkspaceId::new();
         let a = AgentId::new();
@@ -710,9 +638,7 @@ mod tests {
                     agent_id: b,
                     mode: SandboxAgentMode::Write,
                 },
-                // b is detached; the writer slot is free again.
                 SandboxEvent::AgentDetached { agent_id: b },
-                // Now a upgrades to Write.
                 SandboxEvent::AgentAttached {
                     agent_id: a,
                     mode: SandboxAgentMode::Write,

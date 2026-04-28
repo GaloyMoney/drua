@@ -24,7 +24,6 @@ use domain::code_assistant::CodeAssistant;
 /// Parsed once at boot from `config.server.tunnel.deployments`.
 pub type TunnelPublicKeys = Arc<HashMap<String, ed25519_dalek::VerifyingKey>>;
 
-/// Unified application state shared by all routes and middleware.
 #[derive(Clone)]
 pub struct AppState {
     pub app: App,
@@ -33,15 +32,12 @@ pub struct AppState {
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
     pub code_assistant: Option<CodeAssistant>,
-    /// Serialized YAML config exposed via the `appConfig` GraphQL query.
+    /// Exposed via the `appConfig` GraphQL query.
     pub app_config_yaml: graphql::Yaml,
-    /// Optional SA token validator — present when running in-cluster.
+    /// Present when running in-cluster.
     pub sa_token_validator: Option<SaTokenValidator>,
-    /// Postgres-backed session store shared with the session layer.
     pub session_store: PgSessionStore,
-    /// Parsed tunnel-deployment public keys. See [`TunnelPublicKeys`].
     pub tunnel_public_keys: TunnelPublicKeys,
-    /// Git remote URL for the library repo (rendered as a link in the UI).
     pub library_repo_url: Option<String>,
 }
 
@@ -73,14 +69,12 @@ impl AppState {
         }
     }
 
-    /// Set the SA token validator (typically initialized from in-cluster config).
     pub fn with_sa_token_validator(mut self, validator: SaTokenValidator) -> Self {
         self.sa_token_validator = Some(validator);
         self
     }
 }
 
-/// Build the web router with page routes, auth routes, API routes, and GraphQL.
 pub fn router() -> Router<AppState> {
     routes::router()
         .merge(auth::auth_router())
@@ -88,7 +82,6 @@ pub fn router() -> Router<AppState> {
         .merge(graphql::router())
 }
 
-/// Arguments for running the server, passed from the CLI entrypoint.
 pub struct RunServerArgs {
     pub config_path: String,
     pub pg_con: String,
@@ -99,7 +92,6 @@ pub struct RunServerArgs {
     pub config_overrides: Vec<String>,
 }
 
-/// Print the default server configuration as YAML.
 pub fn dump_default_config() -> anyhow::Result<()> {
     let default_config = config::Config::default();
     let yaml_output = serde_yaml::to_string(&default_config)?;
@@ -107,7 +99,6 @@ pub fn dump_default_config() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Bootstrap and run the server.
 pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()

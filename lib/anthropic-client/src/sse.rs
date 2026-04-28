@@ -1,26 +1,17 @@
-//! Lightweight SSE (Server-Sent Events) parser for reqwest byte streams.
-//!
-//! Implements just enough of the SSE protocol to parse Anthropic's streaming
-//! responses. Adapted from the Pi agent crate's full SSE implementation but
-//! simplified to work with `reqwest::Response::bytes_stream()`.
+//! Minimal SSE parser for reqwest byte streams. Just enough of the
+//! protocol to handle Anthropic's streaming responses.
 
 use futures::StreamExt;
 
-/// A parsed SSE event with its type and data payload.
 #[derive(Debug, Clone)]
 pub struct SseEvent {
-    /// Event type (from "event:" field, defaults to "message").
+    /// "event:" field, defaults to "message".
     pub event: String,
-    /// Event data (from "data:" field(s), joined with newlines).
+    /// "data:" lines joined with `\n`.
     pub data: String,
 }
 
-/// Parse SSE events from a reqwest response's byte stream.
-///
-/// Collects all SSE events from the stream, calling `handler` for each
-/// complete event. This is a pull-based approach that processes the entire
-/// stream — appropriate because `send_prompt` needs the final accumulated
-/// result anyway.
+/// Calls `handler` for each complete event in the stream.
 pub async fn parse_sse_stream<S, B, F>(mut stream: S, mut handler: F) -> Result<(), SseError>
 where
     S: futures::Stream<Item = Result<B, reqwest::Error>> + Unpin,
@@ -33,8 +24,7 @@ where
         let chunk = chunk.map_err(SseError::Http)?;
         buffer.push_str(&String::from_utf8_lossy(chunk.as_ref()));
 
-        // Process all complete events in the buffer.
-        // An event is terminated by a blank line (\n\n or \r\n\r\n).
+        // Events are terminated by a blank line (\n\n or \r\n\r\n).
         loop {
             let event_end = find_event_boundary(&buffer);
             let Some(end_pos) = event_end else {
@@ -46,12 +36,11 @@ where
                 handler(event)?;
             }
 
-            // Remove the processed event + boundary from buffer
             buffer.drain(..end_pos.drain_end);
         }
     }
 
-    // Process any trailing data in the buffer (stream closed mid-event)
+    // Trailing data: stream closed mid-event.
     if !buffer.trim().is_empty() {
         if let Some(event) = parse_single_event(&buffer) {
             handler(event)?;
@@ -62,22 +51,17 @@ where
 }
 
 struct EventBoundary {
-    /// End of the event text (before the blank-line separator).
     text_end: usize,
-    /// Position to drain up to (past the blank-line separator).
     drain_end: usize,
 }
 
-/// Find the position of the next event boundary (blank line) in the buffer.
 fn find_event_boundary(buf: &str) -> Option<EventBoundary> {
-    // Look for \n\n (the standard SSE event separator)
     if let Some(pos) = buf.find("\n\n") {
         return Some(EventBoundary {
             text_end: pos,
             drain_end: pos + 2,
         });
     }
-    // Also handle \r\n\r\n
     if let Some(pos) = buf.find("\r\n\r\n") {
         return Some(EventBoundary {
             text_end: pos,
@@ -87,17 +71,12 @@ fn find_event_boundary(buf: &str) -> Option<EventBoundary> {
     None
 }
 
-/// Parse a single SSE event from its text (lines between blank-line boundaries).
 fn parse_single_event(text: &str) -> Option<SseEvent> {
     let mut event_type = String::from("message");
     let mut data_lines: Vec<&str> = Vec::new();
 
     for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with(':') {
-            // Comment line — skip
+        if line.is_empty() || line.starts_with(':') {
             continue;
         }
         if let Some((field, value)) = line.split_once(':') {
@@ -105,10 +84,9 @@ fn parse_single_event(text: &str) -> Option<SseEvent> {
             match field {
                 "event" => event_type = value.to_string(),
                 "data" => data_lines.push(value),
-                _ => {} // Ignore unknown fields (id, retry, etc.)
+                _ => {}
             }
         } else if line == "data" {
-            // Field with no colon — treat as field with empty value
             data_lines.push("");
         }
     }

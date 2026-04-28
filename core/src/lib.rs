@@ -54,33 +54,25 @@ pub struct App {
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
-    /// Registry of currently-live tunnel connectors, keyed by
-    /// `deployment_id`. Used by the `/tunnel/ws` handler to evict a
-    /// previous tunnel when a new connector registers the same
-    /// `deployment_id`. See [`tunnel::TunnelRegistry`].
+    /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
+    /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
     library: Library,
     notes: Arc<Notes>,
     jobs: Arc<job::Jobs>,
-    /// Held so the executor's worker task stays alive for the lifetime of
-    /// `App`; dropped on shutdown which aborts the task.
+    /// Held so the executor's worker task lives as long as `App`.
     _prompt_executor: Arc<PromptExecutor>,
 }
 
 impl App {
     pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
-        // Fail loudly at startup if `agents.builtin_roles` is missing a
-        // required role, instead of erroring out on the first
-        // workspace-create.
+        // Fail loudly at startup rather than on first workspace-create.
         config.agents.validate()?;
-        // Same for the executor — catch empty `ANTHROPIC_API_KEY` etc.
-        // before the first agent message lands.
         config
             .prompt_executor
             .validate()
             .map_err(|e| AppError::PromptExecutor(e.to_string()))?;
 
-        // Embedder is always initialized (used by notes; optionally by code-assistant).
         let embedder = Arc::new(
             code_assistant_core::embedder::Embedder::new()
                 .map_err(|e| AppError::Embedder(e.to_string()))?,
@@ -114,9 +106,6 @@ impl App {
         toolsets.register_top_level(WorkspaceLog::new(Arc::clone(&audit)));
         toolsets.set_audit(Arc::clone(&audit));
 
-        // Spawn the prompt executor and hand its request channel to the
-        // agents service; hold the executor so its worker task lives as
-        // long as `App`.
         let (prompt_executor, prompt_tx) = PromptExecutor::init(config.prompt_executor).await;
         let prompt_executor = Arc::new(prompt_executor);
 
@@ -125,12 +114,10 @@ impl App {
         let encryption_key = config.encryption.encryption_key();
         let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
 
-        // Optionally initialize GitHub App token provider from AppConfig.
-        // If configured, verify it works by generating a token — crash on failure
-        // so broken config is caught immediately rather than silently skipped.
-        // Built before Sandboxes::init so the provider can be threaded into
-        // the sandbox lifecycle (used to mint a fresh installation token
-        // for `/initialize` so private repos can be cloned).
+        // Built before Sandboxes::init so the provider can mint a fresh
+        // installation token for `/initialize` to clone private repos.
+        // Verify by generating a token at startup — crash on failure rather
+        // than silently skip.
         let github_app = match config.github_app {
             Some(ref gh_config) => {
                 let provider = GitHubAppTokenProvider::new(gh_config)
@@ -165,10 +152,9 @@ impl App {
         .await
         .map_err(|e| AppError::Library(e.to_string()))?;
 
-        // Shared "anything in workspace context changed" signal — bumped by
-        // Notes/Skills mutations (locally) and by PG NOTIFY (from peers in
-        // HA deployments). Read on the hot path of `Agents::send_message`
-        // to skip DB round-trips when nothing changed.
+        // Bumped by Notes/Skills mutations (local) and PG NOTIFY (peers).
+        // Read on the hot path of `Agents::send_message` to skip DB
+        // round-trips when nothing changed.
         let context_generation = ContextGeneration::new();
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
@@ -180,10 +166,8 @@ impl App {
             context_generation.clone(),
         ));
 
-        // Sandbox-backed tools (Bash, TextEditor) need the sandboxes
-        // service to resolve the running pod for an attached agent —
-        // register them after sandboxes is up but before we wrap the
-        // toolsets in Arc.
+        // Sandbox-backed tools must be registered after sandboxes is up
+        // but before toolsets is wrapped in Arc.
         toolsets.register_top_level(Bash::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(TextEditor::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes)));
@@ -192,8 +176,8 @@ impl App {
         toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
-        // Notes service created before Agents so pinned notes can be
-        // injected into agent system prompts at creation time.
+        // Created before Agents so pinned notes can be injected into agent
+        // system prompts at creation time.
         let notes = Arc::new(Notes::new(
             pool,
             library.clone(),
@@ -211,7 +195,6 @@ impl App {
             context_generation.clone(),
         ));
 
-        // Register consolidated workspace-scoped management tools.
         toolsets.register_top_level(WorkspaceAgent::new(
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
@@ -230,9 +213,7 @@ impl App {
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
 
-        // Admin tools live behind progressive disclosure (search_tools →
-        // describe_tool → call_tool) to declutter the top-level list_tools
-        // response.
+        // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
@@ -240,9 +221,8 @@ impl App {
             Arc::clone(&workspaces),
         ));
 
-        // Reverse-sync: poll the library repo for skill files added/modified
-        // via git and upsert them into the DB. Runs on the library-lock queue
-        // so it serializes with forward-sync (WriteToRuntime) jobs.
+        // Reverse-sync: poll library repo for skill changes and upsert into
+        // DB. Uses library-lock queue to serialize with forward-sync jobs.
         {
             use skill::job::{SyncSkillsFromLibraryConfig, SyncSkillsFromLibraryJobInitializer};
             let sync_init = SyncSkillsFromLibraryJobInitializer::new(
@@ -345,8 +325,7 @@ impl App {
         &self.notes
     }
 
-    /// Gracefully shut down background jobs (e.g. push-runtime-commits).
-    /// Call this on SIGTERM / ctrl-c before exiting.
+    /// Gracefully shut down background jobs. Call on SIGTERM / ctrl-c.
     pub async fn shutdown(&self) {
         if let Err(e) = self.jobs.shutdown().await {
             tracing::error!(error = %e, "job shutdown failed");
@@ -354,12 +333,10 @@ impl App {
     }
 }
 
-/// Background task that listens on the `context_changed` PG channel and
-/// bumps the shared `ContextGeneration` whenever a peer instance (or this
-/// instance) mutates notes or skills. The local mutation paths bump the
-/// atomic directly *and* fire `pg_notify`; this listener exists so other
-/// HA replicas pick up the change. Self-notifications are harmless — they
-/// just look like an extra bump that triggers one no-op cache check.
+/// Listens on the `context_changed` PG channel and bumps `ContextGeneration`
+/// when a peer mutates notes/skills. Local mutations bump the atomic
+/// directly *and* fire `pg_notify`; self-notifications cause a harmless
+/// extra bump.
 fn spawn_context_generation_listener(pool: sqlx::PgPool, generation: ContextGeneration) {
     tokio::spawn(async move {
         loop {

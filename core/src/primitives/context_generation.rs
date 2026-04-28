@@ -65,12 +65,9 @@ impl ContextBumpHook {
 
 impl CommitHook for ContextBumpHook {
     fn post_commit(self) {
-        // In-process: bump the local atomic immediately. Other agents on
-        // this instance will see the new generation on their next turn.
+        // Bump local atomic immediately; broadcast via PG NOTIFY async
+        // (delayed notify only affects peers, never this instance).
         self.generation.bump();
-        // Cross-instance: broadcast via PG NOTIFY. Spawn so the post_commit
-        // path stays non-blocking; this instance has already updated its
-        // local view, so a delayed notify only affects peers.
         let pool = self.pool;
         let payload = self
             .workspace_id
@@ -88,9 +85,8 @@ impl CommitHook for ContextBumpHook {
     }
 
     fn merge(&mut self, other: &mut Self) -> bool {
-        // Multiple bumps in a single commit collapse to one when scoped
-        // identically. Different workspaces (or workspace vs global) keep
-        // separate hooks so each peer gets a per-scope payload.
+        // Same-scope bumps collapse; different scopes keep separate hooks
+        // so each peer gets a per-scope payload.
         self.workspace_id == other.workspace_id
     }
 }

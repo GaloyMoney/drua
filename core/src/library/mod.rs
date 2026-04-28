@@ -27,15 +27,12 @@ const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 20;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
-    /// Local path to clone the library repo into.
     /// Defaults to `<repo-root>/.library/`.
     #[serde(default)]
     pub data_dir: Option<String>,
-    /// Git remote URL to clone from.
     #[serde(default)]
     pub repo_url: Option<String>,
-    /// How often (in seconds) the reverse-sync job polls the library repo
-    /// for new or changed skill files. Defaults to 20.
+    /// Default 20s.
     #[serde(default = "default_skill_sync_interval_secs")]
     pub skill_sync_interval_secs: u64,
 }
@@ -63,21 +60,15 @@ impl LibraryConfig {
     }
 }
 
-/// A single changed skill file with metadata for the sync job.
 pub struct SkillFileChange {
-    /// Parsed skill file. When `needs_rewrite` is true the file's
-    /// `original_path` field is set to the on-disk path.
     pub file: RuntimeFile,
-    /// When `true`, the file on disk lacks proper frontmatter and should be
-    /// rewritten with canonical headers after entity creation.
+    /// File on disk lacks proper frontmatter and should be rewritten with
+    /// canonical headers after entity creation.
     pub needs_rewrite: bool,
 }
 
-/// Skill files detected as new or changed since the last sync.
 pub struct SkillChanges {
-    /// The HEAD commit hash after pulling.
     pub head_commit: String,
-    /// Changed skill files with their original paths and rewrite flags.
     pub files: Vec<SkillFileChange>,
 }
 
@@ -116,9 +107,9 @@ impl Library {
         })
     }
 
-    /// Upsert search data and persist an inbox event within the transaction.
-    /// The inbox handler will embed the document and spawn a serialized job
-    /// for git pull/write/commit/push on any node.
+    /// Upserts search data and persists an inbox event in the same transaction.
+    /// The inbox handler embeds the document and spawns a serialized job for
+    /// git pull/write/commit/push on any node.
     #[tracing::instrument(name = "library.write_in_op", skip_all)]
     pub async fn write_in_op(
         &self,
@@ -138,8 +129,7 @@ impl Library {
         Ok(())
     }
 
-    /// Queue `.gitkeep` files for a new workspace so the folder structure
-    /// (notes/ and skills/) is committed to the library repo.
+    /// Queues `.gitkeep` files so notes/ and skills/ folders are committed.
     #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
     pub async fn sync_workspace_folder_in_op(
         &self,
@@ -160,10 +150,9 @@ impl Library {
         Ok(())
     }
 
-    /// Remove all search data for a workspace and queue a background job
-    /// to delete the `runtime/workspaces/<name>/` directory from the
-    /// library git repo. Call within the workspace delete transaction so
-    /// the search data is removed atomically.
+    /// Removes search data and queues a job to delete
+    /// `runtime/workspaces/<name>/` from the library repo. Call inside the
+    /// workspace delete transaction for atomicity.
     #[tracing::instrument(name = "library.cleanup_workspace_in_op", skip_all)]
     pub async fn cleanup_workspace_in_op(
         &self,
@@ -187,10 +176,7 @@ impl Library {
         Ok(())
     }
 
-    /// Pull the library repo and find skill files that changed since
-    /// `last_sync_commit`. Returns parsed `RuntimeFile::Skill` variants.
-    ///
-    /// On first run (`last_sync_commit` is `None`), returns all skill files.
+    /// On first run (`last_sync_commit` = `None`), returns all skill files.
     /// Returns an empty `files` vec when HEAD hasn't moved.
     #[tracing::instrument(name = "library.find_new_skills", skip(self))]
     pub async fn find_new_skills(
@@ -241,7 +227,6 @@ impl Library {
         })
     }
 
-    /// Hybrid search across library documents.
     #[tracing::instrument(name = "library.search", skip(self))]
     pub async fn search(
         &self,

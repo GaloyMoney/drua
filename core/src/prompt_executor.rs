@@ -58,11 +58,8 @@ pub enum OpenAiResponsesAuth {
 pub enum PromptExecutorConfigError {}
 
 impl PromptExecutorConfig {
-    /// Log diagnostics about each configured model's credential. Never
-    /// fails — the executor must boot even with an empty key (e.g. local
-    /// dev, bats tests) so the rest of the surface (auth, MCP gateway,
-    /// search) is reachable; the first real prompt will just 401 at the
-    /// upstream.
+    /// Logs diagnostics. Never fails — executor must boot with empty keys
+    /// (local dev, bats tests); the first real prompt will 401 upstream.
     pub fn validate(&self) -> Result<(), PromptExecutorConfigError> {
         for model in &self.models {
             match &model.provider {
@@ -170,8 +167,7 @@ impl PromptExecutorConfig {
     }
 }
 
-/// First 7 + last 4 chars, everything else masked. Enough to spot
-/// copy/paste errors without spilling secrets into logs.
+/// First 7 + last 4 chars, rest masked. Spots copy/paste errors without leaking secrets.
 fn masked_preview(s: &str) -> String {
     if s.len() <= 12 {
         "***".to_string()
@@ -189,8 +185,7 @@ fn masked_preview(s: &str) -> String {
     }
 }
 
-/// Wraps a `tokio::task::JoinHandle` so that dropping the wrapper aborts the
-/// task. Lets the executor live as long as the owning service struct.
+/// Drop aborts the task; lets the executor live as long as its owning service.
 struct OwnedTaskHandle(Option<JoinHandle<()>>);
 
 impl OwnedTaskHandle {
@@ -207,12 +202,8 @@ impl Drop for OwnedTaskHandle {
     }
 }
 
-/// Long-running service that drains `PromptRequest`s off a channel and
-/// streams `PromptResponseEvent`s back via each request's `response_channel`.
-///
-/// `init` spawns the worker task immediately and returns the service plus the
-/// sender half that producers (e.g. the `Agents` service) should be handed.
-/// When the `PromptExecutor` is dropped the worker task is aborted.
+/// Drains `PromptRequest`s off a channel and streams responses back via each
+/// request's `response_channel`. Drop aborts the worker task.
 pub struct PromptExecutor {
     _handle: OwnedTaskHandle,
 }
@@ -292,7 +283,7 @@ async fn evaluate_streaming(
 ) {
     let (delta_tx, delta_rx) = mpsc::channel(128);
 
-    // Send StreamHandle immediately so agent loop can start consuming.
+    // Send StreamHandle immediately so agent loop can begin consuming.
     if response
         .send(Ok(llm::PromptResult::Stream(llm::StreamHandle {
             rx: delta_rx,

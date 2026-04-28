@@ -62,7 +62,6 @@ pub struct CodeAssistantRecentTemplate {
     pub rows: Vec<CodeAssistantRequestRow>,
 }
 
-/// A single search result for the web UI.
 pub struct SearchResultView {
     pub file_path: String,
     pub repo: String,
@@ -107,8 +106,6 @@ pub struct AuditEntriesTemplate {
     pub entries: Vec<AuditEntryView>,
 }
 
-// ── Workspaces ───────────────────────────────────────────────────────
-
 pub struct WorkspaceView {
     pub id: String,
     pub name: String,
@@ -127,8 +124,6 @@ pub struct WorkspaceDetailTemplate {
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
 }
-
-// ── Skills ────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
 pub struct SkillView {
@@ -160,8 +155,6 @@ pub struct WorkspaceSkillDetailTemplate {
     pub skill: SkillView,
 }
 
-// ── Sandboxes ─────────────────────────────────────────────────────────
-
 #[allow(dead_code)]
 pub struct ExportedFileView {
     pub file_name: String,
@@ -181,9 +174,7 @@ pub struct SandboxView {
     pub workspace_id: String,
     pub name: String,
     pub state: String,
-    /// Reason for the most recent provisioning failure. Set when the
-    /// sandbox is in the `errored` state; rendered as a banner on the
-    /// detail page.
+    /// Set when the sandbox is in the `errored` state.
     pub last_error: Option<String>,
     pub mode_label: String,
     pub repo_url: Option<String>,
@@ -192,8 +183,7 @@ pub struct SandboxView {
     pub memory: String,
     pub disk_size: String,
     pub created_at: String,
-    /// Short one-liner for the list view: `"—"`, `"system prompt"`,
-    /// `"3 skills"`, or `"system prompt + 3 skills"`.
+    /// E.g. `"—"`, `"system prompt"`, `"3 skills"`, `"system prompt + 3 skills"`.
     pub exports_summary: String,
     pub exported_system_prompt: Option<ExportedFileView>,
     pub exported_skills: Vec<ExportedSkillView>,
@@ -225,10 +215,6 @@ pub struct WorkspaceSandboxDetailTemplate {
     pub sandbox: SandboxView,
 }
 
-// ── Agents (workspace-context create form) ─────────────────────────────
-
-/// Minimal dropdown option for the sandbox attachment selector on the
-/// new-agent form. Only sandboxes that exist in the workspace are offered.
 #[allow(dead_code)]
 pub struct SandboxOptionView {
     pub id: String,
@@ -259,8 +245,7 @@ pub struct AgentDetailView {
     pub workspace_id: String,
     pub name: String,
     pub role: String,
-    /// True when the agent is the workspace lead. The lead never runs in a
-    /// sandbox, so the attach form is hidden in the detail view.
+    /// Lead never runs in a sandbox, so the attach form is hidden.
     pub is_lead: bool,
     pub attached_sandbox: Option<AttachedSandboxView>,
 }
@@ -272,15 +257,11 @@ pub struct WorkspaceAgentDetailTemplate {
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub agent: AgentDetailView,
-    /// Used to populate the attach-sandbox dropdown when the agent has no
-    /// current attachment. Empty when `agent.attached_sandbox` is `Some`.
+    /// Empty when `agent.attached_sandbox` is `Some`.
     pub sandbox_options: Vec<SandboxOptionView>,
-    /// Flash message surfaced after a failed attach/detach (arrives via
-    /// `?error=...` on the redirect back to this page).
+    /// Flash message after a failed attach/detach (`?error=...` on redirect).
     pub error: Option<String>,
 }
-
-// ── Workspace Secrets ────────────────────────────────────────────────
 
 pub struct WorkspaceSecretView {
     pub id: String,
@@ -317,9 +298,7 @@ pub struct WorkspaceHubTemplate {
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub selected_agent_id: String,
-    /// The agent the chat view is rendering for. Used to show that
-    /// agent's name in the chat header so it updates when the user
-    /// switches between agents (instead of showing the workspace name).
+    /// The agent the chat view is rendering for; drives the chat header name.
     pub selected_agent: Option<AgentView>,
 }
 
@@ -329,8 +308,6 @@ pub struct WorkspaceChatTemplate {
     pub workspace: WorkspaceView,
     pub agent_id: String,
 }
-
-// ── CLI Login ─────────────────────────────────────────────────────────
 
 #[derive(Template, WebTemplate)]
 #[template(path = "cli_login.html")]

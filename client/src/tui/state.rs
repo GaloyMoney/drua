@@ -42,7 +42,6 @@ pub enum Focus {
     Threads,
 }
 
-/// Scroll and viewport state for the chat message area.
 #[derive(Default)]
 pub struct ChatViewState {
     pub assistant: AssistantChat,
@@ -65,13 +64,10 @@ impl ChatViewState {
         self.chat_scroll = 0;
     }
 
-    /// Called from the render path to record the available height.
     pub fn update_viewport_height(&mut self, h: u16) {
         self.chat_viewport_height = h;
     }
 }
-
-// ── Thread explorer types (positionally-aligned grid) ─────────────────
 
 #[allow(dead_code)]
 pub struct ThreadInfo {
@@ -82,21 +78,18 @@ pub struct ThreadInfo {
     pub message_count: usize,
 }
 
-/// Which section of the thread grid the cursor is currently in.
-/// The Tools section is non-navigable (it's a count, not a list).
+/// Tools section is non-navigable (it's a count, not a list).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GridSection {
     System,
     Messages,
 }
 
-/// Detail of a system block at a given (thread, system_position) cell.
 pub struct SystemBlockDetail {
     pub kind: String,
     pub text: String,
 }
 
-/// Classification of a cell in the thread × position grid.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
     /// Unique content block owned by this thread. Char = type: U/A/T/R.
@@ -105,13 +98,11 @@ pub enum CellKind {
     Shared,
     /// Summary block (unique content in a COMPACTION thread).
     Summary(char),
-    /// Condensed — masked/simplified version of the original (e.g. masked tool result).
+    /// Masked/simplified version of the original (e.g. masked tool result).
     Condensed,
-    /// Empty — this thread doesn't reference this position.
     Empty,
 }
 
-/// Token usage summary for an assistant response.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct UsageDetail {
@@ -124,19 +115,14 @@ pub struct UsageDetail {
     pub total_cost: f64,
 }
 
-/// Content detail for a single block at a (thread, position).
 pub struct BlockDetail {
     pub role: ChatRole,
     pub content: ContentBlock,
-    /// Usage metadata — present for blocks from an assistant response.
     pub usage: Option<UsageDetail>,
-    /// Timestamp of the event that produced this block.
     pub recorded_at: Option<String>,
 }
 
-/// Positionally-aligned thread grid state.
 pub struct ThreadGridState {
-    /// Thread metadata.
     pub threads: Vec<ThreadInfo>,
     /// All unique block-index positions (sorted) across all threads.
     pub positions: Vec<i32>,
@@ -144,32 +130,22 @@ pub struct ThreadGridState {
     pub grid: Vec<Vec<CellKind>>,
     /// Content at each `(thread_idx, position_idx)` — only for non-empty cells.
     pub details: HashMap<(usize, usize), BlockDetail>,
-    /// Cursor column (position index).
     pub cursor_col: usize,
-    /// Cursor row (thread index).
     pub cursor_row: usize,
-    /// Horizontal scroll offset (in columns).
     pub scroll_col: usize,
-    /// Number of visible columns (updated from render path).
     pub visible_cols: usize,
-    /// Sorted global SystemBlockIndex positions across all threads.
     pub system_positions: Vec<i32>,
-    /// Per-thread system grid: `system_grid[thread_idx][system_pos_idx]`.
     /// First thread to reference a system idx owns it (Unique with kind letter);
     /// subsequent threads share it.
     pub system_grid: Vec<Vec<CellKind>>,
-    /// Per-thread count of tool definitions exposed to the LLM.
     pub tool_def_counts: Vec<usize>,
-    /// Which section the cursor is currently in (Messages by default).
     pub cursor_section: GridSection,
-    /// System-block details at each `(thread_idx, system_pos_idx)` — only for
-    /// non-empty owned cells (Shared cells inherit content from the owner).
+    /// Only for non-empty owned cells (Shared cells inherit content from the owner).
     pub system_details: HashMap<(usize, usize), SystemBlockDetail>,
 }
 
 impl ThreadGridState {
     pub fn ensure_cursor_visible(&mut self) {
-        // Horizontal scroll only applies to the messages section.
         if self.cursor_section != GridSection::Messages || self.visible_cols == 0 {
             return;
         }
@@ -184,7 +160,6 @@ impl ThreadGridState {
         self.visible_cols = cols;
     }
 
-    /// The grid for the cursor's current section.
     fn active_grid(&self) -> &Vec<Vec<CellKind>> {
         match self.cursor_section {
             GridSection::System => &self.system_grid,
@@ -192,7 +167,6 @@ impl ThreadGridState {
         }
     }
 
-    /// Returns true if the cell at (row, col) is non-empty in the active section.
     fn is_non_empty(&self, row: usize, col: usize) -> bool {
         self.active_grid()
             .get(row)
@@ -201,9 +175,7 @@ impl ThreadGridState {
             .unwrap_or(false)
     }
 
-    /// Snap `cursor_col` to the nearest non-empty cell on the current row
-    /// of the active section. Prefers the current column, then searches
-    /// outward in both directions. If the entire row is empty, stays put.
+    /// Prefers the current column, then searches outward in both directions.
     pub fn snap_to_nearest_non_empty(&mut self) {
         let row = self.cursor_row;
         if row >= self.active_grid().len() {
@@ -213,7 +185,6 @@ impl ThreadGridState {
             return;
         }
         let cols = self.active_grid()[row].len();
-        // Search outward: check col-1, col+1, col-2, col+2, ...
         for delta in 1..cols {
             if self.cursor_col >= delta && self.is_non_empty(row, self.cursor_col - delta) {
                 self.cursor_col -= delta;
@@ -225,10 +196,8 @@ impl ThreadGridState {
                 return;
             }
         }
-        // Entire row is empty — stay put
     }
 
-    /// Find the next non-empty column to the right of the current position.
     pub fn next_non_empty_right(&self) -> Option<usize> {
         let row = self.cursor_row;
         if row >= self.active_grid().len() {
@@ -238,7 +207,6 @@ impl ThreadGridState {
         ((self.cursor_col + 1)..cols).find(|&col| self.is_non_empty(row, col))
     }
 
-    /// Find the next non-empty column to the left of the current position.
     pub fn next_non_empty_left(&self) -> Option<usize> {
         let row = self.cursor_row;
         if row >= self.active_grid().len() {
@@ -249,7 +217,6 @@ impl ThreadGridState {
             .find(|&col| self.is_non_empty(row, col))
     }
 
-    /// Find the first non-empty column on the current row of the active section.
     pub fn first_non_empty(&self) -> Option<usize> {
         let row = self.cursor_row;
         let g = self.active_grid();
@@ -259,7 +226,6 @@ impl ThreadGridState {
         g[row].iter().position(|c| !matches!(c, CellKind::Empty))
     }
 
-    /// Find the last non-empty column on the current row of the active section.
     pub fn last_non_empty(&self) -> Option<usize> {
         let row = self.cursor_row;
         let g = self.active_grid();
@@ -270,41 +236,32 @@ impl ThreadGridState {
     }
 }
 
-/// Top-level TUI state — replaces the old flat `App` struct.
 pub struct ScreenState {
-    // Workspace browsing
     pub workspaces: Vec<WorkspaceItem>,
     pub cursor: usize,
     pub selected_lead_id: Option<String>,
 
-    // Agent browsing
     pub agent_cursor: usize,
 
-    // Global
     pub server_url: String,
     pub user_name: String,
     pub should_quit: bool,
     pub focus: Focus,
     pub status_message: Option<String>,
 
-    // Chat
     pub chat_view: ChatViewState,
     pub chat_input: String,
     pub input_cursor: usize,
-    /// The agent whose history is currently loaded in the chat view.
     /// When this differs from `selected_agent_id()`, the event loop fetches fresh history.
     pub loaded_agent_id: Option<String>,
 
-    // Thread explorer (positionally-aligned grid)
     pub thread_view: Option<ThreadGridState>,
 
-    // Create workspace modal
     pub mode: Mode,
     pub input_name: String,
     pub input_description: String,
     pub input_field: u8,
 
-    // Export thread modal
     pub export_path: String,
 }
 
@@ -361,19 +318,16 @@ impl ScreenState {
         self.workspaces.get(self.cursor)
     }
 
-    /// Returns the agent at the current agent cursor position.
     pub fn selected_agent(&self) -> Option<&AgentItem> {
         self.selected_workspace()
             .and_then(|ws| ws.agents.get(self.agent_cursor))
     }
 
-    /// Returns the id of the currently selected agent (for chat targeting).
     pub fn selected_agent_id(&self) -> Option<String> {
         self.selected_agent().map(|a| a.id.clone())
     }
 
-    /// Select the lead agent (index 0, since lead is always sorted first)
-    /// and focus the chat pane.
+    /// Lead is always sorted first.
     pub fn select_lead_and_focus_chat(&mut self) {
         self.agent_cursor = 0;
         self.focus = Focus::Chat;
@@ -460,8 +414,6 @@ impl ScreenState {
         };
     }
 
-    // ── Cursor-aware chat input helpers ──────────────────────────────
-
     pub fn input_insert_char(&mut self, c: char) {
         self.chat_input.insert(self.input_cursor, c);
         self.input_cursor += c.len_utf8();
@@ -469,7 +421,6 @@ impl ScreenState {
 
     pub fn input_backspace(&mut self) {
         if self.input_cursor > 0 {
-            // Find the previous char boundary
             let prev = self.chat_input[..self.input_cursor]
                 .char_indices()
                 .next_back()
@@ -480,17 +431,17 @@ impl ScreenState {
         }
     }
 
-    /// Ctrl+A — move cursor to start of line.
+    /// Ctrl+A
     pub fn input_home(&mut self) {
         self.input_cursor = 0;
     }
 
-    /// Ctrl+E — move cursor to end of line.
+    /// Ctrl+E
     pub fn input_end(&mut self) {
         self.input_cursor = self.chat_input.len();
     }
 
-    /// Ctrl+U — delete from cursor to start of line.
+    /// Ctrl+U
     pub fn input_kill_to_start(&mut self) {
         self.chat_input.drain(..self.input_cursor);
         self.input_cursor = 0;
@@ -502,7 +453,6 @@ impl ScreenState {
             return;
         }
         let before = &self.chat_input[..self.input_cursor];
-        // Skip trailing whitespace, then skip non-whitespace
         let end = before.len();
         let after_spaces = before.trim_end().len();
         let word_start = before[..after_spaces]
@@ -538,15 +488,12 @@ impl ScreenState {
         self.input_cursor = 0;
     }
 
-    // ── Thread grid navigation ────────────────────────────────────
-
     pub fn grid_move_right(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             if let Some(col) = g.next_non_empty_right() {
                 g.cursor_col = col;
                 g.ensure_cursor_visible();
             } else {
-                // At end of line — try jumping to next row that has content to the right
                 let cursor_col = g.cursor_col;
                 for next_row in (g.cursor_row + 1)..g.threads.len() {
                     let has_content_right = g.active_grid().get(next_row).is_some_and(|row| {
@@ -571,7 +518,6 @@ impl ScreenState {
                         return;
                     }
                 }
-                // Last row exhausted — wrap to the first cell of the first row.
                 g.cursor_row = 0;
                 if let Some(col) = g.first_non_empty() {
                     g.cursor_col = col;
@@ -587,7 +533,7 @@ impl ScreenState {
                 g.cursor_col = col;
                 g.ensure_cursor_visible();
             } else {
-                // At start of line — wrap to the end of the same row
+                // wrap to the end of the same row
                 if let Some(col) = g.last_non_empty() {
                     if col != g.cursor_col {
                         g.cursor_col = col;
@@ -605,7 +551,6 @@ impl ScreenState {
                 g.cursor_row += 1;
                 let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
                 if was_orphan != is_orphan {
-                    // Crossing orphan boundary — jump to first content
                     if let Some(col) = g.first_non_empty() {
                         g.cursor_col = col;
                     }
@@ -624,7 +569,6 @@ impl ScreenState {
                 g.cursor_row -= 1;
                 let is_orphan = g.threads[g.cursor_row].start_reason == "ORPHAN";
                 if was_orphan != is_orphan {
-                    // Crossing orphan boundary — jump to first content
                     if let Some(col) = g.first_non_empty() {
                         g.cursor_col = col;
                     }
@@ -633,7 +577,6 @@ impl ScreenState {
                 }
                 g.ensure_cursor_visible();
             } else {
-                // Already on top row — jump to beginning
                 if let Some(col) = g.first_non_empty() {
                     g.cursor_col = col;
                     if g.cursor_section == GridSection::Messages {
@@ -664,8 +607,7 @@ impl ScreenState {
         }
     }
 
-    /// Jump to the next unique/summary cell on the current row (wraps),
-    /// scoped to the cursor's current section.
+    /// Wraps; scoped to the cursor's current section.
     pub fn grid_tab_next(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             let row = g.cursor_row;
@@ -674,7 +616,6 @@ impl ScreenState {
                 return;
             }
             let cursor_col = g.cursor_col;
-            // Search forward
             let forward = active[row]
                 .iter()
                 .enumerate()
@@ -686,7 +627,6 @@ impl ScreenState {
                 g.ensure_cursor_visible();
                 return;
             }
-            // Wrap around
             let wrap = active[row]
                 .iter()
                 .take(cursor_col)
@@ -700,10 +640,8 @@ impl ScreenState {
         }
     }
 
-    /// Cycle the cursor between System and Messages sections. On entry,
-    /// land on the leftmost non-empty cell of the new section on the
-    /// current row (or row 0 if the current row has no content there).
-    /// If the target section is empty entirely, stays in the current section.
+    /// Lands on the leftmost non-empty cell of the new section on the current
+    /// row (or the first row with content). No-op if target section is empty.
     pub fn grid_cycle_section(&mut self) {
         if let Some(ref mut g) = self.thread_view {
             let target = match g.cursor_section {
@@ -718,11 +656,9 @@ impl ScreenState {
                 .iter()
                 .all(|row| row.iter().all(|c| matches!(c, CellKind::Empty)))
             {
-                // Target section is entirely empty — stay where we were.
                 g.cursor_section = prev_section;
                 return;
             }
-            // Try current row first, then row 0, then the first row with content.
             let row = g.cursor_row;
             let landing = g.first_non_empty().or_else(|| {
                 g.active_grid()
@@ -736,7 +672,7 @@ impl ScreenState {
             if let Some(col) = landing {
                 g.cursor_col = col;
             } else {
-                // Shouldn't happen given the empty-check above, but stay safe.
+                // Shouldn't happen given the empty-check above.
                 g.cursor_section = prev_section;
                 g.cursor_row = row;
             }

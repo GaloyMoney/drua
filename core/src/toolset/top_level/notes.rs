@@ -14,10 +14,6 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for};
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 fn default_search_limit() -> usize {
     10
 }
@@ -75,29 +71,20 @@ impl NotesParams {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output shapes (schemars-derived, also used for serialization)
-// ---------------------------------------------------------------------------
-
-/// Union output for all notes subcommands.  Only `command` is required;
-/// the other fields are populated per subcommand.
+/// Union output for all notes subcommands; fields are populated per subcommand.
 #[derive(Default, serde::Serialize, schemars::JsonSchema)]
 struct NotesOutput {
-    /// The command that was executed.
     command: String,
-    /// Note UUID.
     #[serde(skip_serializing_if = "Option::is_none")]
     note_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
-    /// Full note content (get) or confirmation text.
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pinned: Option<bool>,
-    /// Search/list results.
     #[serde(skip_serializing_if = "Option::is_none")]
     results: Option<Vec<NoteResultOutput>>,
 }
@@ -156,10 +143,6 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 async fn resolve_workspace_name(
     workspaces: &Workspaces,
     subject: &AuthSubject,
@@ -171,10 +154,6 @@ async fn resolve_workspace_name(
         .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
     Ok(ws.name)
 }
-
-// ---------------------------------------------------------------------------
-// NotesTool
-// ---------------------------------------------------------------------------
 
 pub struct NotesTool {
     notes: Arc<Notes>,

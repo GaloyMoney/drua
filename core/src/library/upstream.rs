@@ -8,8 +8,8 @@ use crate::github_app::GitHubAppTokenProvider;
 use super::file::GitFileHash;
 use super::LibraryError;
 
-/// Build a `git` command that never prompts for credentials.
-/// When a token is provided, injects it via a one-shot credential helper.
+/// Builds a `git` command that never prompts; injects a one-shot credential
+/// helper when a token is provided.
 fn git_cmd(token: Option<&str>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
@@ -38,8 +38,7 @@ impl Upstream {
     ) -> Result<Self, LibraryError> {
         if let Some(url) = repo_url {
             if !repo_path.join(".git").exists() {
-                // Clean up any leftover files from a previous failed clone
-                // so `git clone` doesn't fail with "directory not empty".
+                // Avoid `git clone` failing with "directory not empty".
                 if repo_path.exists() {
                     if let Err(e) = tokio::fs::remove_dir_all(&repo_path).await {
                         tracing::warn!(error = %e, "failed to clean stale library dir");
@@ -57,7 +56,6 @@ impl Upstream {
         })
     }
 
-    /// Generate a fresh GitHub App installation token, or `None` if no app is configured.
     async fn fresh_token(github_app: &Option<Arc<GitHubAppTokenProvider>>) -> Option<String> {
         match github_app.as_ref() {
             Some(provider) => match provider.generate_token().await {
@@ -81,9 +79,8 @@ impl Upstream {
         Ok(())
     }
 
-    /// Compute the git blob SHA-1 of the file on disk, or `None` if the file
-    /// doesn't exist.  Uses the same `blob <len>\0<content>` format as
-    /// `git hash-object`, matching [`RuntimeFile::file_hash`].
+    /// Same `blob <len>\0<content>` format as `git hash-object`, matching
+    /// [`super::file::RuntimeFile::file_hash`].
     pub async fn file_hash_on_disk(&self, relative_path: &str) -> Option<GitFileHash> {
         let full_path = self.repo_path.join(relative_path);
         let content = tokio::fs::read(&full_path).await.ok()?;
@@ -123,8 +120,7 @@ impl Upstream {
         Ok(())
     }
 
-    /// Stage multiple paths and commit. Handles both new files and deletions
-    /// (a deleted file that is staged records the removal).
+    /// Handles both new files and deletions (staged deletes record the removal).
     pub async fn commit_paths(&self, paths: &[&str], message: &str) -> Result<(), LibraryError> {
         self.require_git_repo()?;
 
@@ -161,7 +157,7 @@ impl Upstream {
             .map_err(|e| LibraryError::Git(format!("git commit: {e}")))?;
         if !commit.status.success() {
             let stderr = String::from_utf8_lossy(&commit.stderr);
-            // Allow "nothing to commit" — the file may already match.
+            // "nothing to commit" is fine — file already matches.
             if !stderr.contains("nothing to commit") {
                 return Err(LibraryError::Git(format!("git commit failed: {stderr}")));
             }
@@ -170,10 +166,8 @@ impl Upstream {
         Ok(())
     }
 
-    /// Discard any uncommitted changes left over from a previously failed
-    /// job. Safe because all git operations are serialized on the
-    /// `library-lock` queue — any dirty state is an incomplete write, not
-    /// in-progress work.
+    /// Safe because all git ops are serialized on the `library-lock` queue —
+    /// any dirty state is an incomplete write, not in-progress work.
     pub async fn reset_dirty_state(&self) -> Result<(), LibraryError> {
         self.require_git_repo()?;
 
@@ -206,7 +200,7 @@ impl Upstream {
             )));
         }
 
-        // Also remove untracked files (e.g. newly written but never staged).
+        // Also remove untracked files (newly written but never staged).
         let clean = tokio::process::Command::new("git")
             .args(["clean", "-fd"])
             .current_dir(&self.repo_path)
@@ -235,7 +229,7 @@ impl Upstream {
             .map_err(|e| LibraryError::Git(format!("git pull: {e}")))?;
         if !pull.status.success() {
             let stderr = String::from_utf8_lossy(&pull.stderr);
-            // Empty remote (no commits yet) — nothing to pull, not an error.
+            // Empty remote — nothing to pull.
             if stderr.contains("no such ref was fetched") {
                 tracing::debug!("pull skipped: remote has no commits yet");
                 return Ok(());
@@ -294,7 +288,6 @@ impl Upstream {
         Ok(())
     }
 
-    /// Return the HEAD commit hash, or `None` if the repo has no commits.
     pub async fn head_commit_hash(&self) -> Result<Option<String>, LibraryError> {
         self.require_git_repo()?;
 
@@ -306,7 +299,7 @@ impl Upstream {
             .map_err(|e| LibraryError::Git(format!("git rev-parse HEAD: {e}")))?;
 
         if !output.status.success() {
-            // No commits yet — HEAD doesn't exist.
+            // No HEAD — repo has no commits.
             return Ok(None);
         }
 
@@ -317,13 +310,8 @@ impl Upstream {
         Ok(Some(hash))
     }
 
-    /// Find skill files that changed since `last_commit`.
-    ///
-    /// Returns `(relative_path, content)` tuples for each changed `.md` file
-    /// under the skill directories.
-    ///
-    /// When `last_commit` is `None` (first sync), lists all tracked skill
-    /// files at HEAD.
+    /// Returns `(relative_path, content)` tuples for changed `.md` files.
+    /// `last_commit = None` lists all tracked skill files at HEAD.
     pub async fn changed_skill_files(
         &self,
         last_commit: Option<&str>,
@@ -358,7 +346,6 @@ impl Upstream {
                     .collect::<Vec<_>>()
             }
             None => {
-                // First run: list all tracked skill files.
                 let output = tokio::process::Command::new("git")
                     .args([
                         "ls-files",
@@ -390,7 +377,6 @@ impl Upstream {
             match tokio::fs::read_to_string(&full_path).await {
                 Ok(content) => results.push((path, content)),
                 Err(e) => {
-                    // File may have been deleted in a later commit.
                     tracing::debug!(path = %path, error = %e, "skipping unreadable skill file");
                 }
             }
@@ -398,9 +384,7 @@ impl Upstream {
         Ok(results)
     }
 
-    /// Remove an entire directory from the working tree, stage the
-    /// removal with `git rm -r`, and commit. No-op when the directory
-    /// doesn't exist.
+    /// `git rm -r` the directory and commit. No-op if it doesn't exist.
     pub async fn remove_dir_and_commit(
         &self,
         relative_dir: &str,

@@ -23,26 +23,14 @@ use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
 use super::{parse_params, schema_for};
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ComposeParams {
-    /// JavaScript code to execute. Has access to a `tools` namespace for
-    /// calling upstream MCP tools. Use `return` for the final value.
-    /// Top-level `await` is supported.
     script: String,
 
-    /// Optional execution timeout in milliseconds. Defaults to 120 000 (2 min),
-    /// max 300 000 (5 min). Covers the entire script including all tool calls.
     #[serde(default, deserialize_with = "liberal::deserialize_option_i64")]
     timeout_ms: Option<i64>,
 }
 
-/// A `TopLevelTool` that evaluates JavaScript with access to upstream MCP
-/// tools via a `tools.*` proxy. Each inner tool call goes through the same
-/// dispatch path as `call_tool`, preserving audit and visibility filtering.
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
@@ -65,19 +53,11 @@ impl ComposeTool {
 
 static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ComposeParams>);
 
-// ---------------------------------------------------------------------------
-// Output shape (schemars-derived, also used for serialization)
-// ---------------------------------------------------------------------------
-
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
-    /// The value returned by the script.
     result: serde_json::Value,
-    /// Console output captured during execution.
     console: Vec<String>,
-    /// Number of tool calls made.
     tool_calls: usize,
-    /// Execution time in milliseconds.
     execution_time_ms: u64,
 }
 
@@ -133,15 +113,13 @@ impl TopLevelTool for ComposeTool {
 
         Audit::record_action("compose".to_string());
 
-        // Generate TypeScript declarations from the visible catalog + top-level tools
         let dts = {
             let sets = self.sets.read().expect("toolset lock poisoned");
             let top = self.top_level.read().expect("top_level lock poisoned");
             generate_dts(subject, &sets, &top)
         };
 
-        // Prepend type declarations as a JS block comment so the script
-        // context is self-documenting (helpful for error diagnostics).
+        // Prepend type declarations as a JS block comment for error diagnostics.
         let script = if dts.is_empty() {
             params.script
         } else {
@@ -166,15 +144,12 @@ impl TopLevelTool for ComposeTool {
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
-        // Format the output
         let mut sections = Vec::new();
 
-        // Main result
         let value_str =
             serde_json::to_string_pretty(&result.value).unwrap_or_else(|_| "null".to_string());
         sections.push(format!("=== Result ===\n{value_str}"));
 
-        // Console output (if any)
         if !result.console_output.is_empty() {
             sections.push(format!(
                 "=== Console ===\n{}",
@@ -182,12 +157,10 @@ impl TopLevelTool for ComposeTool {
             ));
         }
 
-        // Available namespaces summary
         if !dts.is_empty() {
             sections.push(format!("=== Available Types ===\n{dts}"));
         }
 
-        // Metadata
         sections.push(format!(
             "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}",
             result.tool_calls_made, result.execution_time
@@ -207,8 +180,6 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
-// ─── Catalog Dispatcher ──────────────────────────────────────────────────────
-
 /// Bridges the JS engine's [`js_engine::ToolDispatcher`] trait to both the
 /// catalog (SearchableToolSet) dispatch path and the top-level tool registry,
 /// preserving visibility filtering, audit logging, and output filtering.
@@ -225,7 +196,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        // First: try catalog sets (prefixed names like "honeycomb_list_environments")
+        // Try catalog sets first (prefixed names like "honeycomb_list_environments").
         if let Ok((set, tool_name, default_filter)) = self.find_set(name) {
             Audit::record_action(format!("compose > catalog: {name}"));
 
@@ -256,15 +227,12 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
             };
         }
 
-        // Fall back: top-level tool (e.g. "bash", "read", "glob")
         self.call_top_level(name, args).await
     }
 }
 
 impl CatalogDispatcher {
-    /// Locate the `SearchableToolSet` backing `prefixed_name`, filtered by
-    /// the subject's visibility. Returns the toolset, inner tool name, and
-    /// default output filter. Same logic as `CallCatalogTool::find_set()`.
+    /// Same logic as `CallCatalogTool::find_set()`.
     #[allow(clippy::type_complexity)]
     fn find_set(
         &self,
@@ -289,8 +257,6 @@ impl CatalogDispatcher {
         Err(ToolSetsError::ToolNotFound(prefixed_name.to_string()))
     }
 
-    /// Dispatch to a top-level tool by exact name. Respects visibility and
-    /// each tool's [`TopLevelTool::composable`] flag.
     async fn call_top_level(
         &self,
         name: &str,
@@ -317,7 +283,6 @@ impl CatalogDispatcher {
             .await
             .map_err(|e| with_hint(name, e.to_string()))?;
 
-        // Prefer structured_content (typed JSON) over text parsing
         if let Some(structured) = &result.structured_content {
             return Ok(structured.clone());
         }
@@ -330,7 +295,6 @@ impl CatalogDispatcher {
     }
 }
 
-/// Extract all text content from a [`CallToolResult`] into a single string.
 fn extract_text(result: &CallToolResult) -> String {
     result
         .content
@@ -342,8 +306,6 @@ fn extract_text(result: &CallToolResult) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-
-// ─── TypeScript Declaration Generation ───────────────────────────────────────
 
 /// Generate TypeScript declarations from the visible catalog entries and
 /// top-level tools, grouped by server prefix. Output looks like:
@@ -365,7 +327,6 @@ pub(crate) fn generate_dts(
     sets: &[Arc<dyn SearchableToolSet>],
     top_level: &HashMap<String, Arc<dyn TopLevelTool>>,
 ) -> String {
-    // Top-level tools (flat, no namespace prefix)
     let mut top_fns: Vec<(String, String, String)> = Vec::new();
     for (name, tool) in top_level.iter() {
         if !tool.composable() || !tool.is_visible(subject) {
@@ -380,7 +341,6 @@ pub(crate) fn generate_dts(
     }
     top_fns.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Catalog tools grouped by server prefix: (tool_name, params_ts, return_ts)
     let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     for set in sets.iter() {
         if !set.is_visible(subject) {
@@ -411,14 +371,12 @@ pub(crate) fn generate_dts(
 
     let mut lines = vec!["declare namespace tools {".to_string()];
 
-    // Top-level functions first
     for (name, params, ret) in &top_fns {
         lines.push(format!(
             "  function {name}(args: {{ {params} }}): Promise<{ret}>;"
         ));
     }
 
-    // Then namespace-grouped catalog tools
     for (ns, tools) in &namespaces {
         lines.push(format!("  namespace {ns} {{"));
         for (name, params, ret) in tools {
@@ -455,9 +413,6 @@ mod tests {
         assert!(out.contains("concourse_*"));
     }
 
-    /// Catalog tools sometimes return arrays of objects (e.g. concourse
-    /// `list_builds`). The new generator handles `type: array` with object
-    /// items by recursing into `items`.
     #[test]
     fn output_schema_array_of_objects() {
         let schema = serde_json::json!({
@@ -497,10 +452,6 @@ mod tests {
         assert!(ts.contains("logs: string"), "{ts}");
     }
 
-    /// Integration test: a realistic schemars-derived schema (with `Option`,
-    /// `Vec`, `HashMap`, and a string enum) is rendered into a TS type that
-    /// captures the nullable union, enum literals, array, and Record shape
-    /// — none of which the previous `output_schema_to_ts` could handle.
     #[test]
     fn end_to_end_schemars_to_ts() {
         use std::collections::HashMap;
@@ -527,16 +478,12 @@ mod tests {
         let ts = json_schema_ts::schema_to_ts(&schema);
 
         assert!(ts.contains("id: string"), "{ts}");
-        // Option<String> → string | null (or null | string).
         assert!(
             ts.contains("string | null") || ts.contains("null | string"),
             "{ts}"
         );
-        // Vec<String> → string[].
         assert!(ts.contains("tags: string[]"), "{ts}");
-        // HashMap<String, u32> → Record<string, number>.
         assert!(ts.contains("Record<string, number>"), "{ts}");
-        // Enum variants render as a union of string literals.
         assert!(ts.contains("\"pending\""), "{ts}");
         assert!(ts.contains("\"done\""), "{ts}");
     }

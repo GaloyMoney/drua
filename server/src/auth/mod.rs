@@ -28,7 +28,6 @@ use domain::primitives::UserId;
 use crate::templates::{CliLoginTemplate, CliTokenTemplate};
 use crate::AppState;
 
-/// Build the router for GitHub OAuth and dev-login endpoints.
 pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route("/auth/github", get(oauth::github_redirect))
@@ -38,7 +37,7 @@ pub fn auth_router() -> Router<AppState> {
         .route("/auth/cli-login", get(cli_login))
 }
 
-/// Axum middleware that resolves [`AuthSubject`] and inserts it into request extensions.
+/// Resolves [`AuthSubject`] and inserts it into request extensions.
 ///
 /// Extracts headers and session synchronously from the request, then performs
 /// async lookups, to avoid holding `&Request` across `.await` boundaries.
@@ -54,7 +53,6 @@ pub async fn auth_middleware(mut request: Request, next: Next) -> Response {
 }
 
 fn extract_bearer_token(request: &Request) -> Option<String> {
-    // 1. Check Authorization: Bearer header
     if let Some(header_value) = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -65,8 +63,7 @@ fn extract_bearer_token(request: &Request) -> Option<String> {
         }
     }
 
-    // 2. Fallback: check ?token= query parameter (for MCP clients that
-    //    don't support custom headers in server config)
+    // Fallback for MCP clients that can't set custom headers.
     request.uri().query().and_then(|q| {
         q.split('&')
             .find_map(|pair| pair.strip_prefix("token="))
@@ -88,11 +85,10 @@ async fn resolve_auth_context(
         None => return AuthSubject::Anonymous,
     };
 
-    // 1. Check Authorization: Bearer header
     if let Some(raw_token) = bearer_token {
-        // 1a. Session-ID resolution (CLI tokens created by /auth/cli-login).
-        //     Session IDs are 22-char base64url; MCP tokens are 43-char — the
-        //     parse naturally rejects non-session tokens with zero ambiguity.
+        // Session-ID resolution (CLI tokens from /auth/cli-login).
+        // Session IDs are 22-char base64url; MCP tokens are 43-char — the parse
+        // naturally rejects non-session tokens with zero ambiguity.
         if let Ok(session_id) = raw_token.parse::<Id>() {
             if let Ok(Some(record)) = state.session_store.load(&session_id).await {
                 if let Some(user_id) = record
@@ -105,7 +101,7 @@ async fn resolve_auth_context(
             }
         }
 
-        // 1b. Hash-based lookup (user-created MCP credentials + legacy agent tokens)
+        // Hash-based lookup: user-created MCP credentials + legacy agent tokens.
         let token_hash = hash_token(&raw_token);
         if let Ok(Some(creds)) = state.app.mcp_creds().find_by_token_hash(&token_hash).await {
             if !creds.is_revoked() {
@@ -130,16 +126,15 @@ async fn resolve_auth_context(
             }
         }
 
-        // 1c. SA token validation (sandbox pods with projected ServiceAccount tokens)
+        // SA tokens from sandbox pods (projected ServiceAccount tokens).
         if sa_token::looks_like_jwt(&raw_token) {
             if let Some(ref validator) = state.sa_token_validator {
                 if let Ok(id_str) = validator.validate(&raw_token).await {
                     let agent_id = domain::primitives::AgentId::from(
                         id_str.parse::<uuid::Uuid>().expect("validated as UUID"),
                     );
-                    // Internal lookup — use a system-level User subject to
-                    // bypass authz.  This runs during token resolution, before
-                    // the per-request AuthSubject is known.
+                    // System-level User subject bypasses authz; runs during token
+                    // resolution, before the per-request AuthSubject is known.
                     let system_sub =
                         AuthSubject::User(domain::primitives::UserId::from(uuid::Uuid::nil()));
                     if let Ok(agent) = state.app.agents().find_by_id(&system_sub, agent_id).await {
@@ -150,7 +145,6 @@ async fn resolve_auth_context(
         }
     }
 
-    // 2. Check session cookie
     if let Some(session) = session {
         if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
             return AuthSubject::User(user_id);
@@ -204,7 +198,7 @@ async fn logout(session: Session) -> axum::response::Redirect {
 
 #[instrument(name = "web.auth.cli_login", skip_all)]
 async fn cli_login(State(state): State<AppState>, session: Session) -> Result<Response, AuthError> {
-    // If user is already logged in, create a long-lived session and return its ID as the CLI token
+    // If logged in, create a long-lived session and return its ID as the CLI token.
     if let Ok(Some(user_id)) = session.get::<UserId>("user_id").await {
         let mut record = Record {
             id: Id::default(),
@@ -221,7 +215,6 @@ async fn cli_login(State(state): State<AppState>, session: Session) -> Result<Re
         return Ok(CliTokenTemplate { token }.into_response());
     }
 
-    // Not logged in — set return-to flag and show login buttons
     session.insert("cli_return_to", "/auth/cli-login").await?;
     let dev_auth = state.login == crate::auth::config::LoginMethod::Dev;
     Ok(CliLoginTemplate { dev_auth }.into_response())

@@ -9,16 +9,11 @@ use super::{estimation, event_belongs_to_thread};
 
 const MASK_PLACEHOLDER: &str = "[Tool output cleared — re-invoke tool if needed]";
 
-/// The result of analysing a session's event stream for pruning opportunities.
 #[derive(Debug, Default)]
 pub struct PruningPlan {
-    /// Tool results to mask: carries the replacement content with placeholder text.
     pub masked_tool_results: Vec<MaskedToolResult>,
-    /// Thinking block indexes to exclude from new thread's assistant views.
     pub cleared_thinking: HashSet<MessageBlockIndex>,
-    /// User message indexes (sandbox notifications) to strip from new thread's views.
     pub stripped_user_messages: HashSet<MessageBlockIndex>,
-    /// Estimated tokens saved by applying this plan.
     pub estimated_tokens_saved: u64,
 }
 
@@ -30,11 +25,8 @@ impl PruningPlan {
     }
 }
 
-/// Build a complete pruning plan by combining all three pruning operations.
-///
-/// `prompt_definition` is the current thread's prompt so we can determine
-/// which tool results are actually visible (compacted threads inherit tool
-/// results from ancestor threads whose events carry the old thread_id).
+/// `prompt_definition` resolves which tool results are actually visible —
+/// compacted threads inherit results from ancestor threads with old IDs.
 pub fn build_pruning_plan<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent> + Clone,
     thread_id: SessionThreadId,
@@ -44,9 +36,6 @@ pub fn build_pruning_plan<'a>(
 ) -> PruningPlan {
     let sandbox_tracker = SandboxTracker::from_events(events.clone(), thread_id, is_main_thread);
 
-    // Extract the set of tool result block indexes that are actually
-    // referenced in the current thread's views. This covers inherited
-    // tool results from ancestor threads (whose events carry old thread IDs).
     let visible_tool_results: HashSet<MessageBlockIndex> = prompt_definition
         .messages
         .iter()
@@ -74,25 +63,15 @@ pub fn build_pruning_plan<'a>(
     }
 }
 
-// ============================================================================
-// Tool result masking
-// ============================================================================
-
-/// Identify tool results to mask. Keeps the `keep_recent` most recent intact,
-/// masks the rest with a placeholder that preserves the tool name and sandbox
-/// context.
-///
-/// Uses `visible_tool_results` (block indexes from the thread's prompt
-/// definition) instead of event-level thread ownership — compacted threads
-/// inherit tool results from ancestor threads whose events carry old IDs.
+/// Keeps `keep_recent` most recent intact; masks rest with a placeholder
+/// (preserves tool name + sandbox context). Uses `visible_tool_results`
+/// rather than event-level ownership to handle inherited results.
 fn plan_tool_result_masking<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     keep_recent: usize,
     sandbox_tracker: &SandboxTracker,
     visible_tool_results: &HashSet<MessageBlockIndex>,
 ) -> (Vec<MaskedToolResult>, u64) {
-    // Collect all tool results whose block indexes appear in the thread's
-    // prompt definition (covers inherited results from ancestor threads).
     let mut all_results: Vec<(MessageBlockIndex, usize, &ToolResultInput)> = Vec::new();
     let mut already_masked: HashSet<MessageBlockIndex> = HashSet::new();
     let mut block_idx = 0usize;
@@ -136,12 +115,10 @@ fn plan_tool_result_masking<'a>(
     let mut tokens_saved = 0u64;
 
     for (idx, event_idx, result) in to_mask {
-        // Skip results already masked by a previous compaction
         if already_masked.contains(idx) {
             continue;
         }
 
-        // Skip results that are already tiny
         let content_len = result.content.len();
         if content_len <= MASK_PLACEHOLDER.len() + 50 {
             continue;
@@ -170,12 +147,7 @@ fn plan_tool_result_masking<'a>(
     (masked, tokens_saved)
 }
 
-// ============================================================================
-// Thinking block clearing
-// ============================================================================
-
-/// Identify assistant responses whose thinking blocks should be cleared.
-/// Keeps only the most recent assistant response's thinking blocks for this thread.
+/// Keeps only the most recent assistant response's thinking blocks.
 fn plan_thinking_clearing<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
@@ -220,7 +192,6 @@ fn plan_thinking_clearing<'a>(
         }
     }
 
-    // Keep the most recent group, clear all earlier ones
     if thinking_groups.len() <= 1 {
         return (HashSet::new(), 0);
     }
@@ -238,21 +209,15 @@ fn plan_thinking_clearing<'a>(
     (cleared, tokens_saved)
 }
 
-// ============================================================================
-// Sandbox notification stripping
-// ============================================================================
-
-/// Identify sandbox notifications to strip for the given thread.
-/// Keeps only the most recent Attach for each sandbox that is still attached.
-/// Strips all Detach notifications and superseded Attach notifications.
+/// Keeps only the most recent Attach per still-attached sandbox; strips
+/// all Detaches and superseded Attaches.
 fn plan_sandbox_stripping<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
     is_main_thread: bool,
 ) -> (HashSet<MessageBlockIndex>, u64) {
-    // Track: sandbox_name → (most_recent_attach_block_idx, is_attached)
+    // sandbox_name → (most_recent_attach_block_idx, is_attached)
     let mut sandbox_state: HashMap<String, (MessageBlockIndex, bool)> = HashMap::new();
-    // All sandbox notification block indexes seen (for this thread), in order
     let mut all_sandbox_indexes: Vec<(MessageBlockIndex, String, bool)> = Vec::new();
     let mut block_idx = 0usize;
 
@@ -295,7 +260,6 @@ fn plan_sandbox_stripping<'a>(
         }
     }
 
-    // Keep: the most recent Attach for each currently-attached sandbox
     let keep: HashSet<MessageBlockIndex> = sandbox_state
         .values()
         .filter(|(_, attached)| *attached)
@@ -308,20 +272,14 @@ fn plan_sandbox_stripping<'a>(
     for (idx, _name, _is_attach) in &all_sandbox_indexes {
         if !keep.contains(idx) {
             stripped.insert(*idx);
-            // Sandbox notifications are ~100-200 chars
-            tokens_saved += 40;
+            tokens_saved += 40; // sandbox notifications are ~100-200 chars
         }
     }
 
     (stripped, tokens_saved)
 }
 
-// ============================================================================
-// SandboxTracker
-// ============================================================================
-
-/// Tracks which sandbox was active at each event index in the session
-/// (filtered to events belonging to the specified thread).
+/// Active sandbox at each event index (filtered to thread's events).
 pub struct SandboxTracker {
     active_at_event: Vec<Option<String>>,
 }
@@ -361,7 +319,6 @@ impl SandboxTracker {
         Self { active_at_event }
     }
 
-    /// Which sandbox (if any) was active at event index `i`.
     pub fn sandbox_at(&self, i: usize) -> Option<&str> {
         self.active_at_event.get(i)?.as_deref()
     }
@@ -399,7 +356,6 @@ mod tests {
         }
     }
 
-    /// Build a minimal PromptDefinition with ToolResults views for the given indexes.
     fn prompt_with_tool_results(indexes: &[usize]) -> PromptDefinition {
         let messages = if indexes.is_empty() {
             vec![]
@@ -473,7 +429,6 @@ mod tests {
         ];
 
         let (cleared, _) = plan_thinking_clearing(events.iter(), thread_id, true);
-        // First thinking (index 0) should be cleared, second (index 2) kept
         assert!(cleared.contains(&MessageBlockIndex::new(0)));
         assert!(!cleared.contains(&MessageBlockIndex::new(2)));
         assert_eq!(cleared.len(), 1);
@@ -487,10 +442,8 @@ mod tests {
     fn masking_skips_already_masked_tool_results() {
         let thread_id = SessionThreadId::new();
 
-        // Three tool results on this thread, keep_recent=1 → oldest 2 eligible for masking.
-        // A prior ToolResultsMasked already covers index 0 → only index 1 should be masked.
+        // 3 results, keep_recent=1; prior mask covers idx 0 → only idx 1 should mask.
         let events = [
-            // Tool result at block index 0
             AgentSessionEvent::ToolResultsAdded {
                 thread_id,
                 results: vec![ToolResultInput {
@@ -499,7 +452,6 @@ mod tests {
                     is_error: false,
                 }],
             },
-            // Tool result at block index 1
             AgentSessionEvent::ToolResultsAdded {
                 thread_id,
                 results: vec![ToolResultInput {
@@ -508,7 +460,6 @@ mod tests {
                     is_error: false,
                 }],
             },
-            // Prior compaction already masked index 0
             AgentSessionEvent::ToolResultsMasked {
                 results: vec![MaskedToolResult {
                     original_index: MessageBlockIndex::new(0),
@@ -519,7 +470,6 @@ mod tests {
                     },
                 }],
             },
-            // Tool result at block index 3 (after the masked block at index 2)
             AgentSessionEvent::ToolResultsAdded {
                 thread_id,
                 results: vec![ToolResultInput {
@@ -530,12 +480,9 @@ mod tests {
             },
         ];
 
-        // After prior compaction, the thread's views reference replacement index 2
-        // (for original 0) plus originals 1 and 3.
         let prompt = prompt_with_tool_results(&[2, 1, 3]);
         let plan = build_pruning_plan(events.iter(), thread_id, true, &make_config(1), &prompt);
 
-        // Only index 1 should be masked (index 0 already masked, index 3 is kept as recent)
         assert_eq!(plan.masked_tool_results.len(), 1);
         assert_eq!(
             plan.masked_tool_results[0].original_index,

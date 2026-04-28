@@ -7,28 +7,19 @@ const MAX_PATTERN_LENGTH: usize = 1000;
 const DEFAULT_TAIL: usize = 1000;
 
 /// Post-processing filter applied to tool output to reduce token usage.
-///
-/// Processing order: grep -> head -> tail.
-/// When no filter is provided by the caller, [`OutputFilter::global_default`]
-/// is used to cap output at [`DEFAULT_TAIL`] lines.
+/// Processing order: grep -> head -> tail. Defaults to [`global_default`].
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OutputFilter {
-    /// Regex pattern to filter output lines (only matching lines returned).
     pub grep: Option<String>,
-    /// Exclude matching lines instead of including them (grep -v).
     #[serde(default)]
     pub invert_match: Option<bool>,
-    /// Lines of context around grep matches (grep -C).
     pub context_lines: Option<usize>,
-    /// Return only the first N lines.
     pub head: Option<usize>,
-    /// Return only the last N lines.
     pub tail: Option<usize>,
 }
 
 impl OutputFilter {
-    /// A sensible default filter applied when the caller does not provide one.
-    /// Caps output at [`DEFAULT_TAIL`] lines to prevent token blowups.
+    /// Caps output at [`DEFAULT_TAIL`] lines.
     pub fn global_default() -> Self {
         Self {
             tail: Some(DEFAULT_TAIL),
@@ -36,7 +27,6 @@ impl OutputFilter {
         }
     }
 
-    /// Format the active filter fields as human-readable text for `describe_tool`.
     pub fn describe(&self) -> String {
         let mut parts = Vec::new();
         if let Some(ref grep) = self.grep {
@@ -61,8 +51,7 @@ impl OutputFilter {
         }
     }
 
-    /// Apply the filter to a [`CallToolResult`], returning a new result with
-    /// filtered text content. Non-text content blocks are dropped.
+    /// Non-text content blocks are dropped.
     pub fn apply(&self, result: CallToolResult) -> Result<CallToolResult, ToolSetsError> {
         if self.grep.is_none() && self.head.is_none() && self.tail.is_none() {
             return Ok(result);
@@ -71,7 +60,6 @@ impl OutputFilter {
         let text = extract_text(&result);
         let lines: Vec<&str> = text.lines().collect();
 
-        // 1. grep
         let filtered = if let Some(pattern) = &self.grep {
             if pattern.len() > MAX_PATTERN_LENGTH {
                 return Err(ToolSetsError::InvalidArgument(format!(
@@ -87,14 +75,12 @@ impl OutputFilter {
             lines
         };
 
-        // 2. head
         let filtered = if let Some(n) = self.head {
             filtered.into_iter().take(n).collect()
         } else {
             filtered
         };
 
-        // 3. tail
         let filtered: Vec<&str> = if let Some(n) = self.tail {
             let len = filtered.len();
             if len > n {
@@ -114,7 +100,6 @@ impl OutputFilter {
     }
 }
 
-/// Extract all text content from a [`CallToolResult`] into a single string.
 fn extract_text(result: &CallToolResult) -> String {
     result
         .content
@@ -127,11 +112,8 @@ fn extract_text(result: &CallToolResult) -> String {
         .join("\n")
 }
 
-/// Filter lines by regex pattern with optional context lines.
-///
-/// When `invert` is false, returns lines that match the pattern (grep).
-/// When `invert` is true, returns lines that do NOT match (grep -v).
-/// When `context` is Some(n), includes n lines before/after each match (grep -C).
+/// `invert=false` keeps matches (grep); `invert=true` drops them (grep -v).
+/// `context=Some(n)` includes n lines before/after each match (grep -C).
 pub(crate) fn filter_lines<'a>(
     lines: &[&'a str],
     re: &regex::Regex,
@@ -278,7 +260,6 @@ mod tests {
         let result = text_result("a\nb\nc\nd\ne");
         let filtered = filter.apply(result).unwrap();
         let text = extract_text(&filtered);
-        // head(3) → a,b,c then tail(2) → b,c
         assert_eq!(text, "b\nc");
     }
 
@@ -328,8 +309,6 @@ mod tests {
         assert_eq!(filtered.is_error, Some(true));
     }
 
-    // ── filter_lines unit tests ─────────────────────────────────────
-
     #[test]
     fn filter_lines_basic_match() {
         let re = regex::Regex::new("err").unwrap();
@@ -365,7 +344,6 @@ mod tests {
         let filtered = filter.apply(result).unwrap();
         let text = extract_text(&filtered);
         assert_eq!(text.lines().count(), DEFAULT_TAIL);
-        // Should keep the last DEFAULT_TAIL lines
         assert!(text.starts_with(&format!("line {}", 1500 - DEFAULT_TAIL)));
     }
 
@@ -374,7 +352,6 @@ mod tests {
         let re = regex::Regex::new("M").unwrap();
         let lines = vec!["a", "M", "b", "M", "c"];
         let out = filter_lines(&lines, &re, false, Some(1));
-        // contexts overlap → no separator
         assert_eq!(out, vec!["a", "M", "b", "M", "c"]);
     }
 }

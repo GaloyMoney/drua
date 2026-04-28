@@ -31,10 +31,8 @@ impl NoteRepo {
         }
     }
 
-    /// Bulk soft-delete all notes belonging to a workspace. No event is
-    /// generated because the repo uses `soft_without_queries`, making a
-    /// column update equivalent to iterating each entity through
-    /// `delete_in_op`.
+    /// `soft_without_queries` makes this column update equivalent to
+    /// iterating each entity through `delete_in_op`; no events generated.
     pub async fn cascade_delete_for_workspace_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -47,8 +45,7 @@ impl NoteRepo {
         Ok(())
     }
 
-    /// Post-persist hook: sync note content to the git-backed library.
-    /// Only fires on content changes (Initialized/Updated); skips pin/unpin.
+    /// Fires only on content changes (Initialized/Updated); skips pin/unpin.
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,

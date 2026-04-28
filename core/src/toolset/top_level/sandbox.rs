@@ -21,20 +21,12 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::parse_params;
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SandboxCommand {
-    /// Create a new sandbox.
     Create,
-    /// List all sandboxes in the workspace.
     List,
-    /// Get sandbox details by ID.
     Get,
-    /// Run a read-only tool (grep, glob, read, ls) against a sandbox.
     Inspect,
 }
 
@@ -52,62 +44,38 @@ impl SandboxCommand {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SandboxCreateMode {
-    /// Empty workspace.
     Scratch,
-    /// Clone a repository.
     Repo,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum InspectTool {
-    /// Search file contents.
     Grep,
-    /// Find files by pattern.
     Glob,
-    /// Read file contents.
     Read,
-    /// List directory entries.
     Ls,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WorkspaceSandboxParams {
-    /// Which sandbox operation to perform.
     command: SandboxCommand,
 
-    // -- create fields --
-    /// Display name for the new sandbox (required for `create`).
     name: Option<String>,
-    /// Sandbox mode: 'scratch' for empty workspace, 'repo' to clone a repository (required for `create`).
     mode: Option<SandboxCreateMode>,
-    /// Repository URL to clone (required when mode is 'repo').
     repo_url: Option<String>,
-    /// Git branch to check out after cloning (optional, defaults to the repo's default branch).
     branch: Option<String>,
-    /// CPU resource spec (e.g. '500m'). Defaults to '500m'.
     cpu: Option<String>,
-    /// Memory resource spec (e.g. '512Mi'). Defaults to '512Mi'.
     memory: Option<String>,
-    /// Disk size spec (e.g. '10Gi'). Defaults to '10Gi'.
     disk_size: Option<String>,
 
-    // -- get / inspect fields --
-    /// ID of the sandbox (required for `get` and `inspect`).
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
 
-    // -- inspect fields --
-    /// Read-only tool to run against the sandbox (required for `inspect`): grep, glob, read, ls.
     tool: Option<InspectTool>,
-    /// Tool-specific arguments for `inspect`. grep: {pattern, path?, glob?, output_mode?, ...}. glob: {pattern, path?}. read: {path, offset?, limit?}. ls: {path, ignore?}.
     #[serde(default)]
     tool_args: Option<JsonObject>,
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 pub struct WorkspaceSandbox {
     sandboxes: Arc<Sandboxes>,
@@ -129,8 +97,7 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        // Note: `definitions` intentionally retained for $ref resolution
-        // by the compose TS generator.
+        // `definitions` retained for $ref resolution by the compose TS generator.
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),
@@ -276,10 +243,6 @@ impl TopLevelTool for WorkspaceSandbox {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inspect helpers
-// ---------------------------------------------------------------------------
-
 async fn execute_inspect(
     sub: &AuthSubject,
     sandboxes: &Sandboxes,
@@ -289,7 +252,7 @@ async fn execute_inspect(
 ) -> Result<CallToolResult, ToolSetsError> {
     let is_ls = matches!(tool, InspectTool::Ls);
 
-    // Extract LS ignore list before the match moves tool_args.
+    // Extract LS ignore list before tool_args is moved.
     let ls_ignore: Vec<String> = if is_ls {
         tool_args
             .get("ignore")
@@ -326,7 +289,6 @@ async fn execute_inspect(
         Ok(resp) => {
             let mut output = resp.output;
 
-            // LS: apply client-side ignore filter
             if is_ls && !ls_ignore.is_empty() {
                 output = output
                     .lines()
@@ -351,7 +313,6 @@ async fn execute_inspect(
     }
 }
 
-/// Translate `{path, offset?, limit?}` into the text editor's `view` command.
 fn build_read_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError> {
     let path = args
         .get("path")
@@ -385,7 +346,6 @@ fn build_read_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError
     })
 }
 
-/// Translate `{path, ignore?}` into the text editor's `view` command on a directory.
 fn build_ls_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError> {
     let path = args
         .get("path")
@@ -400,10 +360,6 @@ fn build_ls_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError> 
         }),
     })
 }
-
-// ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
 
 fn format_sandbox(s: &Sandbox) -> String {
     let agents: Vec<String> = s

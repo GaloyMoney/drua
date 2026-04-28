@@ -9,7 +9,6 @@ pub enum TargetThread {
     Id(SessionThreadId),
 }
 
-/// Metadata attached to a prompt built from a compacted thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionMetadata {
     pub follows_from: SessionThreadId,
@@ -35,33 +34,20 @@ pub struct Prompt {
     pub compaction: Option<CompactionMetadata>,
 }
 
-/// The semantic role of a system prompt block. Each kind appears at most
-/// once in a thread's view; updates are matched by kind so callers don't
-/// need to know positional indexes.
+/// Each kind appears at most once per thread; updates match by kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemBlockKind {
-    /// Identity line: "You are an AI agent in workspace X."
     Base,
-    /// Tools description: top-level tools, MCP gateway, etc.
     Tools,
-    /// Behavioral guidelines: investigate-before-answering, parallel calls.
     Behavioral,
-    /// Role-specific instructions (WorkspaceLead vs Agent).
     Role,
-    /// Pinned workspace notes (changes when notes are pinned/edited).
     Notes,
-    /// Available skills listing (changes when skills are imported).
     Skills,
 }
 
 impl SystemBlockKind {
-    /// Canonical ordering of system blocks in a prompt. Matches the order
-    /// produced by `system_prompt::system_blocks_for_role` followed by
-    /// notes/skills injection in `Agents::send_message`. Used by the
-    /// session entity to build refreshed views — the entity can't ask the
-    /// agent module what order it wants, so the order lives here as the
-    /// shared contract.
+    /// Canonical order shared between `system_prompt` and the session entity.
     pub const ORDER: &'static [SystemBlockKind] = &[
         SystemBlockKind::Base,
         SystemBlockKind::Tools,
@@ -181,10 +167,6 @@ pub enum StopReason {
     Error,
 }
 
-// ============================================================================
-// Conversions: message types → llm types
-// ============================================================================
-
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
         llm::Prompt {
@@ -209,9 +191,7 @@ impl From<Prompt> for llm::Prompt {
 
 impl From<SystemBlock> for llm::prompt::SystemBlock {
     fn from(b: SystemBlock) -> Self {
-        // All kinds map to the wire-format `Text` block — the kind is a
-        // domain-level distinction used for replacement-by-kind semantics
-        // and is not visible to the LLM API.
+        // Kind is domain-level only; wire format is always `Text`.
         let text = match b {
             SystemBlock::Base { text }
             | SystemBlock::Tools { text }
@@ -312,10 +292,6 @@ impl From<AssistantBlock> for llm::prompt::AssistantBlock {
     }
 }
 
-// ============================================================================
-// Conversions: llm types → message types
-// ============================================================================
-
 impl From<llm::prompt::AssistantBlock> for AssistantBlock {
     fn from(b: llm::prompt::AssistantBlock) -> Self {
         match b {
@@ -361,15 +337,9 @@ impl From<llm::prompt::Tool> for ToolDefinition {
     }
 }
 
-// Note: there is intentionally no `From<llm::prompt::SystemBlock> for SystemBlock`
-// — wire-format blocks carry no `kind`, so they can't be mapped back to a
-// typed domain block without additional context.
+// No `From<llm::prompt::SystemBlock> for SystemBlock`: wire blocks carry
+// no `kind`.
 
-// ============================================================================
-// Sandbox notification helpers
-// ============================================================================
-
-/// What happened to a sandbox from the agent's perspective.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxOperation {
@@ -377,9 +347,7 @@ pub enum SandboxOperation {
     Detach,
 }
 
-/// Build the XML text injected into the agent's session when a sandbox is
-/// attached or detached. Matches the `<sandbox>` tag format described in the
-/// agent system prompt.
+/// XML matches the `<sandbox>` tag format described in the agent system prompt.
 pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> String {
     match op {
         SandboxOperation::Attach { mode, mount_path } => {

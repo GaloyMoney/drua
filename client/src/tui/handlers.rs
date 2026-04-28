@@ -14,7 +14,6 @@ pub enum Action {
     ExportThread { agent_id: String, path: String },
 }
 
-/// Top-level key dispatcher — routes to mode/focus-specific handlers.
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -22,14 +21,11 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Char('c') => return Action::Quit,
             KeyCode::Char('z') => return Action::Suspend,
-            // Ctrl+O — jump to lead agent chat (global, like command-center)
             KeyCode::Char('o') => {
                 state.select_lead_and_focus_chat();
                 return Action::None;
             }
-            // Ctrl+R — refresh workspaces
             KeyCode::Char('r') => return Action::Refresh,
-            // Ctrl+H / Ctrl+L — focus left / right
             KeyCode::Char('h') => {
                 state.focus_left();
                 return Action::None;
@@ -38,7 +34,6 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                 state.focus_right();
                 return Action::None;
             }
-            // Ctrl+T — toggle thread explorer
             KeyCode::Char('t') => return Action::ToggleThreads,
             _ => {}
         }
@@ -104,7 +99,6 @@ fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::Enter => {
-            // Close thread view so chat pane is visible, switch to chat for typing
             state.thread_view = None;
             state.focus = Focus::Chat;
             Action::None
@@ -147,7 +141,6 @@ fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 
 fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     match key.code {
-        // ←→ navigate positions (columns)
         KeyCode::Left | KeyCode::Char('h') => {
             state.grid_move_left();
             Action::None
@@ -156,7 +149,6 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_move_right();
             Action::None
         }
-        // ↑↓ navigate threads (rows)
         KeyCode::Up | KeyCode::Char('k') => {
             state.grid_move_up();
             Action::None
@@ -165,7 +157,6 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_move_down();
             Action::None
         }
-        // g/G — jump to start/end of positions
         KeyCode::Char('g') => {
             state.grid_jump_start();
             Action::None
@@ -174,7 +165,6 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_jump_end();
             Action::None
         }
-        // Tab — cycle section (System ↔ Messages)
         KeyCode::Tab => {
             state.grid_cycle_section();
             Action::None
@@ -184,7 +174,6 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_tab_next();
             Action::None
         }
-        // e — export thread to file
         KeyCode::Char('e') => {
             state.enter_export_mode();
             Action::None
@@ -197,10 +186,7 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     }
 }
 
-// ── Shared input editing ────────────────────────────────────────────
-
-/// Handle common text-editing key events on the chat input.
-/// Follows the same readline-style shortcuts as command-center.
+/// Readline-style shortcuts on the chat input.
 fn handle_input_editing(state: &mut ScreenState, key: &KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -284,7 +270,6 @@ fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     }
 }
 
-/// Send chat to whichever agent is currently selected in the agents panel.
 fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action {
     match state.selected_agent_id() {
         Some(agent_id) => {
