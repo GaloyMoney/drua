@@ -842,21 +842,39 @@ impl Agents {
                 let result = match next {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
-                        let _ = tx
-                            .send(ChatOutputEvent::Error {
-                                message: e.to_string(),
-                            })
+                        let msg = e.to_string();
+                        let _ = sessions
+                            .assistant_response_failed(id, current_model.clone(), msg.clone())
                             .await;
+                        let _ = tx.send(ChatOutputEvent::Error { message: msg }).await;
                         return;
                     }
-                    Err(_) => return,
+                    Err(_) => {
+                        let msg = "prompt response channel closed".to_string();
+                        let _ = sessions
+                            .assistant_response_failed(id, current_model.clone(), msg.clone())
+                            .await;
+                        let _ = tx.send(ChatOutputEvent::Error { message: msg }).await;
+                        return;
+                    }
                 };
 
                 let (response, streamed) = match result {
-                    llm::PromptResult::Stream(handle) => match consume_stream(handle, &tx).await {
-                        Some(resp) => (resp, true),
-                        None => return,
-                    },
+                    llm::PromptResult::Stream(handle) => {
+                        match consume_stream(handle, &tx).await {
+                            Ok(resp) => (resp, true),
+                            Err(msg) => {
+                                let _ = sessions
+                                    .assistant_response_failed(
+                                        id,
+                                        current_model.clone(),
+                                        msg,
+                                    )
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
                     llm::PromptResult::Complete(response) => (response, false),
                 };
 
@@ -962,11 +980,12 @@ impl Agents {
 }
 
 /// Drain a streaming LLM response, forwarding deltas and accumulating the
-/// final response. Returns `None` on stream error (already sent on `tx`).
+/// final response. Returns `Err(msg)` on stream error; the caller is
+/// responsible for forwarding the error to the UI and the session.
 async fn consume_stream(
     handle: llm::StreamHandle,
     tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
-) -> Option<llm::PromptResponse> {
+) -> Result<llm::PromptResponse, String> {
     let mut acc = llm::stream::StreamAccumulator::new();
     let mut rx = handle.rx;
     while let Some(event) = rx.recv().await {
@@ -978,16 +997,17 @@ async fn consume_stream(
                 acc.process(&delta);
             }
             Err(e) => {
+                let msg = e.to_string();
                 let _ = tx
                     .send(ChatOutputEvent::Error {
-                        message: e.to_string(),
+                        message: msg.clone(),
                     })
                     .await;
-                return None;
+                return Err(msg);
             }
         }
     }
-    Some(acc.finish())
+    Ok(acc.finish())
 }
 
 fn delta_to_chat_event(delta: &llm::stream::StreamDelta) -> Option<ChatOutputEvent> {

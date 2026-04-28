@@ -135,6 +135,48 @@ impl Sessions {
         Ok(result)
     }
 
+    /// Records a failed assistant turn. Without this the thread stays in
+    /// `AwaitingAssistantResponse` after an LLM error and every subsequent
+    /// user message bounces with "session is waiting for an assistant
+    /// response."
+    #[instrument(name = "domain.agent_session.assistant_response_failed", skip(self))]
+    pub async fn assistant_response_failed(
+        &self,
+        agent_id: AgentId,
+        model: String,
+        error_message: String,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
+        let thread_id = session
+            .current_main_thread_id()
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+
+        let metadata = AssistantResponseMetadata {
+            api: String::new(),
+            model,
+            usage: Usage {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 0,
+            },
+            cost: Cost::default(),
+        };
+
+        let result = session.assistant_response_received(
+            thread_id,
+            Vec::new(),
+            StopReason::Error,
+            Some(error_message),
+            metadata,
+        )?;
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
+        Ok(result)
+    }
+
     #[instrument(name = "domain.agent_session.add_tool_results", skip(self, results))]
     pub async fn add_tool_results(
         &self,
