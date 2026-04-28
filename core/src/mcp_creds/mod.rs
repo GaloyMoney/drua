@@ -76,7 +76,11 @@ impl McpCredentials {
         id: impl Into<McpCredsId> + std::fmt::Debug,
     ) -> Result<McpCreds, McpCredsError> {
         let id = id.into();
-        let mut creds = self.repo.find_by_id(id).await?;
+        // Load + update inside one op: otherwise a concurrent revoke
+        // could observe the same pre-state and the second update would
+        // overwrite the first's event.
+        let mut op = self.repo.begin_op().await?;
+        let mut creds = self.repo.find_by_id_in_op(&mut op, id).await?;
         sub.can(AuthVerb::Delete, AuthResource::McpCreds(Some(creds.id)))?;
 
         let is_owner =
@@ -91,8 +95,9 @@ impl McpCredentials {
         }
 
         if creds.revoke().did_execute() {
-            self.repo.update(&mut creds).await?;
+            self.repo.update_in_op(&mut op, &mut creds).await?;
         }
+        op.commit().await?;
 
         Ok(creds)
     }
@@ -104,7 +109,7 @@ impl McpCredentials {
         id: impl Into<McpCredsId> + std::fmt::Debug,
     ) -> Result<McpCreds, McpCredsError> {
         let id = id.into();
-        let mut creds = self.repo.find_by_id(id).await?;
+        let mut creds = self.repo.find_by_id_in_op(&mut *op, id).await?;
 
         if creds.revoke().did_execute() {
             self.repo.update_in_op(op, &mut creds).await?;
