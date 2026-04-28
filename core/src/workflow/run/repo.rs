@@ -25,8 +25,6 @@ impl WorkflowRunRepo {
         Self { pool: pool.clone() }
     }
 
-    /// Bulk soft-delete every workflow run belonging to a workspace.
-    /// Mirrors the cascade pattern on `WorkflowDefinitionRepo`.
     pub async fn cascade_delete_for_workspace_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,

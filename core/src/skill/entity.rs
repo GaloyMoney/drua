@@ -111,12 +111,7 @@ impl Skill {
         Idempotent::Executed(())
     }
 
-    /// User-initiated update path (MCP `skill update`). Unlike
-    /// [`Self::update`] this does NOT take a file hash — there's no
-    /// upstream file to compare against, the caller is the source of
-    /// truth. Returns `Idempotent::AlreadyApplied` only if every
-    /// supplied field already matches the entity, so the post-persist
-    /// library-sync hook can short-circuit no-op edits.
+    /// User-driven path (no file_hash compare; that's [`Self::update`]).
     pub fn update_content(
         &mut self,
         name: Option<String>,

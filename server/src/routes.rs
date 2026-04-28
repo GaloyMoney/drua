@@ -1111,13 +1111,7 @@ async fn api_agent_secrets(
     Json(body).into_response()
 }
 
-// ---------------------------------------------------------------------------
-// Workflows
-// ---------------------------------------------------------------------------
-
-/// Tiny query-value percent-encoder used for flash messages on redirect.
-/// Encodes anything outside the unreserved set (RFC 3986 §2.3) so query
-/// strings stay well-formed for `&` / `=` / `?` / spaces / non-ASCII.
+/// Percent-encode anything outside the RFC 3986 §2.3 unreserved set.
 fn encode_query_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -1227,7 +1221,6 @@ fn workflow_run_to_view(r: &domain::workflow::WorkflowRun) -> WorkflowRunView {
             }
         })
         .map(|s| {
-            // Trim long outputs for listings.
             const MAX: usize = 100;
             let oneline = s.replace('\n', " ");
             if oneline.chars().count() > MAX {
@@ -1399,14 +1392,10 @@ async fn workspace_workflow_trigger(
     };
     let sub = AuthSubject::User(user_id);
 
-    // `id` (workspace) is only used to keep the redirect URL stable —
-    // `Workflows::trigger_run` does its own auth check against the
-    // workflow's own workspace.
     let workflow_id = WorkflowDefinitionId::from(wf_id);
 
-    // Parse the payload. Empty / whitespace-only → null. Invalid JSON →
-    // bounce back with a flash message rather than 400, so the operator
-    // can correct without losing context.
+    // Bad JSON bounces back with a flash rather than 400 so the
+    // operator can correct in place.
     let payload = match form
         .payload
         .as_deref()

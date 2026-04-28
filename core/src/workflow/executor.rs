@@ -1,12 +1,3 @@
-//! Workflow run executor.
-//!
-//! For the MVP this is intentionally minimal: it walks the snapshotted
-//! `steps_snapshot` of a [`WorkflowRun`] in order and executes each
-//! `AgentStep` by spinning up a transient agent, sending the resolved
-//! skill body as the prompt (with `$ARGUMENTS` substituted to the
-//! pretty-printed trigger context), draining the chat-output stream into
-//! a single string, and recording the outcome on the run.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,19 +13,10 @@ use super::definition::WorkflowStepDef;
 use super::error::WorkflowError;
 use super::run::{WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
-/// Run an existing [`WorkflowRun`] to completion.
-///
-/// Loads the run, walks its snapshotted steps, and persists step
-/// transitions + the terminal `RunCompleted` event. Errors during a step
-/// are caught and turned into `StepFailed` + a failed terminal state —
-/// the function returns `Ok(())` whenever it managed to record a
-/// terminal state, and only `Err(_)` when the run cannot even be loaded
-/// or persisted.
-///
-/// **Resumable.** All entity mutations are idempotent (see
-/// [`WorkflowRun::step_started`] etc.) and steps that already finished
-/// in a prior attempt are skipped, so the function is safe to invoke
-/// repeatedly by the job runner after a crash or restart.
+/// Resumable: idempotent mutations + skipping already-terminal steps
+/// make this safe to invoke repeatedly after a crash.
+/// `Ok(())` whenever a terminal state was recorded; `Err(_)` only on
+/// load/persist failure.
 #[tracing::instrument(name = "core.workflow.execute_run", skip_all, fields(run_id = %run_id))]
 pub async fn execute_run(
     runs: WorkflowRunRepo,
@@ -45,9 +27,6 @@ pub async fn execute_run(
 ) -> Result<(), WorkflowError> {
     let mut run = runs.find_by_id(run_id).await?;
 
-    // If a prior attempt already wrote the terminal `RunCompleted`
-    // event there's nothing left to do — the job runner can mark this
-    // attempt as complete and move on.
     if matches!(
         run.state,
         WorkflowRunState::Succeeded | WorkflowRunState::Failed
@@ -65,7 +44,6 @@ pub async fn execute_run(
     for step in &steps {
         let step_name = step.name().to_string();
 
-        // Skip steps that already terminated in a prior execution attempt.
         if step_already_terminal(&run, &step_name) {
             continue;
         }
@@ -141,11 +119,11 @@ async fn execute_step(
             sandbox,
             timeout_seconds,
         } => {
-            // System-level user subject — nil UUID, treated as a real
-            // user and therefore allowed everything by `AuthSubject::can`.
+            // `User(nil)` is treated as the system principal by
+            // `AuthSubject::can` — bypasses authz the same way the
+            // SA-token resolver does.
             let system_subject = AuthSubject::User(UserId::from(uuid::Uuid::nil()));
 
-            // Resolve the sandbox by name (within the workspace) if requested.
             let attach_sandbox = match sandbox.as_deref() {
                 Some(sandbox_name) => {
                     let list = sandboxes
@@ -161,8 +139,6 @@ async fn execute_step(
                 None => None,
             };
 
-            // Build the prompt by interpolating `$ARGUMENTS` in the skill
-            // body with the (pretty-printed) trigger context.
             let arguments = serde_json::to_string_pretty(trigger_context)
                 .unwrap_or_else(|_| trigger_context.to_string());
             let sandbox_id = attach_sandbox.map(|(id, _)| id);
@@ -172,10 +148,6 @@ async fn execute_step(
                 .map_err(|e| WorkflowError::Skill(e.to_string()))?
                 .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
 
-            // Spawn an agent owned by this workflow run. The
-            // `(workflow_id, workflow_run_id)` stamp keeps it out of
-            // the default workspace agent listing — see
-            // `Agents::list_for_workspace`.
             let agent_name = format!("workflow-{}-{}", run_id, name);
             let mut op = agents
                 .begin_op()
@@ -196,17 +168,12 @@ async fn execute_step(
                 .await
                 .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-            // Send the prompt as the agent's auth subject so its tool
-            // calls authorize correctly.
             let agent_subject = agent.auth_subject();
             let mut rx = agents
                 .send_message(agent_subject, agent.id, prompt)
                 .await
                 .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-            // Drain the chat-output stream, collecting AssistantText +
-            // AssistantTextDelta into a single string. Terminate on
-            // AssistantDone, Error, or channel close.
             let timeout = timeout_seconds
                 .map(Duration::from_secs)
                 .unwrap_or_else(|| Duration::from_secs(300));

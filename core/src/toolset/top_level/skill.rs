@@ -1,17 +1,5 @@
-//! `skill` — workspace-scoped skill management.
-//!
-//! Pairs with [`super::use_skill::UseSkillTool`]: this tool is the
-//! *management* surface (CRUD on skill definitions); `use_skill` is
-//! the *invocation* surface (resolve + interpolate).
-//!
-//! DB-first writes — the entity post-persist hook propagates to the
-//! git-backed library repo asynchronously. See
-//! [`crate::skill::Skills::create`] for the write semantics.
-//!
-//! Visibility:
-//! - Read commands (`list`, `get`) require `can_read_workspace`.
-//! - Write commands (`create`, `update`, `delete`) require
-//!   `can_write_workspace`, enforced inside `call()`.
+//! Skill *management*. [`super::use_skill::UseSkillTool`] is the
+//! invocation surface.
 
 use std::sync::{Arc, LazyLock};
 
@@ -27,10 +15,6 @@ use crate::workspace::Workspaces;
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for};
-
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -70,10 +54,6 @@ impl SkillParams {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output (schemars-derived; doubles as `structured_content` source)
-// ---------------------------------------------------------------------------
-
 #[derive(Default, serde::Serialize, schemars::JsonSchema)]
 struct SkillOutput {
     /// Which command was executed.
@@ -89,19 +69,14 @@ struct SkillSummary {
     id: String,
     name: String,
     description: String,
-    /// `"workspace"` when scoped to a workspace, `"global"` otherwise.
+    /// `"workspace"` or `"global"`.
     scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_id: Option<String>,
-    /// Full markdown body of the skill (only included on `get` and
-    /// returned on create/update so the caller can confirm).
+    /// Set on `get` / `create` / `update`; omitted from `list`.
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 pub struct SkillTool {
     skills: Arc<Skills>,
@@ -175,9 +150,6 @@ impl TopLevelTool for SkillTool {
     }
 
     fn composable(&self) -> bool {
-        // Skill management is workspace-state mutation; same constraint
-        // as `agent` / `sandbox` / `workflow` — not a thing compose
-        // scripts should be calling.
         false
     }
 

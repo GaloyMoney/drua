@@ -384,8 +384,6 @@ impl Upstream {
         Ok(results)
     }
 
-    /// Mirrors [`Self::changed_skill_files`] for `*.yml` files under the
-    /// workflow directories.
     pub async fn changed_workflow_files(
         &self,
         last_commit: Option<&str>,

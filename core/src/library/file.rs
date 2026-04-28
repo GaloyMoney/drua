@@ -85,11 +85,8 @@ pub enum RuntimeFile {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         original_path: Option<String>,
     },
-    /// Workflow definition (YAML). The webhook secret is intentionally
-    /// **not** serialized into the file — it stays DB-only so secrets
-    /// don't leak into git. The reverse-sync path generates a fresh
-    /// secret when the file describes a webhook trigger and no DB row
-    /// exists yet.
+    /// YAML body. Webhook secret is **not** serialized — it stays
+    /// DB-only so secrets don't leak into git.
     Workflow {
         doc_id: WorkflowDefinitionId,
         workspace_id: Option<WorkspaceId>,
@@ -191,7 +188,6 @@ impl RuntimeFile {
         }
     }
 
-    /// Build a `RuntimeFile::Workflow` from raw fields.
     #[allow(clippy::too_many_arguments)]
     pub fn for_workflow(
         workflow_id: WorkflowDefinitionId,
@@ -674,27 +670,15 @@ fn name_from_filename(path: &str) -> Option<String> {
     }
 }
 
-// ─── Workflow YAML support ───────────────────────────────────────────────────
-//
-// Workflow files live in `runtime/workflows/<name>-<id-prefix>.yml` (global)
-// or `runtime/workspaces/<ws-name>/workflows/<name>-<id-prefix>.yml`. The
-// webhook secret is intentionally **not** stored in the file — it's
-// regenerated on first sync if the DB row doesn't exist yet, and on update
-// the existing DB-side secret is preserved.
-
-/// On-disk YAML representation of a workflow definition. Used both for
-/// rendering (`render_workflow_yaml`) and for reverse-sync parsing.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct WorkflowYaml {
-    /// Stable identity. New files (no `id:` field) get a freshly-generated
-    /// `WorkflowDefinitionId` on import; the file is rewritten with the
-    /// canonical id afterwards.
+    /// Files lacking `id:` get a fresh `WorkflowDefinitionId` on import
+    /// and the file is rewritten with the canonical id afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<uuid::Uuid>,
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Trigger config without the secret — secrets stay DB-only.
     trigger: WorkflowTriggerYaml,
     steps: Vec<WorkflowStepYaml>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -708,9 +692,6 @@ struct WorkflowYaml {
 enum WorkflowTriggerYaml {
     #[default]
     Manual,
-    /// Webhook trigger. The on-disk file never carries the secret; the
-    /// reverse-sync path either reuses the DB-side secret (if the
-    /// workflow already exists) or generates a fresh one (new file).
     Webhook {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
@@ -793,29 +774,17 @@ fn render_workflow_yaml(
         created: created_at.to_string(),
         updated: updated_at.to_string(),
     };
-    // `serde_yaml::to_string` is infallible for our shape; fall back to a
-    // best-effort comment if it ever isn't.
     serde_yaml::to_string(&yaml).unwrap_or_else(|e| format!("# yaml render error: {e}\n"))
 }
 
-/// Parse result mirrors `ParsedSkillFile` — same protocol used by the
-/// reverse-sync job to decide whether to rewrite the on-disk file.
 pub struct ParsedWorkflowFile {
     pub file: RuntimeFile,
-    /// `true` when the file lacks an `id:` field, has a non-canonical
-    /// path, or contains stale formatting; the sync job rewrites the
-    /// file with canonical headers in that case.
+    /// Set when the sync job should rewrite the file with canonical
+    /// headers (missing `id:`, non-canonical path, stale format).
     pub needs_rewrite: bool,
 }
 
-/// Parse a workflow YAML file back into a `RuntimeFile::Workflow` variant.
-///
-/// `path` is the file's relative path in the library repo. The function
-/// derives `workspace_name` from the path and stores the original path
-/// on the returned `RuntimeFile` so the sync job can rename / canonicalise.
-///
-/// Returns `None` only when the YAML is malformed past recovery, or
-/// when no `name:` is set and no name can be derived from the filename.
+/// `None` when the YAML is malformed or no name can be derived.
 pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFile> {
     let workspace_name = workspace_name_from_workflow_path(path);
     let trimmed = content.trim();
@@ -838,11 +807,10 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
 
     let trigger = match yaml.trigger {
         WorkflowTriggerYaml::Manual => WorkflowTrigger::Manual,
+        // Empty secret signals "mint on create / preserve on update"
+        // — the upsert path handles it (see `Workflows::create`).
         WorkflowTriggerYaml::Webhook { provider } => WorkflowTrigger::Webhook {
             provider,
-            // Empty secret = "service should generate one on create"
-            // (see `Workflows::create`). For updates the upsert path
-            // splices the existing DB secret back in.
             secret: String::new(),
         },
     };
@@ -879,10 +847,8 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
     })
 }
 
-/// Extract the workspace name from a workflow file's relative path.
-///
-/// - `runtime/workspaces/{ws}/workflows/*.yml` → `Some(ws)`
-/// - `runtime/workflows/*.yml` → `None` (global)
+/// `runtime/workspaces/{ws}/workflows/*.yml` → `Some(ws)`;
+/// `runtime/workflows/*.yml` → `None` (global).
 pub fn workspace_name_from_workflow_path(relative_path: &str) -> Option<String> {
     let parts: Vec<&str> = relative_path.split('/').collect();
     if parts.len() >= 5
@@ -1235,8 +1201,6 @@ mod tests {
         assert_eq!(workspace_name_from_skill_path(path), None);
     }
 
-    // ─── Workflow YAML round-trip + parsing ─────────────────────────────────
-
     fn sample_steps() -> Vec<WorkflowStepDef> {
         vec![WorkflowStepDef::AgentStep {
             name: "investigate".to_string(),
@@ -1257,7 +1221,6 @@ mod tests {
             Some("Investigate Honeycomb alerts"),
             WorkflowTrigger::Webhook {
                 provider: Some("honeycomb".to_string()),
-                // Secret should NOT round-trip through the file.
                 secret: "whsec_should-not-be-serialized".to_string(),
             },
             sample_steps(),
@@ -1266,7 +1229,6 @@ mod tests {
         );
 
         let content = original.content();
-        // Belt-and-braces: the secret value must never appear in the file.
         assert!(!content.contains("whsec_should-not-be-serialized"));
 
         let path = original.relative_path();
@@ -1292,8 +1254,6 @@ mod tests {
                 match trigger {
                     WorkflowTrigger::Webhook { provider, secret } => {
                         assert_eq!(provider.as_deref(), Some("honeycomb"));
-                        // Parser leaves secret empty — caller decides whether
-                        // to mint a new one or splice in the DB-side value.
                         assert_eq!(secret, "");
                     }
                     _ => panic!("expected webhook trigger"),

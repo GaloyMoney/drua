@@ -79,11 +79,8 @@ impl WorkflowRun {
             .expect("entity_first_persisted_at not found")
     }
 
-    /// Record that a step has started executing.
-    ///
-    /// Idempotent: if any event for this step name (start or terminal)
-    /// is already recorded, this is a no-op. Critical for at-least-once
-    /// job retries.
+    /// No-op if any prior event for this step is already recorded —
+    /// keeps at-least-once job retries safe.
     pub fn step_started(&mut self, step_name: String) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -113,10 +110,7 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
-    /// Record a successful step completion with the captured output.
-    ///
-    /// Idempotent on `(step_name, terminal-event)`: if this step has
-    /// already finished (succeeded or failed), this is a no-op.
+    /// No-op if the step already terminated.
     pub fn step_completed(
         &mut self,
         step_name: String,
@@ -149,10 +143,7 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
-    /// Record a step failure.
-    ///
-    /// Idempotent on `(step_name, terminal-event)`: if this step has
-    /// already finished (succeeded or failed), this is a no-op.
+    /// No-op if the step already terminated.
     pub fn step_failed(&mut self, step_name: String, error: String) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -181,10 +172,7 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
-    /// Record terminal run completion (Succeeded or Failed).
-    ///
-    /// Idempotent: a second call after the run already completed is a
-    /// no-op, regardless of the requested state.
+    /// No-op if the run already reached a terminal state.
     pub fn run_completed(&mut self, state: WorkflowRunState) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),

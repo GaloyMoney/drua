@@ -148,8 +148,7 @@ impl Agents {
         &self.skills
     }
 
-    /// Compose `*_in_op` agent methods with caller-driven writes (e.g. the
-    /// workflow executor stamping a new agent inside a workflow run).
+    /// For composing `*_in_op` methods with caller-driven writes.
     pub async fn begin_op(&self) -> Result<es_entity::DbOp<'_>, sqlx::Error> {
         self.repo.begin_op().await
     }
@@ -218,9 +217,8 @@ impl Agents {
         Ok(agent)
     }
 
-    /// Stamps `(workflow_id, workflow_run_id)` so the agent is excluded
-    /// from [`Self::list_for_workspace`] and surfaced through
-    /// [`Self::list_for_workflow_run`]. Caller commits the op.
+    /// Caller commits the op. Stamping `(workflow_id, workflow_run_id)`
+    /// is what excludes the agent from [`Self::list_for_workspace`].
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
@@ -300,8 +298,6 @@ impl Agents {
         .await
     }
 
-    /// `workflow_id` / `workflow_run_id` are set/unset together;
-    /// user-created agents pass `None` for both.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
     async fn create_in_op(
@@ -438,14 +434,8 @@ impl Agents {
         Ok(agent)
     }
 
-    /// List user-owned agents in a workspace.
-    ///
-    /// Workflow-spawned agents (those with [`Agent::workflow_id`] set)
-    /// are filtered out — they belong to a specific workflow run, not
-    /// to the workspace's free-agent pool, and surfacing them in the
-    /// default listing would drown out the agents the user actually
-    /// cares about. Use [`Self::list_for_workflow_run`] to retrieve
-    /// the agents owned by a specific run.
+    /// Workflow-spawned agents are filtered out; see
+    /// [`Self::list_for_workflow_run`] for those.
     #[instrument(name = "domain.agent.list_for_workspace", skip(self, sub))]
     pub async fn list_for_workspace(
         &self,
@@ -467,8 +457,7 @@ impl Agents {
                 es_entity::ListDirection::Descending,
             )
             .await?;
-        // The partial index `idx_agents_workspace_id_user_owned` covers
-        // this filter so it stays cheap as workflow runs accumulate.
+        // Covered by the `idx_agents_workspace_id_user_owned` partial index.
         Ok(result
             .entities
             .into_iter()
@@ -476,11 +465,6 @@ impl Agents {
             .collect())
     }
 
-    /// List agents owned by a specific workflow run.
-    ///
-    /// `workspace_id` is required so the auth check can be scoped to
-    /// the run's workspace — the caller (typically the workflow
-    /// service) already has it from the loaded `WorkflowRun`.
     #[instrument(name = "domain.agent.list_for_workflow_run", skip(self, sub))]
     pub async fn list_for_workflow_run(
         &self,

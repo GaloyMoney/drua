@@ -29,13 +29,8 @@ pub enum AgentEvent {
         name: String,
         authz_scopes: Vec<AuthScope>,
         workspace_name: String,
-        /// Workflow definition this agent was spawned for, if any.
-        /// `None` for user-created agents — those are the ones the
-        /// workspace agent listing surfaces by default.
         #[serde(default)]
         workflow_id: Option<WorkflowDefinitionId>,
-        /// Specific workflow run that owns this agent. Always `Some`
-        /// when `workflow_id` is `Some`. See [`Agent::workflow_run_id`].
         #[serde(default)]
         workflow_run_id: Option<WorkflowRunId>,
     },
@@ -69,17 +64,10 @@ pub struct Agent {
     /// At most one attached sandbox at a time (enforced by `sandbox_attached`).
     #[builder(default)]
     pub attached_sandbox: Option<(SandboxId, SandboxAgentMode)>,
-    /// Workflow definition this agent was spawned for, if any.
-    ///
-    /// `None` means the agent was created directly by a user (the normal
-    /// case — these are what `Agents::list_for_workspace` returns).
-    /// `Some` means the agent was spawned by a [`crate::workflow`] run
-    /// to execute one of its steps; those agents are owned by the run
-    /// and hidden from the default workspace listing.
+    /// `Some` for agents spawned by a workflow run — hidden from
+    /// `Agents::list_for_workspace`. Set together with `workflow_run_id`.
     #[builder(default)]
     pub workflow_id: Option<WorkflowDefinitionId>,
-    /// Specific workflow run that owns this agent. Populated together
-    /// with [`Self::workflow_id`].
     #[builder(default)]
     pub workflow_run_id: Option<WorkflowRunId>,
     events: EntityEvents<AgentEvent>,
@@ -269,7 +257,6 @@ pub struct NewAgent {
     pub(super) authz_scopes: Vec<AuthScope>,
     #[builder(setter(into))]
     pub(super) workspace_name: String,
-    /// `Some` when the agent is spawned by a workflow run.
     #[builder(default, setter(into, strip_option))]
     pub(super) workflow_id: Option<WorkflowDefinitionId>,
     #[builder(default, setter(into, strip_option))]

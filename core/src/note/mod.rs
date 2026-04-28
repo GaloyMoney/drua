@@ -54,15 +54,7 @@ impl Notes {
         Ok(op)
     }
 
-<<<<<<< HEAD
-=======
-    /// Create a new note in a workspace.
-    ///
-    /// `workflow_id` scopes the note to a specific workflow definition
-    /// (surfaced on that workflow's web/MCP views as runbook context).
-    /// Pass `None` for the standard workspace-scoped note.
     #[allow(clippy::too_many_arguments)]
->>>>>>> c6e6882 (feat(workflow): web UI + workflow-scoped notes)
     #[instrument(name = "note.store", skip(self))]
     pub async fn store(
         &self,
@@ -162,14 +154,8 @@ impl Notes {
         Ok(note)
     }
 
-<<<<<<< HEAD
-    /// `Some(id)` updates; `None` creates.
-=======
-    /// Create or update a note. If `note_id` is provided, update;
-    /// otherwise create with the given `workflow_id` scope (or `None`
-    /// for workspace-scoped). `workflow_id` is only honoured on create —
-    /// scope is set at creation time and not migrated by `update`.
->>>>>>> c6e6882 (feat(workflow): web UI + workflow-scoped notes)
+    /// `Some(id)` updates; `None` creates. `workflow_id` honoured on
+    /// create only — `update` doesn't migrate scope.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "note.store_or_update", skip(self))]
     pub async fn store_or_update(
@@ -318,13 +304,8 @@ impl Notes {
             .map_err(NoteError::from)
     }
 
-<<<<<<< HEAD
-=======
-    /// List workspace-scoped notes only (excludes notes attached to a
-    /// specific workflow definition). The default listing in the agent
-    /// chat / dashboard wants this — workflow notes appear on the
-    /// workflow's own page.
->>>>>>> c6e6882 (feat(workflow): web UI + workflow-scoped notes)
+    /// Workspace-scoped notes only — workflow-scoped notes surface
+    /// via [`Self::list_for_workflow_definition`].
     #[instrument(name = "note.list", skip(self))]
     pub async fn list(
         &self,
@@ -352,11 +333,6 @@ impl Notes {
             .collect())
     }
 
-    /// List notes attached to a specific workflow definition.
-    ///
-    /// `workspace_id` is required so the auth check stays scoped to the
-    /// workflow's workspace. The caller (typically the workflow web
-    /// page) already has it from the loaded `WorkflowDefinition`.
     #[instrument(name = "note.list_for_workflow_definition", skip(self))]
     pub async fn list_for_workflow_definition(
         &self,
@@ -429,9 +405,7 @@ impl Notes {
             return Ok(None);
         }
 
-        // Workflow-scoped notes are runbook context for that specific
-        // workflow only — never inject them into the broader workspace
-        // prompt.
+        // Workflow-scoped notes don't belong in the workspace prompt.
         let workspace_only: Vec<&Note> = result
             .entities
             .iter()

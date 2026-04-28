@@ -1,9 +1,4 @@
-//! Webhook ingestion route for workflow triggers.
-//!
-//! `POST /webhooks/:definition_id` lets external systems (e.g. Honeycomb
-//! triggers) kick off a workflow run. The route sits *outside* the normal
-//! auth middleware — instead, the request is authenticated against the
-//! webhook secret stored on the workflow definition's trigger config.
+//! Outside the auth middleware — authn via the trigger's stored secret.
 
 use axum::{
     body::Bytes,
@@ -33,8 +28,6 @@ pub async fn handle_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // 1. Load the workflow definition (bypassing auth — we authenticate
-    //    via the trigger secret instead).
     let definition = match state
         .app
         .workflows()
@@ -48,7 +41,6 @@ pub async fn handle_webhook(
         }
     };
 
-    // 2. Only webhook-triggered workflows accept POSTs here.
     let (provider, expected_secret) = match &definition.trigger {
         WorkflowTrigger::Webhook { provider, secret } => (provider.clone(), secret.clone()),
         WorkflowTrigger::Manual => {
@@ -56,18 +48,16 @@ pub async fn handle_webhook(
         }
     };
 
-    // 3. Pick the verification header for the provider.
     let header_name = match provider.as_deref() {
         Some("honeycomb") => "x-honeycomb-webhook-token",
         _ => "authorization",
     };
 
-    // 4. Extract & compare the presented secret.
     let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
         Some(value) => match provider.as_deref() {
-            // Generic provider: Authorization: Bearer <secret>
+            // Generic provider strips the `Bearer ` prefix; named
+            // providers carry the raw secret.
             None => value.strip_prefix("Bearer ").unwrap_or(value).to_string(),
-            // Provider-specific: header value is the raw secret
             _ => value.to_string(),
         },
         None => {
@@ -81,7 +71,6 @@ pub async fn handle_webhook(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    // 5. Parse the body as JSON. An empty body is treated as `null`.
     let trigger_context = if body.is_empty() {
         serde_json::Value::Null
     } else {
@@ -94,9 +83,6 @@ pub async fn handle_webhook(
         }
     };
 
-    // 6. Trigger the run. The executor runs on a background tokio task,
-    //    so the webhook returns immediately. We pass the already-loaded
-    //    definition to avoid a second `find_by_id` round trip.
     match state
         .app
         .workflows()

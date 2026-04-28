@@ -1,12 +1,3 @@
-//! Workflow execution jobs.
-//!
-//! Replaces the original `tokio::spawn` so that workflow runs survive
-//! deploys / process restarts. The job system persists `(job_type,
-//! config)` to PostgreSQL, retries on failure, and re-runs anything that
-//! was in flight when the process died — paired with the idempotent
-//! mutations on [`super::run::WorkflowRun`] this gives at-least-once
-//! execution semantics.
-
 use std::sync::Arc;
 
 use job::*;
@@ -103,14 +94,8 @@ impl JobRunner for ExecuteRunRunner {
     }
 }
 
-// ─── Reverse-sync job: import workflow YAML files from the library ─────────
-//
-// Mirrors `skill::job::SyncSkillsFromLibraryJob` — interval-poll the
-// library repo, find changed `*.yml` files under `runtime/workflows/`
-// or `runtime/workspaces/*/workflows/`, and upsert them into the DB
-// inside one transaction. Runs on the `library-lock` queue so it
-// serialises with forward-sync (`WriteToRuntime`) on the same repo.
-
+// Mirrors `skill::job::SyncSkillsFromLibraryJob`. Runs on the
+// `library-lock` queue so it serialises with forward-sync writes.
 pub(crate) const SYNC_WORKFLOWS_FROM_LIBRARY_JOB: &str = "workflow.sync-from-library";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,10 +213,8 @@ impl SyncWorkflowsFromLibraryRunner {
             "processing changed workflow files from library"
         );
 
-        // Workflows are always workspace-scoped (NOT NULL FK on the
-        // table). Files under `runtime/workflows/` (no workspace) are
-        // skipped with a warning rather than promoted to a global
-        // workflow.
+        // workflow_definitions.workspace_id is NOT NULL — global files
+        // under `runtime/workflows/` are skipped with a warning below.
         let mut ws_cache: std::collections::HashMap<
             String,
             Option<crate::primitives::WorkspaceId>,

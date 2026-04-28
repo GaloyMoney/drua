@@ -1,12 +1,3 @@
-//! `workflow` — consolidated workspace-scoped workflow management.
-//!
-//! Single tool with a `command` discriminator (mirrors `notes`):
-//! `create`, `list`, `get`, `trigger`, `runs`.
-//!
-//! Read commands (`list`, `get`, `runs`) require `can_read_workspace`;
-//! write commands (`create`, `trigger`) enforce `can_write_workspace`
-//! inside `call()`.
-
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
@@ -25,21 +16,13 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for};
 
-// ---------------------------------------------------------------------------
-// Params (tagged enum — no parameter sprawl)
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum WorkflowParams {
-    /// Create a new workflow definition (MVP: single-step webhook workflows).
     Create {
         name: String,
         #[serde(default)]
         description: Option<String>,
-        /// Webhook provider (e.g. `"honeycomb"`). Omit for a generic
-        /// `Authorization: Bearer <secret>` shared-token webhook. Pass
-        /// `manual: true` to opt out of the webhook entirely.
         #[serde(default)]
         provider: Option<String>,
         #[serde(default)]
@@ -50,18 +33,18 @@ enum WorkflowParams {
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
-    /// List workflow definitions in the workspace.
     List,
-    /// Get a workflow definition by ID.
-    Get { definition_id: WorkflowDefinitionId },
-    /// Manually trigger a workflow run.
+    Get {
+        definition_id: WorkflowDefinitionId,
+    },
     Trigger {
         definition_id: WorkflowDefinitionId,
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
-    /// List runs for a workflow definition.
-    Runs { definition_id: WorkflowDefinitionId },
+    Runs {
+        definition_id: WorkflowDefinitionId,
+    },
 }
 
 impl WorkflowParams {
@@ -76,34 +59,23 @@ impl WorkflowParams {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output shapes (schemars-derived; also used for serialization)
-// ---------------------------------------------------------------------------
-
-/// Union output for all workflow subcommands. Only `command` is required;
-/// other fields are populated per subcommand.
+/// Union output across subcommands; only `command` is always set.
 #[derive(Default, serde::Serialize, schemars::JsonSchema)]
 struct WorkflowOutput {
     /// Which command was executed.
     command: String,
-    // -- single definition (create/get) --
     #[serde(skip_serializing_if = "Option::is_none")]
     definition: Option<WorkflowDefinitionOutput>,
-    // -- list of definitions (list) --
     #[serde(skip_serializing_if = "Option::is_none")]
     definitions: Option<Vec<WorkflowDefinitionOutput>>,
-    // -- single run (trigger) --
     #[serde(skip_serializing_if = "Option::is_none")]
     run: Option<WorkflowRunOutput>,
-    // -- list of runs (runs) --
     #[serde(skip_serializing_if = "Option::is_none")]
     runs: Option<Vec<WorkflowRunOutput>>,
-    // -- create-only fields --
-    /// Auto-generated webhook secret (only set on `create` for webhook
-    /// triggers — surfaced once so the caller can configure the upstream).
+    /// Surfaced on `create` only — operators configure the upstream
+    /// with this value, then it's never returned again.
     #[serde(skip_serializing_if = "Option::is_none")]
     webhook_secret: Option<String>,
-    /// Webhook URL (only set on `create` for webhook triggers).
     #[serde(skip_serializing_if = "Option::is_none")]
     webhook_url: Option<String>,
 }
@@ -115,9 +87,8 @@ struct WorkflowDefinitionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     workspace_id: String,
-    /// Trigger kind: `"manual"` or `"webhook"`.
+    /// `"manual"` or `"webhook"`.
     trigger_type: String,
-    /// Webhook provider tag when `trigger_type` is `"webhook"` (e.g. `"honeycomb"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_provider: Option<String>,
     steps: Vec<WorkflowStepOutput>,
@@ -126,7 +97,7 @@ struct WorkflowDefinitionOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct WorkflowStepOutput {
     name: String,
-    /// Step kind: `"agent_step"` for MVP.
+    /// `"agent_step"`.
     step_type: String,
     skill: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,7 +111,7 @@ struct WorkflowRunOutput {
     id: String,
     definition_id: String,
     workspace_id: String,
-    /// One of `pending` | `running` | `succeeded` | `failed`.
+    /// `pending` / `running` / `succeeded` / `failed`.
     state: String,
     started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,26 +122,18 @@ struct WorkflowRunOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct StepResultOutput {
     name: String,
-    /// Step output as JSON (string, object, etc.) — `null` if not yet
-    /// completed or if the step failed.
+    /// `null` while pending or after failure.
     output: Option<serde_json::Value>,
-    /// Error message when the step failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
-
 pub struct WorkflowTool {
     workflows: Arc<Workflows>,
     workspaces: Arc<Workspaces>,
-    /// Optional public-facing host (e.g. `https://drua.example.com`) used
-    /// to render the webhook URL on `create` responses. When `None` the
-    /// response shows just the path.
+    /// `None` renders the webhook URL as a path only.
     public_host: Option<String>,
 }
 
@@ -270,8 +233,6 @@ impl TopLevelTool for WorkflowTool {
     }
 
     fn composable(&self) -> bool {
-        // Workflows spawn agents under a system subject and run
-        // asynchronously — same constraint as `agent` and `sandbox`.
         false
     }
 
@@ -430,10 +391,6 @@ impl TopLevelTool for WorkflowTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output mappers
-// ---------------------------------------------------------------------------
-
 fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
     let (trigger_type, trigger_provider) = match &d.trigger {
         WorkflowTrigger::Manual => ("manual".to_string(), None),
@@ -496,10 +453,6 @@ fn run_state_str(state: WorkflowRunState) -> &'static str {
         WorkflowRunState::Failed => "failed",
     }
 }
-
-// ---------------------------------------------------------------------------
-// Text formatting helpers (human-readable companion to structured_content)
-// ---------------------------------------------------------------------------
 
 impl WorkflowTool {
     fn webhook_url_and_secret(&self, def: &WorkflowDefinition) -> (Option<String>, Option<String>) {

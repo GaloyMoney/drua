@@ -324,13 +324,8 @@ impl Skills {
         Ok(Some(buf))
     }
 
-    /// Create a workspace-scoped skill from MCP / web input.
-    ///
-    /// DB-first: the entity is persisted, and the existing
-    /// `post_persist_hook(sync_to_library)` propagates to the
-    /// git-backed library asynchronously through the inbox / write
-    /// pipeline. Auth: caller must hold `WorkspaceAdmin` on the
-    /// target workspace.
+    /// DB-first; `post_persist_hook(sync_to_library)` writes the
+    /// canonical file asynchronously.
     #[instrument(name = "skill.create", skip(self, body))]
     pub async fn create(
         &self,
@@ -360,8 +355,6 @@ impl Skills {
         Ok(skill)
     }
 
-    /// User-driven update of an existing skill. Mirrors
-    /// [`Self::create`] for authz + library sync.
     #[instrument(name = "skill.update", skip(self, body))]
     pub async fn update(
         &self,
@@ -377,7 +370,6 @@ impl Skills {
             AuthResource::Skill(workspace_id, Some(id)),
         )?;
         let mut skill = self.repo.find_by_id(id).await?;
-        // Workspace-scope guard: prevent edits leaking across workspaces.
         if skill.workspace_id != Some(workspace_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
@@ -390,13 +382,9 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Soft-delete a workspace-scoped skill.
-    ///
-    /// Note: the on-disk YAML file in the library repo is **not**
-    /// removed by this call. Single-file removal isn't yet plumbed
-    /// through `WriteToRuntime`; the file is reaped only when the
-    /// owning workspace is deleted (via the existing
-    /// `WorkspaceCleanup` job). Tracked as a follow-up.
+    /// Soft-delete only — the on-disk file is left in the library
+    /// until the owning workspace is deleted (single-file removal
+    /// isn't plumbed through `WriteToRuntime` yet).
     #[instrument(name = "skill.delete", skip(self))]
     pub async fn delete(
         &self,

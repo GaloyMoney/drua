@@ -18,13 +18,8 @@ pub enum NoteEvent {
         content: String,
         tags: Vec<String>,
         file_hash: GitFileHash,
-        /// Optional [`WorkflowDefinitionId`] this note is scoped to.
-        ///
-        /// `None` means the note is workspace-scoped (the existing
-        /// behaviour). `Some` attaches the note to a specific workflow
-        /// definition — surfaced on that workflow's web/MCP views as
-        /// runbook-style context shared across runs. Notes are never
-        /// scoped per run.
+        /// `Some` attaches the note to a workflow definition (runbook
+        /// context). `None` is workspace-scoped, the original behaviour.
         #[serde(default)]
         workflow_id: Option<WorkflowDefinitionId>,
     },
@@ -49,8 +44,6 @@ pub struct Note {
     pub(crate) tags: Vec<String>,
     pub(crate) file_hash: Option<GitFileHash>,
     pub(crate) pinned: bool,
-    /// Workflow definition this note is scoped to, if any. See
-    /// [`NoteEvent::Initialized::workflow_id`] for semantics.
     #[builder(default)]
     pub workflow_id: Option<WorkflowDefinitionId>,
     pub(super) events: EntityEvents<NoteEvent>,
@@ -247,7 +240,6 @@ pub struct NewNote {
     pub(super) file_hash: GitFileHash,
     #[builder(default)]
     pub(super) pinned: bool,
-    /// Optional workflow scope. `None` for workspace-scoped notes.
     #[builder(default, setter(into, strip_option))]
     pub(super) workflow_id: Option<WorkflowDefinitionId>,
 }
@@ -325,7 +317,6 @@ mod tests {
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
         assert_eq!(note.workspace_name, "test");
         assert!(note.file_hash.is_some());
-        // Default scope is workspace (no workflow attachment).
         assert!(note.workflow_id.is_none());
     }
 

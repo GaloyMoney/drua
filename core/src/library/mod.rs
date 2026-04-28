@@ -73,15 +73,11 @@ pub struct SkillChanges {
     pub files: Vec<SkillFileChange>,
 }
 
-/// A single changed workflow file with metadata for the sync job.
-/// Mirrors [`SkillFileChange`] — the same parse + rewrite protocol
-/// applies, just keyed on YAML files under `runtime/workflows/...`.
 pub struct WorkflowFileChange {
     pub file: RuntimeFile,
     pub needs_rewrite: bool,
 }
 
-/// Workflow files detected as new or changed since the last sync.
 pub struct WorkflowChanges {
     pub head_commit: String,
     pub files: Vec<WorkflowFileChange>,
@@ -242,8 +238,7 @@ impl Library {
         })
     }
 
-    /// Mirrors [`Self::find_new_skills`] for `runtime/workflows/*.yml` and
-    /// `runtime/workspaces/*/workflows/*.yml`.
+    /// Mirrors [`Self::find_new_skills`] for workflow YAML files.
     #[tracing::instrument(name = "library.find_new_workflows", skip(self))]
     pub async fn find_new_workflows(
         &self,
@@ -295,7 +290,6 @@ impl Library {
             files,
         })
     }
-
 
     #[tracing::instrument(name = "library.search", skip(self))]
     pub async fn search(

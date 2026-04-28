@@ -15,30 +15,17 @@ pub enum WorkflowDefinitionEvent {
     Initialized {
         id: WorkflowDefinitionId,
         workspace_id: WorkspaceId,
-        /// Cached workspace display name (set at creation, never
-        /// mutated on rename — matches the skill/agent pattern).
-        /// Required for the library forward-sync hook to render the
-        /// file path. Optional in the event for backward compatibility
-        /// with pre-sync workflows.
         #[serde(default)]
         workspace_name: Option<String>,
         name: String,
         description: Option<String>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
-        /// On reverse-sync, the file's path on disk before any
-        /// canonicalisation by the sync job. `None` for entities
-        /// created via the MCP tool.
+        /// On-disk path before sync canonicalisation; the
+        /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
         original_path: Option<String>,
     },
-    /// Body or trigger changed (typically from a reverse-sync that
-    /// detected a new file hash). Webhook secrets stay DB-only and are
-    /// never overwritten by file edits — the sync path preserves them.
-    ///
-    /// `file_hash` is intentionally not stored — see
-    /// [`WorkflowDefinition::file_hash`] for the rationale (computing
-    /// on-the-fly avoids the forward/reverse-sync feedback loop).
     Updated {
         name: Option<String>,
         description: Option<String>,
@@ -59,8 +46,6 @@ pub struct WorkflowDefinition {
     pub description: Option<String>,
     pub trigger: WorkflowTrigger,
     pub steps: Vec<WorkflowStepDef>,
-    /// On reverse-sync, the original on-disk path. The sync job uses
-    /// this to remove the old file after writing the canonical one.
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     events: EntityEvents<WorkflowDefinitionEvent>,
@@ -80,9 +65,6 @@ impl WorkflowDefinition {
             .expect("entity should have at least one persisted timestamp")
     }
 
-    /// Build the canonical [`crate::library::RuntimeFile::Workflow`]
-    /// for this entity. Uses the cached `workspace_name` so the
-    /// post-persist hook doesn't need to do extra lookups.
     pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
         crate::library::RuntimeFile::for_workflow_with_original_path(
             self.id,
@@ -98,24 +80,15 @@ impl WorkflowDefinition {
         )
     }
 
-    /// Compute the file hash from the entity's canonical runtime
-    /// representation. Mirrors the `Skill::file_hash` fix
-    /// ([`f6dd821`](https://github.com/GaloyMoney/drua/commit/f6dd821))
-    /// — keeping the hash on a stored field caused a forward/reverse
-    /// sync feedback loop because the on-disk timestamps drift from
-    /// the stored value across event hydration. Computing on the fly
-    /// from `as_runtime_file()` makes the hash exactly match what
-    /// `WriteToRuntime` puts on disk, so reverse-sync recognises its
-    /// own output and stops re-updating.
+    /// Computed (not stored) so it matches what `WriteToRuntime` writes;
+    /// otherwise reverse-sync drifts and re-emits commits in a loop
+    /// (mirrors `Skill::file_hash`, drua commit f6dd821).
     pub(crate) fn file_hash(&self) -> GitFileHash {
         self.as_runtime_file().file_hash()
     }
 
-    /// Apply a reverse-sync update from the library. Compares the
-    /// incoming file hash to the entity's *computed* hash and skips
-    /// when they match. Webhook secrets are preserved — only the body
-    /// of the trigger config (provider) and the steps can change via
-    /// the file. Returns `Idempotent::AlreadyApplied` for a no-op.
+    /// Webhook secrets stay DB-only — the splice below replays the
+    /// existing one rather than letting the file overwrite it.
     pub fn update_from_library(
         &mut self,
         name: Option<String>,
@@ -134,7 +107,6 @@ impl WorkflowDefinition {
         if let Some(ref d) = description {
             self.description = d.clone();
         }
-        // Splice the existing webhook secret back in — file never carries it.
         let merged_trigger = trigger
             .as_ref()
             .map(|incoming| match (incoming, &self.trigger) {
@@ -241,8 +213,6 @@ pub struct NewWorkflowDefinition {
     pub(super) description: Option<String>,
     pub(super) trigger: WorkflowTrigger,
     pub(super) steps: Vec<WorkflowStepDef>,
-    /// On reverse-sync from the library, the on-disk path before
-    /// canonicalisation. The sync job will rename / clean up afterwards.
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
 }
@@ -307,11 +277,4 @@ mod tests {
         assert_eq!(def.steps.len(), 1);
         assert!(matches!(def.trigger, WorkflowTrigger::Webhook { .. }));
     }
-
-    // Note: `file_hash_is_stable_across_calls` and
-    // `update_from_library_preserves_secret` were removed —
-    // exercising it requires `file_hash()`, which depends on persisted
-    // event timestamps that aren't available for in-memory test
-    // entities. The secret-preservation logic in `update_from_library`
-    // is straightforward pattern-matching reviewed by reading.
 }

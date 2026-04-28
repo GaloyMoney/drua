@@ -17,11 +17,6 @@ use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
 
-// `agents` / `skills` / `sandboxes` are owned by the
-// `workflow.execute-run` job runner (see `Workflows::execute_run_job_initializer`),
-// not by `Workflows` directly — the service only persists the run and
-// enqueues the job, the runner does the actual work.
-
 pub use definition::{WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
 pub use error::*;
@@ -39,13 +34,8 @@ use run::entity::NewWorkflowRun;
 pub struct Workflows {
     repo: WorkflowDefinitionRepo,
     run_repo: WorkflowRunRepo,
-    /// Used to validate `skill:` references on `create` so the operator
-    /// gets immediate feedback instead of a runtime `SkillNotFound`.
     skills: Arc<Skills>,
-    /// Same idea for `sandbox:` references.
     sandboxes: Arc<Sandboxes>,
-    /// Job spawner for the `workflow.execute-run` background job — wired
-    /// up at [`crate::App::init`] time after the job system is online.
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
 }
 
@@ -66,7 +56,7 @@ impl Workflows {
         }
     }
 
-    /// Test/dev constructor — bypasses library wiring (no git sync).
+    /// No git sync — for tests.
     pub fn new_without_library(
         pool: &sqlx::PgPool,
         skills: Arc<Skills>,
@@ -82,9 +72,6 @@ impl Workflows {
         }
     }
 
-    /// Job initializer for `workflow.execute-run`. Build this at App
-    /// startup, register it with `Jobs::add_initializer`, and pass the
-    /// returned spawner to [`Workflows::new`].
     pub fn execute_run_job_initializer(
         pool: &sqlx::PgPool,
         agents: Arc<Agents>,
@@ -94,27 +81,22 @@ impl Workflows {
         ExecuteRunJobInitializer::new(WorkflowRunRepo::new(pool), agents, skills, sandboxes)
     }
 
-    /// Auto-generate a webhook secret of the form `whsec_<32 hex chars>`.
     fn generate_webhook_secret() -> String {
         let mut bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut bytes);
         format!("whsec_{}", hex::encode(bytes))
     }
 
-    /// Verify every step's `skill:` resolves to a real skill in the
-    /// workspace (or globally), and every `sandbox:` name resolves to
-    /// an existing workspace sandbox. Surfaces
-    /// [`WorkflowError::SkillNotFound`] / [`WorkflowError::SandboxNotFound`]
-    /// at create time so the operator gets immediate feedback instead
-    /// of a runtime failure deep inside the executor.
+    /// Resolve `skill:` / `sandbox:` references at create time so the
+    /// operator gets immediate feedback rather than a runtime
+    /// `SkillNotFound` deep inside the executor. Skips sandbox-exported
+    /// skills — those resolve per attachment at run time.
     async fn validate_steps(
         &self,
         sub: &AuthSubject,
         workspace_id: WorkspaceId,
         steps: &[WorkflowStepDef],
     ) -> Result<(), WorkflowError> {
-        // Pre-fetch the workspace's sandboxes once so every step shares the
-        // lookup.
         let sandbox_names: Vec<String> = self
             .sandboxes
             .list_for_workspace(sub, workspace_id)
@@ -127,12 +109,6 @@ impl Workflows {
         for step in steps {
             match step {
                 WorkflowStepDef::AgentStep { skill, sandbox, .. } => {
-                    // We don't know yet which sandbox each step will
-                    // resolve to (sandbox skills are scoped per
-                    // attachment), so check against workspace + global
-                    // skills only — exactly the lookup `Workflows::create`
-                    // controls. Sandbox-exported skills can still
-                    // resolve at runtime.
                     let found = self
                         .skills
                         .find_by_name(skill, Some(workspace_id), None)
@@ -153,13 +129,8 @@ impl Workflows {
         Ok(())
     }
 
-    /// Create a new workflow definition.
-    ///
-    /// `workspace_name` is the cached workspace display name — needed
-    /// so the post-persist hook can render the canonical library file
-    /// path without an extra DB lookup. Pass an empty string for tests
-    /// that don't care about library-side naming (the file just won't
-    /// land under a workspace folder).
+    /// `workspace_name` is cached on the entity so the forward-sync
+    /// hook can render the library path without an extra lookup.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "core.workflow.create", skip_all)]
     pub async fn create(
@@ -182,8 +153,6 @@ impl Workflows {
 
         self.validate_steps(sub, workspace_id, &steps).await?;
 
-        // Auto-generate the webhook secret if the trigger is webhook +
-        // the caller passed an empty/placeholder secret.
         let trigger = match trigger {
             WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
                 WorkflowTrigger::Webhook {
@@ -213,14 +182,9 @@ impl Workflows {
         Ok(workflow)
     }
 
-    /// Reverse-sync entry point: upsert a workflow from a library file
-    /// within an existing transaction. Mirrors `Skills::upsert_from_library_in_op`.
-    ///
-    /// On `Create`: stamps `original_path` so the next forward-sync
-    /// pass can rename / clean up the file. Generates a fresh webhook
-    /// secret when the file declares a webhook trigger.
-    /// On `Update`: preserves the existing DB-side webhook secret —
-    /// secrets never round-trip through the file.
+    /// Mirrors `Skills::upsert_from_library_in_op`. On create: mints a
+    /// fresh webhook secret. On update: preserves the DB-side secret;
+    /// the file never carries it.
     #[instrument(name = "core.workflow.upsert_from_library_in_op", skip_all)]
     pub(crate) async fn upsert_from_library_in_op(
         &self,
@@ -252,10 +216,8 @@ impl Workflows {
             _ => return Ok(()),
         };
 
-        // Soft validation on reverse-sync: warn but don't fail. The
-        // library may legitimately be in an intermediate state during
-        // a multi-file push (workflow file landing before its
-        // referenced skill).
+        // Soft check: a multi-file library push can legitimately land
+        // a workflow before its referenced skill, so warn don't fail.
         for step in &steps {
             match step {
                 WorkflowStepDef::AgentStep { skill, .. } => {
@@ -289,8 +251,6 @@ impl Workflows {
             }
             tracing::info!(id = %doc_id, name = %name, "updated workflow from library");
         } else {
-            // New workflow from a hand-authored file: mint a fresh secret
-            // for webhook triggers.
             let trigger = match trigger {
                 WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
                     WorkflowTrigger::Webhook {
@@ -339,13 +299,8 @@ impl Workflows {
         Ok(workflow)
     }
 
-    /// Look up a workflow without performing an auth check.
-    ///
-    /// Reserved for internal callers (the webhook handler in particular)
-    /// that authenticate via the trigger's stored secret rather than via
-    /// [`AuthSubject`]. The caller is expected to use the returned
-    /// definition's stored secret to verify the request before invoking
-    /// [`Self::trigger_run_for_definition`] with the same value.
+    /// Bypasses auth — internal callers (the webhook handler) verify
+    /// via the trigger's stored secret instead.
     #[instrument(name = "core.workflow.find_by_id_unchecked", skip_all)]
     pub async fn find_by_id_unchecked(
         &self,
@@ -376,10 +331,7 @@ impl Workflows {
         Ok(result.entities)
     }
 
-    /// Create a [`WorkflowRun`] for `definition_id`, persist it, and spawn
-    /// the executor on a tokio task. Returns the freshly-created run
-    /// immediately — the executor runs in the background and updates the
-    /// run as steps progress.
+    /// Spawns the executor as a job and returns the run synchronously.
     #[instrument(name = "core.workflow.trigger_run", skip_all)]
     pub async fn trigger_run(
         &self,
@@ -395,11 +347,8 @@ impl Workflows {
         self.spawn_run(definition, trigger_context).await
     }
 
-    /// Spawn a run for a pre-loaded definition without an auth check.
-    ///
-    /// Pairs with [`Self::find_by_id_unchecked`] so the webhook handler
-    /// can load the definition once (to read the trigger secret), verify
-    /// the request, then trigger the run without re-fetching.
+    /// No auth check — pairs with [`Self::find_by_id_unchecked`] so
+    /// the webhook handler doesn't double-load the definition.
     #[instrument(name = "core.workflow.trigger_run_for_definition", skip_all)]
     pub async fn trigger_run_for_definition(
         &self,
@@ -424,12 +373,6 @@ impl Workflows {
 
         let run = self.run_repo.create(new).await?;
 
-        // Enqueue the `workflow.execute-run` job. The job system
-        // persists the request in PostgreSQL, so even if the process
-        // crashes between this call and the runner picking it up the
-        // executor will still run after restart. Combined with the
-        // idempotent mutations on [`WorkflowRun`], this gives
-        // at-least-once execution semantics that survive deploys.
         self.execute_run_spawner
             .spawn(::job::JobId::new(), ExecuteRunConfig { run_id: run.id })
             .await
@@ -478,18 +421,13 @@ impl Workflows {
         Ok(run)
     }
 
-    /// Bulk soft-delete every workflow definition + run belonging to a
-    /// workspace within a transaction. Used by `Workspaces::delete` to
-    /// cascade workflow rows alongside skills, notes, secrets, etc.
-    /// The library's git-side cleanup is queued separately via
-    /// [`crate::library::Library::cleanup_workspace_in_op`].
     #[instrument(name = "core.workflow.delete_for_workspace_in_op", skip_all)]
     pub(crate) async fn delete_for_workspace_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         workspace_id: WorkspaceId,
     ) -> Result<(), WorkflowError> {
-        // Delete runs first since they FK-reference definitions.
+        // Runs FK-reference definitions, so delete runs first.
         self.run_repo
             .cascade_delete_for_workspace_in_op(op, workspace_id)
             .await?;

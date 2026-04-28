@@ -205,9 +205,6 @@ impl App {
         ));
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
-        // Register the workflow `execute-run` job initializer with the
-        // job system and obtain the spawner so `Workflows` can enqueue
-        // background runs that survive deploys.
         let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
             Arc::clone(&agents),
@@ -274,9 +271,6 @@ impl App {
                 .map_err(|e| AppError::Job(e.to_string()))?;
         }
 
-        // Reverse-sync for workflow YAML files. Same shape as the
-        // skill sync above — interval-poll the library, parse +
-        // upsert, share the library-lock queue.
         {
             let sync_init = workflow::SyncWorkflowsFromLibraryJobInitializer::new(
                 library.clone(),

@@ -31,9 +31,6 @@ enum NotesParams {
         tags: Vec<String>,
         #[serde(default)]
         note_id: Option<NoteId>,
-        /// When `Some`, the note is scoped to that workflow definition
-        /// (runbook-style context for that workflow). Honoured on
-        /// create only — `update` cannot move a note between scopes.
         #[serde(default)]
         workflow_id: Option<WorkflowDefinitionId>,
     },
@@ -48,9 +45,6 @@ enum NotesParams {
     List {
         #[serde(default = "default_list_limit")]
         limit: usize,
-        /// `Some` filters the listing to a specific workflow
-        /// definition; omit (or pass `null`) for the default
-        /// workspace-only listing.
         #[serde(default)]
         workflow_id: Option<WorkflowDefinitionId>,
     },

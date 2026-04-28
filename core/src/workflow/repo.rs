@@ -38,10 +38,6 @@ impl WorkflowDefinitionRepo {
         }
     }
 
-    /// Bulk soft-delete every workflow definition belonging to a
-    /// workspace. Mirrors `SkillRepo::cascade_delete_for_workspace_in_op`
-    /// — uses raw SQL since `soft_without_queries` makes a column
-    /// update equivalent to iterating each entity through `delete_in_op`.
     pub async fn cascade_delete_for_workspace_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -54,11 +50,6 @@ impl WorkflowDefinitionRepo {
         Ok(())
     }
 
-    /// Post-persist hook: forward-sync the workflow definition to the
-    /// git-backed library. Mirrors `SkillRepo::sync_to_library` — only
-    /// fires for `Initialized` / `Updated` events (no library traffic
-    /// on no-op writes), and skips entirely when no library is
-    /// configured (e.g. in tests).
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,
