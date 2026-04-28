@@ -137,9 +137,11 @@ impl Workspaces {
         sub.can(AuthVerb::Update, AuthResource::Workspace(Some(id)))?;
         Audit::record_action_if_unset("workspace.update");
         Audit::record_workspace_id(id);
-        let mut workspace = self.repo.find_by_id(id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let mut workspace = self.repo.find_by_id_in_op(&mut op, id).await?;
         workspace.update(description);
-        self.repo.update(&mut workspace).await?;
+        self.repo.update_in_op(&mut op, &mut workspace).await?;
+        op.commit().await?;
         Ok(workspace)
     }
 
@@ -167,7 +169,7 @@ impl Workspaces {
         id: impl Into<WorkspaceId> + std::fmt::Debug,
     ) -> Result<Workspace, WorkspaceError> {
         let id = id.into();
-        let mut workspace = self.repo.find_by_id(id).await?;
+        let mut workspace = self.repo.find_by_id_in_op(&mut *op, id).await?;
 
         if !workspace.archive().did_execute() {
             return Ok(workspace);
@@ -181,7 +183,7 @@ impl Workspaces {
         }
 
         // ── 2. Cascade soft-delete agents (→ sessions → threads) ───────
-        let agent_list = self.agents.list_for_workspace(_sub, id).await?;
+        let agent_list = self.agents.list_for_workspace_in_op(op, id).await?;
         for agent in &agent_list {
             if let Err(e) = self.agents.delete_in_op(op, agent.id).await {
                 tracing::warn!(
@@ -217,10 +219,9 @@ impl Workspaces {
         }
 
         // ── 7. Archive + soft-delete the workspace entity itself ───────
-        self.repo.update_in_op(op, &mut workspace).await?;
-        self.repo
-            .delete_in_op(op, self.repo.find_by_id(id).await?)
-            .await?;
+        self.repo.update_in_op(&mut *op, &mut workspace).await?;
+        let to_delete = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        self.repo.delete_in_op(op, to_delete).await?;
         Ok(workspace)
     }
 

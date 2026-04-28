@@ -274,7 +274,7 @@ impl Sandboxes {
         response: &InitializeResponse,
     ) -> Result<(), SandboxError> {
         let mut op = self.repo.begin_op().await?;
-        let mut sandbox = self.repo.find_by_id(id).await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
         if sandbox.initialized(response).did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
@@ -285,7 +285,7 @@ impl Sandboxes {
     /// Idempotent transition into [`SandboxState::Initializing`].
     async fn run_initializing(&self, id: SandboxId) -> Result<(), SandboxError> {
         let mut op = self.repo.begin_op().await?;
-        let mut sandbox = self.repo.find_by_id(id).await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
         if sandbox.initializing().did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
@@ -313,7 +313,7 @@ impl Sandboxes {
         reason: &str,
     ) -> Result<(), SandboxError> {
         let mut op = self.repo.begin_op().await?;
-        let mut sandbox = self.repo.find_by_id(id).await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
         if sandbox.errored(step, reason).did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
@@ -476,15 +476,16 @@ impl Sandboxes {
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
-        let mut sandbox = self.repo.find_by_id(id).await?;
+        let pre = self.repo.find_by_id(id).await?;
         sub.can(
             AuthVerb::Update,
-            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+            AuthResource::Sandbox(pre.workspace_id, Some(pre.id)),
         )?;
         Audit::record_action_if_unset("sandbox.restart");
-        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_workspace_id(pre.workspace_id);
         Audit::record_sandbox_id(id);
         let mut op = self.repo.begin_op().await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
         if sandbox.provisioning().did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }
@@ -515,7 +516,7 @@ impl Sandboxes {
         Audit::record_sandbox_id(sandbox_id);
         Audit::record_workspace_id(workspace_id);
         Audit::record_agent_id(agent_id);
-        let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, sandbox_id).await?;
         if sandbox
             .attach_agent(agent_id, workspace_id, mode)?
             .did_execute()
@@ -540,7 +541,7 @@ impl Sandboxes {
     ) -> Result<Sandbox, SandboxError> {
         Audit::record_sandbox_id(sandbox_id);
         Audit::record_agent_id(agent_id);
-        let mut sandbox = self.repo.find_by_id(sandbox_id).await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, sandbox_id).await?;
         if sandbox.detach_agent(agent_id).did_execute() {
             self.repo.update_in_op(op, &mut sandbox).await?;
         }
@@ -564,7 +565,12 @@ impl Sandboxes {
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .list_for_workspace_id_by_created_at_in_op(
+                &mut *op,
+                workspace_id,
+                query,
+                ListDirection::Descending,
+            )
             .await?;
         for sandbox in result.entities {
             if sandbox.state == SandboxState::Suspended {
@@ -615,7 +621,7 @@ impl Sandboxes {
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
         Audit::record_sandbox_id(id);
-        let mut sandbox = self.repo.find_by_id(id).await?;
+        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
 
         let resource_name = sandbox.resource_name();
         if let Err(e) = self.admin.delete_sandbox(&resource_name).await {

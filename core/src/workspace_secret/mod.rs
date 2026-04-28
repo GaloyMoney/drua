@@ -120,15 +120,17 @@ impl WorkspaceSecrets {
         id: WorkspaceSecretId,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
-        let mut secret = self.repo.find_by_id(id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let mut secret = self.repo.find_by_id_in_op(&mut op, id).await?;
         sub.can(
             AuthVerb::Update,
             AuthResource::WorkspaceSecret(secret.workspace_id, Some(secret.id)),
         )?;
         let encrypted_value = self.encryption_key.encrypt_string(value);
         if secret.update_value(encrypted_value).did_execute() {
-            self.repo.update(&mut secret).await?;
+            self.repo.update_in_op(&mut op, &mut secret).await?;
         }
+        op.commit().await?;
         Ok(secret)
     }
 
@@ -139,12 +141,14 @@ impl WorkspaceSecrets {
         sub: &AuthSubject,
         id: WorkspaceSecretId,
     ) -> Result<(), WorkspaceSecretError> {
-        let secret = self.repo.find_by_id(id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let secret = self.repo.find_by_id_in_op(&mut op, id).await?;
         sub.can(
             AuthVerb::Delete,
             AuthResource::WorkspaceSecret(secret.workspace_id, Some(secret.id)),
         )?;
-        self.repo.delete(secret).await?;
+        self.repo.delete_in_op(&mut op, secret).await?;
+        op.commit().await?;
         Ok(())
     }
 

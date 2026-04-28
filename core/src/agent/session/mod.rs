@@ -81,10 +81,12 @@ impl Sessions {
         prompt: String,
         proposed_system_blocks: Vec<SystemBlock>,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
         let _ = session.apply_proposed_system_blocks(proposed_system_blocks);
         let response = session.add_user_input(target, source, prompt)?;
-        self.repo.update(&mut session).await?;
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
         Ok(response)
     }
 
@@ -94,9 +96,11 @@ impl Sessions {
         agent_id: AgentId,
         target: TargetThread,
     ) -> Result<llm::Prompt, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
         let prompt = session.next_prompt(target)?;
-        self.repo.update(&mut session).await?;
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
         Ok(prompt.into())
     }
 
@@ -110,7 +114,8 @@ impl Sessions {
         response: llm::PromptResponse,
         model: String,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
         let thread_id = session
             .current_main_thread_id()
             .ok_or(AgentSessionError::ThreadNotFound)?;
@@ -129,7 +134,8 @@ impl Sessions {
 
         let result =
             session.assistant_response_received(thread_id, content, stop_reason, None, metadata)?;
-        self.repo.update(&mut session).await?;
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
         Ok(result)
     }
 
@@ -139,7 +145,8 @@ impl Sessions {
         agent_id: AgentId,
         results: Vec<llm::ToolUseResult>,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
-        let mut session = self.repo.find_by_agent_id(agent_id).await?;
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
         let thread_id = session
             .current_main_thread_id()
             .ok_or(AgentSessionError::ThreadNotFound)?;
@@ -147,7 +154,8 @@ impl Sessions {
         let tool_results: Vec<ToolResultInput> =
             results.into_iter().map(ToolResultInput::from).collect();
         let result = session.add_tool_results(thread_id, tool_results)?;
-        self.repo.update(&mut session).await?;
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
         Ok(result)
     }
 

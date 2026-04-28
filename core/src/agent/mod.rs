@@ -433,6 +433,29 @@ impl Agents {
         Ok(result.entities)
     }
 
+    #[instrument(name = "domain.agent.list_for_workspace_in_op", skip(self, op))]
+    pub(crate) async fn list_for_workspace_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<Agent>, AgentError> {
+        Audit::record_workspace_id(workspace_id);
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at_in_op(
+                &mut *op,
+                workspace_id,
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result.entities)
+    }
+
     #[instrument(name = "domain.agent.delete_in_op", skip(self, op))]
     pub async fn delete_in_op(
         &self,
@@ -440,7 +463,7 @@ impl Agents {
         id: impl Into<AgentId> + std::fmt::Debug,
     ) -> Result<(), AgentError> {
         let id = id.into();
-        let agent = self.repo.find_by_id(id).await?;
+        let agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(id);
         // Cascade soft-delete to the agent's session and all its threads
@@ -481,7 +504,7 @@ impl Agents {
         // Agent side first: `sandbox_attached` enforces the entity-level
         // invariants (lead can't attach; at most one sandbox per agent).
         // Failing here short-circuits before the sandbox-side round-trip.
-        let mut agent = self.repo.find_by_id(agent_id).await?;
+        let mut agent = self.repo.find_by_id_in_op(&mut op, agent_id).await?;
         if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
@@ -531,7 +554,7 @@ impl Agents {
         let mut op = self.repo.begin_op().await?;
 
         // Symmetric with attach: agent side first, then sandbox side.
-        let mut agent = self.repo.find_by_id(agent_id).await?;
+        let mut agent = self.repo.find_by_id_in_op(&mut op, agent_id).await?;
         if agent.sandbox_detached(sandbox_id).did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
