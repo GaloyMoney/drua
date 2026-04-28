@@ -29,11 +29,17 @@ data:
     providers:
     {{- range . }}
       - name: {{ .name | quote }}
+        {{- with .base_url }}
+        base_url: {{ . | quote }}
+        {{- end }}
         models:
         {{- range .models }}
           - name: {{ .name | quote }}
-            max_tokens_per_response: {{ .maxTokensPerResponse }}
-            context_window_tokens: {{ .contextWindowTokens }}
+            max_tokens_per_response: {{ printf "%d" (int .maxTokensPerResponse) }}
+            context_window_tokens: {{ printf "%d" (int .contextWindowTokens) }}
+            {{- if hasKey . "cacheTtlSeconds" }}
+            cache_ttl_seconds: {{ printf "%d" (int .cacheTtlSeconds) }}
+            {{- end }}
         {{- end }}
     {{- end }}
     {{- end }}
