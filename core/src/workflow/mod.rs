@@ -181,7 +181,8 @@ impl Workflows {
             ));
         }
 
-        self.validate_steps(workspace_id, &steps, &sandboxes).await?;
+        self.validate_steps(workspace_id, &steps, &sandboxes)
+            .await?;
 
         let trigger = match trigger {
             WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
@@ -224,38 +225,30 @@ impl Workflows {
         workspace_id: WorkspaceId,
         file_hash: GitFileHash,
     ) -> Result<(), WorkflowError> {
-        let (
-            doc_id,
-            name,
-            description,
-            trigger,
-            steps,
-            sandboxes,
-            workspace_name,
-            original_path,
-        ) = match file {
-            RuntimeFile::Workflow {
-                doc_id,
-                name,
-                description,
-                trigger,
-                steps,
-                sandboxes,
-                workspace_name,
-                original_path,
-                ..
-            } => (
-                *doc_id,
-                name.clone(),
-                description.clone(),
-                trigger.clone(),
-                steps.clone(),
-                sandboxes.clone(),
-                workspace_name.clone(),
-                original_path.clone(),
-            ),
-            _ => return Ok(()),
-        };
+        let (doc_id, name, description, trigger, steps, sandboxes, workspace_name, original_path) =
+            match file {
+                RuntimeFile::Workflow {
+                    doc_id,
+                    name,
+                    description,
+                    trigger,
+                    steps,
+                    sandboxes,
+                    workspace_name,
+                    original_path,
+                    ..
+                } => (
+                    *doc_id,
+                    name.clone(),
+                    description.clone(),
+                    trigger.clone(),
+                    steps.clone(),
+                    sandboxes.clone(),
+                    workspace_name.clone(),
+                    original_path.clone(),
+                ),
+                _ => return Ok(()),
+            };
 
         // Soft check: a multi-file library push can legitimately land
         // a workflow before its referenced skill, so warn don't fail.

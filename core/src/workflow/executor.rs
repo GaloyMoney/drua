@@ -199,12 +199,7 @@ impl Executor {
                     self.sandboxes.spawn_sandbox_creation(sb.id);
                     sb
                 }
-                Some(sb)
-                    if matches!(
-                        sb.state,
-                        SandboxState::Suspended | SandboxState::Errored
-                    ) =>
-                {
+                Some(sb) if matches!(sb.state, SandboxState::Suspended | SandboxState::Errored) => {
                     if sb.state == SandboxState::Errored {
                         tracing::warn!(
                             sandbox_id = %sb.id,
@@ -340,7 +335,9 @@ impl Executor {
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-                let result = self.stream_agent_response(&agent, prompt, name, *timeout_seconds).await;
+                let result = self
+                    .stream_agent_response(&agent, prompt, name, *timeout_seconds)
+                    .await;
 
                 // Detach the sandbox unconditionally so the next step can
                 // attach (Write mode is single-writer). Best-effort; the

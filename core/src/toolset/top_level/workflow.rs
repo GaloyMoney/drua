@@ -445,7 +445,10 @@ impl TopLevelTool for WorkflowTool {
                 };
 
                 let resolved_steps: Vec<WorkflowStepDef> = if !steps.is_empty() {
-                    steps.into_iter().map(WorkflowStepParam::into_step).collect()
+                    steps
+                        .into_iter()
+                        .map(WorkflowStepParam::into_step)
+                        .collect()
                 } else {
                     let skill = skill.ok_or_else(|| {
                         ToolSetsError::MissingArgument(
@@ -875,10 +878,7 @@ fn format_run_text(r: &WorkflowRun) -> String {
     out.push_str(&format!("run_id:        {}\n", r.id));
     out.push_str(&format!("definition_id: {}\n", r.definition_id));
     out.push_str(&format!("state:         {}\n", run_state_str(r.state)));
-    out.push_str(&format!(
-        "started_at:    {}\n",
-        r.started_at().to_rfc3339()
-    ));
+    out.push_str(&format!("started_at:    {}\n", r.started_at().to_rfc3339()));
     if let Some(t) = r.completed_at {
         out.push_str(&format!("completed_at:  {}\n", t.to_rfc3339()));
     }

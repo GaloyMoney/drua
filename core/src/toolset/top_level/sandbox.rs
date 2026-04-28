@@ -265,9 +265,7 @@ impl TopLevelTool for WorkspaceSandbox {
                     return Err(ToolSetsError::Unauthorized);
                 }
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument(
-                        "sandbox_id is required for restart".to_string(),
-                    )
+                    ToolSetsError::MissingArgument("sandbox_id is required for restart".to_string())
                 })?;
                 let sandbox = self
                     .sandboxes
@@ -280,9 +278,9 @@ impl TopLevelTool for WorkspaceSandbox {
                         .wait_until_ready(sandbox.id, std::time::Duration::from_secs(180))
                         .await
                         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-                    Ok(CallToolResult::success(vec![Content::text(format_sandbox(
-                        &ready,
-                    ))]))
+                    Ok(CallToolResult::success(vec![Content::text(
+                        format_sandbox(&ready),
+                    )]))
                 } else {
                     Ok(CallToolResult::success(vec![Content::text(format!(
                         "Sandbox restart requested. Pass `wait: true` to block until ready, or poll `get` until state=ready.\n\n{}",
@@ -296,18 +294,16 @@ impl TopLevelTool for WorkspaceSandbox {
                     return Err(ToolSetsError::Unauthorized);
                 }
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument(
-                        "sandbox_id is required for suspend".to_string(),
-                    )
+                    ToolSetsError::MissingArgument("sandbox_id is required for suspend".to_string())
                 })?;
                 let sandbox = self
                     .sandboxes
                     .suspend(subject, sandbox_id)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_sandbox(
-                    &sandbox,
-                ))]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_sandbox(&sandbox),
+                )]))
             }
         }
     }
