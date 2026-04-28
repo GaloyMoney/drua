@@ -81,11 +81,6 @@ impl Sessions {
         prompt: String,
         proposed_system_blocks: Vec<SystemBlock>,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
-        // Load + update in a single op so concurrent turns on the same
-        // session (e.g. parallel `send_message` calls) can't lose each
-        // other's events. Without the shared op, two concurrent loaders
-        // would both see the pre-state and the second update overwrites
-        // the first.
         let mut op = self.repo.begin_op().await?;
         let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
         let _ = session.apply_proposed_system_blocks(proposed_system_blocks);

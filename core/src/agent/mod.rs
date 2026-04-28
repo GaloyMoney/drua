@@ -433,11 +433,6 @@ impl Agents {
         Ok(result.entities)
     }
 
-    /// Composable variant of [`Self::list_for_workspace`] — used by the
-    /// workspace cascade-delete so the listing reads against the same op
-    /// in which agents are subsequently soft-deleted. No auth check; this
-    /// is `pub(crate)` and called from contexts that have already
-    /// authorized the workspace-level delete.
     #[instrument(name = "domain.agent.list_for_workspace_in_op", skip(self, op))]
     pub(crate) async fn list_for_workspace_in_op(
         &self,
@@ -468,11 +463,6 @@ impl Agents {
         id: impl Into<AgentId> + std::fmt::Debug,
     ) -> Result<(), AgentError> {
         let id = id.into();
-        // Load through the same op so the read-then-delete sequence is
-        // serialized with concurrent writers — without this, another
-        // session could mutate the agent (e.g. attach a sandbox) between
-        // the load and the soft-delete, and that mutation would silently
-        // be lost.
         let agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(id);
@@ -514,9 +504,6 @@ impl Agents {
         // Agent side first: `sandbox_attached` enforces the entity-level
         // invariants (lead can't attach; at most one sandbox per agent).
         // Failing here short-circuits before the sandbox-side round-trip.
-        // Load inside the op so the load + update + cross-service mutations
-        // form one serializable transaction (otherwise a concurrent
-        // attach/detach could win the race against this update).
         let mut agent = self.repo.find_by_id_in_op(&mut op, agent_id).await?;
         if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
@@ -567,8 +554,6 @@ impl Agents {
         let mut op = self.repo.begin_op().await?;
 
         // Symmetric with attach: agent side first, then sandbox side.
-        // Load inside the op so the read + write are atomic (see comment
-        // in `attach_sandbox`).
         let mut agent = self.repo.find_by_id_in_op(&mut op, agent_id).await?;
         if agent.sandbox_detached(sandbox_id).did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;

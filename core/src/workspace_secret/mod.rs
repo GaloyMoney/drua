@@ -120,8 +120,6 @@ impl WorkspaceSecrets {
         id: WorkspaceSecretId,
         value: &str,
     ) -> Result<WorkspaceSecret, WorkspaceSecretError> {
-        // Load + update through the same op so a concurrent rotate /
-        // delete can't slip in between and produce a lost update.
         let mut op = self.repo.begin_op().await?;
         let mut secret = self.repo.find_by_id_in_op(&mut op, id).await?;
         sub.can(

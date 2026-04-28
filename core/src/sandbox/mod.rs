@@ -274,10 +274,6 @@ impl Sandboxes {
         response: &InitializeResponse,
     ) -> Result<(), SandboxError> {
         let mut op = self.repo.begin_op().await?;
-        // Load inside the op so the load+update form one serializable
-        // transaction; otherwise a concurrent suspend/restart could race
-        // and have its event silently overwritten by the stale entity
-        // loaded here.
         let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
         if sandbox.initialized(response).did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
@@ -480,9 +476,6 @@ impl Sandboxes {
         id: impl Into<SandboxId> + std::fmt::Debug,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
-        // Pre-op load purely for authorization; the authoritative load
-        // for the mutation happens inside the op below so the entity we
-        // mutate reflects the row state at transaction start.
         let pre = self.repo.find_by_id(id).await?;
         sub.can(
             AuthVerb::Update,
@@ -523,9 +516,6 @@ impl Sandboxes {
         Audit::record_sandbox_id(sandbox_id);
         Audit::record_workspace_id(workspace_id);
         Audit::record_agent_id(agent_id);
-        // Load through the caller's op so the single-writer invariant
-        // checked by `attach_agent` (and the resulting update) are
-        // serialized with concurrent attaches/detaches.
         let mut sandbox = self.repo.find_by_id_in_op(&mut *op, sandbox_id).await?;
         if sandbox
             .attach_agent(agent_id, workspace_id, mode)?
@@ -573,10 +563,6 @@ impl Sandboxes {
             first: 100,
             after: None,
         };
-        // List + suspend through the same op so the cascade is
-        // serialized with any concurrent sandbox creation in the
-        // workspace (would otherwise leave a freshly-created sandbox
-        // un-suspended through the workspace deletion).
         let result = self
             .repo
             .list_for_workspace_id_by_created_at_in_op(

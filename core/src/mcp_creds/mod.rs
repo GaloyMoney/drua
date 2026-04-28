@@ -76,9 +76,6 @@ impl McpCredentials {
         id: impl Into<McpCredsId> + std::fmt::Debug,
     ) -> Result<McpCreds, McpCredsError> {
         let id = id.into();
-        // Load + update inside one op: otherwise a concurrent revoke
-        // could observe the same pre-state and the second update would
-        // overwrite the first's event.
         let mut op = self.repo.begin_op().await?;
         let mut creds = self.repo.find_by_id_in_op(&mut op, id).await?;
         sub.can(AuthVerb::Delete, AuthResource::McpCreds(Some(creds.id)))?;
