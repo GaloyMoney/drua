@@ -303,7 +303,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "skill": {
                 "type": "string",
-                "description": "Single-step shorthand: skill name (create). Used only when `steps` is omitted/empty."
+                "description": "Single-step shorthand: NAME of an existing skill in this workspace (create skill first via the `skill` tool). Used only when `steps` is omitted/empty."
             },
             "steps": {
                 "type": "array",
@@ -312,8 +312,14 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string" },
-                        "skill": { "type": "string" },
-                        "sandbox": { "type": "string" },
+                        "skill": {
+                            "type": "string",
+                            "description": "NAME of an existing skill in this workspace (created via the `skill` tool). NOT an inline body — the runtime looks up the skill by this name at trigger time."
+                        },
+                        "sandbox": {
+                            "type": "string",
+                            "description": "Name of a sandbox declared in this workflow's top-level `sandboxes` array."
+                        },
                         "sandbox_mode": { "type": "string", "enum": ["read", "write"] },
                         "timeout_seconds": { "type": "integer", "minimum": 1 }
                     },

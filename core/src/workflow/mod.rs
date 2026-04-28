@@ -104,25 +104,56 @@ impl Workflows {
             }
         }
 
+        // Collect every bad reference in a single pass so the operator
+        // sees the full list (rather than fixing one and re-running).
+        let mut missing_skills: Vec<(String, String)> = Vec::new();
+        let mut undeclared_sandboxes: Vec<(String, String)> = Vec::new();
+
         for step in steps {
             match step {
-                WorkflowStepDef::AgentStep { skill, sandbox, .. } => {
+                WorkflowStepDef::AgentStep {
+                    name,
+                    skill,
+                    sandbox,
+                    ..
+                } => {
                     let found = self
                         .skills
                         .find_by_name(skill, Some(workspace_id), None)
                         .await
                         .map_err(|e| WorkflowError::Skill(e.to_string()))?;
                     if found.is_none() {
-                        return Err(WorkflowError::SkillNotFound(skill.clone()));
+                        missing_skills.push((name.clone(), skill.clone()));
                     }
 
                     if let Some(sandbox_name) = sandbox {
                         if !decl_names.contains(sandbox_name.as_str()) {
-                            return Err(WorkflowError::UndeclaredSandbox(sandbox_name.clone()));
+                            undeclared_sandboxes.push((name.clone(), sandbox_name.clone()));
                         }
                     }
                 }
             }
+        }
+
+        if !missing_skills.is_empty() {
+            let listed = missing_skills
+                .iter()
+                .map(|(step, skill)| format!("step '{step}' → skill '{skill}'"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(WorkflowError::SkillNotFound(format!(
+                "{listed}. The `skill` field expects the NAME of a skill in this workspace; create skills first via the `skill` tool"
+            )));
+        }
+        if !undeclared_sandboxes.is_empty() {
+            let listed = undeclared_sandboxes
+                .iter()
+                .map(|(step, sb)| format!("step '{step}' → sandbox '{sb}'"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(WorkflowError::UndeclaredSandbox(format!(
+                "{listed}. Add each name to the workflow's top-level `sandboxes` declarations"
+            )));
         }
         Ok(())
     }
