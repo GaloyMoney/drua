@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::WorkflowDefinitionId;
+use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
     StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
@@ -28,14 +28,21 @@ enum WorkflowParams {
         provider: Option<String>,
         #[serde(default)]
         manual: bool,
-        skill: String,
+        /// Multi-step form. When non-empty this takes precedence over
+        /// the single-step shorthand (`skill`/`sandbox`/`sandbox_mode`/
+        /// `timeout_seconds`).
+        #[serde(default)]
+        steps: Vec<WorkflowStepParam>,
+        /// Single-step shorthand: required only when `steps` is empty.
+        #[serde(default)]
+        skill: Option<String>,
         #[serde(default)]
         sandbox: Option<String>,
         #[serde(default)]
         sandbox_mode: Option<SandboxAgentMode>,
         #[serde(default)]
         timeout_seconds: Option<u64>,
-        /// Declared sandboxes for the workflow. The step's `sandbox`
+        /// Declared sandboxes for the workflow. Each step's `sandbox`
         /// (if set) must reference one of these by name.
         #[serde(default)]
         sandboxes: Vec<WorkflowSandboxParam>,
@@ -51,6 +58,9 @@ enum WorkflowParams {
     },
     Runs {
         definition_id: WorkflowDefinitionId,
+    },
+    Run {
+        run_id: WorkflowRunId,
     },
 }
 
@@ -78,6 +88,30 @@ enum WorkflowSandboxParam {
         #[serde(default)]
         disk_size: Option<String>,
     },
+}
+
+#[derive(Deserialize)]
+struct WorkflowStepParam {
+    name: String,
+    skill: String,
+    #[serde(default)]
+    sandbox: Option<String>,
+    #[serde(default)]
+    sandbox_mode: Option<SandboxAgentMode>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+impl WorkflowStepParam {
+    fn into_step(self) -> WorkflowStepDef {
+        WorkflowStepDef::AgentStep {
+            name: self.name,
+            skill: self.skill,
+            sandbox: self.sandbox,
+            sandbox_mode: self.sandbox_mode,
+            timeout_seconds: self.timeout_seconds,
+        }
+    }
 }
 
 impl WorkflowSandboxParam {
@@ -124,6 +158,7 @@ impl WorkflowParams {
             Self::Get { .. } => "workflow.get",
             Self::Trigger { .. } => "workflow.trigger",
             Self::Runs { .. } => "workflow.runs",
+            Self::Run { .. } => "workflow.run",
         }
     }
 }
@@ -247,8 +282,8 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "runs"],
-                "description": "Which workflow operation to perform."
+                "enum": ["create", "list", "get", "trigger", "runs", "run"],
+                "description": "Which workflow operation to perform. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
             },
             "name": {
                 "type": "string",
@@ -268,7 +303,22 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "skill": {
                 "type": "string",
-                "description": "Skill name for the single agent step (create)."
+                "description": "Single-step shorthand: skill name (create). Used only when `steps` is omitted/empty."
+            },
+            "steps": {
+                "type": "array",
+                "description": "Multi-step form (create). Takes precedence over the single-step shorthand. Each entry needs `name` and `skill`; optional `sandbox`, `sandbox_mode`, `timeout_seconds`.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "skill": { "type": "string" },
+                        "sandbox": { "type": "string" },
+                        "sandbox_mode": { "type": "string", "enum": ["read", "write"] },
+                        "timeout_seconds": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["name", "skill"]
+                }
             },
             "sandbox": {
                 "type": "string",
@@ -301,6 +351,11 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "format": "uuid",
                 "description": "Workflow definition ID (get / trigger / runs)."
             },
+            "run_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Workflow run ID (run)."
+            },
             "payload": {
                 "description": "Trigger context payload (trigger). Defaults to {}."
             }
@@ -317,11 +372,13 @@ impl TopLevelTool for WorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Manage webhook-triggered workflows that run an agent skill end-to-end. \
-         Commands: `create` (requires `name`, `skill`; optional `provider`, `sandbox`, \
-         `timeout_seconds`, `manual`), `list`, `get` (requires `definition_id`), \
+        "Manage webhook-triggered workflows that run agent skills end-to-end. \
+         Commands: `create` (requires `name`; either `steps` array or single-step \
+         shorthand `skill`; optional `provider`, `sandboxes`, `manual`), \
+         `list`, `get` (requires `definition_id`), \
          `trigger` (requires `definition_id`, optional `payload`), \
-         `runs` (requires `definition_id`)."
+         `runs` (requires `definition_id`; truncated step outputs), \
+         `run` (requires `run_id`; full per-step outputs)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -356,6 +413,7 @@ impl TopLevelTool for WorkflowTool {
                 description,
                 provider,
                 manual,
+                steps,
                 skill,
                 sandbox,
                 sandbox_mode,
@@ -376,12 +434,21 @@ impl TopLevelTool for WorkflowTool {
                     }
                 };
 
-                let step = WorkflowStepDef::AgentStep {
-                    name: "step".into(),
-                    skill,
-                    sandbox,
-                    sandbox_mode,
-                    timeout_seconds,
+                let resolved_steps: Vec<WorkflowStepDef> = if !steps.is_empty() {
+                    steps.into_iter().map(WorkflowStepParam::into_step).collect()
+                } else {
+                    let skill = skill.ok_or_else(|| {
+                        ToolSetsError::MissingArgument(
+                            "either `steps` or `skill` is required for create".into(),
+                        )
+                    })?;
+                    vec![WorkflowStepDef::AgentStep {
+                        name: "step".into(),
+                        skill,
+                        sandbox,
+                        sandbox_mode,
+                        timeout_seconds,
+                    }]
                 };
 
                 let workspace_name = self
@@ -403,7 +470,7 @@ impl TopLevelTool for WorkflowTool {
                         name,
                         description,
                         trigger,
-                        vec![step],
+                        resolved_steps,
                         sandbox_decls,
                     )
                     .await
@@ -489,6 +556,21 @@ impl TopLevelTool for WorkflowTool {
                 let out = WorkflowOutput {
                     command: "runs".to_string(),
                     runs: Some(runs.iter().map(run_to_output).collect()),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            WorkflowParams::Run { run_id } => {
+                let run = self
+                    .workflows
+                    .find_run_by_id(subject, run_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let text = format_run_text(&run);
+                let out = WorkflowOutput {
+                    command: "run".to_string(),
+                    run: Some(run_to_output(&run)),
                     ..Default::default()
                 };
                 (text, out)
@@ -766,6 +848,54 @@ fn format_runs_text(runs: &[WorkflowRun]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn format_run_text(r: &WorkflowRun) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("run_id:        {}\n", r.id));
+    out.push_str(&format!("definition_id: {}\n", r.definition_id));
+    out.push_str(&format!("state:         {}\n", run_state_str(r.state)));
+    out.push_str(&format!(
+        "started_at:    {}\n",
+        r.started_at().to_rfc3339()
+    ));
+    if let Some(t) = r.completed_at {
+        out.push_str(&format!("completed_at:  {}\n", t.to_rfc3339()));
+    }
+    out.push('\n');
+    if r.step_results.is_empty() {
+        out.push_str("No step results.\n");
+        return out;
+    }
+    for (i, sr) in r.step_results.iter().enumerate() {
+        let state = if sr.error.is_some() {
+            "FAILED"
+        } else if sr.completed_at.is_some() {
+            "OK"
+        } else {
+            "RUNNING"
+        };
+        out.push_str(&format!("--- step {}: {} [{state}] ---\n", i + 1, sr.name));
+        if let Some(t) = sr.completed_at {
+            out.push_str(&format!("completed_at: {}\n", t.to_rfc3339()));
+        }
+        if let Some(err) = &sr.error {
+            out.push_str(&format!("error: {err}\n"));
+        }
+        if let Some(v) = &sr.output {
+            let text = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.push_str("output:\n");
+            out.push_str(&text);
+            if !text.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {

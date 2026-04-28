@@ -28,6 +28,8 @@ enum SandboxCommand {
     List,
     Get,
     Inspect,
+    Restart,
+    Suspend,
 }
 
 impl SandboxCommand {
@@ -37,6 +39,8 @@ impl SandboxCommand {
             Self::List => "sandbox.list",
             Self::Get => "sandbox.get",
             Self::Inspect => "sandbox.inspect",
+            Self::Restart => "sandbox.restart",
+            Self::Suspend => "sandbox.suspend",
         }
     }
 }
@@ -116,7 +120,10 @@ impl TopLevelTool for WorkspaceSandbox {
         "Manage sandboxes. Commands: `create` (requires `name`, `mode`, \
          optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
          `list`, `get` (requires `sandbox_id`), \
-         `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`)."
+         `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`), \
+         `restart` (requires `sandbox_id`; wakes a suspended sandbox so it can be \
+         inspected — workflow-scoped sandboxes are suspended after each run), \
+         `suspend` (requires `sandbox_id`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -238,6 +245,45 @@ impl TopLevelTool for WorkspaceSandbox {
                 }
 
                 execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
+            }
+
+            SandboxCommand::Restart => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "sandbox_id is required for restart".to_string(),
+                    )
+                })?;
+                let sandbox = self
+                    .sandboxes
+                    .restart(subject, sandbox_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Sandbox restart requested. Poll `get` until state=ready before inspecting.\n\n{}",
+                    format_sandbox(&sandbox)
+                ))]))
+            }
+
+            SandboxCommand::Suspend => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "sandbox_id is required for suspend".to_string(),
+                    )
+                })?;
+                let sandbox = self
+                    .sandboxes
+                    .suspend(subject, sandbox_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_sandbox(
+                    &sandbox,
+                ))]))
             }
         }
     }

@@ -308,6 +308,15 @@ impl Sandboxes {
         Ok(self.repo.begin_op().await?)
     }
 
+    /// `(workspace_id, name)` is unique at the DB level, so workflow-
+    /// scoped sandboxes embed the workflow short-id in their stored
+    /// name. The user's decl name stays the canonical reference inside
+    /// the workflow YAML; the storage name is an implementation detail.
+    fn workflow_sandbox_storage_name(workflow_id: WorkflowDefinitionId, decl_name: &str) -> String {
+        let short = &workflow_id.to_string()[..8];
+        format!("{decl_name}-wf-{short}")
+    }
+
     /// Lookup scoped to a single workflow definition. Used by the
     /// executor's pre-flight phase; sandboxes are workflow-scoped so a
     /// name can collide across different workflows.
@@ -318,6 +327,7 @@ impl Sandboxes {
         workflow_id: WorkflowDefinitionId,
         name: &str,
     ) -> Result<Option<Sandbox>, SandboxError> {
+        let storage_name = Self::workflow_sandbox_storage_name(workflow_id, name);
         let query = PaginatedQueryArgs {
             first: 100,
             after: None,
@@ -326,14 +336,18 @@ impl Sandboxes {
             .repo
             .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
             .await?;
-        Ok(result.entities.into_iter().find(|s| {
-            s.name == name && s.workflow_id == Some(workflow_id)
-        }))
+        Ok(result
+            .entities
+            .into_iter()
+            .find(|s| s.name == storage_name && s.workflow_id == Some(workflow_id)))
     }
 
     /// Workflow-scoped create; mirrors `create_in_op` but tags the
     /// entity with `workflow_id` and skips the auth check (the workflow
-    /// run was authorised when triggered).
+    /// run was authorised when triggered). The stored name is the
+    /// decl name plus a workflow short-id suffix so two workflows can
+    /// declare the same sandbox name without violating the unique
+    /// `(workspace_id, name)` index.
     #[instrument(name = "domain.sandbox.create_for_workflow_in_op", skip(self, op))]
     pub async fn create_for_workflow_in_op(
         &self,
@@ -344,12 +358,13 @@ impl Sandboxes {
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
+        let storage_name = Self::workflow_sandbox_storage_name(workflow_id, &name.into());
         let id = SandboxId::new();
         let mount_path = self.admin.mount_path(&format!("sb-{id}"));
         let new_sandbox = NewSandbox::builder()
             .id(id)
             .workspace_id(workspace_id)
-            .name(name.into())
+            .name(storage_name)
             .specs(specs)
             .mode(mode)
             .mount_path(mount_path)

@@ -232,6 +232,8 @@ impl Agents {
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
         Audit::record_workspace_id(workspace_id);
+        Audit::record_workflow_id(workflow_id);
+        Audit::record_workflow_run_id(workflow_run_id);
         let workspace_name = self.resolve_workspace_name(workspace_id).await?;
         let id = AgentId::new();
         Audit::record_agent_id(id);
@@ -743,6 +745,12 @@ impl Agents {
         Audit::record_action_if_unset("agent.send_message");
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(id);
+        if let Some(wf) = agent.workflow_id {
+            Audit::record_workflow_id(wf);
+        }
+        if let Some(run) = agent.workflow_run_id {
+            Audit::record_workflow_run_id(run);
+        }
 
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT parent_job_id, id FROM jobs WHERE ((parent_job_id IS NOT DISTINCT FROM $1) AND (COALESCE(id < $3, true))) ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN job_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM sandboxes WHERE workflow_id IS NOT DISTINCT FROM $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $2 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN sandbox_events e ON i.id = e.id ORDER BY i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -32,8 +32,6 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Int8",
-        "Uuid",
         "Bool"
       ]
     },
@@ -45,5 +43,5 @@
       false
     ]
   },
-  "hash": "485ae108b79620f33b6ee77ed238e2b1d3911d07a380de7cc8b8f196b109aa44"
+  "hash": "43a70463279005278365f1da22d0834dfc536d0b82b51d392bd27d6792db7bf6"
 }

@@ -63,6 +63,12 @@ impl Executor {
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
 
+        // Stamp every audit row recorded during this run so they can be
+        // queried by `resource_ids->>'workflow_run_id'`.
+        crate::audit::Audit::record_workspace_id(workspace_id);
+        crate::audit::Audit::record_workflow_id(workflow_id);
+        crate::audit::Audit::record_workflow_run_id(run_id);
+
         // Re-read the latest declarations so a recently-edited workflow
         // sees its updated sandbox list on the next trigger.
         let definition = self.definitions.find_by_id(workflow_id).await?;
