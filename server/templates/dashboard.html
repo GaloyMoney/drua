@@ -35,6 +35,8 @@
       const mcp_endpoint = window.location.origin + '/mcp';
       const serverConfig = JSON.stringify({type:"http",url:mcp_endpoint,headers:{Authorization:"Bearer "+token}});
       const cliCmd = `claude mcp add-json --scope user drua '${serverConfig}'`;
+      const codexToml = `[mcp_servers.drua]\nurl = "${mcp_endpoint}"\nhttp_headers = { Authorization = "Bearer ${token}" }`;
+      const piConfig = JSON.stringify({mcpServers:{drua:{url:mcp_endpoint,auth:"bearer",bearerToken:token}}});
       document.getElementById('creds-result').innerHTML = `
         <h3>MCP Credentials Created: ${mcpCreds.name}</h3>
         <p class="token-warning">This configuration will not be shown again. Copy it now.</p>
@@ -42,6 +44,10 @@
         <div class="token-box"><code>${cliCmd}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>
         <p><strong>MCP JSON:</strong></p>
         <div class="token-box"><code>${JSON.stringify({drua:JSON.parse(serverConfig)})}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>
+        <p><strong>Codex</strong> (append to <code>~/.codex/config.toml</code>):</p>
+        <div class="token-box"><pre style="margin:0;flex:1;white-space:pre-wrap;word-break:break-all;"><code>${codexToml}</code></pre><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>
+        <p><strong>Pi</strong> (add to <code>.mcp.json</code>; requires <code>pi install npm:pi-mcp-adapter</code>):</p>
+        <div class="token-box"><code>${piConfig}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>
       `;
       // Refresh the credentials list
       const listHtml = await fetch('/dashboard/mcp-creds').then(r => r.text());
