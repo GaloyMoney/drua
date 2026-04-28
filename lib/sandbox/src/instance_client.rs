@@ -104,6 +104,17 @@ impl InitializeRequest {
                 branch: branch.clone(),
                 github_token,
             },
+            // TODO(library-space): wire `/initialize` to perform a sparse
+            // checkout of `spaces/<slug>` against the library repo. The
+            // sandbox server side also needs the matching `library_space`
+            // mode handler before this branch can be reached in practice.
+            SandboxMode::LibrarySpace { slug } => {
+                tracing::warn!(
+                    %slug,
+                    "library-space sandbox /initialize not yet implemented"
+                );
+                todo!("library-space sandbox setup not yet implemented")
+            }
         }
     }
 }

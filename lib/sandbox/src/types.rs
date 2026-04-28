@@ -13,6 +13,34 @@ pub enum SandboxMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// Sparse-checkout of the library knowledge-base repo limited to
+    /// `spaces/<slug>/`. `slug` will become a typed `SpaceId` once the
+    /// `Space` entity lands; for now it's the raw directory name.
+    LibrarySpace {
+        slug: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_space_round_trips_through_serde() {
+        let mode = SandboxMode::LibrarySpace {
+            slug: "oncall".to_string(),
+        };
+        let json = serde_json::to_value(&mode).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "mode": "library_space", "slug": "oncall" })
+        );
+        let back: SandboxMode = serde_json::from_value(json).unwrap();
+        match back {
+            SandboxMode::LibrarySpace { slug } => assert_eq!(slug, "oncall"),
+            other => panic!("expected LibrarySpace, got {other:?}"),
+        }
+    }
 }
 
 /// K8s applies these to pod resources and the PVC; the local backend logs
