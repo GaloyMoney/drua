@@ -52,7 +52,7 @@
 
         fly = pkgs.stdenv.mkDerivation rec {
           pname = "fly";
-          version = "8.0.1";
+          version = "8.1.1";
           src = pkgs.fetchurl {
             url = "https://github.com/concourse/concourse/releases/download/v${version}/fly-${version}-${
               if pkgs.stdenv.isDarwin then "darwin" else "linux"
@@ -60,7 +60,7 @@
               if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64"
             }.tgz";
             sha256 =
-              if pkgs.stdenv.isDarwin && pkgs.stdenv.hostPlatform.isAarch64 then "sha256-eXF29GNUby57Q6nE4aHfzi1FikFlksnaOuiEWICzd2Y="
+              if pkgs.stdenv.isDarwin && pkgs.stdenv.hostPlatform.isAarch64 then "sha256-MUK+FxacT6p+H/apfgsaWxp/cBLmUkeltswSQl9PC78="
               else if pkgs.stdenv.isDarwin then "sha256-PLACEHOLDER-darwin-amd64"
               else if pkgs.stdenv.hostPlatform.isAarch64 then "sha256-PLACEHOLDER-linux-arm64"
               else "sha256-PLACEHOLDER-linux-amd64";
