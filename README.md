@@ -170,7 +170,6 @@ providers:
       - name: llama-3-8b
         max_tokens_per_response: 4096
         context_window_tokens: 128000
-        cache_ttl_seconds: 0
 ```
 
 When `base_url` is set, API-key prefix validation (`sk-ant-`, `sk-`) is

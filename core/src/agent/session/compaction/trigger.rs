@@ -23,23 +23,18 @@ mod tests {
             token_threshold_fraction: 0.6,
             keep_recent_tool_results: 10,
             reset_time_delta_seconds: None,
+            prune_after_seconds: 300,
         }
     }
 
     const CONTEXT_WINDOW: u64 = 200_000;
-    const CACHE_TTL: u64 = 300;
 
     #[test]
     fn none_when_disabled() {
         let mut cfg = config();
         cfg.enabled = false;
         assert_eq!(
-            cfg.determine_action(
-                999_999,
-                CONTEXT_WINDOW,
-                CACHE_TTL,
-                Duration::from_secs(9999)
-            ),
+            cfg.determine_action(999_999, CONTEXT_WINDOW, Duration::from_secs(9999)),
             CompactionAction::None
         );
     }
@@ -48,7 +43,7 @@ mod tests {
     fn none_when_under_threshold_and_cache_hot() {
         let cfg = config();
         assert_eq!(
-            cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(60)),
+            cfg.determine_action(60_000, CONTEXT_WINDOW, Duration::from_secs(60)),
             CompactionAction::None
         );
     }
@@ -57,7 +52,7 @@ mod tests {
     fn prune_opportunistic_when_under_threshold_and_cache_cold() {
         let cfg = config();
         assert_eq!(
-            cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(600)),
+            cfg.determine_action(60_000, CONTEXT_WINDOW, Duration::from_secs(600)),
             CompactionAction::PruneOpportunistic
         );
     }
@@ -66,7 +61,7 @@ mod tests {
     fn prune_then_summarize_when_over_threshold_cache_hot() {
         let cfg = config();
         assert_eq!(
-            cfg.determine_action(150_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(60)),
+            cfg.determine_action(150_000, CONTEXT_WINDOW, Duration::from_secs(60)),
             CompactionAction::PruneThenSummarize
         );
     }
@@ -75,7 +70,7 @@ mod tests {
     fn prune_then_summarize_when_over_threshold_cache_cold() {
         let cfg = config();
         assert_eq!(
-            cfg.determine_action(150_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(600)),
+            cfg.determine_action(150_000, CONTEXT_WINDOW, Duration::from_secs(600)),
             CompactionAction::PruneThenSummarize
         );
     }
@@ -89,7 +84,7 @@ mod tests {
             ..config()
         };
         assert_eq!(
-            cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(700)),
+            cfg.determine_action(60_000, CONTEXT_WINDOW, Duration::from_secs(700)),
             CompactionAction::Orphan
         );
     }
@@ -102,9 +97,8 @@ mod tests {
             reset_time_delta_seconds: Some(ResetTimeDeltaSeconds(600)),
             ..config()
         };
-        // Orphan wins over PruneThenSummarize.
         assert_eq!(
-            cfg.determine_action(150_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(700)),
+            cfg.determine_action(150_000, CONTEXT_WINDOW, Duration::from_secs(700)),
             CompactionAction::Orphan
         );
     }
@@ -118,7 +112,7 @@ mod tests {
             ..config()
         };
         assert_eq!(
-            cfg.determine_action(60_000, CONTEXT_WINDOW, CACHE_TTL, Duration::from_secs(60)),
+            cfg.determine_action(60_000, CONTEXT_WINDOW, Duration::from_secs(60)),
             CompactionAction::None
         );
     }

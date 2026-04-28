@@ -25,14 +25,16 @@ galoyAgents:
           - name: deepseek/deepseek-v4-pro
             maxTokensPerResponse: 16384
             contextWindowTokens: 1040000
-            cacheTtlSeconds: 300
     agents:
       workspaceLead:
         model: deepseek/deepseek-v4-pro
         compactionConfig:
           resetTimeDeltaSeconds: 3600
+          pruneAfterSeconds: 300
       agent:
         model: deepseek/deepseek-v4-pro
+        compactionConfig:
+          pruneAfterSeconds: 300
     report:
       enabled: true
     library:

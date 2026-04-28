@@ -53,6 +53,12 @@ galoyAgents:
           ## When a user message arrives more than this many seconds after
           ## the previous assistant response, start a fresh thread.
           resetTimeDeltaSeconds: 600
+          ## Cache-aware prune trigger: once this many seconds have passed
+          ## since the last assistant response the provider's prompt cache
+          ## is cold, so opportunistic pruning is free. Anthropic's default
+          ## cache window is ≈ 300s. Set 0 for providers without prompt
+          ## caching to disable opportunistic prunes.
+          pruneAfterSeconds: 300
         systemPrompt: |
           You are the lead agent of your workspace. You investigate / coordinate
           and delegate. You answer questions, and use the available tools to help the
@@ -61,6 +67,7 @@ galoyAgents:
         model: "claude-haiku-4-5-20251001"
         compaction:
           resetTimeDeltaSeconds: 600
+          pruneAfterSeconds: 300
         systemPrompt: |
           You are an agent operating inside a Galoy Agents workspace.
           You work on the tasks assigned to you and, when attached to
