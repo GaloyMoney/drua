@@ -216,7 +216,13 @@ impl App {
         );
         let execute_run_spawner = jobs.add_initializer(execute_run_initializer);
 
-        let workflows = Arc::new(Workflows::new(pool, library.clone(), execute_run_spawner));
+        let workflows = Arc::new(Workflows::new(
+            pool,
+            library.clone(),
+            Arc::clone(&skills),
+            Arc::clone(&sandboxes),
+            execute_run_spawner,
+        ));
 
         let workspaces = Arc::new(Workspaces::new(
             pool,

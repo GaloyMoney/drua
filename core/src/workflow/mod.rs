@@ -39,6 +39,11 @@ use run::entity::NewWorkflowRun;
 pub struct Workflows {
     repo: WorkflowDefinitionRepo,
     run_repo: WorkflowRunRepo,
+    /// Used to validate `skill:` references on `create` so the operator
+    /// gets immediate feedback instead of a runtime `SkillNotFound`.
+    skills: Arc<Skills>,
+    /// Same idea for `sandbox:` references.
+    sandboxes: Arc<Sandboxes>,
     /// Job spawner for the `workflow.execute-run` background job — wired
     /// up at [`crate::App::init`] time after the job system is online.
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
@@ -48,11 +53,15 @@ impl Workflows {
     pub fn new(
         pool: &sqlx::PgPool,
         library: Library,
+        skills: Arc<Skills>,
+        sandboxes: Arc<Sandboxes>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new(pool, library),
             run_repo: WorkflowRunRepo::new(pool),
+            skills,
+            sandboxes,
             execute_run_spawner,
         }
     }
@@ -60,11 +69,15 @@ impl Workflows {
     /// Test/dev constructor — bypasses library wiring (no git sync).
     pub fn new_without_library(
         pool: &sqlx::PgPool,
+        skills: Arc<Skills>,
+        sandboxes: Arc<Sandboxes>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new_without_library(pool),
             run_repo: WorkflowRunRepo::new(pool),
+            skills,
+            sandboxes,
             execute_run_spawner,
         }
     }
@@ -86,6 +99,58 @@ impl Workflows {
         let mut bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut bytes);
         format!("whsec_{}", hex::encode(bytes))
+    }
+
+    /// Verify every step's `skill:` resolves to a real skill in the
+    /// workspace (or globally), and every `sandbox:` name resolves to
+    /// an existing workspace sandbox. Surfaces
+    /// [`WorkflowError::SkillNotFound`] / [`WorkflowError::SandboxNotFound`]
+    /// at create time so the operator gets immediate feedback instead
+    /// of a runtime failure deep inside the executor.
+    async fn validate_steps(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        steps: &[WorkflowStepDef],
+    ) -> Result<(), WorkflowError> {
+        // Pre-fetch the workspace's sandboxes once so every step shares the
+        // lookup.
+        let sandbox_names: Vec<String> = self
+            .sandboxes
+            .list_for_workspace(sub, workspace_id)
+            .await
+            .map_err(|e| WorkflowError::Sandbox(e.to_string()))?
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+
+        for step in steps {
+            match step {
+                WorkflowStepDef::AgentStep { skill, sandbox, .. } => {
+                    // We don't know yet which sandbox each step will
+                    // resolve to (sandbox skills are scoped per
+                    // attachment), so check against workspace + global
+                    // skills only — exactly the lookup `Workflows::create`
+                    // controls. Sandbox-exported skills can still
+                    // resolve at runtime.
+                    let found = self
+                        .skills
+                        .find_by_name(skill, Some(workspace_id), None)
+                        .await
+                        .map_err(|e| WorkflowError::Skill(e.to_string()))?;
+                    if found.is_none() {
+                        return Err(WorkflowError::SkillNotFound(skill.clone()));
+                    }
+
+                    if let Some(sandbox_name) = sandbox {
+                        if !sandbox_names.iter().any(|n| n == sandbox_name) {
+                            return Err(WorkflowError::SandboxNotFound(sandbox_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Create a new workflow definition.
@@ -114,6 +179,8 @@ impl Workflows {
                 "workflow requires at least one step".into(),
             ));
         }
+
+        self.validate_steps(sub, workspace_id, &steps).await?;
 
         // Auto-generate the webhook secret if the trigger is webhook +
         // the caller passed an empty/placeholder secret.
@@ -184,6 +251,28 @@ impl Workflows {
             ),
             _ => return Ok(()),
         };
+
+        // Soft validation on reverse-sync: warn but don't fail. The
+        // library may legitimately be in an intermediate state during
+        // a multi-file push (workflow file landing before its
+        // referenced skill).
+        for step in &steps {
+            match step {
+                WorkflowStepDef::AgentStep { skill, .. } => {
+                    if let Ok(None) = self
+                        .skills
+                        .find_by_name(skill, Some(workspace_id), None)
+                        .await
+                    {
+                        tracing::warn!(
+                            workflow = %name,
+                            skill = %skill,
+                            "workflow references unknown skill (will fail at run time if not added before triggering)"
+                        );
+                    }
+                }
+            }
+        }
 
         if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
             if existing
