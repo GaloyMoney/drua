@@ -996,7 +996,9 @@ async fn workspace_agent_history(
             sequence: m.sequence,
             role: match m.role {
                 domain::agent::session::history::ChatHistoryRole::User => "user".to_string(),
-                domain::agent::session::history::ChatHistoryRole::Assistant => "assistant".to_string(),
+                domain::agent::session::history::ChatHistoryRole::Assistant => {
+                    "assistant".to_string()
+                }
             },
             blocks: m
                 .blocks
