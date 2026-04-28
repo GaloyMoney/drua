@@ -52,6 +52,9 @@ data:
             {{- with .resetTimeDeltaSeconds }}
             reset_time_delta_seconds: {{ . }}
             {{- end }}
+            {{- with .pruneAfterSeconds }}
+            prune_after_seconds: {{ . }}
+            {{- end }}
           {{- end }}
           system:
             - type: text
@@ -64,6 +67,9 @@ data:
           compaction:
             {{- with .resetTimeDeltaSeconds }}
             reset_time_delta_seconds: {{ . }}
+            {{- end }}
+            {{- with .pruneAfterSeconds }}
+            prune_after_seconds: {{ . }}
             {{- end }}
           {{- end }}
           system:

@@ -22,8 +22,6 @@ pub struct ModelDefaults {
     pub model: String,
     pub max_tokens_per_response: u32,
     pub context_window_tokens: u64,
-    /// Anthropic ≈ 300s; providers without caching should set 0.
-    pub cache_ttl_seconds: u64,
 }
 
 impl Default for ModelDefaults {
@@ -32,7 +30,6 @@ impl Default for ModelDefaults {
             model: String::new(),
             max_tokens_per_response: 4096,
             context_window_tokens: 200_000,
-            cache_ttl_seconds: 300,
         }
     }
 }

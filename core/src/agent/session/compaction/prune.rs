@@ -353,6 +353,7 @@ mod tests {
             token_threshold_fraction: 0.6,
             keep_recent_tool_results: keep_recent,
             reset_time_delta_seconds: None,
+            prune_after_seconds: Some(300),
         }
     }
 

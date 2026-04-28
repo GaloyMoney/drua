@@ -31,6 +31,13 @@ pub struct CompactionConfig {
     /// Idle threshold; exceeding it starts a fresh (orphan) thread.
     #[serde(default)]
     pub reset_time_delta_seconds: Option<ResetTimeDeltaSeconds>,
+    /// Cache-aware opportunistic prune trigger: once this many seconds
+    /// have passed since the last assistant response the provider's
+    /// prompt cache is cold and pruning is free. `None` disables the
+    /// time-based path entirely — only token-budget pruning remains.
+    /// Anthropic's default cache window is ≈ 300s.
+    #[serde(default)]
+    pub prune_after_seconds: Option<u64>,
 }
 
 impl CompactionConfig {
@@ -40,7 +47,6 @@ impl CompactionConfig {
         &self,
         estimated_tokens: u64,
         context_window_tokens: u64,
-        cache_ttl_seconds: u64,
         time_since_last_turn: Duration,
     ) -> CompactionAction {
         if !self.enabled {
@@ -54,8 +60,9 @@ impl CompactionConfig {
         }
 
         let threshold = (context_window_tokens as f64 * self.token_threshold_fraction) as u64;
-        let cache_ttl = Duration::from_secs(cache_ttl_seconds);
-        let cache_cold = time_since_last_turn > cache_ttl;
+        let cache_cold = self
+            .prune_after_seconds
+            .is_some_and(|secs| time_since_last_turn > Duration::from_secs(secs));
 
         match (estimated_tokens > threshold, cache_cold) {
             (false, false) => CompactionAction::None,
@@ -72,6 +79,7 @@ impl Default for CompactionConfig {
             token_threshold_fraction: 0.6,
             keep_recent_tool_results: 10,
             reset_time_delta_seconds: None,
+            prune_after_seconds: Some(300),
         }
     }
 }
