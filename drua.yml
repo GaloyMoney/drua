@@ -19,7 +19,8 @@ providers:
       - name: moonshotai/kimi-k2
         max_tokens_per_response: 16384
         context_window_tokens: 131072
-        cache_ttl_seconds: 0
+        cache_ttl_seconds: 6sahoten00
+        
 agents:
   builtin_roles:
     workspace_lead:
