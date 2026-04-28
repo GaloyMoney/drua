@@ -373,12 +373,16 @@ impl TopLevelTool for WorkflowTool {
 
     fn description(&self) -> &str {
         "Manage webhook-triggered workflows that run agent skills end-to-end. \
-         Commands: `create` (requires `name`; either `steps` array or single-step \
-         shorthand `skill`; optional `provider`, `sandboxes`, `manual`), \
-         `list`, `get` (requires `definition_id`), \
-         `trigger` (requires `definition_id`, optional `payload`), \
-         `runs` (requires `definition_id`; truncated step outputs), \
-         `run` (requires `run_id`; full per-step outputs)."
+         Each step spawns a fresh agent that has tools `bash`, `text_editor`, \
+         `ls`, `grep`, `glob`, `read`, plus the declared sandbox attached — \
+         skill bodies should describe the goal in terms of those tools (NOT \
+         as raw shell scripts). The trigger payload is interpolated into \
+         each step's skill via `$ARGUMENTS`. Commands: `create` (requires \
+         `name`; either `steps` array or single-step shorthand `skill`; \
+         optional `provider`, `sandboxes`, `manual`), `list`, `get` \
+         (requires `definition_id`), `trigger` (requires `definition_id`, \
+         optional `payload`), `runs` (requires `definition_id`; truncated \
+         step outputs), `run` (requires `run_id`; full per-step outputs)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -533,10 +537,11 @@ impl TopLevelTool for WorkflowTool {
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
                 let text = format!(
-                    "Workflow run started.\n  run_id:        {}\n  definition_id: {}\n  state:         {}",
+                    "Workflow run started.\n  run_id:        {}\n  definition_id: {}\n  state:         {}\n\nInspect with: workflow command=run run_id={}",
                     run.id,
                     run.definition_id,
-                    run_state_str(run.state)
+                    run_state_str(run.state),
+                    run.id,
                 );
                 let out = WorkflowOutput {
                     command: "trigger".to_string(),
@@ -825,27 +830,36 @@ fn format_runs_text(runs: &[WorkflowRun]) -> String {
     lines.push("-".repeat(120));
     for r in runs {
         let started = r.started_at().format("%Y-%m-%d %H:%M:%SZ").to_string();
-        let output = r
-            .step_results
-            .last()
-            .and_then(|sr| {
-                if let Some(err) = &sr.error {
-                    Some(format!("ERROR: {err}"))
-                } else {
+        let failed_step = r.step_results.iter().find(|sr| sr.error.is_some());
+        // Errors get a longer truncation cap (200 vs 60 for normal output)
+        // so context-window/api errors stay legible in the listing.
+        let (output, max_chars) = if let Some(sr) = failed_step {
+            let err = sr.error.as_deref().unwrap_or("unknown");
+            (format!("FAILED [{}]: {err}", sr.name), 200)
+        } else {
+            let text = r
+                .step_results
+                .last()
+                .and_then(|sr| {
                     sr.output.as_ref().map(|v| match v {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     })
-                }
-            })
-            .unwrap_or_else(|| "—".to_string());
+                })
+                .unwrap_or_else(|| "—".to_string());
+            (text, 60)
+        };
         lines.push(format!(
             "{:<38} {:<12} {:<28} {}",
             r.id,
             run_state_str(r.state),
             started,
-            truncate(&output.replace('\n', " "), 60)
+            truncate(&output.replace('\n', " "), max_chars)
         ));
+    }
+    if runs.iter().any(|r| r.state == WorkflowRunState::Failed) {
+        lines.push(String::new());
+        lines.push("Inspect a run with: workflow command=run run_id=<id>".to_string());
     }
     lines.join("\n")
 }

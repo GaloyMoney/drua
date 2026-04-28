@@ -199,19 +199,24 @@ impl Executor {
                     self.sandboxes.spawn_sandbox_creation(sb.id);
                     sb
                 }
-                Some(sb) if sb.state == SandboxState::Suspended => self
-                    .sandboxes
-                    .restart_for_workflow(sb.id)
-                    .await
-                    .map_err(|e| WorkflowError::Sandbox(e.to_string()))?,
-                Some(sb) if sb.state == SandboxState::Errored => {
-                    return Err(WorkflowError::SandboxNotReady {
-                        name: decl.name.clone(),
-                        state: format!(
-                            "errored: {}",
-                            sb.last_error.as_deref().unwrap_or("unknown")
-                        ),
-                    });
+                Some(sb)
+                    if matches!(
+                        sb.state,
+                        SandboxState::Suspended | SandboxState::Errored
+                    ) =>
+                {
+                    if sb.state == SandboxState::Errored {
+                        tracing::warn!(
+                            sandbox_id = %sb.id,
+                            sandbox_name = %decl.name,
+                            last_error = ?sb.last_error,
+                            "pre-flight: restarting sandbox in Errored state",
+                        );
+                    }
+                    self.sandboxes
+                        .restart_for_workflow(sb.id)
+                        .await
+                        .map_err(|e| WorkflowError::Sandbox(e.to_string()))?
                 }
                 Some(sb) => sb,
             };

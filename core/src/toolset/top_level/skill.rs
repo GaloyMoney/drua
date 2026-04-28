@@ -130,11 +130,17 @@ impl TopLevelTool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Manage workspace-scoped skills (prompt templates that agents \
-         invoke via `use_skill`). Commands: `create` (requires `name`, \
-         `description`, `body`), `update` (requires `skill_id`; any \
-         of `name`/`description`/`body`), `delete` (requires \
-         `skill_id`), `list`, `get` (requires `skill_id`)."
+        "Manage workspace-scoped skills. A skill BODY is the natural-language \
+         prompt fed to the agent that runs the step / `use_skill` call — \
+         describe the GOAL, not shell scripts. The agent that runs a skill \
+         has these tools: `bash`, `text_editor` (write/read/replace), `ls`, \
+         `grep`, `glob`, `read`, plus any sandbox attached (sandbox-backed \
+         tools operate inside the sandbox filesystem). Use `$ARGUMENTS`, \
+         `$0`, `$1`, … to interpolate trigger inputs; if the body has no \
+         placeholder, arguments are appended as `ARGUMENTS: <value>`. \
+         Commands: `create` (requires `name`, `description`, `body`), \
+         `update` (requires `skill_id`; any of `name`/`description`/`body`), \
+         `delete` (requires `skill_id`), `list`, `get` (requires `skill_id`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
