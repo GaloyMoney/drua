@@ -1,0 +1,378 @@
+//! `skill` — workspace-scoped skill management.
+//!
+//! Pairs with [`super::use_skill::UseSkillTool`]: this tool is the
+//! *management* surface (CRUD on skill definitions); `use_skill` is
+//! the *invocation* surface (resolve + interpolate).
+//!
+//! DB-first writes — the entity post-persist hook propagates to the
+//! git-backed library repo asynchronously. See
+//! [`crate::skill::Skills::create`] for the write semantics.
+//!
+//! Visibility:
+//! - Read commands (`list`, `get`) require `can_read_workspace`.
+//! - Write commands (`create`, `update`, `delete`) require
+//!   `can_write_workspace`, enforced inside `call()`.
+
+use std::sync::{Arc, LazyLock};
+
+use rmcp::model::{CallToolResult, Content, JsonObject};
+use serde::Deserialize;
+
+use crate::audit::Audit;
+use crate::auth::AuthSubject;
+use crate::primitives::SkillId;
+use crate::skill::{Skill, Skills};
+use crate::workspace::Workspaces;
+
+use super::super::error::ToolSetsError;
+use super::super::traits::TopLevelTool;
+use super::{parse_params, schema_for};
+
+// ---------------------------------------------------------------------------
+// Params
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum SkillParams {
+    Create {
+        name: String,
+        description: String,
+        body: String,
+    },
+    Update {
+        skill_id: SkillId,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        body: Option<String>,
+    },
+    Delete {
+        skill_id: SkillId,
+    },
+    List,
+    Get {
+        skill_id: SkillId,
+    },
+}
+
+impl SkillParams {
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::Create { .. } => "skill.create",
+            Self::Update { .. } => "skill.update",
+            Self::Delete { .. } => "skill.delete",
+            Self::List => "skill.list",
+            Self::Get { .. } => "skill.get",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output (schemars-derived; doubles as `structured_content` source)
+// ---------------------------------------------------------------------------
+
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+struct SkillOutput {
+    /// Which command was executed.
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill: Option<SkillSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skills: Option<Vec<SkillSummary>>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct SkillSummary {
+    id: String,
+    name: String,
+    description: String,
+    /// `"workspace"` when scoped to a workspace, `"global"` otherwise.
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<String>,
+    /// Full markdown body of the skill (only included on `get` and
+    /// returned on create/update so the caller can confirm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Tool
+// ---------------------------------------------------------------------------
+
+pub struct SkillTool {
+    skills: Arc<Skills>,
+    workspaces: Arc<Workspaces>,
+}
+
+impl SkillTool {
+    pub fn new(skills: Arc<Skills>, workspaces: Arc<Workspaces>) -> Self {
+        Self { skills, workspaces }
+    }
+}
+
+static SKILL_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SkillOutput>);
+
+static SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "enum": ["create", "update", "delete", "list", "get"],
+                "description": "Which skill operation to perform."
+            },
+            "name": {
+                "type": "string",
+                "description": "Skill name (required for create; optional for update)."
+            },
+            "description": {
+                "type": "string",
+                "description": "One-line description of what the skill does (required for create; optional for update)."
+            },
+            "body": {
+                "type": "string",
+                "description": "Skill body — the markdown / prompt template that gets resolved when the skill is invoked. Use $ARGUMENTS / $0 / $1 / … placeholders for runtime substitution. Required for create; optional for update."
+            },
+            "skill_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Skill ID. Required for update / delete / get."
+            }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+    })
+});
+
+#[async_trait::async_trait]
+impl TopLevelTool for SkillTool {
+    fn name(&self) -> &str {
+        "skill"
+    }
+
+    fn description(&self) -> &str {
+        "Manage workspace-scoped skills (prompt templates that agents \
+         invoke via `use_skill`). Commands: `create` (requires `name`, \
+         `description`, `body`), `update` (requires `skill_id`; any \
+         of `name`/`description`/`body`), `delete` (requires \
+         `skill_id`), `list`, `get` (requires `skill_id`)."
+    }
+
+    fn input_schema(&self) -> &serde_json::Value {
+        &SKILL_SCHEMA
+    }
+
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&SKILL_OUTPUT_SCHEMA)
+    }
+
+    fn is_visible(&self, subject: &AuthSubject) -> bool {
+        subject.can_read_workspace()
+    }
+
+    fn composable(&self) -> bool {
+        // Skill management is workspace-state mutation; same constraint
+        // as `agent` / `sandbox` / `workflow` — not a thing compose
+        // scripts should be calling.
+        false
+    }
+
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let params: SkillParams = parse_params(arguments)?;
+
+        Audit::record_action(params.audit_action());
+
+        let (text, out) = match params {
+            SkillParams::Create {
+                name,
+                description,
+                body,
+            } => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                let workspace_name = self
+                    .workspaces
+                    .find_by_id(subject, workspace_id)
+                    .await
+                    .map(|w| w.name)
+                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+
+                let skill = self
+                    .skills
+                    .create(
+                        subject,
+                        workspace_id,
+                        &workspace_name,
+                        name,
+                        description,
+                        body,
+                    )
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+
+                let text = format!(
+                    "Skill created.\n  id:   {}\n  name: {}",
+                    skill.id, skill.name
+                );
+                let out = SkillOutput {
+                    command: "create".to_string(),
+                    skill: Some(skill_to_summary(&skill, true)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            SkillParams::Update {
+                skill_id,
+                name,
+                description,
+                body,
+            } => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                let skill = self
+                    .skills
+                    .update(subject, skill_id, workspace_id, name, description, body)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+
+                let text = format!(
+                    "Skill updated.\n  id:   {}\n  name: {}",
+                    skill.id, skill.name
+                );
+                let out = SkillOutput {
+                    command: "update".to_string(),
+                    skill: Some(skill_to_summary(&skill, true)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            SkillParams::Delete { skill_id } => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                self.skills
+                    .delete(subject, skill_id, workspace_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+
+                let text = format!("Skill deleted (id {skill_id}).");
+                let out = SkillOutput {
+                    command: "delete".to_string(),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            SkillParams::List => {
+                let skills = self
+                    .skills
+                    .list_for_workspace(subject, workspace_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                let text = format_list_text(&skills);
+                let out = SkillOutput {
+                    command: "list".to_string(),
+                    skills: Some(skills.iter().map(|s| skill_to_summary(s, false)).collect()),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            SkillParams::Get { skill_id } => {
+                let skill = self
+                    .skills
+                    .find_by_id(subject, skill_id, workspace_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                let text = format_get_text(&skill);
+                let out = SkillOutput {
+                    command: "get".to_string(),
+                    skill: Some(skill_to_summary(&skill, true)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+        };
+
+        let structured = serde_json::to_value(&out).expect("SkillOutput serialization");
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(structured);
+        Ok(result)
+    }
+}
+
+fn skill_to_summary(s: &Skill, include_body: bool) -> SkillSummary {
+    let scope = if s.workspace_id.is_some() {
+        "workspace"
+    } else {
+        "global"
+    };
+    SkillSummary {
+        id: s.id.to_string(),
+        name: s.name.clone(),
+        description: s.description.clone(),
+        scope: scope.to_string(),
+        workspace_id: s.workspace_id.map(|w| w.to_string()),
+        body: include_body.then(|| s.body.clone()),
+    }
+}
+
+fn format_list_text(skills: &[Skill]) -> String {
+    if skills.is_empty() {
+        return "No skills found.".to_string();
+    }
+    let mut lines = Vec::with_capacity(skills.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<24} {:<10} {}",
+        "ID", "NAME", "SCOPE", "DESCRIPTION"
+    ));
+    lines.push("-".repeat(110));
+    for s in skills {
+        let scope = if s.workspace_id.is_some() {
+            "workspace"
+        } else {
+            "global"
+        };
+        lines.push(format!(
+            "{:<38} {:<24} {:<10} {}",
+            s.id,
+            truncate(&s.name, 24),
+            scope,
+            truncate(&s.description, 50)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_get_text(s: &Skill) -> String {
+    let scope = if s.workspace_id.is_some() {
+        "workspace"
+    } else {
+        "global"
+    };
+    format!(
+        "id:          {}\nname:        {}\nscope:       {}\ndescription: {}\n\n--- body ---\n{}",
+        s.id, s.name, scope, s.description, s.body
+    )
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
+}

@@ -110,6 +110,41 @@ impl Skill {
         });
         Idempotent::Executed(())
     }
+
+    /// User-initiated update path (MCP `skill update`). Unlike
+    /// [`Self::update`] this does NOT take a file hash — there's no
+    /// upstream file to compare against, the caller is the source of
+    /// truth. Returns `Idempotent::AlreadyApplied` only if every
+    /// supplied field already matches the entity, so the post-persist
+    /// library-sync hook can short-circuit no-op edits.
+    pub fn update_content(
+        &mut self,
+        name: Option<String>,
+        description: Option<String>,
+        body: Option<String>,
+    ) -> Idempotent<()> {
+        let name_changes = name.as_ref().is_some_and(|n| n != &self.name);
+        let desc_changes = description.as_ref().is_some_and(|d| d != &self.description);
+        let body_changes = body.as_ref().is_some_and(|b| b != &self.body);
+        if !name_changes && !desc_changes && !body_changes {
+            return Idempotent::AlreadyApplied;
+        }
+        if name_changes {
+            self.name = name.clone().unwrap();
+        }
+        if desc_changes {
+            self.description = description.clone().unwrap();
+        }
+        if body_changes {
+            self.body = body.clone().unwrap();
+        }
+        self.events.push(SkillEvent::Updated {
+            name: name_changes.then(|| self.name.clone()),
+            description: desc_changes.then(|| self.description.clone()),
+            body: body_changes.then(|| self.body.clone()),
+        });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Skill {

@@ -35,8 +35,8 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, TextEditor,
-    ToolSets, ToolSetsError, UseSkillTool, WorkflowTool, WorkspaceAgent, WorkspaceLog,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, SkillTool,
+    TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool, WorkspaceAgent, WorkspaceLog,
     WorkspaceSandbox,
 };
 use user::Users;
@@ -236,6 +236,7 @@ impl App {
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
+        toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));
         toolsets.register_top_level(WorkflowTool::new(
             Arc::clone(&workflows),
             Arc::clone(&workspaces),

@@ -324,6 +324,103 @@ impl Skills {
         Ok(Some(buf))
     }
 
+    /// Create a workspace-scoped skill from MCP / web input.
+    ///
+    /// DB-first: the entity is persisted, and the existing
+    /// `post_persist_hook(sync_to_library)` propagates to the
+    /// git-backed library asynchronously through the inbox / write
+    /// pipeline. Auth: caller must hold `WorkspaceAdmin` on the
+    /// target workspace.
+    #[instrument(name = "skill.create", skip(self, body))]
+    pub async fn create(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        workspace_name: &str,
+        name: String,
+        description: String,
+        body: String,
+    ) -> Result<Skill, SkillError> {
+        sub.can(AuthVerb::Create, AuthResource::Skill(workspace_id, None))?;
+        if name.trim().is_empty() {
+            return Err(SkillError::BuildEntity("skill name required".into()));
+        }
+
+        let new = NewSkill::builder()
+            .id(SkillId::new())
+            .workspace_id(workspace_id)
+            .workspace_name(workspace_name)
+            .name(name)
+            .description(description)
+            .body(body)
+            .build()
+            .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+
+        let skill = self.repo.create(new).await?;
+        Ok(skill)
+    }
+
+    /// User-driven update of an existing skill. Mirrors
+    /// [`Self::create`] for authz + library sync.
+    #[instrument(name = "skill.update", skip(self, body))]
+    pub async fn update(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        workspace_id: WorkspaceId,
+        name: Option<String>,
+        description: Option<String>,
+        body: Option<String>,
+    ) -> Result<Skill, SkillError> {
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Skill(workspace_id, Some(id)),
+        )?;
+        let mut skill = self.repo.find_by_id(id).await?;
+        // Workspace-scope guard: prevent edits leaking across workspaces.
+        if skill.workspace_id != Some(workspace_id) {
+            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Update,
+                resource: AuthResource::Skill(workspace_id, Some(id)),
+            }));
+        }
+        if skill.update_content(name, description, body).did_execute() {
+            self.repo.update(&mut skill).await?;
+        }
+        Ok(skill)
+    }
+
+    /// Soft-delete a workspace-scoped skill.
+    ///
+    /// Note: the on-disk YAML file in the library repo is **not**
+    /// removed by this call. Single-file removal isn't yet plumbed
+    /// through `WriteToRuntime`; the file is reaped only when the
+    /// owning workspace is deleted (via the existing
+    /// `WorkspaceCleanup` job). Tracked as a follow-up.
+    #[instrument(name = "skill.delete", skip(self))]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), SkillError> {
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Skill(workspace_id, Some(id)),
+        )?;
+        let skill = self.repo.find_by_id(id).await?;
+        if skill.workspace_id != Some(workspace_id) {
+            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Delete,
+                resource: AuthResource::Skill(workspace_id, Some(id)),
+            }));
+        }
+        let mut op = self.repo.begin_op().await?;
+        self.repo.delete_in_op(&mut op, skill).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
     /// Upsert a skill from a library file within an existing transaction.
     ///
     /// When the file carries an `original_path` the entity stores it so the
