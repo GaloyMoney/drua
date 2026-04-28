@@ -22,6 +22,12 @@ pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient, OpenAiResponsesE
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const API_PATH: &str = "/v1/chat/completions";
 
+/// Retry policy for transient upstream errors (429 / 502 / 503).
+/// Capped tight so a wedged provider can't pin the prompt-executor task.
+const MAX_RETRIES: u32 = 2;
+const MAX_RETRY_AFTER_SECS: u64 = 5;
+const DEFAULT_RETRY_DELAY_SECS: u64 = 1;
+
 #[derive(Debug, Error)]
 pub enum OpenAiChatCompletionsError {
     #[error("OpenAiChatCompletionsError - HTTP: {0}")]
@@ -96,23 +102,50 @@ impl OpenAiClient {
     > {
         let request_body = prompt_to_request(prompt);
 
-        let resp = self
-            .http
-            .post(&self.api_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("content-type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        let mut attempt: u32 = 0;
+        let resp = loop {
+            let resp = self
+                .http
+                .post(&self.api_url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send()
+                .await?;
 
-        let status = resp.status();
-        if !status.is_success() {
+            let status = resp.status();
+            if status.is_success() {
+                break resp;
+            }
+
+            let header_retry = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             let message = resp.text().await.unwrap_or_default();
+            let is_retryable = matches!(status.as_u16(), 429 | 502 | 503);
+            if is_retryable && attempt < MAX_RETRIES {
+                let delay = header_retry
+                    .or_else(|| parse_retry_after_seconds(&message))
+                    .unwrap_or(DEFAULT_RETRY_DELAY_SECS)
+                    .min(MAX_RETRY_AFTER_SECS);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    status = status.as_u16(),
+                    delay_secs = delay,
+                    "openai-client: retrying after transient HTTP error"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                attempt += 1;
+                continue;
+            }
+
             return Err(OpenAiChatCompletionsError::Api {
                 status: status.as_u16(),
                 message,
             });
-        }
+        };
 
         let byte_stream = resp.bytes_stream();
         let (tx, rx) =
@@ -146,6 +179,17 @@ impl OpenAiClient {
     }
 }
 
+/// Best-effort scrape of `error.metadata.retry_after_seconds` from an
+/// OpenRouter-style 429 body. Returns None if the body is not JSON, the
+/// path is missing, or the value isn't a positive integer.
+fn parse_retry_after_seconds(body: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get("error")?
+        .get("metadata")?
+        .get("retry_after_seconds")?
+        .as_u64()
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiClient {
     fn name(&self) -> &str {
@@ -172,5 +216,23 @@ impl LlmProvider for OpenAiClient {
             }
         });
         Ok(out_rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_retry_after_seconds;
+
+    #[test]
+    fn parses_openrouter_429_metadata() {
+        let body = r#"{"error":{"message":"Provider returned error","code":429,"metadata":{"raw":"...","provider_name":"Together","is_byok":false,"retry_after_seconds":3}},"user_id":"u_x"}"#;
+        assert_eq!(parse_retry_after_seconds(body), Some(3));
+    }
+
+    #[test]
+    fn returns_none_when_metadata_absent() {
+        assert_eq!(parse_retry_after_seconds(r#"{"error":{"code":500}}"#), None);
+        assert_eq!(parse_retry_after_seconds("not json"), None);
+        assert_eq!(parse_retry_after_seconds(""), None);
     }
 }
