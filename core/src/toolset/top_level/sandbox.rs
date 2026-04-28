@@ -3,8 +3,9 @@
 //! Single tool with a `command` discriminator (like `text_editor`):
 //! `create`, `list`, `get`, `inspect`.
 //!
-//! Read commands (`list`, `get`, `inspect`) require `can_read_workspace`;
-//! write commands (`create`) enforce `can_write_workspace` inside `call()`.
+//! Authorization is delegated entirely to [`Sandboxes`]: each service
+//! method runs `subject.can(verb, AuthResource::Sandbox(..))` itself, so
+//! this layer only routes parameters and surfaces errors.
 
 use std::sync::{Arc, LazyLock};
 
@@ -13,7 +14,7 @@ use sandbox::instance_client::ExecuteRequest;
 use serde::Deserialize;
 
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SandboxId;
 use crate::sandbox::{Sandbox, Sandboxes};
 
@@ -144,7 +145,11 @@ impl TopLevelTool for WorkspaceSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Read, AuthResource::Sandbox(ws, None))
+                .is_ok()
+        })
     }
 
     fn composable(&self) -> bool {
@@ -163,9 +168,6 @@ impl TopLevelTool for WorkspaceSandbox {
 
         match params.command {
             SandboxCommand::Create => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let name = params.name.ok_or_else(|| {
                     ToolSetsError::MissingArgument("name is required for create".to_string())
                 })?;
@@ -228,10 +230,6 @@ impl TopLevelTool for WorkspaceSandbox {
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
-                if sandbox.workspace_id != workspace_id {
-                    return Err(ToolSetsError::Unauthorized);
-                }
-
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -248,22 +246,16 @@ impl TopLevelTool for WorkspaceSandbox {
 
                 Audit::record_sandbox_id(sandbox_id);
 
-                let sandbox = self
+                let _ = self
                     .sandboxes
                     .find_by_id(subject, sandbox_id)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-                if sandbox.workspace_id != workspace_id {
-                    return Err(ToolSetsError::Unauthorized);
-                }
 
                 execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
             }
 
             SandboxCommand::Restart => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for restart".to_string())
                 })?;
@@ -290,9 +282,6 @@ impl TopLevelTool for WorkspaceSandbox {
             }
 
             SandboxCommand::Suspend => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for suspend".to_string())
                 })?;

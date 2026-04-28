@@ -4,7 +4,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
@@ -400,7 +400,11 @@ impl TopLevelTool for WorkflowTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Read, AuthResource::Workflow(ws, None))
+                .is_ok()
+        })
     }
 
     fn composable(&self) -> bool {
@@ -430,10 +434,6 @@ impl TopLevelTool for WorkflowTool {
                 timeout_seconds,
                 sandboxes,
             } => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
-
                 let trigger = if manual {
                     WorkflowTrigger::Manual
                 } else {
@@ -535,9 +535,6 @@ impl TopLevelTool for WorkflowTool {
                 definition_id,
                 payload,
             } => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let payload =
                     payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
                 let run = self
