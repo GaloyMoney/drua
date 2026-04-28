@@ -365,6 +365,38 @@ pub struct WorkspaceAgentDetailTemplate {
     pub error: Option<String>,
 }
 
+#[allow(dead_code)]
+pub struct ChatHistoryBlockView {
+    /// `text`, `tool_use`, `thinking`, `tool_result`, `sandbox_notification`.
+    pub kind: String,
+    pub text: Option<String>,
+    pub tool_name: Option<String>,
+    /// Pretty-printed JSON for `tool_use.input`.
+    pub tool_input: Option<String>,
+    pub is_error: Option<bool>,
+}
+
+#[allow(dead_code)]
+pub struct ChatHistoryMessageView {
+    pub sequence: usize,
+    /// `user` or `assistant`.
+    pub role: String,
+    pub blocks: Vec<ChatHistoryBlockView>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "workspace_agent_history.html")]
+pub struct WorkspaceAgentHistoryTemplate {
+    pub workspace: WorkspaceView,
+    pub lead_agent: Option<AgentView>,
+    pub agents: Vec<AgentView>,
+    pub agent: AgentDetailView,
+    pub messages: Vec<ChatHistoryMessageView>,
+    /// `Some((workflow_id, run_id))` for workflow-spawned agents — used
+    /// to render a back link to the run detail page.
+    pub workflow_run: Option<(String, String)>,
+}
+
 pub struct WorkspaceSecretView {
     pub id: String,
     pub workspace_id: String,

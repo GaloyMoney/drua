@@ -89,6 +89,7 @@
 {% endblock %}
 
 {% block content %}
+<a href="/workspaces/{{ workspace.id }}/workflows/{{ workflow_id }}" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to {{ workflow_name }}</a>
 <h2>Run {{ run.id }}</h2>
 <table>
   <tr><th>Workflow</th><td><a href="/workspaces/{{ workspace.id }}/workflows/{{ workflow_id }}">{{ workflow_name }}</a></td></tr>
@@ -131,7 +132,10 @@
   <p><small>These agents were spawned to execute the run's steps. They don't appear in the workspace's main agent list.</small></p>
   <ul>
     {% for a in run_agents %}
-    <li><a href="/workspaces/{{ workspace.id }}/agents/{{ a.id }}">{{ a.name }}</a></li>
+    <li>
+      <a href="/workspaces/{{ workspace.id }}/agents/{{ a.id }}/history">{{ a.name }}</a>
+      <small style="color: var(--pico-muted-color);"> · <a href="/workspaces/{{ workspace.id }}/agents/{{ a.id }}">details</a></small>
+    </li>
     {% endfor %}
   </ul>
   {% endif %}

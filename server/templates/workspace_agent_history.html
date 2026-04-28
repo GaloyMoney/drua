@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}{{ agent.name }} — History — {{ workspace.name }} — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .ws-back { display: block; font-size: 0.8rem; text-decoration: none; color: var(--pico-muted-color); margin-bottom: 0.25rem; }
+  .ws-back:hover { color: var(--pico-primary); }
+  .ws-mode-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+  .ws-mode-header h4 { margin: 0; font-size: 1rem; }
+  .ws-settings-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.75rem; height: 1.75rem; padding: 0; margin: 0;
+    border: 1px solid var(--pico-muted-border-color); border-radius: var(--pico-border-radius);
+    background: none; text-decoration: none; color: var(--pico-muted-color); font-size: 0.9rem;
+    cursor: pointer; flex-shrink: 0;
+  }
+  .ws-settings-btn:hover { background: var(--pico-primary-background); color: var(--pico-primary-inverse); }
+  .agent-item {
+    display: block; padding: 0.4rem 0.75rem; border-radius: var(--pico-border-radius);
+    text-decoration: none; color: var(--pico-color); font-size: 0.9rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .agent-item:hover, .agent-item.active { background: var(--pico-primary-background); color: var(--pico-primary-inverse); }
+  .msg { margin: 0.75rem 0; padding: 0.75rem; border: 1px solid var(--pico-muted-border-color); border-radius: var(--pico-border-radius); }
+  .msg.user { border-left: 3px solid var(--pico-primary); }
+  .msg.assistant { border-left: 3px solid var(--pico-secondary); }
+  .msg-role { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--pico-muted-color); margin-bottom: 0.4rem; }
+  .block-text { white-space: pre-wrap; font-size: 0.9rem; }
+  .block-thinking {
+    white-space: pre-wrap; font-size: 0.85rem; font-style: italic;
+    color: var(--pico-muted-color); border-left: 2px solid var(--pico-muted-border-color);
+    padding-left: 0.5rem; margin: 0.4rem 0;
+  }
+  .block-tool-use, .block-tool-result, .block-sandbox-notification {
+    margin: 0.4rem 0; padding: 0.5rem;
+    background: var(--pico-muted-background); border-radius: var(--pico-border-radius);
+    font-size: 0.85rem;
+  }
+  .block-tool-result.error { background: var(--pico-mark-background-color); }
+  .block-tool-use code, .block-tool-result code { font-family: var(--pico-font-family-monospace); }
+  .block-tool-use pre, .block-tool-result pre {
+    margin: 0.3rem 0 0 0; padding: 0.5rem; background: var(--pico-background-color);
+    border-radius: var(--pico-border-radius); white-space: pre-wrap; word-break: break-word;
+    max-height: 24rem; overflow-y: auto;
+  }
+  .block-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--pico-muted-color); }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+{% match workflow_run %}
+  {% when Some((wf, run)) %}
+  <a href="/workspaces/{{ workspace.id }}/workflows/{{ wf }}/runs/{{ run }}" class="ws-back">&larr; Run</a>
+  {% when None %}
+  <a href="/workspaces/{{ workspace.id }}" class="ws-back">&larr; Workspace</a>
+{% endmatch %}
+<div class="ws-mode-header">
+  <h4>{{ workspace.name }}</h4>
+  <a href="/workspaces/{{ workspace.id }}" class="ws-settings-btn" title="Workspace settings">&#9881;</a>
+</div>
+
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/workspaces/{{ workspace.id }}/chat?agent={{ lead.id }}" class="agent-item">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for a in agents %}
+<a href="/workspaces/{{ workspace.id }}/chat?agent={{ a.id }}" class="agent-item">
+  {{ a.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/workspaces/{{ workspace.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/workspaces/{{ workspace.id }}/workflows" class="agent-item">Workflows</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+{% match workflow_run %}
+  {% when Some((wf, run)) %}
+  <a href="/workspaces/{{ workspace.id }}/workflows/{{ wf }}/runs/{{ run }}" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to run</a>
+  {% when None %}
+{% endmatch %}
+<h2>{{ agent.name }} <small style="font-size: 0.75rem; color: var(--pico-muted-color);">— history</small></h2>
+<p><small>{{ agent.role }} · agent <code>{{ agent.id }}</code></small></p>
+
+{% if messages.is_empty() %}
+<p><em>No messages yet.</em></p>
+{% else %}
+<p><small>Showing the most recent {{ messages.len() }} message(s) in chronological order. Tool calls and tool results are interleaved as separate blocks.</small></p>
+{% for m in messages %}
+<article class="msg {{ m.role }}">
+  <div class="msg-role">{{ m.role }} · #{{ m.sequence }}</div>
+  {% for b in m.blocks %}
+    {% if b.kind == "text" %}
+      {% match b.text %}{% when Some(t) %}<div class="block-text">{{ t }}</div>{% when None %}{% endmatch %}
+    {% else if b.kind == "thinking" %}
+      {% match b.text %}{% when Some(t) %}<div class="block-thinking">{{ t }}</div>{% when None %}{% endmatch %}
+    {% else if b.kind == "tool_use" %}
+      <div class="block-tool-use">
+        <span class="block-label">tool_use</span>
+        {% match b.tool_name %}{% when Some(n) %}<code>{{ n }}</code>{% when None %}{% endmatch %}
+        {% match b.tool_input %}{% when Some(i) %}<pre>{{ i }}</pre>{% when None %}{% endmatch %}
+      </div>
+    {% else if b.kind == "tool_result" %}
+      {% match b.is_error %}
+        {% when Some(true) %}
+        <div class="block-tool-result error">
+          <span class="block-label">tool_result · error</span>
+          {% match b.text %}{% when Some(t) %}<pre>{{ t }}</pre>{% when None %}{% endmatch %}
+        </div>
+        {% when _ %}
+        <div class="block-tool-result">
+          <span class="block-label">tool_result</span>
+          {% match b.text %}{% when Some(t) %}<pre>{{ t }}</pre>{% when None %}{% endmatch %}
+        </div>
+      {% endmatch %}
+    {% else if b.kind == "sandbox_notification" %}
+      <div class="block-sandbox-notification">
+        <span class="block-label">sandbox</span>
+        {% match b.text %}{% when Some(t) %}<pre>{{ t }}</pre>{% when None %}{% endmatch %}
+      </div>
+    {% endif %}
+  {% endfor %}
+</article>
+{% endfor %}
+{% endif %}
+{% endblock %}

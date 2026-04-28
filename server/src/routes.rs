@@ -62,6 +62,10 @@ pub fn router() -> Router<AppState> {
             "/workspaces/{id}/agents/{agent_id}",
             get(workspace_agent_detail),
         )
+        .route(
+            "/workspaces/{id}/agents/{agent_id}/history",
+            get(workspace_agent_history),
+        )
         .route("/workspaces/{id}/workflows", get(workspace_workflows_page))
         .route(
             "/workspaces/{id}/workflows/{wf_id}",
@@ -942,6 +946,132 @@ async fn workspace_agent_detail(
         },
         sandbox_options,
         error: query.error,
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.workspace_agent_history", skip_all)]
+async fn workspace_agent_history(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let agent_id = AgentId::from(agent_id);
+    let agent = match state.app.agents().find_by_id(&sub, agent_id).await {
+        Ok(a) => a,
+        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
+    };
+
+    // Last 200 messages — long enough for a typical workflow run, short
+    // enough to keep the page snappy.
+    let history = state
+        .app
+        .agents()
+        .chat_history(&sub, agent_id, 200)
+        .await
+        .unwrap_or_default();
+
+    let (lead_agent, agents) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let attached_view = attached_sandbox_view(&sub, &state, agent.attached_sandbox).await;
+    let workflow_run = match (agent.workflow_id, agent.workflow_run_id) {
+        (Some(wf), Some(run)) => Some((wf.to_string(), run.to_string())),
+        _ => None,
+    };
+
+    let messages: Vec<ChatHistoryMessageView> = history
+        .into_iter()
+        .map(|m| ChatHistoryMessageView {
+            sequence: m.sequence,
+            role: match m.role {
+                domain::agent::session::history::ChatHistoryRole::User => "user".to_string(),
+                domain::agent::session::history::ChatHistoryRole::Assistant => "assistant".to_string(),
+            },
+            blocks: m
+                .blocks
+                .into_iter()
+                .map(|b| match b {
+                    domain::agent::session::history::ChatHistoryBlock::Text { text } => {
+                        ChatHistoryBlockView {
+                            kind: "text".to_string(),
+                            text: Some(text),
+                            tool_name: None,
+                            tool_input: None,
+                            is_error: None,
+                        }
+                    }
+                    domain::agent::session::history::ChatHistoryBlock::Thinking { text } => {
+                        ChatHistoryBlockView {
+                            kind: "thinking".to_string(),
+                            text: Some(text),
+                            tool_name: None,
+                            tool_input: None,
+                            is_error: None,
+                        }
+                    }
+                    domain::agent::session::history::ChatHistoryBlock::ToolUse { name, input } => {
+                        ChatHistoryBlockView {
+                            kind: "tool_use".to_string(),
+                            text: None,
+                            tool_name: Some(name),
+                            tool_input: Some(
+                                serde_json::to_string_pretty(&input)
+                                    .unwrap_or_else(|_| input.to_string()),
+                            ),
+                            is_error: None,
+                        }
+                    }
+                    domain::agent::session::history::ChatHistoryBlock::ToolResult {
+                        content,
+                        is_error,
+                        ..
+                    } => ChatHistoryBlockView {
+                        kind: "tool_result".to_string(),
+                        text: Some(content),
+                        tool_name: None,
+                        tool_input: None,
+                        is_error: Some(is_error),
+                    },
+                    domain::agent::session::history::ChatHistoryBlock::SandboxNotification {
+                        text,
+                        ..
+                    } => ChatHistoryBlockView {
+                        kind: "sandbox_notification".to_string(),
+                        text: Some(text),
+                        tool_name: None,
+                        tool_input: None,
+                        is_error: None,
+                    },
+                })
+                .collect(),
+        })
+        .collect();
+
+    WorkspaceAgentHistoryTemplate {
+        workspace: workspace_to_view(&ws),
+        lead_agent,
+        agents,
+        agent: AgentDetailView {
+            id: agent.id.to_string(),
+            workspace_id: agent.workspace_id.to_string(),
+            name: agent.name.clone(),
+            role: role_label(agent.agent_role).to_string(),
+            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::WorkspaceLead),
+            attached_sandbox: attached_view,
+        },
+        messages,
+        workflow_run,
     }
     .into_response()
 }

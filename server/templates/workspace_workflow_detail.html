@@ -90,6 +90,7 @@
 {% endblock %}
 
 {% block content %}
+<a href="/workspaces/{{ workspace.id }}/workflows" style="font-size: 0.85rem; text-decoration: none; color: var(--pico-muted-color);">&larr; Back to Workflows</a>
 <h2>{{ workflow.name }}</h2>
 {% match workflow.description %}{% when Some(d) %}<p>{{ d }}</p>{% when None %}{% endmatch %}
 
