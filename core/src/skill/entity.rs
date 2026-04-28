@@ -110,6 +110,36 @@ impl Skill {
         });
         Idempotent::Executed(())
     }
+
+    /// User-driven path (no file_hash compare; that's [`Self::update`]).
+    pub fn update_content(
+        &mut self,
+        name: Option<String>,
+        description: Option<String>,
+        body: Option<String>,
+    ) -> Idempotent<()> {
+        let name_changes = name.as_ref().is_some_and(|n| n != &self.name);
+        let desc_changes = description.as_ref().is_some_and(|d| d != &self.description);
+        let body_changes = body.as_ref().is_some_and(|b| b != &self.body);
+        if !name_changes && !desc_changes && !body_changes {
+            return Idempotent::AlreadyApplied;
+        }
+        if name_changes {
+            self.name = name.clone().unwrap();
+        }
+        if desc_changes {
+            self.description = description.clone().unwrap();
+        }
+        if body_changes {
+            self.body = body.clone().unwrap();
+        }
+        self.events.push(SkillEvent::Updated {
+            name: name_changes.then(|| self.name.clone()),
+            description: desc_changes.then(|| self.description.clone()),
+            body: body_changes.then(|| self.body.clone()),
+        });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Skill {

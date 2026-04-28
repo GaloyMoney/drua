@@ -7,7 +7,7 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::library::SearchResult;
 use crate::note::Notes;
-use crate::primitives::NoteId;
+use crate::primitives::{NoteId, WorkflowDefinitionId};
 use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
@@ -31,6 +31,8 @@ enum NotesParams {
         tags: Vec<String>,
         #[serde(default)]
         note_id: Option<NoteId>,
+        #[serde(default)]
+        workflow_id: Option<WorkflowDefinitionId>,
     },
     Get {
         note_id: NoteId,
@@ -43,6 +45,8 @@ enum NotesParams {
     List {
         #[serde(default = "default_list_limit")]
         limit: usize,
+        #[serde(default)]
+        workflow_id: Option<WorkflowDefinitionId>,
     },
     Pin {
         note_id: NoteId,
@@ -136,6 +140,11 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Maximum number of results (search default 10, list default 20)."
+            },
+            "workflow_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Workflow definition ID. On `store` (omit `note_id`): scopes the new note to that workflow as runbook context. On `list`: filters to notes attached to that workflow only."
             }
         },
         "required": ["command"],
@@ -208,6 +217,7 @@ impl TopLevelTool for NotesTool {
                 content,
                 tags,
                 note_id,
+                workflow_id,
             } => {
                 let workspace_name = resolve_workspace_name(&self.workspaces, subject).await?;
                 let note = self
@@ -220,6 +230,7 @@ impl TopLevelTool for NotesTool {
                         title,
                         content,
                         tags,
+                        workflow_id,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
@@ -329,18 +340,28 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::List { limit } => {
-                let notes = self
-                    .notes
-                    .list(subject, workspace_id, limit)
-                    .await
-                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+            NotesParams::List { limit, workflow_id } => {
+                let notes = match workflow_id {
+                    Some(wf) => self
+                        .notes
+                        .list_for_workflow_definition(subject, workspace_id, wf)
+                        .await
+                        .map_err(|e| ToolSetsError::Note(e.to_string()))?,
+                    None => self
+                        .notes
+                        .list(subject, workspace_id, limit)
+                        .await
+                        .map_err(|e| ToolSetsError::Note(e.to_string()))?,
+                };
 
                 let results: Vec<SearchResult> =
                     notes.into_iter().map(SearchResult::from).collect();
 
                 let text = if results.is_empty() {
-                    "No notes in this workspace yet.".to_string()
+                    match workflow_id {
+                        Some(wf) => format!("No notes attached to workflow {wf}."),
+                        None => "No notes in this workspace yet.".to_string(),
+                    }
                 } else {
                     let body = results
                         .iter()

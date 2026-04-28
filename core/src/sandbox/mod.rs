@@ -304,6 +304,117 @@ impl Sandboxes {
         Ok(self.repo.maybe_find_by_id(id.into()).await?)
     }
 
+    pub async fn begin_op(&self) -> Result<DbOp<'_>, SandboxError> {
+        Ok(self.repo.begin_op().await?)
+    }
+
+    /// `(workspace_id, name)` is unique at the DB level, so workflow-
+    /// scoped sandboxes embed the workflow short-id in their stored
+    /// name. The user's decl name stays the canonical reference inside
+    /// the workflow YAML; the storage name is an implementation detail.
+    fn workflow_sandbox_storage_name(workflow_id: WorkflowDefinitionId, decl_name: &str) -> String {
+        let short = &workflow_id.to_string()[..8];
+        format!("{decl_name}-wf-{short}")
+    }
+
+    /// Lookup scoped to a single workflow definition. Used by the
+    /// executor's pre-flight phase; sandboxes are workflow-scoped so a
+    /// name can collide across different workflows.
+    #[instrument(name = "domain.sandbox.find_for_workflow", skip(self))]
+    pub async fn find_for_workflow(
+        &self,
+        workspace_id: WorkspaceId,
+        workflow_id: WorkflowDefinitionId,
+        name: &str,
+    ) -> Result<Option<Sandbox>, SandboxError> {
+        let storage_name = Self::workflow_sandbox_storage_name(workflow_id, name);
+        let query = PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .await?;
+        Ok(result
+            .entities
+            .into_iter()
+            .find(|s| s.name == storage_name && s.workflow_id == Some(workflow_id)))
+    }
+
+    /// Workflow-scoped create; mirrors `create_in_op` but tags the
+    /// entity with `workflow_id` and skips the auth check (the workflow
+    /// run was authorised when triggered). The stored name is the
+    /// decl name plus a workflow short-id suffix so two workflows can
+    /// declare the same sandbox name without violating the unique
+    /// `(workspace_id, name)` index.
+    #[instrument(name = "domain.sandbox.create_for_workflow_in_op", skip(self, op))]
+    pub async fn create_for_workflow_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        workspace_id: WorkspaceId,
+        workflow_id: WorkflowDefinitionId,
+        name: impl Into<String> + std::fmt::Debug,
+        specs: SandboxSpecs,
+        mode: SandboxMode,
+    ) -> Result<Sandbox, SandboxError> {
+        let storage_name = Self::workflow_sandbox_storage_name(workflow_id, &name.into());
+        let id = SandboxId::new();
+        let mount_path = self.admin.mount_path(&format!("sb-{id}"));
+        let new_sandbox = NewSandbox::builder()
+            .id(id)
+            .workspace_id(workspace_id)
+            .name(storage_name)
+            .specs(specs)
+            .mode(mode)
+            .mount_path(mount_path)
+            .workflow_id(Some(workflow_id))
+            .build()
+            .expect("could not build new sandbox");
+
+        let sandbox = self.repo.create_in_op(op, new_sandbox).await?;
+        Audit::record_sandbox_id(sandbox.id);
+        Ok(sandbox)
+    }
+
+    /// Polls until `state == Ready` or an error/terminal state. Used by
+    /// the workflow executor pre-flight after create/restart.
+    #[instrument(name = "domain.sandbox.wait_until_ready", skip(self))]
+    pub async fn wait_until_ready(
+        &self,
+        id: SandboxId,
+        timeout: Duration,
+    ) -> Result<Sandbox, SandboxError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let interval = Duration::from_millis(500);
+        loop {
+            let sandbox = self.repo.find_by_id(id).await?;
+            match sandbox.state {
+                SandboxState::Ready => return Ok(sandbox),
+                SandboxState::Errored => {
+                    return Err(SandboxError::NotReady {
+                        state: format!(
+                            "errored: {}",
+                            sandbox.last_error.as_deref().unwrap_or("unknown")
+                        ),
+                    });
+                }
+                SandboxState::Suspended => {
+                    return Err(SandboxError::NotReady {
+                        state: "suspended".into(),
+                    });
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SandboxError::NotReady {
+                    state: format!("timeout in {}", sandbox.state),
+                });
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
     /// `pub(crate)` helper used by the skills context builder; no auth check.
     #[instrument(name = "domain.sandbox.exported_skills_for_workspace", skip(self))]
     pub(crate) async fn exported_skills_for_workspace(
@@ -423,6 +534,17 @@ impl Sandboxes {
         Audit::record_action_if_unset("sandbox.restart");
         Audit::record_workspace_id(pre.workspace_id);
         Audit::record_sandbox_id(id);
+        self.restart_inner(id).await
+    }
+
+    /// Auth-free restart used by the workflow executor pre-flight.
+    #[instrument(name = "domain.sandbox.restart_for_workflow", skip(self))]
+    pub async fn restart_for_workflow(&self, id: SandboxId) -> Result<Sandbox, SandboxError> {
+        Audit::record_sandbox_id(id);
+        self.restart_inner(id).await
+    }
+
+    async fn restart_inner(&self, id: SandboxId) -> Result<Sandbox, SandboxError> {
         let mut op = self.repo.begin_op().await?;
         let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
         if sandbox.provisioning().did_execute() {

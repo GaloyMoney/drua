@@ -15,6 +15,7 @@ pub mod skill;
 pub mod toolset;
 pub mod tunnel;
 pub mod user;
+pub mod workflow;
 pub mod workspace;
 pub mod workspace_secret;
 
@@ -34,10 +35,12 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, TextEditor,
-    ToolSets, ToolSetsError, UseSkillTool, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, Ls, NotesTool, Read, SkillTool,
+    TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool, WorkspaceAgent, WorkspaceLog,
+    WorkspaceSandbox,
 };
 use user::Users;
+use workflow::Workflows;
 use workspace::Workspaces;
 use workspace_secret::WorkspaceSecrets;
 
@@ -53,6 +56,7 @@ pub struct App {
     workspace_secrets: Arc<WorkspaceSecrets>,
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
+    workflows: Arc<Workflows>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
@@ -201,6 +205,21 @@ impl App {
         ));
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
+        let execute_run_initializer = Workflows::execute_run_job_initializer(
+            pool,
+            Arc::clone(&agents),
+            Arc::clone(&skills),
+            Arc::clone(&sandboxes),
+        );
+        let execute_run_spawner = jobs.add_initializer(execute_run_initializer);
+
+        let workflows = Arc::new(Workflows::new(
+            pool,
+            library.clone(),
+            Arc::clone(&skills),
+            execute_run_spawner,
+        ));
+
         let workspaces = Arc::new(Workspaces::new(
             pool,
             Arc::clone(&agents),
@@ -208,10 +227,17 @@ impl App {
             Arc::clone(&skills),
             Arc::clone(&notes),
             workspace_secrets.clone(),
+            Arc::clone(&workflows),
             library.clone(),
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
+        toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));
+        toolsets.register_top_level(WorkflowTool::new(
+            Arc::clone(&workflows),
+            Arc::clone(&workspaces),
+            None,
+        ));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
@@ -244,6 +270,26 @@ impl App {
                 .map_err(|e| AppError::Job(e.to_string()))?;
         }
 
+        {
+            let sync_init = workflow::SyncWorkflowsFromLibraryJobInitializer::new(
+                library.clone(),
+                Arc::clone(&workflows),
+                Arc::clone(&workspaces),
+            );
+            let sync_spawner = jobs.add_initializer(sync_init);
+            sync_spawner
+                .spawn_with_queue_id(
+                    job::JobId::new(),
+                    workflow::SyncWorkflowsFromLibraryConfig {
+                        sync_interval_secs: config.library.skill_sync_interval_secs,
+                        last_sync_commit: None,
+                    },
+                    library::LIBRARY_LOCK_QUEUE,
+                )
+                .await
+                .map_err(|e| AppError::Job(e.to_string()))?;
+        }
+
         jobs.start_poll()
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
@@ -260,6 +306,7 @@ impl App {
             workspace_secrets: Arc::new(workspace_secrets),
             skills,
             sandboxes,
+            workflows,
             github_app,
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
@@ -307,6 +354,10 @@ impl App {
 
     pub fn sandboxes(&self) -> &Sandboxes {
         &self.sandboxes
+    }
+
+    pub fn workflows(&self) -> &Workflows {
+        &self.workflows
     }
 
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {

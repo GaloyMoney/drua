@@ -12,6 +12,7 @@ use super::entity::*;
     columns(
         workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
         name(ty = "String"),
+        workflow_id(ty = "Option<WorkflowDefinitionId>"),
     )
 )]
 pub struct SandboxRepo {

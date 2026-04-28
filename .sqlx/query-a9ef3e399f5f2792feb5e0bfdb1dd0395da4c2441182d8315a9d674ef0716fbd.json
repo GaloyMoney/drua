@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notes SET workspace_id = $2, pinned = $3, workflow_id = $4, deleted = TRUE WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a9ef3e399f5f2792feb5e0bfdb1dd0395da4c2441182d8315a9d674ef0716fbd"
+}

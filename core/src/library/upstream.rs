@@ -384,6 +384,78 @@ impl Upstream {
         Ok(results)
     }
 
+    pub async fn changed_workflow_files(
+        &self,
+        last_commit: Option<&str>,
+    ) -> Result<Vec<(String, String)>, LibraryError> {
+        self.require_git_repo()?;
+
+        let paths = match last_commit {
+            Some(commit) => {
+                let output = tokio::process::Command::new("git")
+                    .args([
+                        "diff",
+                        "--name-only",
+                        &format!("{commit}..HEAD"),
+                        "--",
+                        "runtime/workflows/",
+                        "runtime/workspaces/",
+                    ])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git diff: {e}")))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LibraryError::Git(format!("git diff failed: {stderr}")));
+                }
+
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|p| p.ends_with(".yml") && p.contains("/workflows/"))
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            }
+            None => {
+                let output = tokio::process::Command::new("git")
+                    .args([
+                        "ls-files",
+                        "--",
+                        "runtime/workflows/*.yml",
+                        "runtime/workspaces/*/workflows/*.yml",
+                    ])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git ls-files: {e}")))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LibraryError::Git(format!("git ls-files failed: {stderr}")));
+                }
+
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|p| !p.is_empty())
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let mut results = Vec::with_capacity(paths.len());
+        for path in paths {
+            let full_path = self.repo_path.join(&path);
+            match tokio::fs::read_to_string(&full_path).await {
+                Ok(content) => results.push((path, content)),
+                Err(e) => {
+                    tracing::debug!(path = %path, error = %e, "skipping unreadable workflow file");
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// `git rm -r` the directory and commit. No-op if it doesn't exist.
     pub async fn remove_dir_and_commit(
         &self,

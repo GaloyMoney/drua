@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO agents (id, workspace_id, workflow_id, workflow_run_id, created_at) VALUES ($1, $2, $3, $4, COALESCE($5, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "51c32d176541747213b1998f2d931da63d10b48999bc056f919f97256a9756d7"
+}

@@ -28,6 +28,8 @@ enum SandboxCommand {
     List,
     Get,
     Inspect,
+    Restart,
+    Suspend,
 }
 
 impl SandboxCommand {
@@ -37,6 +39,8 @@ impl SandboxCommand {
             Self::List => "sandbox.list",
             Self::Get => "sandbox.get",
             Self::Inspect => "sandbox.inspect",
+            Self::Restart => "sandbox.restart",
+            Self::Suspend => "sandbox.suspend",
         }
     }
 }
@@ -72,9 +76,20 @@ struct WorkspaceSandboxParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
 
+    /// Inspect sub-tool. Each takes a different `tool_args` shape:
+    /// `ls` → `{ path: string, ignore?: string[] }`;
+    /// `read` → `{ path: string, offset?: int, limit?: int }`;
+    /// `grep` → `{ pattern: string, path?: string, glob?: string, output_mode?: string }`;
+    /// `glob` → `{ pattern: string, path?: string }`.
     tool: Option<InspectTool>,
     #[serde(default)]
     tool_args: Option<JsonObject>,
+
+    /// On `restart`: block server-side until state=ready (or fail) instead
+    /// of returning immediately while the lifecycle is still spinning.
+    /// Caps at the executor's 180s sandbox-ready timeout.
+    #[serde(default)]
+    wait: Option<bool>,
 }
 
 pub struct WorkspaceSandbox {
@@ -116,7 +131,12 @@ impl TopLevelTool for WorkspaceSandbox {
         "Manage sandboxes. Commands: `create` (requires `name`, `mode`, \
          optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
          `list`, `get` (requires `sandbox_id`), \
-         `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`)."
+         `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`; \
+         per-tool args: ls/read take `path`, grep/glob take `pattern`), \
+         `restart` (requires `sandbox_id`; optional `wait: true` blocks until \
+         state=ready — wakes a suspended sandbox so it can be inspected; \
+         workflow-scoped sandboxes are suspended after each run), \
+         `suspend` (requires `sandbox_id`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -128,7 +148,7 @@ impl TopLevelTool for WorkspaceSandbox {
     }
 
     fn composable(&self) -> bool {
-        false
+        true
     }
 
     async fn call(
@@ -238,6 +258,52 @@ impl TopLevelTool for WorkspaceSandbox {
                 }
 
                 execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
+            }
+
+            SandboxCommand::Restart => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for restart".to_string())
+                })?;
+                let sandbox = self
+                    .sandboxes
+                    .restart(subject, sandbox_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                if params.wait.unwrap_or(false) {
+                    let ready = self
+                        .sandboxes
+                        .wait_until_ready(sandbox.id, std::time::Duration::from_secs(180))
+                        .await
+                        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(
+                        format_sandbox(&ready),
+                    )]))
+                } else {
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Sandbox restart requested. Pass `wait: true` to block until ready, or poll `get` until state=ready.\n\n{}",
+                        format_sandbox(&sandbox)
+                    ))]))
+                }
+            }
+
+            SandboxCommand::Suspend => {
+                if !subject.can_write_workspace() {
+                    return Err(ToolSetsError::Unauthorized);
+                }
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for suspend".to_string())
+                })?;
+                let sandbox = self
+                    .sandboxes
+                    .suspend(subject, sandbox_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_sandbox(&sandbox),
+                )]))
             }
         }
     }

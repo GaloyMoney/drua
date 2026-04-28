@@ -1,6 +1,8 @@
 use sha1::{Digest, Sha1};
 
-use crate::primitives::{NoteId, SkillId, WorkspaceId};
+use crate::primitives::{NoteId, SkillId, WorkflowDefinitionId, WorkspaceId};
+use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+use crate::workflow::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileHash(String);
@@ -25,6 +27,7 @@ impl std::fmt::Display for GitFileHash {
 pub enum DocType {
     Note,
     Skill,
+    Workflow,
 }
 
 impl DocType {
@@ -32,6 +35,7 @@ impl DocType {
         match self {
             DocType::Note => "note",
             DocType::Skill => "skill",
+            DocType::Workflow => "workflow",
         }
     }
 }
@@ -79,6 +83,25 @@ pub enum RuntimeFile {
         id_prefix: String,
         /// Original on-disk path before canonicalisation. The `WriteToRuntime`
         /// job removes this path if it differs from canonical `relative_path()`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_path: Option<String>,
+    },
+    /// YAML body. Webhook secret is **not** serialized — it stays
+    /// DB-only so secrets don't leak into git.
+    Workflow {
+        doc_id: WorkflowDefinitionId,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<String>,
+        name: String,
+        description: Option<String>,
+        trigger: WorkflowTrigger,
+        steps: Vec<WorkflowStepDef>,
+        #[serde(default)]
+        sandboxes: Vec<WorkflowSandboxDecl>,
+        created_at: String,
+        updated_at: String,
+        slug: String,
+        id_prefix: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         original_path: Option<String>,
     },
@@ -168,6 +191,65 @@ impl RuntimeFile {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_workflow(
+        workflow_id: WorkflowDefinitionId,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<&str>,
+        name: &str,
+        description: Option<&str>,
+        trigger: WorkflowTrigger,
+        steps: Vec<WorkflowStepDef>,
+        sandboxes: Vec<WorkflowSandboxDecl>,
+        created_at: &str,
+        updated_at: &str,
+    ) -> Self {
+        Self::for_workflow_with_original_path(
+            workflow_id,
+            workspace_id,
+            workspace_name,
+            name,
+            description,
+            trigger,
+            steps,
+            sandboxes,
+            created_at,
+            updated_at,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_workflow_with_original_path(
+        workflow_id: WorkflowDefinitionId,
+        workspace_id: Option<WorkspaceId>,
+        workspace_name: Option<&str>,
+        name: &str,
+        description: Option<&str>,
+        trigger: WorkflowTrigger,
+        steps: Vec<WorkflowStepDef>,
+        sandboxes: Vec<WorkflowSandboxDecl>,
+        created_at: &str,
+        updated_at: &str,
+        original_path: Option<String>,
+    ) -> Self {
+        RuntimeFile::Workflow {
+            doc_id: workflow_id,
+            workspace_id,
+            workspace_name: workspace_name.map(|s| s.to_string()),
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            trigger,
+            steps,
+            sandboxes,
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
+            slug: slugify(name),
+            id_prefix: workflow_id.to_string()[..8].to_string(),
+            original_path,
+        }
+    }
+
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
             RuntimeFile::Note {
@@ -201,6 +283,22 @@ impl RuntimeFile {
                 body: description.clone(),
                 tags: Vec::new(),
             }),
+            RuntimeFile::Workflow {
+                doc_id,
+                workspace_id,
+                name,
+                description,
+                ..
+            } => Some(SearchableFields {
+                doc_id: uuid::Uuid::from(*doc_id),
+                doc_type: DocType::Workflow,
+                workspace_id: workspace_id
+                    .map(uuid::Uuid::from)
+                    .unwrap_or(uuid::Uuid::nil()),
+                title: name.clone(),
+                body: description.clone().unwrap_or_default(),
+                tags: Vec::new(),
+            }),
             RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => None,
         }
     }
@@ -224,6 +322,18 @@ impl RuntimeFile {
             } => match workspace_name {
                 Some(ws) => format!("runtime/workspaces/{}/skills/{}-{}.md", ws, slug, id_prefix),
                 None => format!("runtime/skills/{}-{}.md", slug, id_prefix),
+            },
+            RuntimeFile::Workflow {
+                workspace_name,
+                slug,
+                id_prefix,
+                ..
+            } => match workspace_name {
+                Some(ws) => format!(
+                    "runtime/workspaces/{}/workflows/{}-{}.yml",
+                    ws, slug, id_prefix
+                ),
+                None => format!("runtime/workflows/{}-{}.yml", slug, id_prefix),
             },
             RuntimeFile::GitKeep {
                 workspace_name,
@@ -277,6 +387,26 @@ impl RuntimeFile {
                     body
                 )
             }
+            RuntimeFile::Workflow {
+                doc_id,
+                name,
+                description,
+                trigger,
+                steps,
+                sandboxes,
+                created_at,
+                updated_at,
+                ..
+            } => render_workflow_yaml(
+                *doc_id,
+                name,
+                description.as_deref(),
+                trigger,
+                steps,
+                sandboxes,
+                created_at,
+                updated_at,
+            ),
             RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => String::new(),
         }
     }
@@ -289,6 +419,9 @@ impl RuntimeFile {
             RuntimeFile::Skill {
                 slug, id_prefix, ..
             } => format!("skill: {}-{}", slug, id_prefix),
+            RuntimeFile::Workflow {
+                slug, id_prefix, ..
+            } => format!("workflow: {}-{}", slug, id_prefix),
             RuntimeFile::GitKeep {
                 workspace_name,
                 subdir,
@@ -304,13 +437,16 @@ impl RuntimeFile {
     pub(crate) fn original_path(&self) -> Option<&str> {
         match self {
             RuntimeFile::Skill { original_path, .. } => original_path.as_deref(),
+            RuntimeFile::Workflow { original_path, .. } => original_path.as_deref(),
             _ => None,
         }
     }
 
     pub(crate) fn set_original_path(&mut self, path: String) {
-        if let RuntimeFile::Skill { original_path, .. } = self {
-            *original_path = Some(path);
+        match self {
+            RuntimeFile::Skill { original_path, .. } => *original_path = Some(path),
+            RuntimeFile::Workflow { original_path, .. } => *original_path = Some(path),
+            _ => {}
         }
     }
 
@@ -540,6 +676,309 @@ fn name_from_filename(path: &str) -> Option<String> {
         None
     } else {
         Some(name)
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+struct WorkflowYaml {
+    /// Files lacking `id:` get a fresh `WorkflowDefinitionId` on import
+    /// and the file is rewritten with the canonical id afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<uuid::Uuid>,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    trigger: WorkflowTriggerYaml,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sandboxes: Vec<WorkflowSandboxYaml>,
+    steps: Vec<WorkflowStepYaml>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    created: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    updated: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkflowSandboxYaml {
+    Scratch {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_size: Option<String>,
+    },
+    Repo {
+        name: String,
+        repo_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_size: Option<String>,
+    },
+}
+
+impl WorkflowSandboxYaml {
+    fn from_runtime(d: &WorkflowSandboxDecl) -> Self {
+        let (cpu, memory, disk_size) = match &d.specs {
+            Some(s) => (
+                Some(s.cpu.clone()),
+                Some(s.memory.clone()),
+                Some(s.disk_size.clone()),
+            ),
+            None => (None, None, None),
+        };
+        match &d.mode {
+            SandboxMode::Scratch => WorkflowSandboxYaml::Scratch {
+                name: d.name.clone(),
+                cpu,
+                memory,
+                disk_size,
+            },
+            SandboxMode::Repo { repo_url, branch } => WorkflowSandboxYaml::Repo {
+                name: d.name.clone(),
+                repo_url: repo_url.clone(),
+                branch: branch.clone(),
+                cpu,
+                memory,
+                disk_size,
+            },
+        }
+    }
+
+    fn into_runtime(self) -> WorkflowSandboxDecl {
+        let (name, mode, cpu, memory, disk_size) = match self {
+            WorkflowSandboxYaml::Scratch {
+                name,
+                cpu,
+                memory,
+                disk_size,
+            } => (name, SandboxMode::Scratch, cpu, memory, disk_size),
+            WorkflowSandboxYaml::Repo {
+                name,
+                repo_url,
+                branch,
+                cpu,
+                memory,
+                disk_size,
+            } => (
+                name,
+                SandboxMode::Repo { repo_url, branch },
+                cpu,
+                memory,
+                disk_size,
+            ),
+        };
+        let specs = match (cpu, memory, disk_size) {
+            (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
+                cpu,
+                memory,
+                disk_size,
+            }),
+            // Partial overrides aren't supported — fall back to defaults
+            // so the YAML doesn't carry half-set specs.
+            _ => None,
+        };
+        WorkflowSandboxDecl { name, mode, specs }
+    }
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WorkflowTriggerYaml {
+    #[default]
+    Manual,
+    Webhook {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+    },
+}
+
+impl WorkflowTriggerYaml {
+    fn from_runtime(t: &WorkflowTrigger) -> Self {
+        match t {
+            WorkflowTrigger::Manual => WorkflowTriggerYaml::Manual,
+            WorkflowTrigger::Webhook { provider, .. } => WorkflowTriggerYaml::Webhook {
+                provider: provider.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WorkflowStepYaml {
+    AgentStep {
+        name: String,
+        skill: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox_mode: Option<SandboxAgentMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+    },
+}
+
+impl WorkflowStepYaml {
+    fn from_runtime(s: &WorkflowStepDef) -> Self {
+        match s {
+            WorkflowStepDef::AgentStep {
+                name,
+                skill,
+                sandbox,
+                sandbox_mode,
+                timeout_seconds,
+            } => WorkflowStepYaml::AgentStep {
+                name: name.clone(),
+                skill: skill.clone(),
+                sandbox: sandbox.clone(),
+                sandbox_mode: *sandbox_mode,
+                timeout_seconds: *timeout_seconds,
+            },
+        }
+    }
+
+    fn into_runtime(self) -> WorkflowStepDef {
+        match self {
+            WorkflowStepYaml::AgentStep {
+                name,
+                skill,
+                sandbox,
+                sandbox_mode,
+                timeout_seconds,
+            } => WorkflowStepDef::AgentStep {
+                name,
+                skill,
+                sandbox,
+                sandbox_mode,
+                timeout_seconds,
+            },
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_workflow_yaml(
+    doc_id: WorkflowDefinitionId,
+    name: &str,
+    description: Option<&str>,
+    trigger: &WorkflowTrigger,
+    steps: &[WorkflowStepDef],
+    sandboxes: &[WorkflowSandboxDecl],
+    created_at: &str,
+    updated_at: &str,
+) -> String {
+    let yaml = WorkflowYaml {
+        id: Some(doc_id.into()),
+        name: name.to_string(),
+        description: description.map(|s| s.to_string()),
+        trigger: WorkflowTriggerYaml::from_runtime(trigger),
+        sandboxes: sandboxes
+            .iter()
+            .map(WorkflowSandboxYaml::from_runtime)
+            .collect(),
+        steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
+        created: created_at.to_string(),
+        updated: updated_at.to_string(),
+    };
+    serde_yaml::to_string(&yaml).unwrap_or_else(|e| format!("# yaml render error: {e}\n"))
+}
+
+pub struct ParsedWorkflowFile {
+    pub file: RuntimeFile,
+    /// Set when the sync job should rewrite the file with canonical
+    /// headers (missing `id:`, non-canonical path, stale format).
+    pub needs_rewrite: bool,
+}
+
+/// `None` when the YAML is malformed or no name can be derived.
+pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFile> {
+    let workspace_name = workspace_name_from_workflow_path(path);
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let yaml: WorkflowYaml = serde_yaml::from_str(trimmed).ok()?;
+
+    let (workflow_id, has_id) = match yaml.id {
+        Some(uuid) => (WorkflowDefinitionId::from(uuid), true),
+        None => (WorkflowDefinitionId::new(), false),
+    };
+
+    let name = if !yaml.name.is_empty() {
+        yaml.name
+    } else {
+        name_from_filename(path)?
+    };
+
+    let trigger = match yaml.trigger {
+        WorkflowTriggerYaml::Manual => WorkflowTrigger::Manual,
+        // Empty secret signals "mint on create / preserve on update"
+        // — the upsert path handles it (see `Workflows::create`).
+        WorkflowTriggerYaml::Webhook { provider } => WorkflowTrigger::Webhook {
+            provider,
+            secret: String::new(),
+        },
+    };
+
+    let steps: Vec<WorkflowStepDef> = yaml
+        .steps
+        .into_iter()
+        .map(WorkflowStepYaml::into_runtime)
+        .collect();
+    let sandboxes: Vec<WorkflowSandboxDecl> = yaml
+        .sandboxes
+        .into_iter()
+        .map(WorkflowSandboxYaml::into_runtime)
+        .collect();
+
+    let slug = slugify(&name);
+    let id_prefix = workflow_id.to_string()[..8].to_string();
+
+    let file = RuntimeFile::Workflow {
+        doc_id: workflow_id,
+        workspace_id: None,
+        workspace_name,
+        name,
+        description: yaml.description,
+        trigger,
+        steps,
+        sandboxes,
+        created_at: yaml.created,
+        updated_at: yaml.updated,
+        slug,
+        id_prefix,
+        original_path: Some(path.to_string()),
+    };
+
+    let needs_rewrite = !has_id || file.relative_path() != path;
+
+    Some(ParsedWorkflowFile {
+        file,
+        needs_rewrite,
+    })
+}
+
+/// `runtime/workspaces/{ws}/workflows/*.yml` → `Some(ws)`;
+/// `runtime/workflows/*.yml` → `None` (global).
+pub fn workspace_name_from_workflow_path(relative_path: &str) -> Option<String> {
+    let parts: Vec<&str> = relative_path.split('/').collect();
+    if parts.len() >= 5
+        && parts[0] == "runtime"
+        && parts[1] == "workspaces"
+        && parts[3] == "workflows"
+    {
+        Some(parts[2].to_string())
+    } else {
+        None
     }
 }
 
@@ -880,5 +1319,145 @@ mod tests {
     fn workspace_name_from_skill_path_global() {
         let path = "runtime/skills/deploy-script-abc12345.md";
         assert_eq!(workspace_name_from_skill_path(path), None);
+    }
+
+    fn sample_steps() -> Vec<WorkflowStepDef> {
+        vec![WorkflowStepDef::AgentStep {
+            name: "investigate".to_string(),
+            skill: "alert-investigator".to_string(),
+            sandbox: Some("investigation".to_string()),
+            sandbox_mode: None,
+            timeout_seconds: Some(120),
+        }]
+    }
+
+    fn sample_sandboxes() -> Vec<WorkflowSandboxDecl> {
+        vec![WorkflowSandboxDecl {
+            name: "investigation".to_string(),
+            mode: SandboxMode::Scratch,
+            specs: None,
+        }]
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_global() {
+        let id = WorkflowDefinitionId::new();
+        let original = RuntimeFile::for_workflow(
+            id,
+            None,
+            None,
+            "alert-response",
+            Some("Investigate Honeycomb alerts"),
+            WorkflowTrigger::Webhook {
+                provider: Some("honeycomb".to_string()),
+                secret: "whsec_should-not-be-serialized".to_string(),
+            },
+            sample_steps(),
+            sample_sandboxes(),
+            "2026-04-27T00:00:00Z",
+            "2026-04-27T00:00:00Z",
+        );
+
+        let content = original.content();
+        assert!(!content.contains("whsec_should-not-be-serialized"));
+
+        let path = original.relative_path();
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert!(!parsed.needs_rewrite);
+
+        match parsed.file {
+            RuntimeFile::Workflow {
+                doc_id,
+                workspace_id,
+                workspace_name,
+                name,
+                description,
+                trigger,
+                steps,
+                ..
+            } => {
+                assert_eq!(doc_id, id);
+                assert_eq!(workspace_id, None);
+                assert_eq!(workspace_name, None);
+                assert_eq!(name, "alert-response");
+                assert_eq!(description.as_deref(), Some("Investigate Honeycomb alerts"));
+                match trigger {
+                    WorkflowTrigger::Webhook { provider, secret } => {
+                        assert_eq!(provider.as_deref(), Some("honeycomb"));
+                        assert_eq!(secret, "");
+                    }
+                    _ => panic!("expected webhook trigger"),
+                }
+                assert_eq!(steps.len(), 1);
+            }
+            _ => panic!("expected workflow"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_preserves_sandboxes() {
+        let id = WorkflowDefinitionId::new();
+        let original = RuntimeFile::for_workflow(
+            id,
+            None,
+            None,
+            "alert-response",
+            None,
+            WorkflowTrigger::Manual,
+            sample_steps(),
+            sample_sandboxes(),
+            "2026-04-27T00:00:00Z",
+            "2026-04-27T00:00:00Z",
+        );
+        let content = original.content();
+        let path = original.relative_path();
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        match parsed.file {
+            RuntimeFile::Workflow { sandboxes, .. } => {
+                assert_eq!(sandboxes.len(), 1);
+                assert_eq!(sandboxes[0].name, "investigation");
+                assert!(matches!(sandboxes[0].mode, SandboxMode::Scratch));
+            }
+            _ => panic!("expected workflow"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_workspace_scoped_path() {
+        let id = WorkflowDefinitionId::new();
+        let id_prefix = &id.to_string()[..8];
+        let path = format!("runtime/workspaces/team/workflows/foo-{id_prefix}.yml");
+        assert_eq!(
+            workspace_name_from_workflow_path(&path),
+            Some("team".to_string())
+        );
+    }
+
+    #[test]
+    fn workflow_yaml_without_id_needs_rewrite() {
+        let content = "\
+name: simple-flow
+trigger:
+  type: manual
+steps:
+  - type: agent_step
+    name: step
+    skill: my-skill
+";
+        let path = "runtime/workflows/simple-flow.yml";
+        let parsed = parse_workflow_yaml(content, path).expect("parses");
+        assert!(parsed.needs_rewrite);
+        match parsed.file {
+            RuntimeFile::Workflow { name, trigger, .. } => {
+                assert_eq!(name, "simple-flow");
+                assert!(matches!(trigger, WorkflowTrigger::Manual));
+            }
+            _ => panic!("expected workflow"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_returns_none_for_empty() {
+        assert!(parse_workflow_yaml("", "runtime/workflows/x.yml").is_none());
     }
 }

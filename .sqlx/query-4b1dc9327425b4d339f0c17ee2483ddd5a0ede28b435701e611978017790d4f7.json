@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE agents SET workspace_id = $2, workflow_id = $3, workflow_run_id = $4 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4b1dc9327425b4d339f0c17ee2483ddd5a0ede28b435701e611978017790d4f7"
+}

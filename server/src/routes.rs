@@ -1,8 +1,8 @@
 use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Redirect, Response},
-    routing::get,
-    Extension, Json, Router,
+    routing::{get, post},
+    Extension, Form, Json, Router,
 };
 use serde::Deserialize;
 use tower_sessions::Session;
@@ -12,8 +12,11 @@ use drua_core as domain;
 
 use domain::auth::AuthSubject;
 use domain::mcp_creds::McpCreds;
-use domain::primitives::{AgentId, SandboxId, SkillId, UserId};
+use domain::primitives::{
+    AgentId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
+};
 use domain::sandbox::{SandboxAgentMode, SandboxMode};
+use domain::workflow::WorkflowTrigger;
 
 use crate::templates::*;
 use crate::AppState;
@@ -58,6 +61,23 @@ pub fn router() -> Router<AppState> {
         .route(
             "/workspaces/{id}/agents/{agent_id}",
             get(workspace_agent_detail),
+        )
+        .route(
+            "/workspaces/{id}/agents/{agent_id}/history",
+            get(workspace_agent_history),
+        )
+        .route("/workspaces/{id}/workflows", get(workspace_workflows_page))
+        .route(
+            "/workspaces/{id}/workflows/{wf_id}",
+            get(workspace_workflow_detail),
+        )
+        .route(
+            "/workspaces/{id}/workflows/{wf_id}/trigger",
+            post(workspace_workflow_trigger),
+        )
+        .route(
+            "/workspaces/{id}/workflows/{wf_id}/runs/{run_id}",
+            get(workspace_workflow_run_detail),
         )
 }
 
@@ -930,6 +950,134 @@ async fn workspace_agent_detail(
     .into_response()
 }
 
+#[instrument(name = "web.workspace_agent_history", skip_all)]
+async fn workspace_agent_history(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let agent_id = AgentId::from(agent_id);
+    let agent = match state.app.agents().find_by_id(&sub, agent_id).await {
+        Ok(a) => a,
+        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
+    };
+
+    // Last 200 messages — long enough for a typical workflow run, short
+    // enough to keep the page snappy.
+    let history = state
+        .app
+        .agents()
+        .chat_history(&sub, agent_id, 200)
+        .await
+        .unwrap_or_default();
+
+    let (lead_agent, agents) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let attached_view = attached_sandbox_view(&sub, &state, agent.attached_sandbox).await;
+    let workflow_run = match (agent.workflow_id, agent.workflow_run_id) {
+        (Some(wf), Some(run)) => Some((wf.to_string(), run.to_string())),
+        _ => None,
+    };
+
+    let messages: Vec<ChatHistoryMessageView> = history
+        .into_iter()
+        .map(|m| ChatHistoryMessageView {
+            sequence: m.sequence,
+            role: match m.role {
+                domain::agent::session::history::ChatHistoryRole::User => "user".to_string(),
+                domain::agent::session::history::ChatHistoryRole::Assistant => {
+                    "assistant".to_string()
+                }
+            },
+            blocks: m
+                .blocks
+                .into_iter()
+                .map(|b| match b {
+                    domain::agent::session::history::ChatHistoryBlock::Text { text } => {
+                        ChatHistoryBlockView {
+                            kind: "text".to_string(),
+                            text: Some(text),
+                            tool_name: None,
+                            tool_input: None,
+                            is_error: None,
+                        }
+                    }
+                    domain::agent::session::history::ChatHistoryBlock::Thinking { text } => {
+                        ChatHistoryBlockView {
+                            kind: "thinking".to_string(),
+                            text: Some(text),
+                            tool_name: None,
+                            tool_input: None,
+                            is_error: None,
+                        }
+                    }
+                    domain::agent::session::history::ChatHistoryBlock::ToolUse { name, input } => {
+                        ChatHistoryBlockView {
+                            kind: "tool_use".to_string(),
+                            text: None,
+                            tool_name: Some(name),
+                            tool_input: Some(
+                                serde_json::to_string_pretty(&input)
+                                    .unwrap_or_else(|_| input.to_string()),
+                            ),
+                            is_error: None,
+                        }
+                    }
+                    domain::agent::session::history::ChatHistoryBlock::ToolResult {
+                        content,
+                        is_error,
+                        ..
+                    } => ChatHistoryBlockView {
+                        kind: "tool_result".to_string(),
+                        text: Some(content),
+                        tool_name: None,
+                        tool_input: None,
+                        is_error: Some(is_error),
+                    },
+                    domain::agent::session::history::ChatHistoryBlock::SandboxNotification {
+                        text,
+                        ..
+                    } => ChatHistoryBlockView {
+                        kind: "sandbox_notification".to_string(),
+                        text: Some(text),
+                        tool_name: None,
+                        tool_input: None,
+                        is_error: None,
+                    },
+                })
+                .collect(),
+        })
+        .collect();
+
+    WorkspaceAgentHistoryTemplate {
+        workspace: workspace_to_view(&ws),
+        lead_agent,
+        agents,
+        agent: AgentDetailView {
+            id: agent.id.to_string(),
+            workspace_id: agent.workspace_id.to_string(),
+            name: agent.name.clone(),
+            role: role_label(agent.agent_role).to_string(),
+            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::WorkspaceLead),
+            attached_sandbox: attached_view,
+        },
+        messages,
+        workflow_run,
+    }
+    .into_response()
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ChatQuery {
     agent: Option<uuid::Uuid>,
@@ -1093,4 +1241,415 @@ async fn api_agent_secrets(
     tracing::Span::current().record("secret_count", body.len());
 
     Json(body).into_response()
+}
+
+/// Percent-encode anything outside the RFC 3986 §2.3 unreserved set.
+fn encode_query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b;
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') {
+            out.push(c as char);
+        } else {
+            out.push_str(&format!("%{c:02X}"));
+        }
+    }
+    out
+}
+
+fn workflow_definition_to_view_for_list(
+    d: &domain::workflow::WorkflowDefinition,
+) -> WorkflowDefinitionView {
+    let (trigger_type, trigger_provider, secret) = match &d.trigger {
+        WorkflowTrigger::Manual => ("manual".to_string(), None, None),
+        WorkflowTrigger::Webhook { provider, secret } => (
+            "webhook".to_string(),
+            provider.clone(),
+            Some(secret.clone()),
+        ),
+    };
+    // The list view never surfaces the secret — only the detail page does.
+    let _ = secret;
+    WorkflowDefinitionView {
+        id: d.id.to_string(),
+        name: d.name.clone(),
+        description: d.description.clone(),
+        trigger_type,
+        trigger_provider,
+        webhook_secret: None,
+        webhook_url: None,
+        steps: d.steps.iter().map(workflow_step_to_view).collect(),
+        sandboxes: d.sandboxes.iter().map(workflow_sandbox_to_view).collect(),
+        created_at: d.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+fn workflow_definition_to_view_for_detail(
+    d: &domain::workflow::WorkflowDefinition,
+    public_host: Option<&str>,
+) -> WorkflowDefinitionView {
+    let (trigger_type, trigger_provider, secret) = match &d.trigger {
+        WorkflowTrigger::Manual => ("manual".to_string(), None, None),
+        WorkflowTrigger::Webhook { provider, secret } => (
+            "webhook".to_string(),
+            provider.clone(),
+            Some(secret.clone()),
+        ),
+    };
+    let webhook_url = secret.as_ref().map(|_| match public_host {
+        Some(host) => format!("{host}/webhooks/{}", d.id),
+        None => format!("/webhooks/{}", d.id),
+    });
+    WorkflowDefinitionView {
+        id: d.id.to_string(),
+        name: d.name.clone(),
+        description: d.description.clone(),
+        trigger_type,
+        trigger_provider,
+        webhook_secret: secret,
+        webhook_url,
+        steps: d.steps.iter().map(workflow_step_to_view).collect(),
+        sandboxes: d.sandboxes.iter().map(workflow_sandbox_to_view).collect(),
+        created_at: d.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+fn workflow_sandbox_to_view(d: &domain::workflow::WorkflowSandboxDecl) -> WorkflowSandboxView {
+    let (kind, repo_url, branch) = match &d.mode {
+        SandboxMode::Scratch => ("scratch".to_string(), None, None),
+        SandboxMode::Repo { repo_url, branch } => {
+            ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+        }
+    };
+    WorkflowSandboxView {
+        name: d.name.clone(),
+        kind,
+        repo_url,
+        branch,
+    }
+}
+
+fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepView {
+    match s {
+        domain::workflow::WorkflowStepDef::AgentStep {
+            name,
+            skill,
+            sandbox,
+            timeout_seconds,
+            ..
+        } => WorkflowStepView {
+            name: name.clone(),
+            step_type: "agent_step".to_string(),
+            skill: skill.clone(),
+            sandbox: sandbox.clone(),
+            timeout_seconds: *timeout_seconds,
+        },
+    }
+}
+
+fn workflow_run_state_str(state: domain::workflow::WorkflowRunState) -> &'static str {
+    match state {
+        domain::workflow::WorkflowRunState::Pending => "pending",
+        domain::workflow::WorkflowRunState::Running => "running",
+        domain::workflow::WorkflowRunState::Succeeded => "succeeded",
+        domain::workflow::WorkflowRunState::Failed => "failed",
+    }
+}
+
+fn workflow_run_to_view(r: &domain::workflow::WorkflowRun) -> WorkflowRunView {
+    let output_summary = r
+        .step_results
+        .last()
+        .and_then(|sr| {
+            if let Some(err) = &sr.error {
+                Some(format!("ERROR: {err}"))
+            } else {
+                sr.output.as_ref().map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+            }
+        })
+        .map(|s| {
+            const MAX: usize = 100;
+            let oneline = s.replace('\n', " ");
+            if oneline.chars().count() > MAX {
+                format!("{}…", oneline.chars().take(MAX).collect::<String>())
+            } else {
+                oneline
+            }
+        })
+        .unwrap_or_else(|| "—".to_string());
+
+    WorkflowRunView {
+        id: r.id.to_string(),
+        definition_id: r.definition_id.to_string(),
+        state: workflow_run_state_str(r.state).to_string(),
+        started_at: r.started_at().format("%Y-%m-%d %H:%M:%SZ").to_string(),
+        completed_at: r
+            .completed_at
+            .map(|t| t.format("%Y-%m-%d %H:%M:%SZ").to_string()),
+        output_summary,
+    }
+}
+
+fn step_result_to_view(sr: &domain::workflow::StepResult) -> StepResultView {
+    let state = if sr.error.is_some() {
+        "failed"
+    } else if sr.completed_at.is_some() {
+        "succeeded"
+    } else {
+        "running"
+    };
+    StepResultView {
+        name: sr.name.clone(),
+        state: state.to_string(),
+        output: sr.output.as_ref().map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+        }),
+        error: sr.error.clone(),
+        completed_at: sr
+            .completed_at
+            .map(|t| t.format("%Y-%m-%d %H:%M:%SZ").to_string()),
+    }
+}
+
+fn note_to_view(n: &domain::note::Note) -> NoteView {
+    NoteView {
+        id: n.id.to_string(),
+        title: n.title().to_string(),
+        content: n.body().to_string(),
+        tags: n.tags().to_vec(),
+        created_at: n.created_at(),
+    }
+}
+
+#[instrument(name = "web.workspace_workflows_page", skip_all)]
+async fn workspace_workflows_page(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+
+    let workflows = state
+        .app
+        .workflows()
+        .list_for_workspace(&sub, workspace_id)
+        .await
+        .unwrap_or_default();
+
+    WorkspaceWorkflowsPageTemplate {
+        workspace: workspace_to_view(&ws),
+        lead_agent,
+        agents: agent_views,
+        workflows: workflows
+            .iter()
+            .map(workflow_definition_to_view_for_list)
+            .collect(),
+    }
+    .into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WorkflowDetailQuery {
+    flash: Option<String>,
+}
+
+#[instrument(name = "web.workspace_workflow_detail", skip_all)]
+async fn workspace_workflow_detail(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, wf_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Query(query): Query<WorkflowDetailQuery>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let workflow_id = WorkflowDefinitionId::from(wf_id);
+    let workflow = match state.app.workflows().find_by_id(&sub, workflow_id).await {
+        Ok(w) if w.workspace_id == workspace_id => w,
+        _ => {
+            return Redirect::to(&format!("/workspaces/{id}/workflows")).into_response();
+        }
+    };
+
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+
+    let recent_runs = state
+        .app
+        .workflows()
+        .list_runs(&sub, workflow_id)
+        .await
+        .unwrap_or_default();
+
+    let workflow_notes = state
+        .app
+        .notes()
+        .list_for_workflow_definition(&sub, workspace_id, workflow_id)
+        .await
+        .unwrap_or_default();
+
+    WorkspaceWorkflowDetailTemplate {
+        workspace: workspace_to_view(&ws),
+        lead_agent,
+        agents: agent_views,
+        workflow: workflow_definition_to_view_for_detail(&workflow, None),
+        recent_runs: recent_runs.iter().map(workflow_run_to_view).collect(),
+        workflow_notes: workflow_notes.iter().map(note_to_view).collect(),
+        flash: query.flash,
+    }
+    .into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WorkflowTriggerForm {
+    payload: Option<String>,
+}
+
+#[instrument(name = "web.workspace_workflow_trigger", skip_all)]
+async fn workspace_workflow_trigger(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, wf_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Form(form): Form<WorkflowTriggerForm>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workflow_id = WorkflowDefinitionId::from(wf_id);
+
+    // Bad JSON bounces back with a flash rather than 400 so the
+    // operator can correct in place.
+    let payload = match form
+        .payload
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = format!("invalid JSON payload: {e}");
+                return Redirect::to(&format!(
+                    "/workspaces/{id}/workflows/{wf_id}?flash={}",
+                    encode_query_value(&msg)
+                ))
+                .into_response();
+            }
+        },
+        None => serde_json::Value::Null,
+    };
+
+    match state
+        .app
+        .workflows()
+        .trigger_run(&sub, workflow_id, payload)
+        .await
+    {
+        Ok(run) => Redirect::to(&format!(
+            "/workspaces/{id}/workflows/{wf_id}/runs/{}",
+            run.id
+        ))
+        .into_response(),
+        Err(e) => {
+            let msg = format!("failed to trigger run: {e}");
+            Redirect::to(&format!(
+                "/workspaces/{id}/workflows/{wf_id}?flash={}",
+                encode_query_value(&msg)
+            ))
+            .into_response()
+        }
+    }
+}
+
+#[instrument(name = "web.workspace_workflow_run_detail", skip_all)]
+async fn workspace_workflow_run_detail(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, wf_id, run_id)): Path<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
+        Ok(ws) => ws,
+        Err(_) => return Redirect::to("/workspaces").into_response(),
+    };
+
+    let workflow_id = WorkflowDefinitionId::from(wf_id);
+    let workflow = match state.app.workflows().find_by_id(&sub, workflow_id).await {
+        Ok(w) if w.workspace_id == workspace_id => w,
+        _ => return Redirect::to(&format!("/workspaces/{id}/workflows")).into_response(),
+    };
+
+    let run_id = WorkflowRunId::from(run_id);
+    let run = match state.app.workflows().find_run_by_id(&sub, run_id).await {
+        Ok(r) if r.workspace_id == workspace_id && r.definition_id == workflow_id => r,
+        _ => {
+            return Redirect::to(&format!("/workspaces/{id}/workflows/{wf_id}")).into_response();
+        }
+    };
+
+    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+
+    let run_agents = state
+        .app
+        .agents()
+        .list_for_workflow_run(&sub, workspace_id, run_id)
+        .await
+        .unwrap_or_default();
+
+    let steps = run
+        .step_results
+        .iter()
+        .map(step_result_to_view)
+        .collect::<Vec<_>>();
+
+    WorkspaceWorkflowRunDetailTemplate {
+        workspace: workspace_to_view(&ws),
+        lead_agent,
+        agents: agent_views,
+        workflow_id: workflow.id.to_string(),
+        workflow_name: workflow.name.clone(),
+        run: workflow_run_to_view(&run),
+        steps,
+        run_agents: run_agents
+            .iter()
+            .map(|a| AgentView {
+                id: a.id.to_string(),
+                name: a.name.clone(),
+            })
+            .collect(),
+    }
+    .into_response()
 }

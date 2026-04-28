@@ -15,7 +15,8 @@ use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
 pub use file::{
-    parse_skill_markdown, DocType, GitFileHash, ParsedSkillFile, RuntimeFile, SearchableFields,
+    parse_skill_markdown, parse_workflow_yaml, DocType, GitFileHash, ParsedSkillFile,
+    ParsedWorkflowFile, RuntimeFile, SearchableFields,
 };
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::SearchResult;
@@ -70,6 +71,16 @@ pub struct SkillFileChange {
 pub struct SkillChanges {
     pub head_commit: String,
     pub files: Vec<SkillFileChange>,
+}
+
+pub struct WorkflowFileChange {
+    pub file: RuntimeFile,
+    pub needs_rewrite: bool,
+}
+
+pub struct WorkflowChanges {
+    pub head_commit: String,
+    pub files: Vec<WorkflowFileChange>,
 }
 
 #[derive(Clone)]
@@ -129,14 +140,14 @@ impl Library {
         Ok(())
     }
 
-    /// Queues `.gitkeep` files so notes/ and skills/ folders are committed.
+    /// Queues `.gitkeep` files so notes/, skills/, workflows/ folders are committed.
     #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
     pub async fn sync_workspace_folder_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
         workspace_name: &str,
     ) -> Result<(), LibraryError> {
-        for subdir in ["notes", "skills"] {
+        for subdir in ["notes", "skills", "workflows"] {
             let file = RuntimeFile::GitKeep {
                 workspace_name: workspace_name.to_string(),
                 subdir: subdir.to_string(),
@@ -222,6 +233,59 @@ impl Library {
         }
 
         Ok(SkillChanges {
+            head_commit: head,
+            files,
+        })
+    }
+
+    /// Mirrors [`Self::find_new_skills`] for workflow YAML files.
+    #[tracing::instrument(name = "library.find_new_workflows", skip(self))]
+    pub async fn find_new_workflows(
+        &self,
+        last_sync_commit: Option<&str>,
+    ) -> Result<WorkflowChanges, LibraryError> {
+        self.upstream.pull().await?;
+
+        let head = self.upstream.head_commit_hash().await?;
+        let head = match head {
+            Some(h) => h,
+            None => {
+                tracing::debug!("no commits in library repo");
+                return Ok(WorkflowChanges {
+                    head_commit: String::new(),
+                    files: Vec::new(),
+                });
+            }
+        };
+
+        if last_sync_commit == Some(head.as_str()) {
+            return Ok(WorkflowChanges {
+                head_commit: head,
+                files: Vec::new(),
+            });
+        }
+
+        let changed = self
+            .upstream
+            .changed_workflow_files(last_sync_commit)
+            .await?;
+
+        let mut files = Vec::with_capacity(changed.len());
+        for (path, content) in &changed {
+            match file::parse_workflow_yaml(content, path) {
+                Some(parsed) => {
+                    files.push(WorkflowFileChange {
+                        needs_rewrite: parsed.needs_rewrite,
+                        file: parsed.file,
+                    });
+                }
+                None => {
+                    tracing::warn!(path = %path, "failed to parse workflow yaml, skipping");
+                }
+            }
+        }
+
+        Ok(WorkflowChanges {
             head_commit: head,
             files,
         })

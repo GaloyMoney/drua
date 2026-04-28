@@ -20,6 +20,7 @@ use crate::note::Notes;
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+use crate::workflow::Workflows;
 use crate::workspace_secret::WorkspaceSecrets;
 
 #[derive(Clone)]
@@ -30,10 +31,12 @@ pub struct Workspaces {
     skills: Arc<Skills>,
     notes: Arc<Notes>,
     secrets: WorkspaceSecrets,
+    workflows: Arc<Workflows>,
     library: Library,
 }
 
 impl Workspaces {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: &sqlx::PgPool,
         agents: Arc<Agents>,
@@ -41,6 +44,7 @@ impl Workspaces {
         skills: Arc<Skills>,
         notes: Arc<Notes>,
         secrets: WorkspaceSecrets,
+        workflows: Arc<Workflows>,
         library: Library,
     ) -> Self {
         let repo = WorkspaceRepo::new(pool);
@@ -51,6 +55,7 @@ impl Workspaces {
             skills,
             notes,
             secrets,
+            workflows,
             library,
         }
     }
@@ -202,6 +207,10 @@ impl Workspaces {
 
         if let Err(e) = self.secrets.delete_for_workspace_in_op(op, id).await {
             tracing::warn!(error = %e, "failed to delete secrets during workspace delete");
+        }
+
+        if let Err(e) = self.workflows.delete_for_workspace_in_op(op, id).await {
+            tracing::warn!(error = %e, "failed to delete workflows during workspace delete");
         }
 
         if let Err(e) = self

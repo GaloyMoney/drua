@@ -6,6 +6,7 @@ pub mod server;
 mod templates;
 pub mod tracing_init;
 pub mod tunnel;
+pub mod webhook;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +81,7 @@ pub fn router() -> Router<AppState> {
         .merge(auth::auth_router())
         .merge(routes::api_router())
         .merge(graphql::router())
+        .merge(webhook::router())
 }
 
 pub struct RunServerArgs {

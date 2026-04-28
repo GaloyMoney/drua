@@ -108,6 +108,14 @@ impl Audit {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "agent_id", agent_id));
     }
 
+    pub fn record_workflow_id(workflow_id: WorkflowDefinitionId) {
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "workflow_id", workflow_id));
+    }
+
+    pub fn record_workflow_run_id(workflow_run_id: WorkflowRunId) {
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "workflow_run_id", workflow_run_id));
+    }
+
     pub fn record_outcome(outcome: InteractionOutcome) {
         Self::update_context(|ctx| ctx.outcome = Some(outcome));
     }

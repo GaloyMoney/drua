@@ -1,5 +1,6 @@
 use crate::primitives::{
-    AgentId, McpCredsId, NoteId, SandboxId, SkillId, WorkspaceId, WorkspaceSecretId,
+    AgentId, McpCredsId, NoteId, SandboxId, SkillId, WorkflowDefinitionId, WorkspaceId,
+    WorkspaceSecretId,
 };
 
 /// Each variant encodes its parent container so authorization checks
@@ -17,6 +18,7 @@ pub enum AuthResource {
     McpCreds(Option<McpCredsId>),
     Note(WorkspaceId, Option<NoteId>),
     Skill(WorkspaceId, Option<SkillId>),
+    Workflow(WorkspaceId, Option<WorkflowDefinitionId>),
     AuditLog(WorkspaceId),
     /// Matched by [`super::AuthScope::External`] scopes by name.
     External(String),
@@ -31,6 +33,7 @@ impl AuthResource {
             | AuthResource::WorkspaceSecret(ws, _)
             | AuthResource::Note(ws, _)
             | AuthResource::Skill(ws, _)
+            | AuthResource::Workflow(ws, _)
             | AuthResource::AuditLog(ws) => Some(*ws),
             AuthResource::McpCreds(_) | AuthResource::External(_) => None,
         }
