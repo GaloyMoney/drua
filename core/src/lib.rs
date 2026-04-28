@@ -231,6 +231,7 @@ impl App {
             Arc::clone(&skills),
             Arc::clone(&notes),
             workspace_secrets.clone(),
+            Arc::clone(&workflows),
             library.clone(),
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));

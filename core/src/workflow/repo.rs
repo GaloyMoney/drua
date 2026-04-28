@@ -14,6 +14,7 @@ use super::entity::*;
         workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
         name(ty = "String"),
     ),
+    delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "crate::library::LibraryError")
 )]
 pub struct WorkflowDefinitionRepo {
@@ -35,6 +36,22 @@ impl WorkflowDefinitionRepo {
             pool: pool.clone(),
             library: None,
         }
+    }
+
+    /// Bulk soft-delete every workflow definition belonging to a
+    /// workspace. Mirrors `SkillRepo::cascade_delete_for_workspace_in_op`
+    /// — uses raw SQL since `soft_without_queries` makes a column
+    /// update equivalent to iterating each entity through `delete_in_op`.
+    pub async fn cascade_delete_for_workspace_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workflow_definitions SET deleted = TRUE WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(op.as_executor())
+            .await?;
+        Ok(())
     }
 
     /// Post-persist hook: forward-sync the workflow definition to the

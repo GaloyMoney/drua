@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
     id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL REFERENCES workspaces(id),
     name VARCHAR NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX idx_workflow_definitions_workspace_id ON workflow_definitions(workspace_id);
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL REFERENCES workspaces(id),
     definition_id UUID NOT NULL REFERENCES workflow_definitions(id),
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX idx_workflow_runs_workspace_id ON workflow_runs(workspace_id);

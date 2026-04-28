@@ -477,4 +477,25 @@ impl Workflows {
         )?;
         Ok(run)
     }
+
+    /// Bulk soft-delete every workflow definition + run belonging to a
+    /// workspace within a transaction. Used by `Workspaces::delete` to
+    /// cascade workflow rows alongside skills, notes, secrets, etc.
+    /// The library's git-side cleanup is queued separately via
+    /// [`crate::library::Library::cleanup_workspace_in_op`].
+    #[instrument(name = "core.workflow.delete_for_workspace_in_op", skip_all)]
+    pub(crate) async fn delete_for_workspace_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), WorkflowError> {
+        // Delete runs first since they FK-reference definitions.
+        self.run_repo
+            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .await?;
+        self.repo
+            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .await?;
+        Ok(())
+    }
 }
