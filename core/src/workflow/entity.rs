@@ -252,6 +252,7 @@ mod tests {
             name: "investigate".to_string(),
             skill: "echo-test".to_string(),
             sandbox: None,
+            sandbox_mode: None,
             timeout_seconds: Some(60),
         }
     }

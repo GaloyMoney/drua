@@ -1187,6 +1187,7 @@ fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepV
             skill,
             sandbox,
             timeout_seconds,
+            ..
         } => WorkflowStepView {
             name: name.clone(),
             step_type: "agent_step".to_string(),

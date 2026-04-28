@@ -79,6 +79,16 @@ impl WorkflowRun {
             .expect("entity_first_persisted_at not found")
     }
 
+    pub fn any_step_failed(&self) -> bool {
+        self.step_results.iter().any(|r| r.error.is_some())
+    }
+
+    pub fn step_already_terminal(&self, step_name: &str) -> bool {
+        self.step_results
+            .iter()
+            .any(|r| r.name == step_name && r.completed_at.is_some())
+    }
+
     /// No-op if any prior event for this step is already recorded —
     /// keeps at-least-once job retries safe.
     pub fn step_started(&mut self, step_name: String) -> Idempotent<()> {

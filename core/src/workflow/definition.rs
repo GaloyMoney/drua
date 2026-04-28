@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::sandbox::SandboxAgentMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowTrigger {
@@ -24,6 +26,10 @@ pub enum WorkflowStepDef {
         name: String,
         skill: String,
         sandbox: Option<String>,
+        /// Read or Write attach mode for the named sandbox.
+        /// `None` → `Write`, preserving the original default.
+        #[serde(default)]
+        sandbox_mode: Option<SandboxAgentMode>,
         timeout_seconds: Option<u64>,
     },
 }

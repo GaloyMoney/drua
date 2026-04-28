@@ -1,6 +1,7 @@
 use sha1::{Digest, Sha1};
 
 use crate::primitives::{NoteId, SkillId, WorkflowDefinitionId, WorkspaceId};
+use crate::sandbox::SandboxAgentMode;
 use crate::workflow::{WorkflowStepDef, WorkflowTrigger};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -718,6 +719,8 @@ enum WorkflowStepYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sandbox: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox_mode: Option<SandboxAgentMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
     },
 }
@@ -729,11 +732,13 @@ impl WorkflowStepYaml {
                 name,
                 skill,
                 sandbox,
+                sandbox_mode,
                 timeout_seconds,
             } => WorkflowStepYaml::AgentStep {
                 name: name.clone(),
                 skill: skill.clone(),
                 sandbox: sandbox.clone(),
+                sandbox_mode: *sandbox_mode,
                 timeout_seconds: *timeout_seconds,
             },
         }
@@ -745,11 +750,13 @@ impl WorkflowStepYaml {
                 name,
                 skill,
                 sandbox,
+                sandbox_mode,
                 timeout_seconds,
             } => WorkflowStepDef::AgentStep {
                 name,
                 skill,
                 sandbox,
+                sandbox_mode,
                 timeout_seconds,
             },
         }
@@ -1206,6 +1213,7 @@ mod tests {
             name: "investigate".to_string(),
             skill: "alert-investigator".to_string(),
             sandbox: None,
+            sandbox_mode: None,
             timeout_seconds: Some(120),
         }]
     }

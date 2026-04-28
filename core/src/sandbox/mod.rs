@@ -304,6 +304,25 @@ impl Sandboxes {
         Ok(self.repo.maybe_find_by_id(id.into()).await?)
     }
 
+    /// Internal lookup for the workflow executor — no auth subject
+    /// because the run was already authorised when triggered.
+    #[instrument(name = "domain.sandbox.find_for_workflow_run", skip(self))]
+    pub async fn find_for_workflow_run(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Option<Sandbox>, SandboxError> {
+        let query = PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .await?;
+        Ok(result.entities.into_iter().find(|s| s.name == name))
+    }
+
     /// `pub(crate)` helper used by the skills context builder; no auth check.
     #[instrument(name = "domain.sandbox.exported_skills_for_workspace", skip(self))]
     pub(crate) async fn exported_skills_for_workspace(

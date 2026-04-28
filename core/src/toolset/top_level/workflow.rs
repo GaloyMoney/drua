@@ -6,6 +6,7 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::WorkflowDefinitionId;
+use crate::sandbox::SandboxAgentMode;
 use crate::workflow::{
     StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowStepDef,
     WorkflowTrigger, Workflows,
@@ -30,6 +31,8 @@ enum WorkflowParams {
         skill: String,
         #[serde(default)]
         sandbox: Option<String>,
+        #[serde(default)]
+        sandbox_mode: Option<SandboxAgentMode>,
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
@@ -254,6 +257,7 @@ impl TopLevelTool for WorkflowTool {
                 manual,
                 skill,
                 sandbox,
+                sandbox_mode,
                 timeout_seconds,
             } => {
                 if !subject.can_write_workspace() {
@@ -274,6 +278,7 @@ impl TopLevelTool for WorkflowTool {
                     name: "step".into(),
                     skill,
                     sandbox,
+                    sandbox_mode,
                     timeout_seconds,
                 };
 
@@ -414,6 +419,7 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             skill,
             sandbox,
             timeout_seconds,
+            ..
         } => WorkflowStepOutput {
             name: name.clone(),
             step_type: "agent_step".to_string(),
@@ -567,10 +573,11 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                 name,
                 skill,
                 sandbox,
+                sandbox_mode,
                 timeout_seconds,
             } => {
                 out.push_str(&format!(
-                    "  - agent_step name={name} skill={skill} sandbox={sandbox:?} timeout_s={timeout_seconds:?}\n"
+                    "  - agent_step name={name} skill={skill} sandbox={sandbox:?} sandbox_mode={sandbox_mode:?} timeout_s={timeout_seconds:?}\n"
                 ));
             }
         }
