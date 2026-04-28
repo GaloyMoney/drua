@@ -97,7 +97,6 @@ impl WorkspaceSecrets {
         Ok(result.entities)
     }
 
-    /// Find a secret by ID.
     #[instrument(name = "workspace_secret.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
@@ -112,7 +111,6 @@ impl WorkspaceSecrets {
         Ok(secret)
     }
 
-    /// Update a secret's value.
     #[instrument(name = "workspace_secret.update_value", skip_all)]
     pub async fn update_value(
         &self,

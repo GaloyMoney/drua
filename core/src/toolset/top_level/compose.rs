@@ -196,7 +196,6 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        // Try catalog sets first (prefixed names like "honeycomb_list_environments").
         if let Ok((set, tool_name, default_filter)) = self.find_set(name) {
             Audit::record_action(format!("compose > catalog: {name}"));
 

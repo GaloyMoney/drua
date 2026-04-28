@@ -294,8 +294,6 @@ impl Agents {
 
         let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
-        // Build `tools` from the registry as the agent will see them
-        // (same scopes used at runtime).
         let agent_subject = agent.auth_subject();
         let tool_defs: Vec<session::message::ToolDefinition> = self
             .toolsets
@@ -480,7 +478,6 @@ impl Agents {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
 
-        // Sandbox side: enforces workspace match and single-writer.
         let sandbox = self
             .sandboxes
             .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
@@ -652,8 +649,7 @@ impl Agents {
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
-        // Users + exported agents always allowed; agents may only message
-        // peers in their own workspace; anonymous rejected.
+        // Agents may only message peers in their own workspace; anonymous rejected.
         match &subject {
             AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
             AuthSubject::Agent(ws, _, _) | AuthSubject::AgentOnBehalfOfUser(_, ws, _, _)
@@ -668,16 +664,14 @@ impl Agents {
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
 
-        // Attribute tool calls to the originating user if available; else
-        // fall back to an unattributed `Agent` subject.
+        // Attribute tool calls to the originating user if available.
         let agent_subject = match subject.originating_user_id() {
             Some(user_id) => agent.auth_subject_for_user(user_id),
             None => agent.auth_subject(),
         };
 
-        // Cached against `ContextGeneration`; DB only on bump. Pass blocks
-        // into `add_user_input` so diff + user-input share a single repo
-        // round-trip; `next_prompt` later spawns a new thread if changed.
+        // Pass blocks into `add_user_input` so diff + user-input share a single
+        // repo round-trip; `next_prompt` later spawns a new thread if changed.
         let dynamic_blocks = self.cached_dynamic_blocks(agent.workspace_id).await;
         let mut proposed_system_blocks = system_prompt::system_blocks_for_role(
             agent.agent_role,
@@ -793,7 +787,6 @@ impl Agents {
                     }
                 };
 
-                // Streaming path already forwarded deltas during consumption.
                 if !streamed {
                     forward_response(response, &tx).await;
                 }

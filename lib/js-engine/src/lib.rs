@@ -230,8 +230,6 @@ impl JsEngine {
             });
         }
 
-        // Drain the ring buffer into a Vec, prepending the dropped-line
-        // marker if any entries were truncated.
         let console_output = console_buf.lock().unwrap().snapshot();
         let tool_calls_made = tool_call_count.load(Ordering::Relaxed);
 
@@ -522,8 +520,6 @@ fn format_caught_error(caught: &rquickjs::CaughtError<'_>) -> String {
         rquickjs::CaughtError::Error(e) => format!("{e}"),
     }
 }
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
