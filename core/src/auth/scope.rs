@@ -5,54 +5,37 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::{AuthResource, AuthVerb};
 use crate::primitives::{SandboxId, WorkspaceId};
 
-/// A typed authorization scope carried by [`super::AuthSubject`] variants.
-///
-/// Serializes as a plain string so that existing event-store JSON and config
-/// files (which store scopes as `["read","write"]`) remain compatible.
+/// Typed authorization scope. Serializes as a plain string for backward
+/// compatibility with event-store JSON storing `["read","write"]`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AuthScope {
-    /// Full administrative access.
     Admin,
-    /// The subject is an admin of a specific workspace (granted to the
-    /// `WorkspaceLead` agent role today). Gates workspace management tools
-    /// (list/create/update agents and sandboxes, query audit logs, etc.)
-    /// and is checked by per-tool visibility to *hide* sandbox-backed
-    /// filesystem tools (admins orchestrate; they don't run inside a
-    /// sandbox themselves).
+    /// Workspace admin (granted to `WorkspaceLead` role). Gates workspace
+    /// management tools and hides sandbox-backed filesystem tools (admins
+    /// orchestrate; they don't run inside a sandbox themselves).
     WorkspaceAdmin(WorkspaceId),
-    /// Membership in a workspace. Grants any verb on workspace-scoped
-    /// resources (notes, skills, agents, the workspace itself). Given to
-    /// every agent at creation time. The distinction from `WorkspaceAdmin`
-    /// is in tool *visibility* (which tools the agent sees), not in what
-    /// the agent is *authorized* to do once it has a tool.
+    /// Workspace membership. Distinction from `WorkspaceAdmin` is in tool
+    /// *visibility*, not in what the agent is *authorized* to do.
     WorkspaceMember(WorkspaceId),
-    /// Use access — the agent may invoke sandbox tools, including
-    /// state-mutating ones (e.g. the `bash` top-level tool). Granted on a
-    /// `Write` attach.
+    /// May invoke sandbox tools including state-mutating ones. Granted on `Write` attach.
     SandboxUse(SandboxId),
-    /// Read-only access — the agent may invoke sandbox tools that
-    /// don't modify state. Granted on a `Read` attach.
+    /// Read-only sandbox access. Granted on `Read` attach.
     SandboxRead(SandboxId),
-    /// An externally-defined scope string. Grants access only to
-    /// [`AuthResource::External`] resources whose name matches.
+    /// Grants access only to [`AuthResource::External`] resources whose name matches.
     External(String),
 }
 
 impl AuthScope {
-    /// Whether this single scope grants the requested verb+resource.
     pub fn permits(&self, verb: AuthVerb, resource: &AuthResource) -> bool {
         match self {
-            // Admin grants everything.
             AuthScope::Admin => true,
 
-            // WorkspaceAdmin grants any verb on any resource within its workspace.
             AuthScope::WorkspaceAdmin(ws) => {
                 resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
             }
 
-            // WorkspaceMember grants a limited set of actions within its
-            // workspace. Expand this list explicitly as new tools need it.
+            // Limited set within workspace; expand as new tools need it.
             AuthScope::WorkspaceMember(ws) => {
                 let in_ws = resource.workspace_id().is_some_and(|res_ws| res_ws == *ws);
                 if !in_ws {
@@ -60,21 +43,17 @@ impl AuthScope {
                 }
                 matches!(
                     (verb, resource),
-                    // Read own workspace context (e.g. resolve workspace name).
                     (AuthVerb::Read, AuthResource::Workspace(_))
-                    // CRUD on notes.
-                    | (AuthVerb::Create, AuthResource::Note(..))
-                    | (AuthVerb::Read, AuthResource::Note(..))
-                    | (AuthVerb::Update, AuthResource::Note(..))
-                    | (AuthVerb::Delete, AuthResource::Note(..))
-                    // List and use skills.
-                    | (AuthVerb::Read, AuthResource::Skill(..))
-                    | (AuthVerb::Use, AuthResource::Skill(..))
+                        | (AuthVerb::Create, AuthResource::Note(..))
+                        | (AuthVerb::Read, AuthResource::Note(..))
+                        | (AuthVerb::Update, AuthResource::Note(..))
+                        | (AuthVerb::Delete, AuthResource::Note(..))
+                        | (AuthVerb::Read, AuthResource::Skill(..))
+                        | (AuthVerb::Use, AuthResource::Skill(..))
                 )
             }
 
-            // SandboxUse grants Use and Read on the matching sandbox
-            // (write implies read).
+            // Write implies read.
             AuthScope::SandboxUse(sb) => {
                 matches!(verb, AuthVerb::Use | AuthVerb::Read)
                     && matches!(
@@ -83,7 +62,6 @@ impl AuthScope {
                     )
             }
 
-            // SandboxRead grants only Read on the matching sandbox.
             AuthScope::SandboxRead(sb) => {
                 verb == AuthVerb::Read
                     && matches!(
@@ -92,17 +70,12 @@ impl AuthScope {
                     )
             }
 
-            // External scopes match External resources by name.
             AuthScope::External(name) => {
                 matches!(resource, AuthResource::External(res_name) if res_name == name)
             }
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Display / FromStr
-// ---------------------------------------------------------------------------
 
 impl fmt::Display for AuthScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -125,7 +98,6 @@ impl FromStr for AuthScope {
             return Ok(AuthScope::Admin);
         }
 
-        // Parse "ws:{uuid}:admin" or "ws:{uuid}:member"
         if let Some(rest) = s.strip_prefix("ws:") {
             if let Some(uuid_str) = rest.strip_suffix(":admin") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
@@ -139,9 +111,8 @@ impl FromStr for AuthScope {
             }
         }
 
-        // Parse sandbox scopes — accept both current and legacy suffixes.
+        // Accept both current and legacy suffixes: `:use`/`:use_all`, `:read`/`:use_read_only`.
         if let Some(rest) = s.strip_prefix("sandbox:") {
-            // Current: "sandbox:{uuid}:use", legacy: "sandbox:{uuid}:use_all"
             if let Some(uuid_str) = rest
                 .strip_suffix(":use")
                 .or_else(|| rest.strip_suffix(":use_all"))
@@ -150,7 +121,6 @@ impl FromStr for AuthScope {
                     return Ok(AuthScope::SandboxUse(SandboxId::from(uuid)));
                 }
             }
-            // Current: "sandbox:{uuid}:read", legacy: "sandbox:{uuid}:use_read_only"
             if let Some(uuid_str) = rest
                 .strip_suffix(":read")
                 .or_else(|| rest.strip_suffix(":use_read_only"))
@@ -165,13 +135,8 @@ impl FromStr for AuthScope {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Convenience From impls
-// ---------------------------------------------------------------------------
-
 impl From<String> for AuthScope {
     fn from(s: String) -> Self {
-        // Re-use FromStr so the mapping stays in one place.
         s.parse().unwrap()
     }
 }
@@ -181,10 +146,6 @@ impl From<&str> for AuthScope {
         s.parse().unwrap()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Serde — serialize as a plain string for backward-compatible JSON
-// ---------------------------------------------------------------------------
 
 impl Serialize for AuthScope {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

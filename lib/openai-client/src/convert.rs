@@ -1,9 +1,4 @@
-//! Conversion functions between the provider-agnostic `llm` types and the
-//! OpenAI-specific internal types.
-//!
-//! These adapters sit at the boundary of `OpenAiClient`: inbound `Prompt`
-//! values are converted to `OpenAiRequest` for the wire, and streaming
-//! response chunks are converted to `StreamDelta`.
+//! Adapters between the provider-agnostic `llm` types and OpenAI wire types.
 
 use llm::prompt::{
     AssistantBlock, Message, SystemBlock, Tool, ToolChoice, ToolResultBlock, UserBlock,
@@ -16,16 +11,9 @@ use crate::types::{
     OpenAiTool, OpenAiToolChoice, OpenAiToolChoiceFunction, OpenAiToolFunction, StreamOptions,
 };
 
-// ============================================================================
-// Prompt → OpenAiRequest
-// ============================================================================
-
-/// Convert a provider-agnostic `Prompt` into an OpenAI-specific request
-/// body with `stream: true`.
 pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
     let mut messages: Vec<OpenAiMessage> = Vec::new();
 
-    // System blocks become system messages (one per block).
     for block in &prompt.system {
         match block {
             SystemBlock::Text { text, .. } => {
@@ -39,7 +27,6 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
         }
     }
 
-    // Conversation messages.
     for msg in &prompt.messages {
         convert_message(msg, &mut messages);
     }
@@ -70,8 +57,8 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
 fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
     match message {
         Message::User { content } => {
-            // Merge consecutive text blocks into a single user message.
-            // Tool results become separate "tool" role messages.
+            // Merge consecutive text blocks into a single user message; tool
+            // results become separate "tool" role messages.
             let mut text_parts: Vec<String> = Vec::new();
 
             for block in content {
@@ -84,7 +71,6 @@ fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
                         content: result_content,
                         ..
                     } => {
-                        // Flush any pending text first.
                         if !text_parts.is_empty() {
                             out.push(OpenAiMessage {
                                 role: "user",
@@ -120,7 +106,6 @@ fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
             }
         }
         Message::Assistant { content } => {
-            // Group text and tool calls into a single assistant message.
             let mut text_parts: Vec<String> = Vec::new();
             let mut tool_calls: Vec<OpenAiRequestToolCall> = Vec::new();
 
@@ -192,16 +177,9 @@ fn convert_tool_choice(choice: &ToolChoice) -> OpenAiToolChoice {
     }
 }
 
-// ============================================================================
-// Streaming chunk → StreamDelta(s)
-// ============================================================================
-
 /// Converts OpenAI streaming chunks into provider-agnostic [`StreamDelta`]s.
-///
-/// Only tracks tool call IDs so that subsequent argument deltas can reference
-/// the correct tool call.
+/// Tracks tool call IDs by index so subsequent argument deltas can reference them.
 pub(crate) struct DeltaSynthesizer {
-    /// Maps OpenAI tool_call index to the tool call ID.
     tool_ids: Vec<Option<String>>,
 }
 
@@ -212,8 +190,6 @@ impl DeltaSynthesizer {
         }
     }
 
-    /// Process a raw SSE data payload (OpenAI JSON) and emit provider-agnostic
-    /// `StreamDelta`s.
     pub fn process_chunk(&mut self, data: &str) -> Result<Vec<StreamDelta>, String> {
         if data.trim() == "[DONE]" {
             return Ok(vec![]);
@@ -224,8 +200,7 @@ impl DeltaSynthesizer {
 
         let mut deltas = Vec::new();
 
-        // Usage chunk (OpenAI sends it in a separate chunk when
-        // stream_options.include_usage is true).
+        // OpenAI emits usage in a separate chunk when stream_options.include_usage is set.
         if let Some(usage) = &chunk.usage {
             let cached_tokens = usage
                 .prompt_tokens_details
@@ -245,22 +220,18 @@ impl DeltaSynthesizer {
         };
 
         if let Some(delta) = &choice.delta {
-            // Text content.
             if let Some(text) = &delta.content {
                 if !text.is_empty() {
                     deltas.push(StreamDelta::TextDelta { text: text.clone() });
                 }
             }
 
-            // Tool calls.
             if let Some(tool_calls) = &delta.tool_calls {
                 for tc in tool_calls {
-                    // Grow tracking vec.
                     while self.tool_ids.len() <= tc.index {
                         self.tool_ids.push(None);
                     }
 
-                    // First chunk for this tool call — emit ToolCallStart.
                     if self.tool_ids[tc.index].is_none() {
                         let id = tc.id.clone().unwrap_or_default();
                         let name = tc
@@ -272,7 +243,6 @@ impl DeltaSynthesizer {
                         deltas.push(StreamDelta::ToolCallStart { id, name });
                     }
 
-                    // Argument deltas.
                     if let Some(func) = &tc.function {
                         if let Some(args) = &func.arguments {
                             if !args.is_empty() {
@@ -288,7 +258,6 @@ impl DeltaSynthesizer {
             }
         }
 
-        // Handle finish_reason — emit Done.
         if let Some(reason) = &choice.finish_reason {
             let stop_reason = match reason.as_str() {
                 "stop" => Some(StopReason::EndTurn),

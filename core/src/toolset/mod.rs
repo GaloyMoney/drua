@@ -127,14 +127,13 @@ impl ToolSets {
         }
     }
 
-    /// Wire the audit service so tool calls are automatically recorded.
     /// Optional — when `None` (e.g. in tests) audit is silently skipped.
     pub fn set_audit(&mut self, audit: Arc<Audit>) {
         self.audit = Some(audit);
     }
 
-    /// Register a top-level tool. Uses interior mutability so tools can be
-    /// registered even after the `ToolSets` is wrapped in an `Arc`.
+    /// Uses interior mutability so tools can be registered after the
+    /// `ToolSets` is wrapped in an `Arc`.
     pub fn register_top_level(&self, tool: impl TopLevelTool + 'static) {
         let tool: Arc<dyn TopLevelTool> = Arc::new(tool);
         let name = tool.name().to_string();
@@ -220,9 +219,7 @@ impl ToolSets {
         }
     }
 
-    /// Human-readable summary of available toolsets — used as the MCP
-    /// server's `instructions` payload so clients know how to discover and
-    /// call upstream tools.
+    /// Human-readable summary used as the MCP server's `instructions` payload.
     pub fn mcp_gateway_info(&self) -> String {
         let sets = self.sets.read().expect("toolset lock poisoned");
         let mut lines = vec![
@@ -245,9 +242,8 @@ impl ToolSets {
         lines.join("\n")
     }
 
-    /// Top-level tools visible to the given `subject`. A tool is included
-    /// iff its [`TopLevelTool::is_visible`] returns `true`. Used to populate
-    /// prompt `tools` arrays and the MCP `list_tools` response.
+    /// Top-level tools visible to `subject`. Included iff
+    /// [`TopLevelTool::is_visible`] returns `true`.
     pub fn top_level_tools(
         &self,
         subject: &AuthSubject,
@@ -260,8 +256,7 @@ impl ToolSets {
             .into_iter()
     }
 
-    /// Look up and execute a top-level tool by name. Records an audit
-    /// entry when an [`Audit`] instance has been wired via [`set_audit`].
+    /// Records an audit entry when an [`Audit`] has been wired via [`set_audit`].
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -322,8 +317,7 @@ impl ToolSets {
     }
 }
 
-/// Estimate token count from a [`CallToolResult`]'s text content (~4 chars
-/// per token).
+/// Estimate tokens from text content (~4 chars per token).
 pub fn estimate_tokens(result: &CallToolResult) -> u64 {
     let total_chars: usize = result
         .content
@@ -338,9 +332,6 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
 
 #[cfg(test)]
 impl ToolSets {
-    /// Test-only: construct an empty ToolSets without running `init`'s
-    /// I/O (upstream MCP dialers, Concourse client). Tests exercising the
-    /// catalog's dynamic-registration primitives don't need any of that.
     pub fn empty_for_test() -> Self {
         Self {
             sets: Arc::new(RwLock::new(Vec::new())),
@@ -350,9 +341,6 @@ impl ToolSets {
         }
     }
 
-    /// Test-only: snapshot the current set of toolset names, in
-    /// registration order. Used to assert takeover semantics without
-    /// exposing the internal Vec.
     pub fn toolset_names_for_test(&self) -> Vec<String> {
         self.sets
             .read()
@@ -368,9 +356,6 @@ mod tests {
     use super::*;
     use rmcp::model::CallToolResult;
 
-    /// A minimal stub to exercise `replace_tunnel_toolsets` /
-    /// `unregister_searchable_by_session` without spinning up a real
-    /// tunnel. Its `call()` will never be invoked by these tests.
     struct StubToolSet {
         name: String,
         scope: Option<ToolSetScope>,
@@ -425,9 +410,6 @@ mod tests {
         }
     }
 
-    /// Atomic swap: `replace_tunnel_toolsets` drops every toolset whose
-    /// scope is `Tunnel(deployment_id, _)` and appends the new ones —
-    /// in one write-lock, so routing never sees the old entries.
     #[test]
     fn replace_tunnel_toolsets_swaps_by_deployment() {
         let toolsets = ToolSets::empty_for_test();
@@ -448,16 +430,12 @@ mod tests {
         ))];
         toolsets.replace_tunnel_toolsets("staging", new_sets);
 
-        // Both old "staging" entries gone; static "concourse" untouched;
-        // new "stg-k8s" appended.
         assert_eq!(
             toolsets.toolset_names_for_test(),
             vec!["concourse", "stg-k8s"]
         );
     }
 
-    /// Atomic swap only touches the target deployment — other
-    /// deployments' tunnel toolsets are preserved.
     #[test]
     fn replace_tunnel_toolsets_spares_other_deployments() {
         let toolsets = ToolSets::empty_for_test();
@@ -471,11 +449,6 @@ mod tests {
         assert_eq!(toolsets.toolset_names_for_test(), vec!["prd-k8s"]);
     }
 
-    /// Session-aware unregister: after an eviction-style replace, the
-    /// evicted loop's `unregister_searchable_by_session(old_session)` is a
-    /// no-op — it only matches entries whose scope carries `old_session`,
-    /// of which there are none after the swap. The new session's entries
-    /// survive.
     #[test]
     fn unregister_by_session_is_noop_for_evicted_session() {
         let toolsets = ToolSets::empty_for_test();
@@ -492,17 +465,13 @@ mod tests {
             ))],
         );
 
-        // Evicted loop's late cleanup must not remove the new session's entries.
         toolsets.unregister_searchable_by_session(old_session);
         assert_eq!(toolsets.toolset_names_for_test(), vec!["stg-k8s"]);
 
-        // The real owner can still release itself.
         toolsets.unregister_searchable_by_session(new_session);
         assert!(toolsets.toolset_names_for_test().is_empty());
     }
 
-    /// Clean disconnect path (no takeover): a session registers toolsets,
-    /// then `unregister_searchable_by_session` with its own id cleans them up.
     #[test]
     fn unregister_by_session_clean_disconnect() {
         let toolsets = ToolSets::empty_for_test();
@@ -511,7 +480,6 @@ mod tests {
         toolsets.register_searchable(StubToolSet::static_("concourse"));
 
         toolsets.unregister_searchable_by_session(session);
-        // Static toolsets are never removed by session-based unregister.
         assert_eq!(toolsets.toolset_names_for_test(), vec!["concourse"]);
     }
 }

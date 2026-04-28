@@ -1,8 +1,5 @@
-//! Format-agnostic thread export types and builder.
-//!
-//! [`ExportableThread`] is a format-neutral intermediate representation that
-//! entity.rs produces and format-specific modules (e.g. `pi_export`) consume.
-//! This keeps the entity free of any particular export format's types.
+//! Format-neutral IR produced by entity.rs and consumed by format-specific
+//! exporters (e.g. `pi_export`).
 
 use chrono::{DateTime, Utc};
 use es_entity::EntityEvents;
@@ -14,10 +11,6 @@ use super::{
     thread::SessionThreadId,
     AgentSessionId,
 };
-
-// ============================================================================
-// Types
-// ============================================================================
 
 pub struct ExportableThread {
     pub session_id: AgentSessionId,
@@ -36,10 +29,6 @@ pub enum ExportableEntry {
         metadata: AssistantResponseMetadata,
     },
 }
-
-// ============================================================================
-// Builder
-// ============================================================================
 
 pub(super) fn build_exportable_thread(
     session_id: AgentSessionId,
@@ -60,12 +49,9 @@ pub(super) fn build_exportable_thread(
                 }
                 entries.push(ExportableEntry::UserMessage { text: text.clone() });
             }
-            // Skip SandboxNotificationAdded — they can fire between
-            // tool_use and tool_result, breaking the API's required
-            // assistant(tool_use) -> tool_result sequence.
+            // Skip: would break required assistant(tool_use) -> tool_result sequence.
             AgentSessionEvent::SandboxNotificationAdded { .. } => {}
-            // Skip intermediate tool-use loops: only emit the final
-            // assistant response per turn (non-ToolUse stop reason).
+            // Only emit the final assistant response per turn.
             AgentSessionEvent::AssistantResponseReceived {
                 thread_id: tid,
                 content,
@@ -79,8 +65,7 @@ pub(super) fn build_exportable_thread(
                     metadata: metadata.clone(),
                 });
             }
-            // Skip tool results — they pair with tool_use assistant
-            // messages which are also skipped above.
+            // Skip: pair with tool_use assistant blocks which are also skipped.
             AgentSessionEvent::ToolResultsAdded { .. } => {}
             _ => {}
         }
@@ -94,7 +79,6 @@ pub(super) fn build_exportable_thread(
     }
 }
 
-/// Whether a [`TargetThread`] references the given thread id.
 fn targets_thread(
     target: &TargetThread,
     thread_id: SessionThreadId,

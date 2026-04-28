@@ -19,22 +19,12 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for, EntriesOutput};
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LsParams {
-    /// Absolute path to the directory inside the sandbox workspace.
     path: String,
-    /// List of file/directory names to exclude from the listing.
     #[serde(default)]
     ignore: Vec<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 pub struct Ls {
     sandboxes: Arc<Sandboxes>,
@@ -70,7 +60,7 @@ impl TopLevelTool for Ls {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from workspace admins — see bash.rs.
+        // See bash.rs.
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
@@ -105,7 +95,6 @@ impl TopLevelTool for Ls {
                 let output = if params.ignore.is_empty() {
                     resp.output
                 } else {
-                    // Filter out entries matching the ignore list
                     resp.output
                         .lines()
                         .filter(|line| {

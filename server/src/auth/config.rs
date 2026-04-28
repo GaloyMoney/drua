@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 const GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// OAuth client with auth and token URLs configured.
 pub type OAuthClient = oauth2::Client<
     StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
     StandardTokenResponse<oauth2::EmptyExtraTokenFields, oauth2::basic::BasicTokenType>,

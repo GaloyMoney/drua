@@ -19,25 +19,14 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for, ContentOutput};
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ReadParams {
-    /// Absolute path to the file inside the sandbox workspace.
     path: String,
-    /// Line offset to start reading from (0-based). Optional.
     #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
     offset: Option<i64>,
-    /// Maximum number of lines to read. Optional.
     #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
     limit: Option<i64>,
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 pub struct Read {
     sandboxes: Arc<Sandboxes>,
@@ -73,7 +62,7 @@ impl TopLevelTool for Read {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from workspace admins — see bash.rs.
+        // See bash.rs.
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
@@ -89,18 +78,17 @@ impl TopLevelTool for Read {
         Audit::record_sandbox_id(sandbox_id);
         let params: ReadParams = parse_params(arguments)?;
 
-        // Translate offset/limit into the text editor's view_range [start, end]
-        // where start is 1-based and end = -1 means EOF.
+        // Translate offset/limit into the editor's view_range; start is 1-based, -1 = EOF.
         let mut editor_input = serde_json::json!({
             "command": "view",
             "path": params.path,
         });
 
         if params.offset.is_some() || params.limit.is_some() {
-            let start = params.offset.unwrap_or(0) + 1; // 0-based offset → 1-based line
+            let start = params.offset.unwrap_or(0) + 1;
             let end = match params.limit {
                 Some(l) => start + l - 1,
-                None => -1, // EOF
+                None => -1,
             };
             editor_input["view_range"] = serde_json::json!([start, end]);
         }

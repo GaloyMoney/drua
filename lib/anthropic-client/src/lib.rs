@@ -1,9 +1,5 @@
-//! Anthropic Messages API client.
-//!
-//! Accepts the provider-agnostic types from `lib/llm` at the public boundary
-//! and uses Anthropic-specific types (ported from the Pi agent crate)
-//! internally. Streams SSE events and accumulates the response before
-//! returning a single `PromptResponse`.
+//! Anthropic Messages API client. Accepts provider-agnostic `lib/llm` types
+//! at the boundary, streams SSE events, and accumulates the response.
 
 mod convert;
 mod sse;
@@ -48,12 +44,6 @@ impl From<SseError> for AnthropicError {
     }
 }
 
-/// Anthropic Messages API client. Converts provider-agnostic `Prompt` values
-/// into Anthropic-specific wire types, streams the SSE response, and
-/// accumulates the result into a single `PromptResponse`.
-///
-/// Internally uses types ported from the Pi agent crate. The public interface
-/// (`new`, `send_prompt`) remains unchanged so callers need no modifications.
 #[derive(Clone)]
 pub struct AnthropicClient {
     http: reqwest::Client,
@@ -78,13 +68,7 @@ impl AnthropicClient {
         self
     }
 
-    /// Issue a streaming Messages API request and return the fully-accumulated
-    /// assistant reply.
-    ///
-    /// Internally converts the provider-agnostic [`Prompt`] to Anthropic's
-    /// wire format, sends a streaming request, parses SSE events, and
-    /// accumulates text/tool-use/thinking blocks into a single
-    /// [`PromptResponse`].
+    /// Streams the Messages API and returns the fully-accumulated reply.
     #[instrument(name = "anthropic_client.send_prompt", skip_all)]
     pub async fn send_prompt(&self, prompt: &Prompt) -> Result<PromptResponse, AnthropicError> {
         let request_body = prompt_to_request(prompt);
@@ -109,16 +93,11 @@ impl AnthropicClient {
             });
         }
 
-        // Stream SSE events and accumulate the response.
         let byte_stream = resp.bytes_stream();
         let mut accumulator = StreamAccumulator::new();
 
-        // We need to move the accumulator into the closure but also get it
-        // back after parsing completes. Use a mutable reference captured by
-        // the closure — `parse_sse_stream` takes `FnMut`.
         let acc_ref = &mut accumulator;
         let sse_result: Result<(), SseError> = parse_sse_stream(byte_stream, |event| {
-            // Skip ping events (keep-alive).
             if event.event == "ping" {
                 return Ok(());
             }
@@ -128,11 +107,9 @@ impl AnthropicClient {
         })
         .await;
 
-        // An SSE-level error from the API (e.g. `{"type":"error","error":{...}}`)
-        // is captured by the accumulator; HTTP/transport errors bubble up here.
+        // SSE-level API errors are captured by the accumulator; only
+        // HTTP/transport errors bubble up here.
         if let Err(e) = sse_result {
-            // If the accumulator already captured partial content and the stream
-            // simply ended, return what we have. Otherwise propagate the error.
             if accumulator.is_done() {
                 tracing::warn!(error = %e, "SSE stream error after message completed, returning partial response");
             } else {
@@ -143,10 +120,8 @@ impl AnthropicClient {
         Ok(accumulated_to_response(accumulator.finish()))
     }
 
-    /// Issue a streaming Messages API request, yielding provider-agnostic
-    /// [`StreamDelta`]s via channel. Ping events and events that carry no
-    /// delta are filtered out. The Anthropic→`StreamDelta` conversion
-    /// happens inside this method so callers never see Anthropic wire types.
+    /// Yields provider-agnostic [`StreamDelta`]s via channel; ping events and
+    /// events without a delta are filtered out.
     #[instrument(name = "anthropic_client.send_prompt_streaming", skip_all)]
     pub async fn send_prompt_streaming(
         &self,
@@ -220,7 +195,6 @@ impl LlmProvider for AnthropicClient {
             .await
             .map_err(|e| PromptError::Provider(e.to_string()))?;
 
-        // Re-map the error type from AnthropicError to PromptError.
         let (tx, out_rx) = tokio::sync::mpsc::channel(128);
         tokio::spawn(async move {
             let mut rx = rx;

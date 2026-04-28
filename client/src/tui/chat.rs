@@ -1,4 +1,3 @@
-/// Structured chat content: interleaved text and tool-use blocks.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ContentBlock {
     Text(String),
@@ -29,8 +28,6 @@ pub struct ChatMessage {
     pub blocks: Vec<ContentBlock>,
 }
 
-/// Manages the conversation with a workspace lead agent.
-///
 /// Streaming flow:
 /// 1. `add_user_message(text)` → pushes user msg + empty assistant msg, sets streaming
 /// 2. `append_text(text)` / `add_tool_activity(name)` → fills the current assistant msg
@@ -42,7 +39,6 @@ pub struct AssistantChat {
 }
 
 impl AssistantChat {
-    /// Push a user message and prepare an empty assistant reply.
     pub fn add_user_message(&mut self, text: impl Into<String>) {
         self.messages.push(ChatMessage {
             role: ChatRole::User,
@@ -55,8 +51,7 @@ impl AssistantChat {
         self.streaming = true;
     }
 
-    /// Append text to the current assistant message's last text block,
-    /// creating a new text block if the last block is a tool-use or empty.
+    /// Creates a new text block if the last block is a tool-use or empty.
     pub fn append_text(&mut self, text: &str) {
         let msg = match self.messages.last_mut() {
             Some(m) if m.role == ChatRole::Assistant => m,
@@ -75,7 +70,6 @@ impl AssistantChat {
         }
     }
 
-    /// Record a tool invocation inline in the current assistant message.
     pub fn add_tool_activity(&mut self, name: impl Into<String>) {
         if let Some(msg) = self
             .messages
@@ -89,7 +83,6 @@ impl AssistantChat {
         }
     }
 
-    /// Append an error as a system message and stop streaming.
     pub fn add_error(&mut self, msg: impl Into<String>) {
         self.messages.push(ChatMessage {
             role: ChatRole::System,
@@ -98,18 +91,15 @@ impl AssistantChat {
         self.streaming = false;
     }
 
-    /// Mark the current stream as complete.
     pub fn finish_streaming(&mut self) {
         self.streaming = false;
     }
 
-    /// Replace the conversation with pre-fetched history messages.
     pub fn load_history(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
         self.streaming = false;
     }
 
-    /// Reset all conversation state.
     pub fn clear(&mut self) {
         self.messages.clear();
         self.streaming = false;

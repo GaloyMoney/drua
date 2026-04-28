@@ -36,12 +36,9 @@ impl Notes {
         }
     }
 
-    /// Begin a transaction with a `ContextBumpHook` already registered,
-    /// scoped to the given workspace. After this op commits successfully,
-    /// the hook bumps the local `ContextGeneration` and fires a
-    /// `context_changed` PG NOTIFY so peer instances refresh on their
-    /// next turn. Mutation methods should always go through this helper
-    /// rather than calling `self.repo.begin_op()` directly.
+    /// Registers a `ContextBumpHook` so committing the op bumps the local
+    /// `ContextGeneration` and fires a `context_changed` PG NOTIFY. All
+    /// mutations go through this helper rather than `repo.begin_op()`.
     async fn begin_op(
         &self,
         workspace_id: WorkspaceId,
@@ -57,7 +54,6 @@ impl Notes {
         Ok(op)
     }
 
-    /// Create a new note in a workspace.
     #[instrument(name = "note.store", skip(self))]
     pub async fn store(
         &self,
@@ -105,7 +101,6 @@ impl Notes {
         Ok(note)
     }
 
-    /// Update an existing note.
     #[instrument(name = "note.update", skip(self))]
     pub async fn update(
         &self,
@@ -154,7 +149,7 @@ impl Notes {
         Ok(note)
     }
 
-    /// Create or update a note. If `note_id` is provided, update; otherwise create.
+    /// `Some(id)` updates; `None` creates.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "note.store_or_update", skip(self))]
     pub async fn store_or_update(
@@ -179,7 +174,6 @@ impl Notes {
         }
     }
 
-    /// Pin a note so it appears in workspace context injection.
     #[instrument(name = "note.pin", skip(self))]
     pub async fn pin(
         &self,
@@ -206,7 +200,6 @@ impl Notes {
         Ok(note)
     }
 
-    /// Unpin a note, removing it from workspace context injection.
     #[instrument(name = "note.unpin", skip(self))]
     pub async fn unpin(
         &self,
@@ -233,7 +226,6 @@ impl Notes {
         Ok(note)
     }
 
-    /// List pinned notes for a workspace.
     #[instrument(name = "note.list_pinned", skip(self))]
     pub async fn list_pinned(
         &self,
@@ -256,7 +248,6 @@ impl Notes {
         Ok(result.entities.into_iter().filter(|n| n.pinned).collect())
     }
 
-    /// Retrieve a single note by id, scoped to workspace.
     #[instrument(name = "note.find_by_id", skip(self))]
     pub async fn find_by_id(
         &self,
@@ -278,7 +269,6 @@ impl Notes {
         Ok(note)
     }
 
-    /// Hybrid search across workspace notes.
     #[instrument(name = "note.search", skip(self))]
     pub async fn search(
         &self,
@@ -299,7 +289,6 @@ impl Notes {
             .map_err(NoteError::from)
     }
 
-    /// List all notes in a workspace.
     #[instrument(name = "note.list", skip(self))]
     pub async fn list(
         &self,
@@ -323,8 +312,7 @@ impl Notes {
         Ok(result.entities)
     }
 
-    /// Bulk soft-delete all notes belonging to a workspace within a
-    /// transaction. Used during workspace cascade deletion.
+    /// Used during workspace cascade deletion.
     #[instrument(name = "note.delete_for_workspace_in_op", skip_all)]
     pub(crate) async fn delete_for_workspace_in_op(
         &self,
@@ -337,24 +325,16 @@ impl Notes {
         Ok(())
     }
 
-    /// Maximum total characters of pinned note content to inject into an
-    /// agent's system prompt. Notes are included most-recently-updated-first;
-    /// once this budget is exhausted, remaining pinned notes are omitted with
-    /// a hint to use the `notes search` tool.
+    /// Char budget for pinned-note injection. Notes are included
+    /// most-recently-updated-first; remaining pinned notes are omitted
+    /// with a hint to use `notes search`.
     const PINNED_INJECTION_BUDGET: usize = 8000;
 
-    /// Maximum number of non-pinned notes to include in the title/tag index.
     const NOTE_INDEX_LIMIT: usize = 20;
 
-    /// Build workspace notes context for system prompt injection.
-    ///
-    /// Contains two sections:
-    /// 1. **Pinned notes** — full content, within the character budget.
-    /// 2. **Recent notes index** — title + tags only for non-pinned notes,
-    ///    so the agent knows what's available to search for.
-    ///
-    /// Returns `None` if the workspace has no notes at all.
-    /// This is an internal method (no auth check) — called at agent creation.
+    /// Two sections: pinned notes (full content within budget) and a recent
+    /// notes index (title+tags only). `None` if the workspace has no notes.
+    /// Internal — no auth check, called at agent creation.
     #[instrument(name = "note.pinned_context_for_workspace", skip(self))]
     pub async fn pinned_context_for_workspace(
         &self,
@@ -385,9 +365,7 @@ impl Notes {
         let mut buf = String::from(header);
         let mut remaining = Self::PINNED_INJECTION_BUDGET.saturating_sub(header.len());
 
-        // ── Section 1: Pinned notes (full content) ──────────────────────
         if !pinned.is_empty() {
-            // Sort by most-recently-updated first (events timestamp).
             pinned.sort_by(|a, b| {
                 let a_ts = a.events.entity_last_modified_at();
                 let b_ts = b.events.entity_last_modified_at();
@@ -418,7 +396,6 @@ impl Notes {
             }
         }
 
-        // ── Section 2: Recent notes index (titles + tags only) ──────────
         if !non_pinned.is_empty() && remaining > 100 {
             let section_header = "\n## Recent notes\n\n";
             buf.push_str(section_header);

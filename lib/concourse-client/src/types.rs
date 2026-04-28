@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Pipeline instance variables (opaque).
 pub type InstanceVars = HashMap<String, serde_json::Value>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,7 +97,6 @@ pub struct Build {
     pub created_by: Option<String>,
 }
 
-/// Pipeline configuration wrapper.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PipelineConfigResponse {
     pub config: PipelineConfig,
@@ -128,7 +126,6 @@ pub struct PipelineResourceConfig {
     pub source: serde_json::Value,
 }
 
-/// Build resource inputs/outputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildResources {
     #[serde(default)]
@@ -148,7 +145,6 @@ pub struct BuildResourceInput {
     pub first_occurrence: bool,
 }
 
-/// SSE build event envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildEventEnvelope {
     pub data: serde_json::Value,
@@ -157,7 +153,6 @@ pub struct BuildEventEnvelope {
     pub version: String,
 }
 
-/// OAuth2 token response from Concourse sky/issuer.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,

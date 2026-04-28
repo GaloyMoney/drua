@@ -390,10 +390,6 @@ async fn code_assistant_search(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Workspaces
-// ---------------------------------------------------------------------------
-
 fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
     WorkspaceView {
         id: ws.id.to_string(),
@@ -486,10 +482,6 @@ async fn workspace_detail(
     .into_response()
 }
 
-// ---------------------------------------------------------------------------
-// Workspace Secrets
-// ---------------------------------------------------------------------------
-
 fn secret_to_view(s: &domain::workspace_secret::WorkspaceSecret) -> WorkspaceSecretView {
     WorkspaceSecretView {
         id: s.id.to_string(),
@@ -529,10 +521,6 @@ async fn workspace_secrets_list(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Workspace Skills
-// ---------------------------------------------------------------------------
 
 fn skill_to_view(s: &domain::skill::Skill) -> SkillView {
     SkillView {
@@ -623,10 +611,6 @@ async fn workspace_skill_detail(
     .into_response()
 }
 
-// ---------------------------------------------------------------------------
-// Workspace Sandboxes
-// ---------------------------------------------------------------------------
-
 fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
     let (mode_label, repo_url, branch) = match &s.mode {
         SandboxMode::Scratch => ("Scratch".to_string(), None, None),
@@ -677,10 +661,8 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
     }
 }
 
-/// Returns `(lead_agent, other_agents)` for the workspace sidebar.
-/// The lead sits on its own above the `Agents` header; the rest form the
-/// list underneath. If there's no WorkspaceLead (shouldn't happen after
-/// workspace create, but handle gracefully), `lead_agent` is `None`.
+/// `lead_agent` is `None` if no WorkspaceLead exists (shouldn't happen
+/// after workspace create, but handled gracefully).
 async fn workspace_sidebar_context(
     sub: &AuthSubject,
     state: &AppState,
@@ -807,10 +789,6 @@ async fn workspace_sandbox_detail(
     }
     .into_response()
 }
-
-// ---------------------------------------------------------------------------
-// Workspace Agents
-// ---------------------------------------------------------------------------
 
 #[instrument(name = "web.workspace_agent_new", skip_all)]
 async fn workspace_agent_new(
@@ -952,10 +930,6 @@ async fn workspace_agent_detail(
     .into_response()
 }
 
-// ---------------------------------------------------------------------------
-// Workspace Chat
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize, Default)]
 pub struct ChatQuery {
     agent: Option<uuid::Uuid>,
@@ -1040,19 +1014,11 @@ async fn workspace_chat(
     .into_response()
 }
 
-// ---------------------------------------------------------------------------
-// JSON API
-// ---------------------------------------------------------------------------
-
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/agents/{id}/secrets", get(api_agent_secrets))
         .route("/tunnel/ws", get(crate::tunnel::tunnel_ws_handler))
 }
-
-// ---------------------------------------------------------------------------
-// Internal API — Agent Secrets (for harness injection)
-// ---------------------------------------------------------------------------
 
 /// Internal endpoint: returns secret values for an agent's workspace.
 /// Secured via SA token auth (AuthSubject::Agent) — same pattern as MCP gateway.
@@ -1066,7 +1032,6 @@ async fn api_agent_secrets(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    // Only allow Agent auth (SA token from sandbox pods)
     let (workspace_id, jwt_agent_id) = match &auth {
         AuthSubject::Agent(workspace_id, agent_id, _) => (*workspace_id, *agent_id),
         _ => return axum::http::StatusCode::UNAUTHORIZED.into_response(),

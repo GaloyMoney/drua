@@ -4,11 +4,8 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Sandbox  (agents.x-k8s.io/v1alpha1)
-// ---------------------------------------------------------------------------
-
-/// Sandbox manages a single, stateful, isolated pod with a stable identity.
+/// Sandbox CRD (agents.x-k8s.io/v1alpha1): a single, stateful, isolated pod
+/// with a stable identity.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[kube(
     group = "agents.x-k8s.io",
@@ -20,14 +17,11 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSpec {
-    /// Pod template describing the sandbox container(s).
     pub pod_template: PodTemplateSpec,
 
-    /// Optional persistent volume claim templates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volume_claim_templates: Vec<serde_json::Value>,
 
-    /// Lifecycle controls (expiration, shutdown policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SandboxLifecycle>,
 
@@ -43,11 +37,10 @@ fn default_replicas() -> i32 {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxLifecycle {
-    /// Absolute time when the sandbox should be shut down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shutdown_time: Option<Time>,
 
-    /// What to do when the sandbox is shut down: "Delete" or "Retain".
+    /// "Delete" or "Retain".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shutdown_policy: Option<String>,
 }
@@ -55,15 +48,12 @@ pub struct SandboxLifecycle {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxStatus {
-    /// Standard Kubernetes conditions (e.g. Ready).
     #[serde(default)]
     pub conditions: Vec<serde_json::Value>,
 
-    /// Name of the headless service created for this sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
 
-    /// Cluster-internal DNS name (CRD field: "serviceFQDN").
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -71,20 +61,14 @@ pub struct SandboxStatus {
     )]
     pub service_fqdn: Option<String>,
 
-    /// Current replica count.
     #[serde(default)]
     pub replicas: i32,
 
-    /// Label selector for pod discovery (CRD field: "selector").
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "selector")]
     pub label_selector: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// SandboxTemplate  (extensions.agents.x-k8s.io/v1alpha1)
-// ---------------------------------------------------------------------------
-
-/// Reusable template for creating Sandbox instances.
+/// SandboxTemplate CRD (extensions.agents.x-k8s.io/v1alpha1).
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[kube(
     group = "extensions.agents.x-k8s.io",
@@ -95,14 +79,13 @@ pub struct SandboxStatus {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxTemplateSpec {
-    /// Pod template to use for sandboxes created from this template.
     pub pod_template: PodTemplateSpec,
 
-    /// NetworkPolicy management mode: "Managed" (default) or "Unmanaged".
+    /// "Managed" (default) or "Unmanaged".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_policy_management: Option<String>,
 
-    /// Custom network policy rules (when Unmanaged).
+    /// Used when `network_policy_management == "Unmanaged"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_policy: Option<serde_json::Value>,
 }

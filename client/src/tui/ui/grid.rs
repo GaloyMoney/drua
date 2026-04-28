@@ -28,8 +28,6 @@ fn compute_sections(threads: &[super::super::state::ThreadInfo]) -> Vec<usize> {
     sections
 }
 
-/// For each section, compute the sorted list of non-empty column indices
-/// used by any thread in that section.
 fn section_active_columns(
     grid: &[Vec<CellKind>],
     sections: &[usize],
@@ -118,12 +116,11 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
     let start_col = grid.scroll_col;
     let end_col = (grid.scroll_col + visible_cols).min(grid.positions.len());
 
-    // Compute sections and their active columns
     let sections = compute_sections(&grid.threads);
     let num_sections = sections.last().copied().unwrap_or(0) + 1;
     let section_cols = section_active_columns(&grid.grid, &sections, num_sections);
 
-    // Build display list: separator before each new section (except section 0)
+    // Separator before each new section (except section 0)
     let mut display_items: Vec<GridDisplayItem> = Vec::new();
     for row_idx in 0..grid.threads.len() {
         if row_idx > 0 && sections[row_idx] != sections[row_idx - 1] {
@@ -132,7 +129,6 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
         display_items.push(GridDisplayItem::Row(row_idx));
     }
 
-    // Vertical scrolling: find cursor in display list
     let cursor_display_idx = display_items
         .iter()
         .position(|item| matches!(item, GridDisplayItem::Row(r) if *r == grid.cursor_row))
@@ -169,7 +165,6 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                 let thread = &grid.threads[row_idx];
                 let section = sections[row_idx];
 
-                // Thread label
                 let reason = match thread.start_reason.as_str() {
                     "INITIAL_THREAD" => "Init",
                     "TOOL_DEFS_UPDATED" => "TDef",
@@ -229,7 +224,6 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                 // Section divider (system → tools)
                 spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
 
-                // ── Tool count section ──
                 let tool_count = grid.tool_def_counts.get(row_idx).copied().unwrap_or(0);
                 let tool_str = if tool_count > 0 {
                     format!("⚙×{tool_count}")
@@ -305,9 +299,7 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
                         let has_rightward = i + 1 < ne_count;
 
                         if matches!(cell, CellKind::Empty) {
-                            // This column is active in the section but empty for this row.
-                            // Show a connector if between non-empty cells on this row,
-                            // otherwise blank.
+                            // Connector if between non-empty cells on this row, otherwise blank.
                             let row_non_empty: Vec<usize> = active
                                 .iter()
                                 .filter(|&&c| {
@@ -354,7 +346,6 @@ pub fn draw_thread_grid(frame: &mut Frame, state: &mut ScreenState, area: Rect) 
     }
 }
 
-/// Render a non-empty cell symbol + connector into the span list.
 fn render_cell_span(
     spans: &mut Vec<Span<'static>>,
     cell: CellKind,
@@ -432,7 +423,6 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // System-section detail short-circuits the message-block rendering below.
     if grid.cursor_section == GridSection::System {
         render_system_detail(grid, &mut lines);
         let paragraph = Paragraph::new(lines)
@@ -442,7 +432,6 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         return;
     }
 
-    // Show detail for the cursor's current row only.
     let cell = grid
         .grid
         .get(grid.cursor_row)
@@ -484,7 +473,6 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
         ]));
 
         if let Some(detail) = grid.details.get(&(grid.cursor_row, grid.cursor_col)) {
-            // Show timestamp + usage on a single metadata line.
             let ts_part = detail
                 .recorded_at
                 .as_deref()
@@ -540,7 +528,6 @@ pub fn draw_position_detail(frame: &mut Frame, state: &ScreenState, area: Rect) 
     frame.render_widget(paragraph, area);
 }
 
-/// Render the position-detail pane content for a system-section cursor.
 /// For Shared cells, resolves to the owner thread's content (the first
 /// thread with details registered at this column).
 fn render_system_detail(
@@ -591,7 +578,6 @@ fn render_system_detail(
     }
 }
 
-/// Format a single content block for the position detail pane.
 fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'static>> {
     let role_color = match role {
         ChatRole::User => Color::Cyan,
@@ -653,18 +639,16 @@ fn format_block_detail(content: &ContentBlock, role: ChatRole) -> Vec<Line<'stat
     }
 }
 
-/// Map a non-empty CellKind to (symbol, color, bold).
 fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
     match cell {
         CellKind::Unique(c) | CellKind::Summary(c) => {
             let color = match c {
-                // Message-block letters
                 'U' => Color::Cyan,
                 'A' => Color::White,
                 't' => Color::Gray,
                 'T' => Color::Yellow,
                 'R' => Color::Gray,
-                // System-block letters (S also reused for Sandbox messages — both green)
+                // S is reused for both Sandbox messages and Skills system blocks — both green.
                 'B' => Color::Blue,
                 'H' => Color::Magenta,
                 'N' => Color::LightYellow,
@@ -680,7 +664,6 @@ fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
     }
 }
 
-/// Format a token count for compact display (e.g. 1234 → "1.2k").
 fn format_tokens(count: i32) -> String {
     if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)

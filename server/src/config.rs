@@ -69,8 +69,7 @@ fn default_cache_ttl() -> u64 {
 }
 
 impl Config {
-    /// Build a `PromptExecutorConfig` from the top-level `providers`
-    /// section, binding each model to its provider's API key.
+    /// Each model is bound to its provider's API key.
     pub fn prompt_executor_config(&self) -> PromptExecutorConfig {
         let mut models = Vec::new();
 
@@ -110,9 +109,6 @@ impl Config {
     }
 }
 
-/// GitHub App config from the YAML config file.
-/// The `private_key_path` field is `#[serde(skip)]` because it's a secret
-/// loaded from an env var / K8s secret mount — never baked into the config file.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubAppCliConfig {
@@ -140,8 +136,7 @@ pub struct ServerConfig {
     pub tunnel: TunnelConfig,
 }
 
-/// `deployment_id` → PEM Ed25519 public key. Config-driven; keypairs
-/// live in Terraform.
+/// `deployment_id` → PEM Ed25519 public key. Keypairs live in Terraform.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelConfig {
@@ -234,7 +229,6 @@ impl Config {
         let mut config: Config = serde_yaml::from_value(yaml_value)
             .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
 
-        // Populate agents.models from the top-level providers section.
         for provider_cfg in &config.providers {
             for model in &provider_cfg.models {
                 config.agents.models.insert(
@@ -251,16 +245,14 @@ impl Config {
 
         config.db.pg_con = secrets.pg_con;
         config.oauth.github_client_secret = secrets.github_client_secret;
-        // Trim to catch stray whitespace / trailing newline that often
-        // sneaks in when the key was piped from `echo` or a broken
-        // `.env`; both render the key invalid upstream for opaque reasons.
+        // Trim trailing newline / whitespace from `echo` or broken `.env` —
+        // both render the key invalid upstream for opaque reasons.
         config.anthropic_api_key = secrets.anthropic_api_key.trim().to_string();
         config.openai_api_key = secrets.openai_api_key.trim().to_string();
         if !secrets.github_allowed_teams.is_empty() {
             config.oauth.github_allowed_teams = secrets.github_allowed_teams;
         }
 
-        // Concourse toolset credentials from env
         if let Ok(val) = std::env::var("CONCOURSE_USERNAME") {
             config.toolsets.concourse.username = val;
         }
@@ -268,7 +260,7 @@ impl Config {
             config.toolsets.concourse.password = val;
         }
 
-        // Upstream MCP auth headers from env: {NAME}_AUTH_HEADER
+        // {NAME}_AUTH_HEADER env vars override upstream MCP auth headers.
         for upstream in &mut config.toolsets.mcp_upstreams {
             let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
             if let Ok(val) = std::env::var(&env_key) {
@@ -276,7 +268,6 @@ impl Config {
             }
         }
 
-        // GitHub App private key path from env (K8s secret mount)
         if let Some(ref mut gh) = config.github_app {
             if let Ok(val) = std::env::var("GITHUB_APP_PRIVATE_KEY_PATH") {
                 gh.private_key_path = val;

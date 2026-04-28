@@ -20,7 +20,7 @@ pub struct UpstreamToolSet {
     tool_prefix: String,
     category: String,
     category_description: String,
-    /// Scopes required to see / invoke this upstream. Empty = unrestricted.
+    /// Empty = unrestricted.
     required_scopes: Vec<AuthScope>,
     tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,

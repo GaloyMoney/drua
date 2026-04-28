@@ -5,11 +5,7 @@ use super::event_belongs_to_thread;
 
 const CHARS_PER_TOKEN: usize = 4;
 
-/// Estimate context tokens from session events for a specific thread.
-///
-/// Strategy: use the most recent `Usage` from an `AssistantResponseReceived`
-/// event as baseline (its `input` field = how many tokens the LLM saw),
-/// then add char-based estimates for events that arrived since.
+/// Uses last `Usage` as baseline; adds char-based estimates for events since.
 pub fn estimate_context_tokens<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     thread_id: SessionThreadId,
@@ -25,10 +21,6 @@ pub fn estimate_context_tokens<'a>(
     }
 }
 
-/// Estimate tokens for events after the last known usage checkpoint.
-///
-/// Single reverse pass: walk backwards, summing tokens for thread events
-/// until we hit the last `AssistantResponseReceived` for this thread.
 fn estimate_trailing_tokens<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
@@ -47,7 +39,6 @@ fn estimate_trailing_tokens<'a>(
     trailing
 }
 
-/// Estimate tokens for all events belonging to a thread (fallback when no usage baseline exists).
 fn estimate_all_tokens<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,
@@ -93,13 +84,10 @@ fn chars_to_tokens(chars: usize) -> u64 {
     (chars / CHARS_PER_TOKEN).max(1) as u64
 }
 
-/// Estimate tokens for a given content length (in chars).
-/// Exposed for use by the pruning module.
 pub fn estimate_event_tokens_for_content(content_len: usize) -> u64 {
     chars_to_tokens(content_len)
 }
 
-/// Extract the most recent `Usage` from the session event stream for a specific thread.
 pub fn last_usage<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent>,
     thread_id: SessionThreadId,

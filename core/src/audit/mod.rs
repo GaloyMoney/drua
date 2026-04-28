@@ -8,8 +8,6 @@ pub use crate::primitives::*;
 pub use error::*;
 pub use primitives::*;
 
-/// Well-known key under which [`AuditContextData`] is stored in the
-/// [`EventContext`].
 const AUDIT_CONTEXT_KEY: &str = "audit";
 
 /// Maximum number of bytes persisted for an error message. Anything beyond
@@ -40,16 +38,9 @@ impl Audit {
         Self { pool: pool.clone() }
     }
 
-    // ------------------------------------------------------------------
-    // Type-safe context accumulation
-    //
-    // These associated functions record fields into the thread-local
-    // `EventContext` under [`AUDIT_CONTEXT_KEY`]. Call them inside an
-    // `async { … }.with_event_context(seed)` block at the request
-    // boundary so the context is properly propagated.
-    // ------------------------------------------------------------------
-
-    /// Decompose the authenticated subject into explicit audit fields.
+    /// Records audit fields into the thread-local `EventContext` under
+    /// [`AUDIT_CONTEXT_KEY`]. Call inside an `async { … }.with_event_context(seed)`
+    /// block at the request boundary.
     pub fn record_subject(auth: &AuthSubject) {
         Self::update_context(|ctx| match auth {
             AuthSubject::User(user_id) => {
@@ -71,17 +62,14 @@ impl Audit {
         });
     }
 
-    /// Record the workspace that scopes this interaction.
     pub fn record_workspace_id(workspace_id: WorkspaceId) {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "workspace_id", workspace_id));
     }
 
-    /// Record the sandbox targeted by this interaction.
     pub fn record_sandbox_id(sandbox_id: SandboxId) {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "sandbox_id", sandbox_id));
     }
 
-    /// Insert a typed ID into the context's `resource_ids` map.
     fn set_resource_id(ctx: &mut AuditContextData, key: &str, id: impl Into<uuid::Uuid>) {
         ctx.resource_ids.insert(
             key.to_owned(),
@@ -89,27 +77,23 @@ impl Audit {
         );
     }
 
-    /// Record the interaction type (API call, MCP call, …).
     pub fn record_interaction_type(itype: InteractionType) {
         Self::update_context(|ctx| ctx.interaction_type = Some(itype));
     }
 
-    /// Record how the request arrived (e.g. `"api: POST /workspaces"`,
-    /// `"mcp: bash"`, `"graphql: CreateWorkspace"`). Called once per
-    /// request at the boundary layer.
+    /// Record entrypoint (e.g. `"api: POST /workspaces"`, `"mcp: bash"`).
+    /// Called once per request at the boundary layer.
     pub fn record_entrypoint(entrypoint: impl Into<String>) {
         let entrypoint = entrypoint.into();
         Self::update_context(|ctx| ctx.entrypoint = Some(entrypoint));
     }
 
-    /// Record the action label (e.g. `"POST /workspaces"`).
     pub fn record_action(action: impl Into<String>) {
         let action = action.into();
         Self::update_context(|ctx| ctx.action = Some(action));
     }
 
-    /// Set the action only if no inner handler has recorded one yet.
-    /// Used by domain services so boundary layers don't overwrite a
+    /// Set action only if unset, so boundary layers don't overwrite a
     /// more specific action set by the domain.
     pub fn record_action_if_unset(action: impl Into<String>) {
         let action = action.into();
@@ -120,41 +104,34 @@ impl Audit {
         });
     }
 
-    /// Record the agent that scopes this interaction.
     pub fn record_agent_id(agent_id: AgentId) {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "agent_id", agent_id));
     }
 
-    /// Derive and record the outcome from an HTTP status code.
     pub fn record_outcome(outcome: InteractionOutcome) {
         Self::update_context(|ctx| ctx.outcome = Some(outcome));
     }
 
-    /// Compute elapsed time from `start` and record it.
     pub fn record_duration(start: std::time::Instant) {
         let ms = start.elapsed().as_millis() as u64;
         Self::update_context(|ctx| ctx.duration_ms = Some(ms));
     }
 
-    /// Record the estimated token count of the response.
     pub fn record_tokens(tokens: u64) {
         Self::update_context(|ctx| ctx.tokens_returned = Some(tokens));
     }
 
-    /// Record a successful outcome.
     pub fn record_success() {
         Self::update_context(|ctx| ctx.outcome = Some(InteractionOutcome::Success));
     }
 
-    /// Record an error outcome with a message.
     pub fn record_error(message: impl Into<String>) {
         let message = message.into();
         Self::update_context(|ctx| ctx.outcome = Some(InteractionOutcome::Error { message }));
     }
 
-    /// Set the outcome only if no inner handler has recorded one yet.
-    /// Used by the middleware so it doesn't overwrite a more specific
-    /// outcome (e.g. an MCP tool error reported as HTTP 200).
+    /// Set outcome only if unset, so the middleware doesn't overwrite a more
+    /// specific outcome (e.g. an MCP tool error reported as HTTP 200).
     pub fn record_outcome_if_unset(outcome: InteractionOutcome) {
         Self::update_context(|ctx| {
             if ctx.outcome.is_none() {
@@ -163,13 +140,10 @@ impl Audit {
         });
     }
 
-    /// Merge arbitrary metadata into the context.
     pub fn record_metadata(value: serde_json::Value) {
         Self::update_context(|ctx| ctx.metadata = Some(value));
     }
 
-    /// Read-then-modify-then-write the [`AuditContextData`] stored in the
-    /// current [`EventContext`]. Creates a default if none exists yet.
     fn update_context(f: impl FnOnce(&mut AuditContextData)) {
         let mut ec = EventContext::current();
         let mut data: AuditContextData = ec
@@ -182,22 +156,17 @@ impl Audit {
         ec.insert(AUDIT_CONTEXT_KEY, &data).unwrap_or_default();
     }
 
-    /// Collect the accumulated [`AuditContextData`] from the current
-    /// [`EventContext`]. Returns `None` if nothing was recorded.
     pub fn collect_context() -> Option<AuditContextData> {
         let ec = EventContext::current();
         ec.data().lookup(AUDIT_CONTEXT_KEY).ok().flatten()
     }
 
-    /// Collect the accumulated context and persist it as an audit entry.
-    ///
-    /// Persistence is fire-and-forget (`tokio::spawn`) so this never blocks
-    /// the caller. Anonymous subjects and empty contexts are silently skipped.
+    /// Persist accumulated context as an audit entry. Fire-and-forget;
+    /// anonymous subjects and empty contexts are silently skipped.
     pub fn record_from_context(&self) {
         let Some(ctx_data) = Self::collect_context() else {
             return;
         };
-        // Skip anonymous — nothing to attribute.
         if ctx_data.acting_user_id.is_none() && ctx_data.acting_agent_id.is_none() {
             return;
         }
@@ -209,7 +178,6 @@ impl Audit {
         });
     }
 
-    /// List recent audit entries (most recent first).
     #[instrument(name = "audit.list_recent", skip_all)]
     pub async fn list_recent(&self, limit: i64) -> Result<Vec<AuditEntry>, AuditError> {
         let rows = sqlx::query_as!(
@@ -240,12 +208,8 @@ impl Audit {
         Ok(rows)
     }
 
-    /// Query audit entries using the provided filter criteria.
-    ///
-    /// All filter fields are optional — unset fields are excluded from the
-    /// WHERE clause. String fields use `ILIKE` for fuzzy matching.
-    /// Resource IDs (workspace, sandbox) are filtered via the `resource_ids`
-    /// JSONB column using `->>` extraction.
+    /// Filter fields are optional and excluded from WHERE when unset.
+    /// Strings use `ILIKE`; resource IDs are extracted from `resource_ids` JSONB via `->>`.
     #[instrument(name = "audit.find", skip_all)]
     pub async fn find(&self, query: &AuditLogQuery) -> Result<Vec<AuditEntry>, AuditError> {
         let workspace_id = query

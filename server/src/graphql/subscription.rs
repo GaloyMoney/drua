@@ -4,10 +4,6 @@ use tokio_stream::StreamExt;
 
 use super::primitives::*;
 
-// ---------------------------------------------------------------------------
-// GraphQL output types for each ChatOutputEvent variant
-// ---------------------------------------------------------------------------
-
 #[derive(SimpleObject)]
 pub struct UserMessageEvent {
     pub text: String,
@@ -68,10 +64,6 @@ pub struct ErrorEvent {
 pub struct ServiceEvent {
     pub message: String,
 }
-
-// ---------------------------------------------------------------------------
-// Union type for subscription stream
-// ---------------------------------------------------------------------------
 
 #[derive(Union)]
 pub enum ChatStreamEvent {
@@ -138,10 +130,6 @@ impl From<drua_core::primitives::ChatOutputEvent> for ChatStreamEvent {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Subscription root
-// ---------------------------------------------------------------------------
 
 pub struct Subscription;
 

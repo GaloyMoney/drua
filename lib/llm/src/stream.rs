@@ -1,51 +1,48 @@
-//! Provider-agnostic streaming types and accumulator.
-//!
-//! [`StreamDelta`] represents a single incremental event from any LLM
-//! provider. The agent loop forwards deltas to the UI in real-time and
-//! feeds them into a [`StreamAccumulator`] that builds the final
-//! [`PromptResponse`] once the stream completes.
+//! Provider-agnostic streaming deltas and a [`StreamAccumulator`] that
+//! builds the final [`PromptResponse`] once the stream completes.
 
 use std::collections::HashMap;
 
 use crate::prompt::AssistantBlock;
 use crate::{PromptResponse, StopReason, Usage};
 
-/// Provider-agnostic streaming delta. Forwarded to UI and fed to accumulator.
-///
-/// Providers emit only the events that map naturally to their wire format —
-/// no lifecycle framing (start/stop) is required. The [`StreamAccumulator`]
-/// infers block boundaries from the content deltas.
+/// Block boundaries are inferred from the deltas themselves; providers emit
+/// only the events that map naturally to their wire format. `Usage` is
+/// additive — providers may emit it more than once.
 #[derive(Debug, Clone)]
 pub enum StreamDelta {
-    /// A chunk of assistant text content.
-    TextDelta { text: String },
-    /// A chunk of thinking / reasoning content.
-    ThinkingDelta { text: String },
-    /// Start of a new tool call. Must precede any [`ToolCallDelta`] for
-    /// the same `id`.
-    ToolCallStart { id: String, name: String },
-    /// A chunk of JSON arguments for a tool call identified by `id`.
-    ToolCallDelta { id: String, partial_json: String },
-    /// Signature for the current thinking block.
-    ThinkingSignature { signature: String },
-    /// Token usage statistics. Accumulated additively — providers may emit
-    /// this more than once (e.g. input tokens early, output tokens late).
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    /// Must precede any [`ToolCallDelta`] for the same `id`.
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        id: String,
+        partial_json: String,
+    },
+    ThinkingSignature {
+        signature: String,
+    },
     Usage {
         input_tokens: u32,
         output_tokens: u32,
         cache_read_input_tokens: u32,
         cache_creation_input_tokens: u32,
     },
-    /// The stream is complete.
-    Done { stop_reason: Option<StopReason> },
-    /// An error occurred mid-stream.
-    Error { message: String },
+    Done {
+        stop_reason: Option<StopReason>,
+    },
+    Error {
+        message: String,
+    },
 }
 
-/// Accumulates [`StreamDelta`] events into a complete [`PromptResponse`].
-///
-/// Block boundaries are inferred from the deltas themselves — no explicit
-/// start/stop events are required from providers.
 pub struct StreamAccumulator {
     thinking: Option<ThinkingBuilder>,
     text: Option<String>,
@@ -80,9 +77,7 @@ impl StreamAccumulator {
         }
     }
 
-    /// Process a delta. The delta is consumed for accumulation.
-    /// This does NOT return anything — the caller forwards the delta to UI
-    /// separately.
+    /// The caller is responsible for forwarding the delta to UI separately.
     pub fn process(&mut self, delta: &StreamDelta) {
         match delta {
             StreamDelta::TextDelta { text } => {
@@ -141,7 +136,7 @@ impl StreamAccumulator {
         self.done
     }
 
-    /// Produce the final response. Blocks are ordered: thinking, text, tool calls.
+    /// Block order: thinking, text, tool calls.
     pub fn finish(self) -> PromptResponse {
         let mut content = Vec::new();
 
@@ -160,9 +155,8 @@ impl StreamAccumulator {
         }
 
         for tc in self.tool_calls {
-            // Zero-parameter tools may receive no InputJsonDelta events,
-            // leaving json_buf empty. Default to "{}" so the Anthropic
-            // API doesn't reject a null input on the next turn.
+            // Zero-parameter tools receive no InputJsonDelta events; default
+            // to "{}" so the Anthropic API doesn't reject a null input.
             let json_str = if tc.json_buf.is_empty() {
                 "{}".to_string()
             } else {

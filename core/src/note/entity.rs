@@ -44,7 +44,7 @@ pub struct Note {
 }
 
 impl Note {
-    /// Full document content (with frontmatter) as stored in the library.
+    /// Document content with frontmatter, as stored in the library.
     pub fn content(&self) -> String {
         self.as_runtime_file().content()
     }
@@ -306,22 +306,18 @@ mod tests {
         let mut note = new_note();
         assert!(!note.pinned);
 
-        // Pin
         let result = note.pin();
         assert!(matches!(result, es_entity::Idempotent::Executed(())));
         assert!(note.pinned);
 
-        // Pin again is idempotent
         let result = note.pin();
         assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
         assert!(note.pinned);
 
-        // Unpin
         let result = note.unpin();
         assert!(matches!(result, es_entity::Idempotent::Executed(())));
         assert!(!note.pinned);
 
-        // Unpin again is idempotent
         let result = note.unpin();
         assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
         assert!(!note.pinned);

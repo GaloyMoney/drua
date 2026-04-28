@@ -6,16 +6,12 @@ use tracing::instrument;
 pub use config::*;
 pub use error::*;
 
-/// A successfully generated GitHub installation access token.
 pub struct InstallationToken {
     pub token: String,
     pub expires_at: String,
 }
 
-/// Generates GitHub App installation access tokens via the RS256 JWT flow.
-///
-/// Holds the cached `EncodingKey` and HTTP client. Designed to be shared
-/// across requests (put it in `Arc` or `Clone` the wrapper).
+/// RS256 JWT flow → GitHub installation access tokens. Designed to be shared.
 #[derive(Clone)]
 pub struct GitHubAppTokenProvider {
     client_id: String,
@@ -25,8 +21,6 @@ pub struct GitHubAppTokenProvider {
 }
 
 impl GitHubAppTokenProvider {
-    /// Create a new provider by reading the PEM private key from disk.
-    /// Returns an error only if the key file cannot be read or parsed.
     pub fn new(config: &GitHubAppConfig) -> Result<Self, GitHubAppError> {
         tracing::info!(
             private_key_path = %config.private_key_path,
@@ -46,19 +40,13 @@ impl GitHubAppTokenProvider {
         })
     }
 
-    /// Generate a fresh installation access token from the GitHub API.
-    ///
-    /// 1. Signs an RS256 JWT (10 min expiry) with the app's client_id as `iss`.
-    /// 2. POSTs to `/app/installations/{id}/access_tokens` with scoped permissions.
-    /// 3. Returns the token string and its expiration timestamp.
     #[instrument(name = "github_app.generate_token", skip_all)]
     pub async fn generate_token(&self) -> Result<InstallationToken, GitHubAppError> {
         let jwt = self.sign_jwt()?;
         self.exchange_for_installation_token(&jwt).await
     }
 
-    /// Sign an RS256 JWT for GitHub App authentication.
-    /// Claims: iss = client_id, iat = now - 60s (clock drift), exp = now + 10min.
+    /// iss=client_id, iat=now-60s (clock drift), exp=now+10min.
     fn sign_jwt(&self) -> Result<String, GitHubAppError> {
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -71,7 +59,6 @@ impl GitHubAppTokenProvider {
         Ok(token)
     }
 
-    /// Exchange the JWT for an installation access token with scoped permissions.
     async fn exchange_for_installation_token(
         &self,
         jwt: &str,

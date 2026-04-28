@@ -12,8 +12,7 @@ use super::grid::{draw_position_detail, draw_thread_grid};
 
 pub fn draw_chat_pane(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
     if state.thread_view.is_some() {
-        // Thread grid mode: grid (top 50%) + position detail (bottom 50%).
-        // Replaces the entire center panel — no chat input.
+        // Thread grid mode: grid (top) + position detail (bottom). No chat input.
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -22,7 +21,6 @@ pub fn draw_chat_pane(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
         draw_thread_grid(frame, state, layout[0]);
         draw_position_detail(frame, state, layout[1]);
     } else {
-        // Normal mode: messages + input
         let chat_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(3)])
@@ -91,8 +89,7 @@ fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
         )));
     }
 
-    // Auto-scroll: chat_scroll is "lines from bottom".
-    // 0 = pinned to bottom, >0 = scrolled up into history.
+    // chat_scroll is "lines from bottom": 0 = pinned, >0 = scrolled up.
     let viewport = area.height.saturating_sub(2);
     let available_width = area.width.saturating_sub(2) as usize;
     let wrapped_lines: u16 = lines
@@ -154,7 +151,6 @@ fn format_chat_message(msg: &ChatMessage) -> Vec<Line<'static>> {
                         )));
                     }
                     ContentBlock::Thinking(text) => {
-                        // Show a truncated preview of thinking content
                         let preview = if text.len() > 80 {
                             format!("💭 {}…", &text[..80])
                         } else {

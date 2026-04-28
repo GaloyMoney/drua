@@ -11,26 +11,24 @@ use super::{
     thread::*, view::*, AgentSessionId,
 };
 
-// ============================================================================
-// Events
-// ============================================================================
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThreadStartReason {
-    /// First thread of the session — no prior thread to reference.
     InitialThread,
-    /// Tool definitions changed; new thread captures the updated set.
-    /// (Reserved — not yet emitted by any code path.)
-    ToolDefsUpdated { from_thread: SessionThreadId },
-    /// One or more system blocks changed (notes/skills updated, etc).
-    /// Spawned lazily inside `next_prompt` when the current thread's
-    /// `SystemView` is detected as stale.
-    ContextRefreshed { from_thread: SessionThreadId },
-    /// Conversation compacted to free context window space.
-    Compaction { from_thread: SessionThreadId },
-    /// Idle-timeout reset; previous thread orphaned.
-    Orphan { from_thread: SessionThreadId },
+    /// Reserved — not yet emitted.
+    ToolDefsUpdated {
+        from_thread: SessionThreadId,
+    },
+    /// Spawned lazily in `next_prompt` when `SystemView` is stale.
+    ContextRefreshed {
+        from_thread: SessionThreadId,
+    },
+    Compaction {
+        from_thread: SessionThreadId,
+    },
+    Orphan {
+        from_thread: SessionThreadId,
+    },
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -48,9 +46,8 @@ pub enum AgentSessionEvent {
     ToolDefsUpdated {
         tool_defs: Vec<ToolDefinition>,
     },
-    /// Replace the current block of a given kind. Identified by the
-    /// `kind()` of the contained block; appends to the materialized flat
-    /// list and bumps `latest_idx_by_kind` for that kind.
+    /// Replaces the current block of `block.kind()`; appends to the flat list
+    /// and bumps `latest_idx_by_kind`.
     SystemBlockUpdated {
         block: SystemBlock,
     },
@@ -63,8 +60,7 @@ pub enum AgentSessionEvent {
         target: TargetThread,
         sandbox_name: String,
         operation: SandboxOperation,
-        /// Pre-computed notification text. Persisted so the chat history
-        /// remains accurate even if the template changes in a future version.
+        /// Persisted so chat history is stable across template changes.
         text: String,
     },
     ThreadStarted {
@@ -87,8 +83,7 @@ pub enum AgentSessionEvent {
         thread_id: SessionThreadId,
         results: Vec<ToolResultInput>,
     },
-    /// Masked tool results pushed into the main event stream so they
-    /// participate in block indexing and can be shared across threads.
+    /// Pushed into main event stream so they share block indexing across threads.
     ToolResultsMasked {
         results: Vec<MaskedToolResult>,
     },
@@ -102,8 +97,6 @@ pub enum AgentSessionEvent {
     },
 }
 
-/// A tool result that was masked during compaction, carrying both the
-/// original view index and the replacement content (placeholder text).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaskedToolResult {
     pub original_index: MessageBlockIndex,
@@ -153,11 +146,6 @@ impl AgentSession {
         self.current_main_thread
     }
 
-    /// Build a format-agnostic [`ExportableThread`] for the given target.
-    ///
-    /// Defaults to the current main thread when `target` is `Main`.
-    /// Format-specific modules (e.g. `pi_export`) consume the returned
-    /// intermediate representation to produce their output.
     pub fn exportable_thread(
         &self,
         target: TargetThread,
@@ -253,7 +241,6 @@ impl AgentSession {
         }
         let thread_id = thread_id.unwrap();
 
-        // Collect pending BlockIndexes since last PromptSent for this thread (scan backwards)
         let total_blocks = self.events.iter_all().fold(0usize, |acc, e| match e {
             AgentSessionEvent::UserInputAdded { .. }
             | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
@@ -298,11 +285,9 @@ impl AgentSession {
         }
         pending_indexes.reverse();
 
-        // Build prompt definition from the current (still-old) thread and
-        // append the pending user messages. We augment the prompt_definition
-        // directly so compaction (and any context refresh below) sees the
-        // full context, but the old thread's event log is only updated with
-        // a UserTurn event when no new thread is spawned.
+        // Augment prompt_definition with pending user messages so compaction
+        // and context refresh see full context. The old thread's event log
+        // gets a UserTurn only if no new thread is spawned.
         let mut prompt_definition = self
             .threads
             .get_persisted(&thread_id)
@@ -321,13 +306,9 @@ impl AgentSession {
             None
         };
 
-        // Lazy context refresh: spawn a fresh thread now that the augmented
-        // messages (history + pending user input) are assembled, so the
-        // refreshed thread inherits the COMPLETE conversation including the
-        // user turn that triggered this prompt. Without this, the refreshed
-        // thread's last inherited message would be the prior assistant
-        // response and hydration would set its turn to `User` — causing the
-        // upcoming assistant response to be rejected as `NotAssistantTurn`.
+        // Refresh after augmenting messages so the refreshed thread inherits
+        // the user turn that triggered this prompt; otherwise hydration would
+        // set its turn to User and reject the upcoming assistant response.
         let (thread_id, prompt_definition) = if matches!(target, TargetThread::Main)
             && self.thread_has_stale_system_view(thread_id)
         {
@@ -338,20 +319,13 @@ impl AgentSession {
             (thread_id, prompt_definition)
         };
 
-        // --- Compaction check ---
-        // Compaction runs on the (possibly just-refreshed) thread. A
-        // refresh inherits the prior thread's messages, so if those are
-        // over budget compaction will still prune them. The chain
-        // becomes: from_thread → refresh_thread → compaction_thread.
+        // Compaction runs on the (possibly refreshed) thread; chain may be
+        // from_thread → refresh_thread → compaction_thread.
         let (thread_id, prompt_definition) = match self.try_prune(thread_id, &prompt_definition) {
-            Some(result) => result, // user messages carried to compacted thread
+            Some(result) => result,
             None => {
-                // No compaction — attach the pending user message to the
-                // current thread's event log when it lives in `entities`.
-                // For threads that were just spawned (refresh / compaction)
-                // and live in `new_entities`, the pending message is already
-                // baked into their `Initialized*` event so no UserTurn is
-                // needed.
+                // For just-spawned threads, the pending message is baked
+                // into their `Initialized*` event already.
                 if let Some(umv) = pending_user_view {
                     if let Some(thread) = self.threads.get_persisted_mut(&thread_id) {
                         thread.add_user_message(umv);
@@ -381,25 +355,14 @@ impl AgentSession {
             .push(AgentSessionEvent::ToolDefsUpdated { tool_defs });
     }
 
-    /// Push a single system block update. The `kind()` of the block
-    /// identifies which slot to replace in the materialized view; subsequent
-    /// thread builds will pick up the new content.
     pub fn push_system_block(&mut self, block: SystemBlock) {
         self.events
             .push(AgentSessionEvent::SystemBlockUpdated { block });
     }
 
-    /// Apply a set of proposed system blocks. For each kind in the proposal,
-    /// compare against the current latest block of that kind; if the content
-    /// differs (or the kind isn't present yet), push a `SystemBlockUpdated`
-    /// event. Returns `Executed` if any block was actually updated,
-    /// `AlreadyApplied` otherwise.
-    ///
-    /// Thread creation is NOT done here — it happens lazily inside
-    /// `next_prompt` when the current thread's view is detected as stale.
+    /// Diffs proposed against current per-kind blocks; emits `SystemBlockUpdated`
+    /// for changed/new kinds. Thread refresh happens lazily in `next_prompt`.
     pub fn apply_proposed_system_blocks(&mut self, proposed: Vec<SystemBlock>) -> Idempotent<()> {
-        // Compute the diff under an immutable borrow so we can decide
-        // up-front which blocks are new vs unchanged.
         let to_push: Vec<SystemBlock> = {
             let materialized = self.materialize();
             proposed
@@ -424,11 +387,7 @@ impl AgentSession {
         Idempotent::Executed(())
     }
 
-    /// Returns `true` if the given thread's `SystemView` no longer matches
-    /// the canonical "latest for each kind" view. Triggers when:
-    /// - an existing kind in the view has a newer idx (replacement), OR
-    /// - a kind newly appeared in `latest_idx_by_kind` that the view
-    ///   doesn't reference (addition — e.g. first note pinned).
+    /// Stale when an existing kind has a newer idx OR a new kind appeared.
     fn thread_has_stale_system_view(&self, thread_id: SessionThreadId) -> bool {
         let Some(thread) = self.threads.get_persisted(&thread_id) else {
             return false;
@@ -438,8 +397,7 @@ impl AgentSession {
         view.indexes() != refreshed.indexes()
     }
 
-    /// Build the canonical "latest for each kind" `SystemView`, ordered
-    /// per `SystemBlockKind::ORDER`. Kinds not yet pushed are skipped.
+    /// Latest-per-kind ordered by `SystemBlockKind::ORDER`; skips unset kinds.
     fn canonical_refreshed_view(&self) -> SystemView {
         let materialized = self.materialize();
         let indexes: Vec<SystemBlockIndex> = SystemBlockKind::ORDER
@@ -449,24 +407,10 @@ impl AgentSession {
         SystemView::from_indexes(indexes)
     }
 
-    /// Spawn a new thread whose `SystemView` references the latest content
-    /// for each kind. The new thread inherits the prior thread's message
-    /// history verbatim — only the system blocks are swapped out. Returns
-    /// the new thread's id and prompt definition so the caller can use
-    /// them directly without re-fetching (the new thread lives in
-    /// `new_entities` until the repo flushes — `get_persisted` won't
-    /// find it).
-    ///
-    /// Caller must have verified the current view is stale via
-    /// `thread_has_stale_system_view`.
-    /// Spawn a new thread whose `SystemView` references the latest content
-    /// for each kind. The new thread inherits the supplied `messages`
-    /// verbatim — typically the from_thread's full message history plus
-    /// any pending user input the caller has already appended. Returns
-    /// the new thread's id and prompt definition.
-    ///
-    /// Caller must have verified the current view is stale via
-    /// `thread_has_stale_system_view`.
+    /// Inherits supplied `messages` verbatim and refreshes system blocks.
+    /// Returns id + prompt definition so caller doesn't re-fetch (new thread
+    /// lives in `new_entities`, not visible to `get_persisted`).
+    /// Caller must verify staleness via `thread_has_stale_system_view`.
     fn spawn_context_refreshed_thread(
         &mut self,
         from_thread: SessionThreadId,
@@ -554,7 +498,6 @@ impl AgentSession {
             return Err(AgentSessionError::NotAssistantTurn);
         }
 
-        // Extract tool use requests before content is moved into the event
         let tool_uses: Vec<ToolUseRequest> = content
             .iter()
             .filter_map(|block| match block {
@@ -568,10 +511,7 @@ impl AgentSession {
             .collect();
         let is_tool_use = matches!(stop_reason, StopReason::ToolUse) && !tool_uses.is_empty();
 
-        // Strip orphaned tool_use blocks when we won't execute them (e.g.
-        // stop_reason is EndTurn/MaxTokens/None). Persisting tool_use blocks
-        // without matching tool_result blocks causes the next prompt to be
-        // rejected by the API.
+        // Strip orphan tool_use blocks: API rejects them without matching tool_results.
         let content = if !is_tool_use && !tool_uses.is_empty() {
             content
                 .into_iter()
@@ -604,7 +544,6 @@ impl AgentSession {
 
         thread.add_assistant_message(view);
 
-        // Check if user input arrived after the last prompt was sent for this thread
         let has_pending_input = self
             .events
             .iter_all()
@@ -633,9 +572,6 @@ impl AgentSession {
         }
     }
 
-    /// Attempt pruning compaction for the given thread. Returns the new
-    /// thread id and prompt definition if compaction was applied, or `None`
-    /// if no compaction was needed.
     fn try_prune(
         &mut self,
         current_thread_id: SessionThreadId,
@@ -652,7 +588,6 @@ impl AgentSession {
             current_prompt_def,
         )?;
 
-        // Apply compaction: push events and add new thread
         for event in result.events {
             self.events.push(event);
         }
@@ -731,8 +666,6 @@ impl AgentSession {
         }
         materialized
     }
-
-    // ─── History query methods ──────────────────────────────────────────────
 
     pub fn chat_history(&self, last_n: usize) -> Vec<history::ChatHistoryMessage> {
         history::build_chat_history(self.events.iter_all(), last_n)

@@ -68,7 +68,7 @@ impl TopLevelTool for GlobTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from workspace admins — see bash.rs.
+        // See bash.rs.
         subject.is_agent() && !subject.is_workspace_admin()
     }
 

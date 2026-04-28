@@ -9,10 +9,6 @@ use crate::auth::AuthSubject;
 use super::super::filter::OutputFilter;
 use super::super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn parse_params<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
 ) -> Result<T, ToolSetsError> {
@@ -30,8 +26,7 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        // Note: `definitions` intentionally retained — the compose TS
-        // generator resolves `$ref`s against it for recursive types.
+        // `definitions` retained — compose TS generator resolves `$ref`s for recursive types.
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),
@@ -40,7 +35,6 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
-/// Deserialize an `i64` from either a JSON number or a string like `"20"`.
 fn deserialize_liberal_i64<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<i64, D::Error> {
@@ -56,7 +50,6 @@ fn deserialize_liberal_i64<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-/// Deserialize an `Option<i64>` from a JSON number, string, or null.
 fn deserialize_option_liberal_i64<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<i64>, D::Error> {
@@ -74,45 +67,31 @@ fn deserialize_option_liberal_i64<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct PipelineParams {
-    /// The pipeline name.
     pipeline: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct PipelineJobParams {
-    /// The pipeline name.
     pipeline: String,
-    /// The job name.
     job: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct BuildIdParams {
-    /// The numeric build ID.
     #[serde(deserialize_with = "deserialize_liberal_i64")]
     build_id: i64,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ListBuildsParams {
-    /// The pipeline name.
     pipeline: String,
-    /// The job name.
     job: String,
-    /// Max number of recent builds to return (default: 10).
+    /// Max recent builds to return (default 10).
     #[serde(default, deserialize_with = "deserialize_option_liberal_i64")]
     limit: Option<i64>,
 }
-
-// ---------------------------------------------------------------------------
-// Schemas
-// ---------------------------------------------------------------------------
 
 static EMPTY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -128,13 +107,6 @@ static PIPELINE_JOB_SCHEMA: LazyLock<serde_json::Value> =
 static BUILD_ID_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<BuildIdParams>);
 static LIST_BUILDS_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<ListBuildsParams>);
-
-// ---------------------------------------------------------------------------
-// Output shapes (schemars-derived, also used for serialization)
-//
-// These structs mirror the JSON objects returned by each tool's call() arm.
-// Schemars produces the output schema; Serialize produces structured_content.
-// ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct PipelineOutput {
@@ -173,7 +145,6 @@ struct BuildStatusOutput {
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct BuildLogsOutput {
-    /// Build log output.
     logs: String,
 }
 
@@ -252,7 +223,6 @@ struct BuildResourceOutput {
     first_occurrence: bool,
 }
 
-// Output schema statics — one per tool, derived from the structs above.
 static OUT_LIST_PIPELINES: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<Vec<PipelineOutput>>);
 static OUT_LIST_JOBS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<Vec<JobOutput>>);
@@ -267,10 +237,6 @@ static OUT_LIST_BUILDS: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<Vec<BuildSummaryOutput>>);
 static OUT_BUILD_RESOURCES: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<Vec<BuildResourceOutput>>);
-
-// ---------------------------------------------------------------------------
-// Toolset
-// ---------------------------------------------------------------------------
 
 pub struct ConcourseToolSet {
     client: Arc<ConcourseClient>,

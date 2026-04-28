@@ -169,7 +169,6 @@ pub async fn tunnel_ws_handler(
 /// `deployment_id` comes from the already-verified handshake; any
 /// `deployment_id` field in the register frame is ignored.
 async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: String) {
-    // ── 1. Read register frame ────────────────────────────────────────────
     let toolset_registrations = match read_registration(&mut socket).await {
         Some(r) => r,
         None => return,
@@ -181,11 +180,9 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         "tunnel connector registered"
     );
 
-    // ── 2. Create channel and handle ──────────────────────────────────────
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<String>(256);
     let handle = TunnelHandle::new(outbound_tx);
 
-    // ── 2b. Claim deployment_id, evict previous tunnel if any ─────────────
     // Capacity-1 channel: a single eviction signal is all we ever send.
     let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
     let session_id = uuid::Uuid::new_v4();
@@ -201,7 +198,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         );
     }
 
-    // ── 3. Build + atomically swap toolsets ───────────────────────────────
     // `replace_tunnel_toolsets` retains any evicted session's entries out
     // of the catalog and appends the new ones under a single write lock,
     // so (a) first-match routing never sees stale entries for this
@@ -237,7 +233,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         .toolsets()
         .replace_tunnel_toolsets(&deployment_id, new_sets);
 
-    // ── 4. Relay loop ─────────────────────────────────────────────────────
     loop {
         tokio::select! {
             // `biased` so an eviction signal always beats in-flight traffic.
@@ -256,7 +251,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
                     .await;
                 break;
             }
-            // Inbound: messages from the connector (tool results)
             ws_msg = socket.recv() => {
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
@@ -274,7 +268,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
                     Some(Ok(Message::Binary(_))) => {}
                 }
             }
-            // Outbound: tool call requests to send to the connector
             msg = outbound_rx.recv() => {
                 match msg {
                     Some(text) => {
@@ -289,8 +282,7 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         }
     }
 
-    // ── 5. Cleanup ────────────────────────────────────────────────────────
-    // Ordering matters here:
+    // Cleanup ordering matters:
     //
     //   1. `unregister_searchable_by_session` — removes our entries from the
     //      catalog so no *new* tool calls can reach our handle. Session-scoped

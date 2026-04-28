@@ -119,8 +119,7 @@ pub enum CacheTtl {
     OneHour,
 }
 
-/// Recursively sort all object keys in a JSON value so that
-/// semantically equal values produce identical serialized bytes.
+/// Recursively sort object keys so semantically equal values serialize identically.
 fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -140,15 +139,9 @@ fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
 }
 
 impl Prompt {
-    /// Returns a hex-encoded SHA-256 hash of the prompt's canonical JSON form.
-    ///
-    /// Deterministic across processes: two `Prompt` values that serialize to
-    /// semantically equal JSON will always produce the same hash, regardless
-    /// of object-key ordering in embedded `serde_json::Value` fields.
-    ///
-    /// Hex-encoded `String` is returned (rather than `[u8; 32]`) because the
-    /// primary use-case is cache keys — strings are directly usable in file
-    /// names, database columns, and log output without further conversion.
+    /// Hex SHA-256 of the canonical JSON form. Stable across processes and
+    /// across embedded `serde_json::Value` key orderings. `cache_key` is
+    /// excluded so the same logical prompt always hashes the same.
     pub fn hash(&self) -> String {
         let mut prompt = self.clone();
         prompt.cache_key = None;
@@ -163,24 +156,18 @@ impl Prompt {
         })
     }
 
-    /// Estimates the token count of this prompt using the cl100k_base BPE encoding.
-    ///
-    /// This is an approximation — it does not replicate any specific provider's
-    /// exact billing logic. It counts tokens across system blocks, all message
-    /// content (text, tool-use inputs, tool-result text, thinking), and tool
-    /// definitions (name + description + schema).
+    /// cl100k_base BPE estimate. Approximation — does not replicate any
+    /// specific provider's billing.
     pub fn estimate_tokens(&self) -> usize {
         let enc = tiktoken::get_encoding("cl100k_base").expect("cl100k_base must be available");
         let mut total = 0usize;
 
-        // System blocks
         for block in &self.system {
             match block {
                 SystemBlock::Text { text, .. } => total += enc.encode(text).len(),
             }
         }
 
-        // Messages
         for msg in &self.messages {
             match msg {
                 Message::User { content } => {
@@ -221,7 +208,6 @@ impl Prompt {
             }
         }
 
-        // Tool definitions
         for tool in &self.tools {
             total += enc.encode(&tool.name).len();
             if let Some(desc) = &tool.description {
@@ -234,10 +220,9 @@ impl Prompt {
         total
     }
 
-    /// Mark the largest reusable Anthropic prefix with a single explicit cache
-    /// breakpoint. Anthropic automatically checks earlier block boundaries
-    /// before this explicit marker, so append-only chat histories only need the
-    /// final cacheable block marked.
+    /// Anthropic auto-checks earlier block boundaries before an explicit
+    /// marker, so append-only chat histories only need the final cacheable
+    /// block marked.
     pub fn enable_anthropic_prompt_caching(&mut self, ttl: Option<CacheTtl>) -> bool {
         self.clear_cache_controls();
         let marker = Some(CacheControl::Ephemeral { ttl });

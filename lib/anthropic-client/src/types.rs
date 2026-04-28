@@ -1,15 +1,7 @@
-//! Anthropic Messages API types ported from the Pi agent crate.
-//!
-//! These types model the Anthropic wire format for both requests and streaming
-//! responses. They are used internally by `AnthropicClient` and are NOT exposed
-//! to callers — the public boundary uses the provider-agnostic types from
-//! `lib/llm`.
+//! Anthropic Messages API wire types. Used internally; the public boundary
+//! uses the provider-agnostic types from `lib/llm`.
 
 use serde::{Deserialize, Serialize};
-
-// ============================================================================
-// Request Types
-// ============================================================================
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AnthropicRequest {
@@ -127,10 +119,6 @@ pub(crate) struct AnthropicSystemBlock {
     pub cache_control: Option<AnthropicCacheControl>,
 }
 
-// ============================================================================
-// Streaming Response Types
-// ============================================================================
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicStreamEvent {
@@ -167,7 +155,6 @@ pub struct AnthropicMessageStart {
     pub usage: Option<AnthropicUsage>,
 }
 
-/// Usage statistics from Anthropic API.
 /// Field names match the API response format.
 #[derive(Debug, Deserialize)]
 #[allow(clippy::struct_field_names)]
@@ -185,9 +172,6 @@ pub struct AnthropicDeltaUsage {
     pub output_tokens: u64,
 }
 
-/// Content block type from `content_block_start`.
-///
-/// Using a tagged enum avoids allocating a `String` for the type field.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicContentBlock {
@@ -201,11 +185,8 @@ pub enum AnthropicContentBlock {
     },
 }
 
-/// Per-token delta from the Anthropic streaming API.
-///
-/// Using a tagged enum instead of a flat struct with `r#type: String` avoids
-/// allocating a `String` for the type discriminant on every content_block_delta
-/// event (the hottest path -- one allocation per streamed token).
+/// Tagged enum (vs `r#type: String`) avoids a `String` allocation on every
+/// content_block_delta event — the hot path on streaming.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::enum_variant_names)]
@@ -228,9 +209,6 @@ pub enum AnthropicDelta {
     },
 }
 
-/// Stop reason from `message_delta`.
-///
-/// Using an enum avoids allocating a `String` for the stop reason.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicStopReason {

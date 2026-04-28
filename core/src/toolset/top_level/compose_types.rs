@@ -14,21 +14,11 @@ use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::{parse_params, schema_for};
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ComposeTypesParams {
-    /// Prefixed tool names to generate declarations for (e.g.
-    /// `["honeycomb_list_environments", "github_list_issues"]`).
-    /// Use `"*"` as a single element to get all visible tools.
+    /// Prefixed tool names. Use `"*"` as a single element for all visible tools.
     tool_names: Vec<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 pub struct ComposeTypes {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
@@ -47,17 +37,10 @@ impl ComposeTypes {
 static COMPOSE_TYPES_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<ComposeTypesParams>);
 
-// ---------------------------------------------------------------------------
-// Output shape (schemars-derived, also used for serialization)
-// ---------------------------------------------------------------------------
-
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeTypesOutput {
-    /// TypeScript declarations for the requested tools.
     declarations: String,
-    /// Number of tools included in the declarations.
     tool_count: usize,
-    /// Tool names that were not found.
     not_found: Vec<String>,
 }
 
@@ -101,7 +84,6 @@ impl TopLevelTool for ComposeTypes {
 
         let want_all = params.tool_names.len() == 1 && params.tool_names[0] == "*";
 
-        // ── Top-level tools (no prefix) ──────────────────────────────────
         let mut top_fns: Vec<(String, String, String)> = Vec::new();
         let mut matched: Vec<String> = Vec::new();
 
@@ -122,7 +104,6 @@ impl TopLevelTool for ComposeTypes {
         }
         top_fns.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // ── Catalog tools (prefix_name) ──────────────────────────────────
         let mut namespaces: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
 
         for set in sets.iter() {
@@ -169,21 +150,18 @@ impl TopLevelTool for ComposeTypes {
                 .collect()
         };
 
-        // Format as .d.ts
         let has_content = !top_fns.is_empty() || !namespaces.is_empty();
         let dts = if !has_content {
             "// No matching tools found".to_string()
         } else {
             let mut lines = vec!["declare namespace tools {".to_string()];
 
-            // Top-level functions first
             for (name, params, ret) in &top_fns {
                 lines.push(format!(
                     "  function {name}(args: {{ {params} }}): Promise<{ret}>;"
                 ));
             }
 
-            // Then namespace-grouped catalog tools
             for (ns, tools) in &namespaces {
                 lines.push(format!("  namespace {ns} {{"));
                 for (name, params, ret) in tools {

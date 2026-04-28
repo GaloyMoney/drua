@@ -69,7 +69,6 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
 
         let provider_arc = Arc::new(provider);
 
-        // Store handle in global state for graceful shutdown
         let handle = TracerHandle {
             provider: Arc::clone(&provider_arc),
             shutdown_called: Arc::new(AtomicBool::new(false)),
@@ -82,7 +81,7 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
         global::set_tracer_provider((*provider_arc).clone());
         let tracer = provider_arc.tracer("drua-tracer");
 
-        // Build separate filter for OTel that excludes tokio/runtime
+        // Excludes tokio/runtime from OTel.
         let otel_filter = EnvFilter::try_from_default_env()
             .or_else(|_| EnvFilter::try_new("info"))
             .expect("default EnvFilter should be valid")
@@ -100,7 +99,7 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
         )
     };
 
-    // Build separate filter for fmt_layer that excludes tokio/runtime from stdout
+    // Excludes tokio/runtime from stdout.
     let fmt_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .expect("default EnvFilter should be valid")

@@ -31,7 +31,6 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
         ])
         .split(main_area);
 
-    // Right column: agents list (top) + agent details (bottom)
     let right_col = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])

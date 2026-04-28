@@ -1,9 +1,4 @@
-//! Conversion functions between the provider-agnostic `llm` types and the
-//! Anthropic-specific internal types.
-//!
-//! These adapters sit at the boundary of `AnthropicClient`: inbound `Prompt`
-//! values are converted to `AnthropicRequest` for the wire, and the
-//! accumulated streaming result is converted back to `PromptResponse`.
+//! Adapters between the provider-agnostic `llm` types and Anthropic wire types.
 
 use llm::prompt::{
     AssistantBlock, CacheControl, CacheTtl, Message, SystemBlock, Tool, ToolChoice,
@@ -20,12 +15,6 @@ use crate::types::{
     AnthropicSystemBlock, AnthropicTool, AnthropicToolChoice, AnthropicToolResultContent,
 };
 
-// ============================================================================
-// Prompt → AnthropicRequest
-// ============================================================================
-
-/// Convert a provider-agnostic `Prompt` into an Anthropic-specific request
-/// body with `stream: true`.
 pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
     let messages: Vec<AnthropicMessage> = prompt.messages.iter().map(convert_message).collect();
 
@@ -168,12 +157,6 @@ fn convert_cache_control(cc: &CacheControl) -> AnthropicCacheControl {
     }
 }
 
-// ============================================================================
-// AccumulatedResponse → PromptResponse
-// ============================================================================
-
-/// Convert the internally-accumulated streaming result back to the
-/// provider-agnostic `PromptResponse` that callers expect.
 pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptResponse {
     let content = acc
         .content
@@ -188,7 +171,7 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         AccumulatedStopReason::StopSequence => StopReason::StopSequence,
     });
 
-    // Truncate u64 → u32 (safe for realistic token counts).
+    // u64 → u32 truncation is safe for realistic token counts.
     let usage = Usage {
         input_tokens: (acc.usage.input_tokens
             + acc.usage.cache_read_tokens
@@ -231,13 +214,9 @@ fn convert_accumulated_block(block: AccumulatedBlock) -> AssistantBlock {
     }
 }
 
-// ============================================================================
-// SSE JSON → StreamDelta (stateful converter)
-// ============================================================================
-
-/// Tracks Anthropic content-block indices so that index-only deltas
-/// (e.g. `InputJsonDelta`) can be mapped to the tool call ID that was
-/// announced in the preceding `ContentBlockStart`.
+/// Tracks content-block indices so index-only deltas (e.g. `InputJsonDelta`)
+/// can be mapped to the tool call ID announced in the preceding
+/// `ContentBlockStart`.
 pub(crate) struct AnthropicDeltaConverter {
     blocks: Vec<BlockInfo>,
 }
@@ -253,9 +232,7 @@ impl AnthropicDeltaConverter {
         Self { blocks: Vec::new() }
     }
 
-    /// Process a raw SSE data payload and return zero or more provider-agnostic
-    /// [`StreamDelta`]s. Returns an empty vec for events with no meaningful
-    /// delta (e.g. `Ping`, `ContentBlockStop`, `MessageStop`).
+    /// Returns an empty vec for `Ping`/`ContentBlockStop`/`MessageStop`.
     pub fn process_event(&mut self, data: &str) -> Result<Vec<StreamDelta>, String> {
         let event: AnthropicStreamEvent =
             serde_json::from_str(data).map_err(|e| format!("JSON parse: {e}"))?;
@@ -291,7 +268,6 @@ impl AnthropicDeltaConverter {
                 content_block,
             } => {
                 let idx = index as usize;
-                // Grow the blocks vec to accommodate this index.
                 while self.blocks.len() <= idx {
                     self.blocks.push(BlockInfo::Text);
                 }

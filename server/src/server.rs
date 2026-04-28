@@ -14,9 +14,7 @@ use drua_core::primitives::WorkspaceId;
 
 use crate::AppState;
 
-/// Extract W3C traceparent from incoming HTTP headers and attach to
-/// the current tracing span. This connects ingress → server spans
-/// in the distributed trace.
+/// Connects ingress → server spans by extracting W3C traceparent.
 async fn trace_context_middleware(request: Request, next: Next) -> Response {
     let parent_cx = global::get_text_map_propagator(|propagator| {
         propagator.extract(&HeaderExtractor(request.headers()))
@@ -25,14 +23,9 @@ async fn trace_context_middleware(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-/// Post-response middleware that records an audit entry for every mutating
-/// HTTP request (POST / PUT / DELETE). Read-only requests are skipped.
-///
-/// Seeds an [`EventContext`] and uses the type-safe [`Audit::record_*`]
-/// helpers to accumulate audit fields. The context is propagated via
-/// [`WithEventContext`] so downstream handlers and services can enrich it.
-/// After the handler completes the collected context is persisted
-/// fire-and-forget.
+/// Records an audit entry for every mutating HTTP request. Seeds an
+/// [`EventContext`] propagated via [`WithEventContext`] so downstream
+/// handlers can enrich it; persists fire-and-forget on response.
 #[instrument(name = "web.audit.middleware", skip_all)]
 async fn audit_middleware(request: Request, next: Next) -> Response {
     use axum::http::Method;
@@ -53,8 +46,7 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
     let auth = request.extensions().get::<AuthSubject>().cloned();
     let app_state = request.extensions().get::<AppState>().cloned();
 
-    // Obtain an empty seed — the `!Send` EventContext must not live across
-    // an `.await`, so we scope it in a block.
+    // The `!Send` EventContext must not live across an `.await`.
     let seed_data = {
         let ctx = EventContext::current();
         ctx.data()
@@ -75,8 +67,7 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
         let response = next.run(request).await;
         Audit::record_duration(start);
 
-        // Derive outcome from HTTP status, but never overwrite a more
-        // specific outcome already recorded by an inner handler.
+        // Don't overwrite a more specific outcome already recorded by a handler.
         let status = response.status();
         let fallback = if status.is_success() || status.is_redirection() {
             InteractionOutcome::Success
@@ -109,11 +100,8 @@ pub struct ServerConfig {
     pub secure_cookies: bool,
 }
 
-/// Build the axum [`Router`] with all web routes, MCP gateway, auth, and
-/// session middleware applied.
-///
-/// The `mcp_service` is the pre-built MCP gateway service (from
-/// [`McpGateway::service`]) that will be mounted at `/mcp`.
+/// `mcp_service` is the pre-built MCP gateway service (from
+/// [`McpGateway::service`]); it is mounted at `/mcp`.
 pub fn build_app<M>(config: &ServerConfig, app_state: AppState, mcp_service: M) -> axum::Router
 where
     M: tower_service::Service<axum::extract::Request, Error = Infallible>
@@ -138,8 +126,7 @@ where
         .with_state(app_state)
 }
 
-/// Extract a workspace ID from URL paths like `/workspaces/{uuid}/…` or
-/// `/api/v1/workspaces/{uuid}/…`.
+/// Matches `/workspaces/{uuid}/…` or `/api/v1/workspaces/{uuid}/…`.
 fn extract_workspace_id_from_path(path: &str) -> Option<WorkspaceId> {
     let segments: Vec<&str> = path.split('/').collect();
     segments

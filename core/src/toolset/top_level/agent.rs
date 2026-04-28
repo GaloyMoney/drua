@@ -22,36 +22,23 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::parse_params;
 
-// ---------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WorkspaceAgentParams {
-    /// Which agent operation to perform.
     command: WorkspaceAgentCommand,
-    /// Display name for the new agent (required for `create`).
     name: Option<String>,
-    /// ID of the agent (required for `attach_sandbox` and `detach_sandbox`).
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
-    /// ID of the sandbox (required for `attach_sandbox` and `detach_sandbox`).
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
-    /// Attach mode — 'read' or 'use'. Defaults to 'read'. Only used for `attach_sandbox`.
     mode: Option<SandboxAgentMode>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum WorkspaceAgentCommand {
-    /// Create a new agent in the workspace.
     Create,
-    /// List all agents in the workspace.
     List,
-    /// Attach a sandbox to an agent.
     AttachSandbox,
-    /// Detach a sandbox from an agent.
     DetachSandbox,
 }
 
@@ -65,10 +52,6 @@ impl WorkspaceAgentCommand {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 pub struct WorkspaceAgent {
     agents: Arc<Agents>,
@@ -91,8 +74,7 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        // Note: `definitions` intentionally retained for $ref resolution
-        // by the compose TS generator.
+        // `definitions` retained for $ref resolution by the compose TS generator.
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),
@@ -244,10 +226,6 @@ impl TopLevelTool for WorkspaceAgent {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn format_agent(a: &Agent) -> String {
     let role = match a.agent_role {

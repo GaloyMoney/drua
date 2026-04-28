@@ -1,6 +1,3 @@
-//! `whoami` — returns the current auth subject type, scopes, and identity.
-//! Useful for debugging visibility / authorization issues.
-
 use std::sync::LazyLock;
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
@@ -33,13 +30,9 @@ static WHOAMI_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-// ---------------------------------------------------------------------------
-// Output shape (schemars-derived, also used for serialization)
-// ---------------------------------------------------------------------------
-
 #[derive(Default, serde::Serialize, schemars::JsonSchema)]
 struct WhoAmIOutput {
-    /// Identity type: user, exported_agent, agent, agent_on_behalf_of_user, or anonymous.
+    /// user, exported_agent, agent, agent_on_behalf_of_user, or anonymous.
     #[serde(rename = "type")]
     identity_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -15,8 +15,6 @@ impl Mutation {
         "pong"
     }
 
-    // ── Workspace ───────────────────────────────────────────────────────
-
     async fn workspace_create(
         &self,
         ctx: &Context<'_>,
@@ -52,8 +50,6 @@ impl Mutation {
         let ws = app.workspaces().delete(sub, input.id).await?;
         Ok(WorkspaceDeletePayload::from(Workspace::from(ws)))
     }
-
-    // ── Agent ───────────────────────────────────────────────────────────
 
     async fn agent_create(
         &self,
@@ -97,8 +93,6 @@ impl Mutation {
             .await?;
         Ok(AgentDetachSandboxPayload::from(Agent::from(agent)))
     }
-
-    // ── Sandbox ─────────────────────────────────────────────────────────
 
     async fn sandbox_create(
         &self,
@@ -145,8 +139,6 @@ impl Mutation {
         Ok(SandboxRestartPayload::from(Sandbox::from(sb)))
     }
 
-    // ── Workspace Secret ────────────────────────────────────────────────
-
     async fn workspace_secret_create(
         &self,
         ctx: &Context<'_>,
@@ -179,8 +171,6 @@ impl Mutation {
             deleted_id: input.id,
         })
     }
-
-    // ── MCP Credentials ─────────────────────────────────────────────────
 
     async fn mcp_credentials_create(
         &self,

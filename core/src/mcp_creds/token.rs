@@ -15,7 +15,6 @@ pub fn generate_token() -> (String, String) {
     (raw_token, token_hash)
 }
 
-/// SHA-256 hash a raw token string, returning a hex-encoded digest.
 pub fn hash_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     bytes_to_hex(&digest)

@@ -1,14 +1,8 @@
 type Agent {
-	"""
-	The sandbox this agent is attached to, if any.
-	"""
 	attachedSandbox: SandboxAttachment
 	id: AgentId!
 	name: String!
 	role: AgentRole!
-	"""
-	The agent's conversation session.
-	"""
 	session: AgentSession!
 	workspaceId: WorkspaceId!
 }
@@ -207,38 +201,22 @@ type PageInfo {
 }
 
 type Query {
-	"""
-	Look up a single agent by ID.
-	"""
 	agent(id: AgentId!): Agent
 	appConfig: Yaml!
-	"""
-	Query audit log entries.
-	"""
 	auditLog(input: AuditLogQueryInput!): [AuditEntry!]!
 	"""
-	Export a thread as Pi-compatible JSONL (v3 format).
-	
-	When `thread_id` is omitted the current main thread is exported.
+	Pi-compatible JSONL (v3). When `thread_id` is omitted the current
+	main thread is exported.
 	"""
 	exportThread(agentId: AgentId!, threadId: SessionThreadId): String!
-	"""
-	The currently authenticated user, if any.
-	"""
 	me: Me
 	ping: String!
-	"""
-	Look up a single sandbox by ID.
-	"""
 	sandbox(id: SandboxId!): Sandbox
 	workspace(id: WorkspaceId!): Workspace
 	workspaces(after: String, first: Int!): WorkspaceConnection!
 }
 
 type Sandbox {
-	"""
-	Agents currently attached to this sandbox.
-	"""
 	attachedAgents: [SandboxAgentAttachment!]!
 	cpu: String!
 	createdAt: Timestamp!
@@ -399,9 +377,6 @@ type SystemBlockInfo {
 	text: String!
 }
 
-"""
-The semantic role of a system prompt block.
-"""
 enum SystemBlockKind {
 	BASE
 	BEHAVIORAL
@@ -510,32 +485,20 @@ type UserMessageEvent {
 
 type Workspace {
 	"""
-	All agents in this workspace (lead agent first).
+	Lead agent first.
 	"""
 	agents: [Agent!]!
 	createdAt: Timestamp!
 	description: String
 	id: WorkspaceId!
-	"""
-	The workspace lead agent.
-	"""
 	lead: Agent!
-	"""
-	MCP credentials owned by the current user.
-	"""
 	mcpCredentials: [McpCreds!]!
 	name: String!
-	"""
-	All sandboxes in this workspace.
-	"""
 	sandboxes: [Sandbox!]!
 	"""
-	All secrets in this workspace (metadata only — values are never exposed via GraphQL).
+	Metadata only — values are never exposed via GraphQL.
 	"""
 	secrets: [WorkspaceSecret!]!
-	"""
-	All skills in this workspace.
-	"""
 	skills: [Skill!]!
 }
 

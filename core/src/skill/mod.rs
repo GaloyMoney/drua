@@ -15,13 +15,8 @@ pub use entity::*;
 pub use error::*;
 use repo::*;
 
-/// Maximum number of skills to include in the system prompt listing.
 const SKILLS_CONTEXT_MAX: usize = 30;
-
-/// Maximum characters for the skill context block.
 const SKILLS_CONTEXT_BUDGET: usize = 4000;
-
-/// Maximum characters per skill description in the listing.
 const MAX_DESCRIPTION_LEN: usize = 200;
 
 #[derive(Clone)]
@@ -50,10 +45,7 @@ impl Skills {
         }
     }
 
-    /// Register a `ContextBumpHook` on the caller-provided op. Called from
-    /// `upsert_from_library_in_op`; the hook fires on commit and is a no-op
-    /// when this `Skills` instance has no `pool` (test contexts using
-    /// `new_without_library`).
+    /// No-op when `Skills` has no `pool` (test contexts using `new_without_library`).
     fn register_context_bump<OP: AtomicOperation>(
         &self,
         op: &mut OP,
@@ -85,14 +77,9 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Resolve a skill by name and return its body.
-    ///
-    /// Lookup order (workspace skill shadows global):
-    /// 1. Workspace-scoped skill (if `workspace_id` is `Some`)
-    /// 2. Global skill (`workspace_id IS NULL`)
-    /// 3. Sandbox exported skill (if `sandbox_id` is `Some`)
-    ///
-    /// Returns `Ok(None)` when no source matches.
+    /// Lookup order (workspace shadows global):
+    /// 1. Workspace-scoped, 2. Global, 3. Sandbox-exported.
+    /// `Ok(None)` when no source matches.
     #[instrument(name = "skill.find_by_name", skip_all, fields(name = %name, sandbox_id))]
     pub async fn find_by_name(
         &self,
@@ -100,8 +87,7 @@ impl Skills {
         workspace_id: Option<WorkspaceId>,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<SkillBody>, SkillError> {
-        // Single query fetches both workspace-scoped and global matches.
-        // Workspace-scoped (matching the caller's workspace) wins over global.
+        // Single query fetches workspace-scoped + global; workspace wins.
         let query = es_entity::PaginatedQueryArgs {
             first: 10,
             after: None,
@@ -122,7 +108,6 @@ impl Skills {
             return Ok(Some(SkillBody::new(skill.body.clone())));
         }
 
-        // Sandbox fallback
         if let Some(sandbox_id) = sandbox_id {
             tracing::Span::current().record("sandbox_id", sandbox_id.to_string());
             let sandbox = self
@@ -138,13 +123,8 @@ impl Skills {
         Ok(None)
     }
 
-    /// Resolve a skill by name and perform `$ARGUMENTS` substitution.
-    ///
-    /// Combines [`find_by_name`](Self::find_by_name) with argument interpolation:
-    /// - If the body contains `$ARGUMENTS`, all occurrences are replaced.
-    /// - Otherwise, if arguments are provided they are appended.
-    ///
-    /// Returns `Ok(None)` when no skill matches.
+    /// Combines [`find_by_name`](Self::find_by_name) with argument interpolation.
+    /// `Ok(None)` when no skill matches.
     #[instrument(name = "skill.interpolate_skill", skip_all, fields(name = %name))]
     pub async fn interpolate_skill(
         &self,
@@ -157,7 +137,6 @@ impl Skills {
         Ok(body.map(|b| b.interpolate(arguments)))
     }
 
-    /// List workspace-scoped skills (public, with auth check).
     #[instrument(name = "skill.list_by_workspace_id", skip_all)]
     pub async fn list_by_workspace_id(
         &self,
@@ -180,8 +159,7 @@ impl Skills {
         Ok(result.entities)
     }
 
-    /// List skills visible to a workspace: workspace-scoped + global.
-    /// Used by the web UI and other authenticated contexts.
+    /// Workspace-scoped + global, with auth check.
     #[instrument(name = "skill.list_for_workspace", skip(self, sub))]
     pub async fn list_for_workspace(
         &self,
@@ -192,7 +170,6 @@ impl Skills {
         self.list_for_workspace_inner(workspace_id).await
     }
 
-    /// Shared listing logic — merges workspace-scoped + global skills.
     async fn list_for_workspace_inner(
         &self,
         workspace_id: WorkspaceId,
@@ -223,8 +200,7 @@ impl Skills {
             .await?;
         let global_skills = global_result.entities;
 
-        // Merge: workspace skills first, then globals (dedup by name,
-        // workspace wins).
+        // Workspace first, dedup by name; workspace wins over global.
         let mut seen_names = std::collections::HashSet::new();
         let mut merged = Vec::new();
         for skill in ws_result.entities {
@@ -239,7 +215,6 @@ impl Skills {
         Ok(merged)
     }
 
-    /// Hybrid search across workspace + global skills via the library index.
     #[instrument(name = "skill.search", skip(self))]
     pub async fn search(
         &self,
@@ -253,8 +228,7 @@ impl Skills {
             .library
             .as_ref()
             .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
-        // Library search already includes global skills (sentinel nil UUID)
-        // alongside workspace-scoped results — see SearchStore::search().
+        // SearchStore::search() includes globals (sentinel nil UUID).
         library
             .search(
                 uuid::Uuid::from(workspace_id),

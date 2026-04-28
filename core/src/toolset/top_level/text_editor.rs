@@ -42,11 +42,8 @@ static TEXT_EDITOR_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<TextOutput>);
 
 static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    // Single object with the union of fields across all four commands.
-    // The `command` discriminator selects which other fields are
-    // meaningful — server validates the per-command requirements. The
-    // model already knows the built-in's shape, so detailed per-command
-    // schemas would be redundant.
+    // Union of fields across all commands; `command` discriminates and
+    // the server validates per-command requirements.
     serde_json::json!({
     "type": "object",
     "properties": {
@@ -89,7 +86,6 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-/// First sandbox the subject can write to (full Use attach).
 fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
     subject.scopes().iter().find_map(|s| match s {
         AuthScope::SandboxUse(id) => Some(*id),
@@ -97,8 +93,7 @@ fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
     })
 }
 
-/// Whether `command` writes to the filesystem. `view` is the only
-/// read-only operation; everything else mutates a file.
+/// `view` is the only read-only operation; everything else mutates.
 fn command_is_mutating(command: &str) -> bool {
     !matches!(command, "view")
 }
@@ -126,7 +121,7 @@ impl TopLevelTool for TextEditor {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // See bash.rs: workspace admins don't run inside sandboxes, hide it.
+        // Hidden from workspace admins — see bash.rs.
         subject.is_agent() && !subject.is_workspace_admin()
     }
 
@@ -141,8 +136,7 @@ impl TopLevelTool for TextEditor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?;
 
-        // Resolve target sandbox + per-command authz.  Mutating commands
-        // require SandboxUse; `view` falls back to SandboxRead.
+        // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
         let sandbox_id = if command_is_mutating(command) {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
@@ -169,8 +163,6 @@ impl TopLevelTool for TextEditor {
             input: serde_json::Value::Object(args),
         };
 
-        // Forward `is_error` as-is so the model sees the same shape it
-        // gets from Anthropic's built-in editor.
         match client.execute(&req).await {
             Ok(resp) => {
                 let out = TextOutput {

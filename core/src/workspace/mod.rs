@@ -175,14 +175,12 @@ impl Workspaces {
             return Ok(workspace);
         }
 
-        // ── 1. Suspend all workspace sandboxes ─────────────────────────
-        // Tear down pods/processes via the admin client before touching
-        // any DB state so in-flight sandbox work stops.
+        // Tear down pods/processes via the admin client before touching DB
+        // state so in-flight sandbox work stops first.
         if let Err(e) = self.sandboxes.suspend_for_workspace_in_op(op, id).await {
             tracing::warn!(error = %e, "failed to suspend sandboxes during workspace delete");
         }
 
-        // ── 2. Cascade soft-delete agents (→ sessions → threads) ───────
         let agent_list = self.agents.list_for_workspace_in_op(op, id).await?;
         for agent in &agent_list {
             if let Err(e) = self.agents.delete_in_op(op, agent.id).await {
@@ -194,22 +192,18 @@ impl Workspaces {
             }
         }
 
-        // ── 3. Cascade soft-delete workspace-scoped skills ─────────────
         if let Err(e) = self.skills.delete_for_workspace_in_op(op, id).await {
             tracing::warn!(error = %e, "failed to delete skills during workspace delete");
         }
 
-        // ── 4. Cascade soft-delete workspace notes ─────────────────────
         if let Err(e) = self.notes.delete_for_workspace_in_op(op, id).await {
             tracing::warn!(error = %e, "failed to delete notes during workspace delete");
         }
 
-        // ── 5. Cascade soft-delete workspace secrets ───────────────────
         if let Err(e) = self.secrets.delete_for_workspace_in_op(op, id).await {
             tracing::warn!(error = %e, "failed to delete secrets during workspace delete");
         }
 
-        // ── 6. Clean up library search data + queue git dir removal ────
         if let Err(e) = self
             .library
             .cleanup_workspace_in_op(op, uuid::Uuid::from(id), &workspace.name)
@@ -218,7 +212,6 @@ impl Workspaces {
             tracing::warn!(error = %e, "failed to clean up library during workspace delete");
         }
 
-        // ── 7. Archive + soft-delete the workspace entity itself ───────
         self.repo.update_in_op(&mut *op, &mut workspace).await?;
         let to_delete = self.repo.find_by_id_in_op(&mut *op, id).await?;
         self.repo.delete_in_op(op, to_delete).await?;

@@ -2,13 +2,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Selects which [`sandbox::AdminClient`] backend the [`super::Sandboxes`]
-/// service uses.
-///
-/// In `local` mode, sandboxes are spawned as child processes via the given
-/// shell command (see [`sandbox::admin_client::LocalSandboxConfig`]). In
-/// `k8s` mode, the service talks to the Agent Sandbox controller via the
-/// configured namespace + template.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum SandboxBackendConfig {
@@ -20,10 +13,8 @@ pub enum SandboxBackendConfig {
     K8s {
         namespace: String,
         template_name: String,
-        /// When present, sandboxes get a PVC mounted at `mount_path` using
-        /// `storage_class`. Without this, sandbox pods use ephemeral storage
-        /// and lose workspace state on restart. Per-sandbox disk size comes
-        /// from [`SandboxSpecs::disk_size`].
+        /// PVC at `mount_path` via `storage_class`; without it pods use
+        /// ephemeral storage. Disk size from `SandboxSpecs::disk_size`.
         #[serde(default)]
         storage_class: Option<String>,
         #[serde(default)]

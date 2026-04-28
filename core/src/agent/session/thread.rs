@@ -41,10 +41,7 @@ pub enum SessionThreadEvent {
         messages: Vec<MessageView>,
         follows_from: SessionThreadId,
     },
-    /// Thread spawned because workspace context (notes/skills/etc) changed.
-    /// Inherits the prior thread's messages verbatim — only the
-    /// `system_view` differs. Compaction can run separately on this thread
-    /// if the inherited messages exceed the budget.
+    /// Inherits prior thread's messages verbatim; only `system_view` differs.
     InitializedFromRefresh {
         id: SessionThreadId,
         session_id: AgentSessionId,
@@ -225,7 +222,6 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                             from_thread: *follows_from,
                         },
                     );
-                    // Determine turn from last message in compacted history
                     let turn = match messages.last() {
                         Some(MessageView::User(_)) => NextTurn::Assistant,
                         Some(MessageView::Assistant(_)) => NextTurn::User,
@@ -246,9 +242,6 @@ impl TryFromEvents<SessionThreadEvent> for SessionThread {
                             from_thread: *follows_from,
                         },
                     );
-                    // Determine turn from last message in inherited history.
-                    // Same logic as compaction — the message ordering tells us
-                    // whose turn comes next.
                     let turn = match messages.last() {
                         Some(MessageView::User(_)) => NextTurn::Assistant,
                         Some(MessageView::Assistant(_)) => NextTurn::User,
@@ -340,11 +333,7 @@ impl NewSessionThread {
         }
     }
 
-    /// Create a context-refreshed thread that inherits the prior thread's
-    /// messages verbatim — only the `system_view` is swapped to point at
-    /// the latest content for each `SystemBlockKind`. Tool definitions and
-    /// model defaults are inherited unchanged. Compaction can still run on
-    /// the resulting thread if the inherited messages exceed the budget.
+    /// Inherits messages verbatim; only `system_view` is swapped.
     pub fn refreshed(
         id: SessionThreadId,
         session_id: AgentSessionId,
@@ -370,8 +359,7 @@ impl NewSessionThread {
         }
     }
 
-    /// Create a fresh thread from an orphan action. Carries only the pending
-    /// user messages — no conversation history.
+    /// Fresh thread from an orphan action; no conversation history.
     pub fn orphaned(
         id: SessionThreadId,
         session_id: AgentSessionId,
@@ -395,7 +383,6 @@ impl NewSessionThread {
     }
 }
 
-/// Builder for the initial thread case (preserves existing API).
 pub struct NewSessionThreadBuilder {
     id: SessionThreadId,
     session_id: Option<AgentSessionId>,

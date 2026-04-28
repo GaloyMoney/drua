@@ -2,18 +2,9 @@
 //! background services (postgres, docker-compose, nix services) survive between
 //! tool calls.
 //!
-//! ## Design
-//!
-//! A single bwrap (or uid-only, or plain) bash session is created lazily on the
-//! first `/execute` bash call. Subsequent commands are piped through stdin.
-//! Output is demarcated with a unique marker:
-//!
-//! ```text
-//! ___SANDBOX_EXIT_{request_id}_{exit_code}___
-//! ```
-//!
-//! A [`tokio::sync::Mutex`] ensures one command at a time. The session
-//! auto-recovers if the shell process dies (detected via stdout EOF).
+//! Output is demarcated with a unique per-command marker:
+//! `___SANDBOX_EXIT_{request_id}_{exit_code}___`. A `Mutex` serializes commands
+//! and the session auto-recovers if the shell dies (stdout EOF).
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -28,23 +19,16 @@ use crate::workspace_root;
 #[cfg(test)]
 use crate::DEFAULT_TIMEOUT_MS;
 
-// ---------------------------------------------------------------------------
-// Marker protocol
-// ---------------------------------------------------------------------------
-
 const MARKER_PREFIX: &str = "___SANDBOX_EXIT_";
 const MARKER_SUFFIX: &str = "___";
 
-/// Build the echo command appended after every user command.
+/// Echo appended after every user command. Captures `$?` before echo overwrites it.
 fn marker_echo(request_id: &str) -> String {
-    // Use a sub-shell to capture $? before echo overwrites it.
     format!(
         r#"__sandbox_ec=$?; echo ""; echo "{MARKER_PREFIX}{request_id}_${{__sandbox_ec}}{MARKER_SUFFIX}"; "#
     )
 }
 
-/// Parse exit code from a marker line. Returns `None` if the line is not a marker
-/// for the given request id.
 fn parse_marker(line: &str, request_id: &str) -> Option<i32> {
     let expected_prefix = format!("{MARKER_PREFIX}{request_id}_");
     let stripped = line.strip_prefix(&expected_prefix)?;
@@ -52,11 +36,6 @@ fn parse_marker(line: &str, request_id: &str) -> Option<i32> {
     code_str.parse::<i32>().ok()
 }
 
-// ---------------------------------------------------------------------------
-// Isolation layer — how to spawn the persistent shell
-// ---------------------------------------------------------------------------
-
-/// Describes which isolation layer to use when spawning the session.
 #[derive(Debug, Clone, Copy)]
 enum IsolationLayer {
     /// Full bubblewrap with mount namespace, PID namespace, uid drop.
@@ -67,9 +46,8 @@ enum IsolationLayer {
     Plain,
 }
 
-/// Try each isolation layer in order until one works.
+/// Try each isolation layer in order until one works (bwrap → uid-only → plain).
 async fn spawn_session_shell(workspace: &str, workspace_tmp: &str) -> Result<Child, String> {
-    // Layer 3: bwrap
     #[cfg(unix)]
     match try_spawn(IsolationLayer::Bwrap, workspace, workspace_tmp) {
         Ok(child) => return Ok(child),
@@ -79,7 +57,6 @@ async fn spawn_session_shell(workspace: &str, workspace_tmp: &str) -> Result<Chi
         Err(e) => return Err(e),
     }
 
-    // Layer 2: uid-only
     #[cfg(unix)]
     if is_root() {
         match try_spawn(IsolationLayer::UidOnly, workspace, workspace_tmp) {
@@ -91,7 +68,6 @@ async fn spawn_session_shell(workspace: &str, workspace_tmp: &str) -> Result<Chi
         }
     }
 
-    // Layer 1: plain bash
     try_spawn(IsolationLayer::Plain, workspace, workspace_tmp)
 }
 
@@ -153,7 +129,7 @@ fn try_spawn(layer: IsolationLayer, workspace: &str, workspace_tmp: &str) -> Res
             },
         )
         .env("NIX_REMOTE", "daemon")
-        .env("PS1", "") // suppress prompt noise
+        .env("PS1", "")
         .current_dir(workspace);
 
     cmd.spawn()
@@ -178,29 +154,20 @@ fn is_spawn_failure(err: &str) -> bool {
     err.starts_with("Failed to execute command:")
 }
 
-// ---------------------------------------------------------------------------
-// BashSession
-// ---------------------------------------------------------------------------
-
-/// A persistent bash shell session.
 struct BashSessionInner {
     child: Child,
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
-    /// stderr is merged by reading it asynchronously and appending to output.
     stderr_handle: tokio::task::JoinHandle<String>,
-    /// Receives stderr chunks collected by the background task.
     stderr_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 }
 
-/// Thread-safe handle to the persistent session.
 pub struct BashSession {
     inner: Mutex<Option<BashSessionInner>>,
     workspace: String,
     workspace_tmp: String,
 }
 
-/// Result of executing a command in the session.
 #[derive(Debug)]
 pub struct CommandResult {
     pub output: String,
@@ -218,14 +185,11 @@ impl BashSession {
         }
     }
 
-    /// Execute a command in the persistent session.
-    ///
-    /// Creates the session lazily on first call. If the session is dead,
-    /// returns an error and clears the session so the next call recreates it.
+    /// Lazily creates the session on first call. On stdin error or stdout EOF,
+    /// clears the session so the next call recreates it.
     pub async fn execute(&self, command: &str, timeout_ms: u64) -> Result<CommandResult, String> {
         let mut guard = self.inner.lock().await;
 
-        // Ensure session exists
         if guard.is_none() {
             let session = self.create_session().await?;
             *guard = Some(session);
@@ -234,12 +198,9 @@ impl BashSession {
         let session = guard.as_mut().unwrap();
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        // Build the full command: run user command, then echo marker with exit code
         let full_command = format!("{command}\n{marker}\n", marker = marker_echo(&request_id),);
 
-        // Write command to stdin
         if let Err(e) = session.stdin.write_all(full_command.as_bytes()).await {
-            // Shell died — clear session for next call to recreate
             let _ = guard.take();
             return Err(format!("Session stdin write failed (shell died?): {e}"));
         }
@@ -248,7 +209,6 @@ impl BashSession {
             return Err(format!("Session stdin flush failed: {e}"));
         }
 
-        // Read stdout until marker appears, with timeout
         let timeout = Duration::from_millis(timeout_ms);
         match tokio::time::timeout(timeout, read_until_marker(&mut session.stdout, &request_id))
             .await
@@ -258,8 +218,7 @@ impl BashSession {
                 Ok(output)
             }
             Ok(Err(_)) => {
-                // stdout EOF — shell died. Retrieve exit code from the child
-                // process so `exit N` still reports the correct code.
+                // stdout EOF: retrieve the child's exit code so `exit N` reports correctly.
                 let mut session = guard.take().expect("session exists");
                 let exit_code = match session.child.wait().await {
                     Ok(status) => status.code().unwrap_or(1),
@@ -271,9 +230,7 @@ impl BashSession {
                 })
             }
             Err(_) => {
-                // Timeout — try SIGINT first to interrupt the foreground command
-                // while keeping the session (and background processes) alive.
-                // The shell will continue to the marker echo after SIGINT.
+                // Try SIGINT first so background processes survive a foreground timeout.
                 let result = Self::try_interrupt_foreground(session, &request_id).await;
                 if result.is_err()
                     && result
@@ -281,7 +238,6 @@ impl BashSession {
                         .err()
                         .is_some_and(|e| e.contains("could not be recovered"))
                 {
-                    // SIGINT didn't work — session is dead, clear it
                     let _ = guard.take();
                 }
                 result
@@ -289,14 +245,13 @@ impl BashSession {
         }
     }
 
-    /// Collect stdout output and any buffered stderr into a single [`CommandResult`].
     async fn collect_output(
         &self,
         session: &mut BashSessionInner,
         result: MarkerResult,
     ) -> CommandResult {
-        // Give the stderr background reader a moment to forward any remaining
-        // chunks that arrived around the same time as the stdout marker.
+        // Allow the stderr drainer to forward chunks that landed around the
+        // same time as the stdout marker.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let mut stderr_buf = String::new();
@@ -320,16 +275,12 @@ impl BashSession {
         }
     }
 
-    /// Send SIGINT to interrupt the foreground command without killing the
-    /// session. After SIGINT, bash continues to the marker echo so we can
-    /// recover the output boundary. Falls back to killing the session if the
-    /// marker doesn't appear within a grace period.
+    /// Send SIGINT and wait briefly for the marker echo. Falls back to killing
+    /// the session if the marker doesn't appear within the grace period.
     async fn try_interrupt_foreground(
         session: &mut BashSessionInner,
         request_id: &str,
     ) -> Result<CommandResult, String> {
-        // Send SIGINT to the shell child's process group. Inside the
-        // bwrap/bash session this propagates to the foreground job.
         #[cfg(unix)]
         if let Some(pid) = session.child.id() {
             // SAFETY: kill(2) is POSIX, sending SIGINT to a known PID.
@@ -338,13 +289,10 @@ impl BashSession {
             }
         }
 
-        // Grace period: wait up to 5 s for the marker after SIGINT.
         const GRACE: Duration = Duration::from_secs(5);
         match tokio::time::timeout(GRACE, read_until_marker(&mut session.stdout, request_id)).await
         {
             Ok(Ok(result)) => {
-                // SIGINT worked — the shell survived and produced the marker.
-                // Drain stderr and return the (partial) output.
                 let mut stderr_buf = String::new();
                 while let Ok(chunk) = session.stderr_rx.try_recv() {
                     stderr_buf.push_str(&chunk);
@@ -358,14 +306,12 @@ impl BashSession {
                 ))
             }
             Ok(Err(_)) | Err(_) => {
-                // Shell didn't recover — kill it so the next call recreates.
                 let _ = session.child.kill().await;
                 Err("Command timed out and session could not be recovered".to_string())
             }
         }
     }
 
-    /// Kill and recreate the session.
     pub async fn restart(&self) -> Result<(), String> {
         let mut guard = self.inner.lock().await;
         if let Some(mut session) = guard.take() {
@@ -397,9 +343,8 @@ impl BashSession {
 
         let stdout = BufReader::new(stdout);
 
-        // Spawn a background task to drain stderr continuously.
-        // We use a channel to forward chunks so the main read loop can
-        // collect them when needed.
+        // Drain stderr continuously and forward chunks via a channel so the
+        // main read loop can collect them when needed.
         let (stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel();
         let stderr_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
@@ -407,7 +352,7 @@ impl BashSession {
             loop {
                 buf.clear();
                 match reader.read_line(&mut buf).await {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(_) => {
                         let _ = stderr_tx.send(buf.clone());
                     }
@@ -433,12 +378,7 @@ impl Drop for BashSessionInner {
     }
 }
 
-/// Shared session state accessible via axum's State extractor.
 pub type SharedSession = Arc<BashSession>;
-
-// ---------------------------------------------------------------------------
-// Read until marker
-// ---------------------------------------------------------------------------
 
 struct MarkerResult {
     output: String,
@@ -460,7 +400,6 @@ async fn read_until_marker(
             .map_err(|e| format!("Failed to read session stdout: {e}"))?;
 
         if n == 0 {
-            // EOF — shell died
             return Err("Shell process exited (stdout EOF)".to_string());
         }
 
@@ -472,10 +411,6 @@ async fn read_until_marker(
         output.push_str(&line_buf);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

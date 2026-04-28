@@ -12,9 +12,6 @@ use es_entity::*;
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum AgentRole {
     WorkspaceLead,
-    /// Generic agent role created on demand (e.g. from the workspace UI).
-    /// Defaults to the same authz scopes as [`Self::WorkspaceLead`] and
-    /// reuses its `RoleConfig` when a dedicated `agent:` block is absent.
     Agent,
 }
 
@@ -30,21 +27,19 @@ pub enum AgentEvent {
         authz_scopes: Vec<AuthScope>,
         workspace_name: String,
     },
-    /// Single delta event for adds and removes — bundles both sides of an
-    /// attach/detach into one record. `added` and `removed` carry only the
-    /// effective delta (no-ops are filtered out before the event fires).
+    /// Effective delta only (no-ops filtered out before firing).
     AuthScopesUpdated {
         added: Vec<AuthScope>,
         removed: Vec<AuthScope>,
     },
-    /// The agent has been attached to `sandbox_id` in `mode`. Records both
-    /// first-time attachment and mode upgrade/downgrade on the same sandbox.
+    /// First-time attach or in-place mode upgrade/downgrade.
     SandboxAttached {
         sandbox_id: SandboxId,
         mode: SandboxAgentMode,
     },
-    /// The agent has been detached from `sandbox_id`.
-    SandboxDetached { sandbox_id: SandboxId },
+    SandboxDetached {
+        sandbox_id: SandboxId,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -54,18 +49,12 @@ pub struct Agent {
     pub workspace_id: WorkspaceId,
     pub agent_role: AgentRole,
     pub name: String,
-    /// Cached workspace display name — set at creation time and never
-    /// updated (if the workspace is renamed, existing agents keep the old
-    /// name until they are recreated).
+    /// Set at creation; never updated (rename does not propagate).
     pub workspace_name: String,
-    /// Backed by a `HashSet` to enforce no-duplicates at the entity level.
-    /// Wire format (`Initialized.authz_scopes`, `AuthScopesUpdated.added/removed`)
-    /// stays as `Vec<AuthScope>` for backward-compatible JSON serialization.
+    /// `HashSet` enforces no-duplicates; wire format stays `Vec<AuthScope>`
+    /// for backward-compatible JSON serialization.
     pub authz_scopes: HashSet<AuthScope>,
-    /// Which sandbox this agent is currently attached to, if any. The entity
-    /// enforces **at most one** attached sandbox at a time via
-    /// [`Self::sandbox_attached`] — to switch sandboxes the caller must first
-    /// [`Self::sandbox_detached`] the existing one.
+    /// At most one attached sandbox at a time (enforced by `sandbox_attached`).
     #[builder(default)]
     pub attached_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     events: EntityEvents<AgentEvent>,
@@ -76,36 +65,23 @@ impl Agent {
         self.authz_scopes.iter().cloned().collect()
     }
 
-    /// The id of the sandbox this agent is currently attached to, if any.
-    /// Strips the [`SandboxAgentMode`] for callers that only care which
-    /// sandbox the agent is targeting (e.g. resolving the fallback for
-    /// [`Skills::find_by_name`](crate::skill::Skills::find_by_name)).
     pub fn attached_sandbox_id(&self) -> Option<SandboxId> {
         self.attached_sandbox.map(|(id, _)| id)
     }
 
-    /// The auth subject this agent acts as when invoking tools — its own
-    /// workspace + id, carrying the scopes persisted on the `Initialized`
-    /// event. Use when no originating user can be attributed.
+    /// Use when no originating user can be attributed.
     pub fn auth_subject(&self) -> AuthSubject {
         AuthSubject::Agent(self.workspace_id, self.id, self.scopes_vec())
     }
 
-    /// Same as [`Self::auth_subject`] but tagged with the user that triggered
-    /// the agent's work, so downstream actions can be attributed back to them.
+    /// Tagged with the originating user so downstream actions can be
+    /// attributed back.
     pub fn auth_subject_for_user(&self, user_id: UserId) -> AuthSubject {
         AuthSubject::AgentOnBehalfOfUser(user_id, self.workspace_id, self.id, self.scopes_vec())
     }
 
-    /// Apply a batch of scope additions/removals as a single
-    /// [`AgentEvent::AuthScopesUpdated`] event. Only entries that actually
-    /// change the set are recorded — passing scopes the agent already has
-    /// (or doesn't have) is a no-op for that entry. Returns
-    /// [`Idempotent::AlreadyApplied`] when the resulting delta is empty.
+    /// Records only the effective delta; returns `AlreadyApplied` when empty.
     fn update_auth_scopes(&mut self, added: &[AuthScope], removed: &[AuthScope]) -> Idempotent<()> {
-        // `HashSet::insert` returns true iff the value wasn't already present;
-        // `HashSet::remove` returns true iff it was. Use those directly so the
-        // mutation and the "did it change?" check happen in one pass.
         let mut effective_added: Vec<AuthScope> = Vec::new();
         for scope in added {
             if self.authz_scopes.insert(scope.clone()) {
@@ -130,25 +106,14 @@ impl Agent {
         Idempotent::Executed(())
     }
 
-    /// Record that this agent is now attached to `sandbox_id` in `mode`.
-    ///
-    /// **Invariant:** an agent can hold at most one sandbox attachment at a
-    /// time. Attaching to a sandbox other than the one already attached
-    /// returns [`super::error::AgentError::AlreadyAttachedToSandbox`] —
-    /// callers must [`Self::sandbox_detached`] the existing sandbox first.
-    ///
-    /// Re-attaching the same sandbox with the same mode is idempotent; the
-    /// same sandbox with a different mode is an in-place upgrade/downgrade
-    /// (the mode switches and scopes are updated). **Write always implies
-    /// Read**, so attaching as Write grants both; downgrading to Read
-    /// removes the Write scope.
+    /// At most one sandbox per agent: a different sandbox returns
+    /// `AlreadyAttachedToSandbox`. Same id + same mode is idempotent;
+    /// different mode is an in-place upgrade/downgrade. Write implies Read.
     pub(super) fn sandbox_attached(
         &mut self,
         sandbox_id: SandboxId,
         mode: SandboxAgentMode,
     ) -> Result<Idempotent<()>, super::error::AgentError> {
-        // Leads orchestrate other agents — they never run inside a sandbox
-        // themselves.
         if matches!(self.agent_role, AgentRole::WorkspaceLead) {
             return Err(super::error::AgentError::LeadCannotAttachSandbox);
         }
@@ -165,19 +130,15 @@ impl Agent {
         }
 
         self.attached_sandbox = Some((sandbox_id, mode));
-        // Scope delta may be AlreadyApplied (e.g. on an upgrade that only
-        // adds an already-held scope); we still record the attachment
-        // event below.
+        // Scope delta may be AlreadyApplied; attachment event still fires.
         let _ = self.apply_sandbox_scopes(sandbox_id, mode);
         self.events
             .push(AgentEvent::SandboxAttached { sandbox_id, mode });
         Ok(Idempotent::Executed(()))
     }
 
-    /// Record that this agent has been detached from `sandbox_id` — clears
-    /// the tracked attachment and drops both `SandboxUse` and
-    /// `SandboxRead` scopes for that id. Idempotent: no-op when the
-    /// agent isn't attached to that sandbox.
+    /// Drops both `SandboxUse` and `SandboxRead` for `sandbox_id`.
+    /// Idempotent when not attached to that sandbox.
     pub(super) fn sandbox_detached(&mut self, sandbox_id: SandboxId) -> Idempotent<()> {
         let is_attached = matches!(self.attached_sandbox, Some((id, _)) if id == sandbox_id);
         if !is_attached {
@@ -185,8 +146,6 @@ impl Agent {
         }
 
         self.attached_sandbox = None;
-        // Scope removal may be AlreadyApplied if the agent somehow didn't
-        // have the scopes (defensive); the detach event still fires.
         let _ = self.update_auth_scopes(
             &[],
             &[
@@ -198,10 +157,8 @@ impl Agent {
         Idempotent::Executed(())
     }
 
-    /// Apply the correct scope delta for an attachment `mode`. Read mode
-    /// grants `SandboxRead` (and removes `SandboxUse` in case of
-    /// downgrade); Write mode grants `SandboxUse` (and removes the
-    /// read-only scope).
+    /// Read grants `SandboxRead` (removes `SandboxUse`); Write grants
+    /// `SandboxUse` (removes `SandboxRead`).
     fn apply_sandbox_scopes(
         &mut self,
         sandbox_id: SandboxId,

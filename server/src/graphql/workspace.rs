@@ -28,7 +28,6 @@ impl Workspace {
         self.entity.created_at().into()
     }
 
-    /// The workspace lead agent.
     async fn lead(&self, ctx: &Context<'_>) -> async_graphql::Result<Agent> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let agent = app
@@ -38,7 +37,7 @@ impl Workspace {
         Ok(Agent::from(agent))
     }
 
-    /// All agents in this workspace (lead agent first).
+    /// Lead agent first.
     async fn agents(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Agent>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let mut agents = app.agents().list_for_workspace(sub, self.entity.id).await?;
@@ -47,7 +46,6 @@ impl Workspace {
         Ok(agents.into_iter().map(Agent::from).collect())
     }
 
-    /// All sandboxes in this workspace.
     async fn sandboxes(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Sandbox>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let sandboxes = app
@@ -57,7 +55,6 @@ impl Workspace {
         Ok(sandboxes.into_iter().map(Sandbox::from).collect())
     }
 
-    /// All skills in this workspace.
     async fn skills(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Skill>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let skills = app
@@ -67,7 +64,7 @@ impl Workspace {
         Ok(skills.into_iter().map(Skill::from).collect())
     }
 
-    /// All secrets in this workspace (metadata only — values are never exposed via GraphQL).
+    /// Metadata only — values are never exposed via GraphQL.
     async fn secrets(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<WorkspaceSecret>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let secrets = app
@@ -77,7 +74,6 @@ impl Workspace {
         Ok(secrets.into_iter().map(WorkspaceSecret::from).collect())
     }
 
-    /// MCP credentials owned by the current user.
     async fn mcp_credentials(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<McpCreds>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let user_id = sub

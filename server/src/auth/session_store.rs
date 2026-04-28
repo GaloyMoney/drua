@@ -2,10 +2,8 @@ use async_trait::async_trait;
 use tower_sessions::session::{Id, Record};
 use tower_sessions::session_store;
 
-/// Postgres-backed session store for tower-sessions.
-///
-/// Uses raw sqlx queries with integer timestamps to avoid
-/// chrono/time feature conflicts with es-entity.
+/// Raw sqlx queries with integer timestamps avoid chrono/time feature conflicts
+/// with es-entity.
 #[derive(Clone, Debug)]
 pub struct PgSessionStore {
     pool: sqlx::PgPool,
@@ -24,7 +22,6 @@ impl session_store::SessionStore for PgSessionStore {
             .map_err(|e| session_store::Error::Backend(e.to_string()))?;
         let expiry = record.expiry_date.unix_timestamp();
 
-        // Try inserting; on ID collision, generate a new ID and retry.
         loop {
             let result = sqlx::query(
                 r#"INSERT INTO sessions (id, data, expiry_date)

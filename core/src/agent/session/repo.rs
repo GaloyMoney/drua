@@ -27,10 +27,8 @@ impl AgentSessionRepo {
         }
     }
 
-    /// Soft-delete the session belonging to `agent_id` and every thread under
-    /// it. No-op when the agent has no session. Soft delete on this entity
-    /// family is a column update with no event, so a bulk SQL update is
-    /// equivalent to iterating each entity through `delete_in_op`.
+    /// Soft-delete = no-event column update, so bulk SQL is equivalent to
+    /// per-entity `delete_in_op`.
     pub async fn cascade_delete_for_agent_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,

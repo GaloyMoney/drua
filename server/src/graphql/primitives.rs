@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-// Re-exported for use by per-entity GraphQL type modules (workspace.rs,
-// agent.rs, etc.) as they are built out in subsequent PRs.
 #[allow(unused_imports)]
 pub use drua_core::primitives::{
     AgentId, McpCredsId, SandboxId, SkillId, UserId, WorkspaceId, WorkspaceSecretId,

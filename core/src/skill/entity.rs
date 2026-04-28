@@ -78,9 +78,8 @@ impl Skill {
         )
     }
 
-    /// Compute the file hash from the entity's canonical runtime representation.
-    /// This matches the content that `WriteToRuntime` writes to disk, so the
-    /// reverse-sync can compare against the on-disk hash without drift.
+    /// Hash of the canonical runtime form (matches what `WriteToRuntime`
+    /// writes), so reverse-sync compares against on-disk hash without drift.
     pub(crate) fn file_hash(&self) -> GitFileHash {
         self.as_runtime_file().file_hash()
     }
@@ -119,7 +118,6 @@ impl core::fmt::Display for Skill {
     }
 }
 
-/// A resolved skill body ready for argument interpolation.
 pub struct SkillBody(String);
 
 impl SkillBody {
@@ -127,15 +125,9 @@ impl SkillBody {
         Self(body)
     }
 
-    /// Substitute placeholders in the skill body with the provided arguments.
-    ///
-    /// - `$ARGUMENTS` — replaced with the full argument string.
-    /// - `$0`, `$1`, `$2`, … — replaced with positional arguments parsed
-    ///   via shell-style splitting (double/single quotes respected).
-    ///
-    /// If the body contains neither `$ARGUMENTS` nor any matching `$N`
-    /// placeholder and arguments are non-empty, appends
-    /// `ARGUMENTS: <value>` to the end.
+    /// `$ARGUMENTS` → full argument string; `$0`, `$1`, … → positional
+    /// (shell-split, quotes respected). If neither placeholder matches and
+    /// args are non-empty, appends `ARGUMENTS: <value>`.
     pub fn interpolate(self, arguments: Option<&str>) -> String {
         let args = arguments.unwrap_or_default();
         let positional = shell_split(args);
@@ -148,7 +140,7 @@ impl SkillBody {
             had_substitution = true;
         }
 
-        // Replace $N from highest index down so $10 isn't eaten by $1.
+        // Highest index first so $10 isn't eaten by $1.
         for i in (0..positional.len()).rev() {
             let placeholder = format!("${i}");
             if result.contains(&placeholder) {
@@ -171,12 +163,9 @@ impl From<SkillBody> for String {
     }
 }
 
-/// Shell-style argument splitting with double and single quote support.
-///
-/// - Double quotes: content preserved literally, backslash escapes the
-///   next character (`\"` → `"`).
-/// - Single quotes: content preserved literally, no escaping.
-/// - Unquoted whitespace delimits arguments.
+/// Double quotes: preserved literally, backslash escapes next char.
+/// Single quotes: preserved literally, no escaping.
+/// Unquoted whitespace delimits arguments.
 fn shell_split(input: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -220,8 +209,6 @@ fn shell_split(input: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // -- shell_split ---------------------------------------------------------
-
     #[test]
     fn shell_split_simple() {
         assert_eq!(shell_split("staging prod"), vec!["staging", "prod"]);
@@ -261,8 +248,6 @@ mod tests {
             vec!["plain", "double quoted", "single quoted"]
         );
     }
-
-    // -- SkillBody::interpolate ----------------------------------------------
 
     #[test]
     fn interpolate_replaces_arguments_placeholder() {

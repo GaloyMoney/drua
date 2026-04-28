@@ -7,7 +7,6 @@ use super::request_logger::{LoggerError, RequestLogger};
 
 pub use error::CodeAssistantLogsError;
 
-/// A single request log row for display in the web UI.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CodeAssistantRequestRow {
     pub id: i64,
@@ -27,14 +26,12 @@ pub struct CodeAssistantRequestRow {
     pub results_json: String,
 }
 
-/// A query string and how often it was used (for the dashboard).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TopQuery {
     pub query: String,
     pub count: i64,
 }
 
-/// Aggregated dashboard stats.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DashboardStats {
     pub total_requests_24h: i64,
@@ -45,7 +42,7 @@ pub struct DashboardStats {
     pub top_queries: Vec<TopQuery>,
 }
 
-/// Raw row type from the `style_agent_request_log` table (historical name).
+/// `style_agent_request_log` is the historical table name.
 type RawRequestRow = (
     i64,
     String,
@@ -61,9 +58,7 @@ type RawRequestRow = (
     chrono::DateTime<chrono::Utc>,
 );
 
-/// Service for writing and reading code assistant request logs in Postgres.
-///
-/// Implements [`RequestLogger`] (write path from the MCP gateway) and
+/// Implements [`RequestLogger`] (writes from the MCP gateway) and
 /// exposes dashboard-specific read queries.
 #[derive(Clone)]
 pub struct CodeAssistantLogs {
@@ -134,7 +129,6 @@ impl CodeAssistantLogs {
         Self { pool: pool.clone() }
     }
 
-    /// Return recent request log rows (most recent first) for the web dashboard.
     #[instrument(name = "domain.code_assistant_logs.recent_requests", skip_all)]
     pub async fn recent_requests(
         &self,
@@ -145,7 +139,6 @@ impl CodeAssistantLogs {
         Ok(rows.into_iter().map(row_to_view).collect())
     }
 
-    /// Return requests ordered by score ascending (least useful first).
     #[instrument(name = "domain.code_assistant_logs.least_useful", skip_all)]
     pub async fn least_useful(
         &self,
@@ -157,7 +150,6 @@ impl CodeAssistantLogs {
         Ok(rows.into_iter().map(row_to_view).collect())
     }
 
-    /// Return aggregated dashboard stats for the web UI.
     #[instrument(name = "domain.code_assistant_logs.dashboard_stats", skip_all)]
     pub async fn dashboard_stats(&self) -> Result<DashboardStats, CodeAssistantLogsError> {
         let low_score_threshold = 0.3_f64;
@@ -206,10 +198,6 @@ impl CodeAssistantLogs {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// RequestLogger implementation — write path (fire-and-forget from MCP gateway)
-// ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
 impl RequestLogger for CodeAssistantLogs {

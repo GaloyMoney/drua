@@ -13,12 +13,8 @@ use crate::note::Notes;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
-/// Default authorization scopes granted to an agent when it's created.
-/// The `WorkspaceLead` role gets `WorkspaceAdmin` (full workspace
-/// management); plain agents get `WorkspaceMember` (read-only workspace
-/// access) so they can use workspace-scoped tools like notes and skills.
-/// Agents additionally pick up `SandboxUse` / `SandboxRead` later when
-/// attached to a sandbox via [`Agent::sandbox_attached`].
+/// Lead → `WorkspaceAdmin`; Agent → `WorkspaceMember` (read-only). Sandbox
+/// scopes are added later via [`Agent::sandbox_attached`].
 fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
     match role {
         AgentRole::WorkspaceLead => vec![AuthScope::WorkspaceAdmin(workspace_id)],
@@ -39,9 +35,8 @@ pub use error::AgentError;
 use repo::AgentRepo;
 use session::Sessions;
 
-/// Snapshot of a workspace's dynamic system blocks (notes + skills),
-/// keyed by the `ContextGeneration` value at fetch time. Used to skip
-/// DB round-trips on the hot path of `send_message`.
+/// Snapshot of dynamic system blocks (notes + skills), keyed by
+/// `ContextGeneration` at fetch time. Skips DB round-trips on the hot path.
 #[derive(Clone)]
 struct CachedWorkspaceContext {
     generation: u64,
@@ -103,19 +98,14 @@ impl Agents {
         }
     }
 
-    /// Hot-path lookup of the dynamic (notes + skills) system blocks for a
-    /// workspace. Reads the global `ContextGeneration` (1ns atomic load)
-    /// and returns cached blocks when the generation matches. Only fetches
-    /// from DB when the generation has bumped — meaning notes or skills
-    /// have changed somewhere (possibly in another workspace, in which
-    /// case the hash check inside `maybe_update_context` will no-op).
+    /// Hot-path lookup of dynamic system blocks. Reads `ContextGeneration`
+    /// atomically; only hits DB when the generation has bumped.
     async fn cached_dynamic_blocks(
         &self,
         workspace_id: WorkspaceId,
     ) -> Vec<session::message::SystemBlock> {
         let current_gen = self.context_generation.current();
 
-        // Fast path: cache hit (no DB).
         {
             let cache = self.context_cache.read().expect("context_cache poisoned");
             if let Some(cached) = cache.get(&workspace_id) {
@@ -125,7 +115,6 @@ impl Agents {
             }
         }
 
-        // Slow path: fetch fresh from DB.
         let notes_block = match &self.notes {
             Some(notes) => notes
                 .pinned_context_for_workspace(workspace_id)
@@ -159,8 +148,6 @@ impl Agents {
         &self.skills
     }
 
-    /// Create a workspace lead agent. The workspace name is passed directly
-    /// because it's known at workspace creation time.
     #[instrument(name = "domain.agent.create_workspace_lead", skip(self, sub))]
     pub async fn create_workspace_lead(
         &self,
@@ -190,8 +177,7 @@ impl Agents {
         Ok(agent)
     }
 
-    /// Create a regular agent. The workspace name is resolved automatically
-    /// from the existing lead agent in the workspace.
+    /// Workspace name is resolved from the existing lead agent.
     #[instrument(name = "domain.agent.create_agent", skip(self, sub))]
     pub async fn create_agent(
         &self,
@@ -222,7 +208,6 @@ impl Agents {
         Ok(agent)
     }
 
-    /// Resolve the workspace display name from the lead agent.
     async fn resolve_workspace_name(
         &self,
         workspace_id: WorkspaceId,
@@ -247,8 +232,6 @@ impl Agents {
             .ok_or(AgentError::NoLeadAgent(workspace_id))
     }
 
-    /// Composable variant of [`Self::create_workspace_lead`] — creates a
-    /// lead agent inside an existing op with a pre-determined id.
     #[instrument(name = "domain.agent.create_workspace_lead_in_op", skip(self, op))]
     pub async fn create_workspace_lead_in_op(
         &self,
@@ -272,9 +255,6 @@ impl Agents {
         .await
     }
 
-    /// Shared inner: creates an agent of any role with all arguments
-    /// explicit. [`Self::create_workspace_lead`] and [`Self::create_agent`]
-    /// delegate here after resolving the workspace name.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
     async fn create_in_op(
@@ -314,9 +294,6 @@ impl Agents {
 
         let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
-        // Build the prompt's `tools` array from the registry as if the
-        // agent were calling them — it will, with these same scopes, once
-        // the session is live.
         let agent_subject = agent.auth_subject();
         let tool_defs: Vec<session::message::ToolDefinition> = self
             .toolsets
@@ -330,7 +307,6 @@ impl Agents {
             &agent.workspace_name,
         );
 
-        // Inject pinned workspace notes into the system prompt.
         if let Some(notes) = &self.notes {
             if let Ok(Some(pinned_content)) = notes.pinned_context_for_workspace(workspace_id).await
             {
@@ -340,7 +316,6 @@ impl Agents {
             }
         }
 
-        // Inject workspace skills listing into the system prompt.
         if let Ok(Some(skills_content)) =
             self.skills.skills_context_for_workspace(workspace_id).await
         {
@@ -366,8 +341,7 @@ impl Agents {
             .await?;
 
         if let Some((sandbox_id, mode)) = attach_sandbox {
-            // Agent side first — `sandbox_attached` rejects a WorkspaceLead
-            // role before we touch the sandbox side.
+            // Agent side first: rejects WorkspaceLead before the sandbox round-trip.
             if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
                 self.repo.update_in_op(op, &mut agent).await?;
             }
@@ -466,21 +440,16 @@ impl Agents {
         let agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(id);
-        // Cascade soft-delete to the agent's session and all its threads
-        // before deleting the agent itself (mirrors workspace → agents).
+        // Cascade soft-delete sessions before agent (mirrors workspace → agents).
         self.sessions.delete_for_agent_in_op(op, id).await?;
         self.repo.delete_in_op(op, agent).await?;
         Ok(())
     }
 
-    /// Attach a sandbox to an agent in `mode` (Read or Write). The subject
-    /// must hold [`AuthScope::WorkspaceAdmin`] on the agent's workspace.
-    /// Re-attach with a different mode is allowed (downgrade unconditional;
-    /// upgrade to Write succeeds only if no other agent currently holds
-    /// Write — see [`crate::sandbox::Sandbox::attach_agent`]). After the
-    /// entity-level attach, the matching `SandboxRead`/`SandboxWrite`
-    /// scope is added to the agent (and any stale opposite-mode scope for
-    /// the same sandbox is removed).
+    /// Re-attach with a different mode: downgrade unconditional; upgrade to
+    /// Write only if no other agent holds Write. The matching
+    /// `SandboxRead`/`SandboxWrite` scope replaces any stale opposite-mode
+    /// scope on the agent.
     #[instrument(name = "domain.agent.attach_sandbox", skip(self, subject))]
     pub async fn attach_sandbox(
         &self,
@@ -501,21 +470,19 @@ impl Agents {
 
         let mut op = self.repo.begin_op().await?;
 
-        // Agent side first: `sandbox_attached` enforces the entity-level
-        // invariants (lead can't attach; at most one sandbox per agent).
-        // Failing here short-circuits before the sandbox-side round-trip.
+        // Agent side first: `sandbox_attached` enforces entity invariants (lead
+        // can't attach; at most one sandbox per agent), short-circuiting before
+        // the sandbox round-trip.
         let mut agent = self.repo.find_by_id_in_op(&mut op, agent_id).await?;
         if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
         }
 
-        // Sandbox side (enforces workspace match and single-writer).
         let sandbox = self
             .sandboxes
             .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
             .await?;
 
-        // Notify the agent's session so the LLM knows a sandbox was attached.
         self.sessions
             .sandbox_notification_in_op(
                 &mut op,
@@ -533,8 +500,7 @@ impl Agents {
         Ok(agent)
     }
 
-    /// Detach a sandbox from an agent. Authz mirrors `attach_sandbox`.
-    /// Idempotent at both layers — entity attach list and agent scope.
+    /// Idempotent at both entity-attach-list and agent-scope layers.
     #[instrument(name = "domain.agent.detach_sandbox", skip(self, subject))]
     pub async fn detach_sandbox(
         &self,
@@ -553,7 +519,6 @@ impl Agents {
 
         let mut op = self.repo.begin_op().await?;
 
-        // Symmetric with attach: agent side first, then sandbox side.
         let mut agent = self.repo.find_by_id_in_op(&mut op, agent_id).await?;
         if agent.sandbox_detached(sandbox_id).did_execute() {
             self.repo.update_in_op(&mut op, &mut agent).await?;
@@ -564,7 +529,6 @@ impl Agents {
             .detach_from_agent_in_op(&mut op, sandbox_id, agent_id)
             .await?;
 
-        // Notify the agent's session so the LLM knows a sandbox was detached.
         self.sessions
             .sandbox_notification_in_op(
                 &mut op,
@@ -653,9 +617,7 @@ impl Agents {
             .await?)
     }
 
-    /// Export a thread of the given agent as Pi-compatible JSONL (v3 format).
-    ///
-    /// When `thread_id` is `None`, the current main thread is exported.
+    /// Export a thread as Pi-compatible JSONL (v3). `None` exports main thread.
     #[instrument(name = "domain.agent.export_thread", skip(self, sub))]
     pub async fn export_thread(
         &self,
@@ -687,10 +649,7 @@ impl Agents {
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
-        // Authorization: user and exported agents may always send. Another
-        // agent may only message a peer in its own workspace (whether
-        // unattributed `Agent` or `AgentOnBehalfOfUser`). Anonymous is
-        // rejected.
+        // Agents may only message peers in their own workspace; anonymous rejected.
         match &subject {
             AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
             AuthSubject::Agent(ws, _, _) | AuthSubject::AgentOnBehalfOfUser(_, ws, _, _)
@@ -705,22 +664,14 @@ impl Agents {
         let source = subject.to_message_source();
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
 
-        // Attribute the agent's tool calls to the originating user when one
-        // is available — direct `User`, an `ExportedAgent` token, or a peer
-        // `AgentOnBehalfOfUser`. Otherwise fall back to an unattributed
-        // `Agent` subject.
+        // Attribute tool calls to the originating user if available.
         let agent_subject = match subject.originating_user_id() {
             Some(user_id) => agent.auth_subject_for_user(user_id),
             None => agent.auth_subject(),
         };
 
-        // Build the current proposed system blocks for this workspace. The
-        // cache makes this cheap: a 1ns atomic compare against the global
-        // `ContextGeneration`; a DB fetch only happens when the counter
-        // has bumped (via Notes/Skills mutations or PG NOTIFY from a peer).
-        // We pass the blocks into `add_user_input` so the diff + user-input
-        // event share a single session repo round-trip. Lazy refresh in
-        // `next_prompt` then spawns a fresh thread if any kind changed.
+        // Pass blocks into `add_user_input` so diff + user-input share a single
+        // repo round-trip; `next_prompt` later spawns a new thread if changed.
         let dynamic_blocks = self.cached_dynamic_blocks(agent.workspace_id).await;
         let mut proposed_system_blocks = system_prompt::system_blocks_for_role(
             agent.agent_role,
@@ -744,9 +695,8 @@ impl Agents {
         match session_response {
             session::AgentSessionResponse::PromptPending { .. } => {}
             other => {
-                // Session is not ready for a new prompt — thread is stuck in
-                // an assistant or tool-use turn. Send a Service event so the
-                // caller sees *something* instead of an empty stream.
+                // Thread stuck in assistant/tool-use turn; emit a Service event
+                // so the caller doesn't see an empty stream.
                 let msg = match other {
                     session::AgentSessionResponse::AwaitingToolUsageComplete => {
                         "Message queued — session is waiting for tool results that will never arrive. Consider creating a new workspace."
@@ -808,23 +758,20 @@ impl Agents {
                             .await;
                         return;
                     }
-                    Err(_) => return, // executor dropped the response channel
+                    Err(_) => return,
                 };
 
                 let (response, streamed) = match result {
-                    llm::PromptResult::Stream(handle) => {
-                        match consume_stream(handle, &tx).await {
-                            Some(resp) => (resp, true),
-                            None => return, // stream error — already sent to UI
-                        }
-                    }
+                    llm::PromptResult::Stream(handle) => match consume_stream(handle, &tx).await {
+                        Some(resp) => (resp, true),
+                        None => return,
+                    },
                     llm::PromptResult::Complete(response) => (response, false),
                 };
 
                 input_tokens += response.usage.input_tokens;
                 output_tokens += response.usage.output_tokens;
 
-                // Persist the complete response to the session.
                 let session_response = match sessions
                     .assistant_response_received(id, response.clone(), current_model.clone())
                     .await
@@ -840,8 +787,6 @@ impl Agents {
                     }
                 };
 
-                // For the Complete path, forward full blocks to UI (streaming
-                // path already forwarded deltas during consumption).
                 if !streamed {
                     forward_response(response, &tx).await;
                 }
@@ -925,9 +870,8 @@ impl Agents {
     }
 }
 
-/// Drain a streaming LLM response, forwarding deltas to the UI channel and
-/// accumulating the final [`llm::PromptResponse`]. Returns `None` if the
-/// stream errors — the error is already sent on `tx`.
+/// Drain a streaming LLM response, forwarding deltas and accumulating the
+/// final response. Returns `None` on stream error (already sent on `tx`).
 async fn consume_stream(
     handle: llm::StreamHandle,
     tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
@@ -948,7 +892,7 @@ async fn consume_stream(
                         message: e.to_string(),
                     })
                     .await;
-                return None; // never persist partial
+                return None;
             }
         }
     }
@@ -1010,7 +954,6 @@ async fn fan_out_tool_calls(
     let outcomes = futures::future::join_all(dispatches).await;
     let mut results = Vec::with_capacity(outcomes.len());
     for (name, result) in outcomes {
-        // Truncate content to keep the stream lightweight.
         const MAX_CONTENT_LEN: usize = 4096;
         let content = if result.content.is_empty() {
             None

@@ -4,15 +4,10 @@ use rmcp::model::JsonObject;
 
 use super::error::ToolSetsError;
 
-/// Serde helpers for liberal deserialization of MCP tool arguments.
-///
-/// Agents sometimes send values in unexpected representations — e.g.
-/// `"20"` instead of `20` for an integer field. These helpers accept
-/// both native JSON types and their stringified equivalents.
+/// Liberal deserialization helpers — agents sometimes send `"20"` instead of `20`.
 mod liberal {
     use serde::Deserialize;
 
-    /// Deserialize an `i64` from either a JSON number or a string like `"20"`.
     pub(crate) fn deserialize_i64<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<i64, D::Error> {
@@ -28,7 +23,6 @@ mod liberal {
         }
     }
 
-    /// Deserialize an `Option<i64>` from a JSON number, string, or null.
     pub(crate) fn deserialize_option_i64<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<i64>, D::Error> {
@@ -47,11 +41,7 @@ mod liberal {
     }
 }
 
-/// Deserialize tool arguments into a typed params struct.
-///
-/// Converts the raw `Option<JsonObject>` from [`TopLevelTool::call`] into `T`.
-/// Missing arguments are treated as an empty object (suitable for tools with
-/// all-optional fields).
+/// Missing arguments are treated as an empty object.
 pub(super) fn parse_params<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
 ) -> Result<T, ToolSetsError> {
@@ -59,17 +49,11 @@ pub(super) fn parse_params<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))
 }
 
-/// Derive a JSON Schema from a params struct that implements [`schemars::JsonSchema`].
-///
-/// Uses draft-07, inlines sub-schemas, and strips `title`/`$schema` to match
-/// the shape expected by MCP tool `input_schema`. Adds
-/// `additionalProperties: false` so the schema rejects unknown fields without
-/// needing `#[serde(deny_unknown_fields)]` (which conflicts with `#[serde(flatten)]`).
-///
-/// `definitions` is **kept** so that downstream consumers (notably the
-/// `compose` TypeScript declaration generator) can resolve `$ref`s for
-/// recursive types — schemars 0.8 still falls back to `$ref` for recursive
-/// shapes even with `inline_subschemas=true`.
+/// Draft-07, inlined sub-schemas, `additionalProperties: false` (avoids
+/// `#[serde(deny_unknown_fields)]` which conflicts with `#[serde(flatten)]`).
+/// `definitions` is **kept** so the compose TS generator can resolve `$ref`s
+/// for recursive shapes (schemars 0.8 falls back to `$ref` even with
+/// `inline_subschemas=true`).
 pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.inline_subschemas = true;
@@ -88,36 +72,24 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
-// ---------------------------------------------------------------------------
-// Shared output shape structs
-//
-// Dual-purpose: schemars derives the JSON Schema for `output_schema()`,
-// serde::Serialize produces `structured_content` at call time.
-// Re-used across tools that share the same output shape.
-// ---------------------------------------------------------------------------
+// Shared output structs: schemars derives `output_schema()`, serde::Serialize
+// produces `structured_content` at call time.
 
-/// Single `output` string — used by bash, grep, text_editor.
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(super) struct TextOutput {
-    /// Tool output text.
     pub output: String,
 }
 
-/// File content string — used by read.
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(super) struct ContentOutput {
-    /// File content (with line numbers if applicable).
     pub content: String,
 }
 
-/// Array of file paths — used by glob.
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(super) struct FilesOutput {
-    /// Matching file paths.
     pub files: Vec<String>,
 }
 
-/// Array of directory entries — used by ls.
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(super) struct EntriesOutput {
     /// Directory entries (directories have trailing '/').

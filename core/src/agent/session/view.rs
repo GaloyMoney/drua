@@ -6,10 +6,6 @@ use crate::agent::config::ModelDefaults;
 
 use super::{entity::AgentSessionEvent, error::AgentSessionError, message::*};
 
-// ============================================================================
-// Index types
-// ============================================================================
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SystemBlockIndex(usize);
 
@@ -22,8 +18,7 @@ impl SystemBlockIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolDefinitionIndex(usize);
 
-/// A unified index that increments across all message block types
-/// (user messages, assistant blocks, and tool results).
+/// Increments across all message block types (user, assistant, tool results).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MessageBlockIndex(usize);
 
@@ -36,10 +31,6 @@ impl MessageBlockIndex {
         self.0
     }
 }
-
-// ============================================================================
-// View types (persisted on threads)
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemView {
@@ -76,19 +67,13 @@ pub struct ToolResultsView {
     pub(super) indexes: Vec<MessageBlockIndex>,
 }
 
-// ============================================================================
-// MaterializedSession
-// ============================================================================
-
 #[derive(Debug)]
 pub(super) struct MaterializedSession<'a> {
     model_defaults: &'a ModelDefaults,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
-    /// For each kind ever pushed, the index of its most-recent block in
-    /// `system_blocks`. Used to resolve "latest content for kind X" without
-    /// scanning the flat list, and to detect stale views (a thread's
-    /// SystemView referencing an idx that's no longer the latest of its kind).
+    /// Per kind, the index of its most-recent block. Resolves latest-for-kind
+    /// in O(1) and detects stale views.
     latest_idx_by_kind: std::collections::HashMap<SystemBlockKind, SystemBlockIndex>,
     tool_defs: Vec<&'a ToolDefinition>,
     tool_breakpoints: Vec<ToolDefinitionIndex>,
@@ -114,9 +99,6 @@ impl<'a> MaterializedSession<'a> {
         }
     }
 
-    /// Push the initial set of system blocks (from the `Initialized` event).
-    /// Records a breakpoint and tracks the index of each kind so subsequent
-    /// updates can substitute by kind.
     pub fn push_system_blocks(&mut self, blocks: impl Iterator<Item = &'a SystemBlock>) {
         self.system_breakpoints
             .push(SystemBlockIndex(self.system_blocks.len()));
@@ -127,22 +109,16 @@ impl<'a> MaterializedSession<'a> {
         }
     }
 
-    /// Push a single block update (from a `SystemBlockUpdated` event).
-    /// Appends to the flat list and updates the kind→idx mapping so the
-    /// next view build sees this as the latest content for that kind.
     pub fn push_updated_system_block(&mut self, block: &'a SystemBlock) {
         let idx = SystemBlockIndex(self.system_blocks.len());
         self.system_blocks.push(block);
         self.latest_idx_by_kind.insert(block.kind(), idx);
     }
 
-    /// The most-recent idx for a given kind, or `None` if no block of that
-    /// kind has been pushed.
     pub fn latest_idx_for_kind(&self, kind: SystemBlockKind) -> Option<SystemBlockIndex> {
         self.latest_idx_by_kind.get(&kind).copied()
     }
 
-    /// The most-recent block for a given kind, if any.
     pub fn latest_block_of_kind(&self, kind: SystemBlockKind) -> Option<&'a SystemBlock> {
         self.latest_idx_by_kind
             .get(&kind)
@@ -167,11 +143,7 @@ impl<'a> MaterializedSession<'a> {
         self.block_count += count;
     }
 
-    /// Returns the assistant block indexes from the most recent
-    /// `push_assistant_blocks` call.
-    ///
-    /// **Invariant**: must be called before any subsequent `push_*` call
-    /// that would advance `block_count`.
+    /// Must be called before any subsequent `push_*` advances `block_count`.
     pub fn assistant_blocks_since_last_breakpoint(&self) -> AssistantMessageView {
         let start = self
             .assistant_breakpoints
@@ -189,11 +161,7 @@ impl<'a> MaterializedSession<'a> {
         self.block_count += count;
     }
 
-    /// Returns the tool result indexes from the most recent
-    /// `push_tool_results` call.
-    ///
-    /// **Invariant**: must be called before any subsequent `push_*` call
-    /// that would advance `block_count`.
+    /// Must be called before any subsequent `push_*` advances `block_count`.
     pub fn tool_results_since_last_breakpoint(&self) -> ToolResultsView {
         let start = self
             .tool_result_breakpoints
@@ -244,19 +212,11 @@ impl<'a> MaterializedSession<'a> {
     }
 }
 
-// ============================================================================
-// BlockContent (used internally for prompt resolution)
-// ============================================================================
-
 enum BlockContent {
     UserText(String),
     AssistantBlock(AssistantBlock),
     ToolResult(ToolResultInput),
 }
-
-// ============================================================================
-// PromptDefinition
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -278,10 +238,6 @@ pub struct PromptDefinition {
 }
 
 impl PromptDefinition {
-    /// Construct a `PromptDefinition` for a freshly-spawned context-refreshed
-    /// thread. The thread inherits the prior thread's `messages` verbatim;
-    /// the `next_prompt` scan-back appends any pending UserInputAdded
-    /// events on top.
     pub(super) fn for_refreshed_thread(
         model_defaults: ModelDefaults,
         system_view: SystemView,
@@ -302,8 +258,6 @@ impl PromptDefinition {
         &self.system_view
     }
 
-    /// Read-only access to the prompt's message views. Used by tests and
-    /// by callers that need to inherit history (e.g. context refresh).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn messages(&self) -> &[MessageView] {
         &self.messages
@@ -439,7 +393,7 @@ impl PromptDefinition {
             }
         }
 
-        // Merge consecutive User messages (e.g. tool results followed by user text)
+        // Merge consecutive User messages (tool results + user text).
         let mut merged: Vec<Message> = Vec::new();
         for msg in messages {
             match msg {

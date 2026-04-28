@@ -18,13 +18,6 @@ use super::view::*;
 use prune::{build_pruning_plan, PruningPlan};
 use trigger::CompactionAction;
 
-/// Returns true if the given event belongs to (was produced on) the specified thread.
-///
-/// Events with an explicit `thread_id` field match directly.
-/// Events with a `target: TargetThread` field match if:
-/// - `TargetThread::Main` — matches only when `is_main_thread` is true
-/// - `TargetThread::Id(id)` — matches when `id == thread_id`
-///
 /// Global events (Initialized, ToolDefsUpdated, etc.) return `false`.
 pub(super) fn event_belongs_to_thread(
     event: &AgentSessionEvent,
@@ -42,10 +35,8 @@ pub(super) fn event_belongs_to_thread(
             TargetThread::Id(id) => *id == thread_id,
         },
 
-        // CompactionApplied belongs to the source thread
         AgentSessionEvent::CompactionApplied { from_thread_id, .. } => *from_thread_id == thread_id,
 
-        // Global events don't belong to any specific thread
         AgentSessionEvent::Initialized { .. }
         | AgentSessionEvent::ToolDefsUpdated { .. }
         | AgentSessionEvent::SystemBlockUpdated { .. }
@@ -54,24 +45,14 @@ pub(super) fn event_belongs_to_thread(
     }
 }
 
-/// The result of applying compaction to a session.
 pub(super) struct CompactionResult {
-    /// Events to push to the session entity.
     pub events: Vec<AgentSessionEvent>,
-    /// New compacted thread entity to add.
     pub new_thread: NewSessionThread,
-    /// The new thread's id (for tracking).
     pub new_thread_id: SessionThreadId,
-    /// The prompt definition built for the new compacted thread (with metadata).
     pub prompt_definition: PromptDefinition,
 }
 
-/// Attempt pruning compaction. Returns `None` if no compaction is needed or
-/// the pruning plan is empty.
-///
-/// This function is pure: it reads the event stream and config, builds a
-/// pruning plan, and returns the events + new thread that the caller must
-/// apply to the session entity.
+/// Pure: returns `None` if no compaction is needed or the plan is empty.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn maybe_prune(
     events: &EntityEvents<AgentSessionEvent>,
@@ -127,13 +108,10 @@ pub(super) fn maybe_prune(
 
     let new_thread_id = SessionThreadId::new();
 
-    // Compute the current total block count so we know where masked
-    // replacement blocks will land in the global content list.
+    // ToolResultsMasked is emitted before CompactionApplied, so its blocks
+    // start at `current_block_count`.
     let current_block_count = count_blocks(events.iter_all());
 
-    // Build original→replacement index mapping for masked tool results.
-    // The ToolResultsMasked event is emitted first (before CompactionApplied),
-    // so its blocks start at `current_block_count`.
     let mask_remap: HashMap<MessageBlockIndex, MessageBlockIndex> = plan
         .masked_tool_results
         .iter()
@@ -146,9 +124,6 @@ pub(super) fn maybe_prune(
         })
         .collect();
 
-    // Transform the current thread's message views to apply the pruning plan.
-    // This remaps masked tool result indexes so that `into_prompt()` resolves
-    // to the masked replacement content.
     let transformed_messages =
         transform_message_views(&current_prompt_definition.messages, &plan, &mask_remap);
 
@@ -163,7 +138,6 @@ pub(super) fn maybe_prune(
     let system_view = current_prompt_definition.system_view().clone();
     let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
 
-    // Build the PromptDefinition for the compacted thread
     let prompt_definition = PromptDefinition {
         model: model_defaults.model.clone(),
         max_tokens_per_response: model_defaults.max_tokens_per_response,
@@ -173,7 +147,6 @@ pub(super) fn maybe_prune(
         compaction: Some(compaction_metadata),
     };
 
-    // Build the new compacted thread
     let new_thread = NewSessionThread::compacted(
         new_thread_id,
         session_id,
@@ -184,7 +157,6 @@ pub(super) fn maybe_prune(
         current_thread_id,
     );
 
-    // Build session-level events
     let masked_indexes: Vec<MessageBlockIndex> = plan
         .masked_tool_results
         .iter()
@@ -196,8 +168,8 @@ pub(super) fn maybe_prune(
 
     let mut session_events = Vec::new();
 
-    // Emit masked tool results into the main event stream first so they
-    // participate in block indexing and can be shared across threads.
+    // Emit masked tool results first so they participate in block indexing
+    // and can be shared across threads.
     if !plan.masked_tool_results.is_empty() {
         session_events.push(AgentSessionEvent::ToolResultsMasked {
             results: plan.masked_tool_results,
@@ -227,8 +199,7 @@ pub(super) fn maybe_prune(
     })
 }
 
-/// Compute duration since the last assistant response on a specific thread.
-/// Falls back to Duration::ZERO when no assistant response has been persisted yet.
+/// `Duration::ZERO` if no assistant response has been persisted yet.
 fn time_since_last_response_on_thread(
     events: &EntityEvents<AgentSessionEvent>,
     thread_id: SessionThreadId,
@@ -253,12 +224,8 @@ fn time_since_last_response_on_thread(
     }
 }
 
-/// Build an orphan result: a brand-new thread with only the pending user
-/// messages (no conversation carry-over). Used when idle time exceeds the
-/// configured reset threshold.
-///
-/// If a sandbox is currently attached, its notification is preserved as the
-/// first message so the agent knows about its sandbox environment.
+/// Brand-new thread with only pending user messages; preserves the active
+/// sandbox notification (if any) as the first message.
 fn build_orphan_result<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     session_id: super::AgentSessionId,
@@ -271,12 +238,9 @@ fn build_orphan_result<'a>(
     let system_view = current_prompt_definition.system_view().clone();
     let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
 
-    // Only carry forward user messages that arrived after the last PromptSent
-    // for this thread — not the entire conversation history.
+    // Only carry forward user messages after the last PromptSent for this thread.
     let pending = pending_user_message_indexes(events.clone(), current_thread_id, is_main_thread);
 
-    // If a sandbox is currently attached, prepend its notification so the
-    // orphan thread's LLM knows about the sandbox mount.
     let sandbox_idx = last_active_sandbox_attach_index(events);
     let mut all_indexes = Vec::new();
     if let Some(idx) = sandbox_idx {
@@ -320,15 +284,12 @@ fn build_orphan_result<'a>(
     })
 }
 
-/// Collect block indexes for user messages that arrived after the last
-/// `PromptSent` for the given thread. These are the "pending" inputs that
-/// should carry over to an orphan thread.
+/// Block indexes for user messages after the last `PromptSent`.
 fn pending_user_message_indexes<'a>(
     events: impl DoubleEndedIterator<Item = &'a AgentSessionEvent> + Clone,
     thread_id: SessionThreadId,
     is_main_thread: bool,
 ) -> Vec<MessageBlockIndex> {
-    // First pass: count total blocks across all events
     let total_blocks = events.clone().fold(0usize, |acc, e| match e {
         AgentSessionEvent::UserInputAdded { .. }
         | AgentSessionEvent::SandboxNotificationAdded { .. } => acc + 1,
@@ -338,8 +299,7 @@ fn pending_user_message_indexes<'a>(
         _ => acc,
     });
 
-    // Second pass: scan backwards, collecting indexes until we hit the last
-    // PromptSent for this thread.
+    // Scan backwards, collecting indexes until the last PromptSent.
     let mut block_counter = total_blocks;
     let mut pending = Vec::new();
     for event in events.rev() {
@@ -372,16 +332,11 @@ fn pending_user_message_indexes<'a>(
     pending
 }
 
-/// Find the block index of the last sandbox attach notification that is still
-/// active (not followed by a detach for the same sandbox). Returns `None` if
-/// no sandbox is currently attached.
+/// Last sandbox attach not followed by a detach.
 fn last_active_sandbox_attach_index<'a>(
     events: impl Iterator<Item = &'a AgentSessionEvent> + Clone,
 ) -> Option<MessageBlockIndex> {
-    // Forward scan: track attach/detach state per sandbox name and assign
-    // block indexes.
     let mut block_counter = 0usize;
-    // sandbox_name → block index of last Attach
     let mut attached: HashMap<String, MessageBlockIndex> = HashMap::new();
 
     for event in events {
@@ -418,12 +373,10 @@ fn last_active_sandbox_attach_index<'a>(
         }
     }
 
-    // Return the most recently attached sandbox's block index.
-    // (Typically there is at most one active sandbox.)
+    // Typically at most one active sandbox.
     attached.into_values().max()
 }
 
-/// Count the total number of content blocks in the event stream.
 fn count_blocks<'a>(events: impl Iterator<Item = &'a AgentSessionEvent>) -> usize {
     events.fold(0usize, |acc, e| match e {
         AgentSessionEvent::UserInputAdded { .. }
@@ -435,10 +388,8 @@ fn count_blocks<'a>(events: impl Iterator<Item = &'a AgentSessionEvent>) -> usiz
     })
 }
 
-/// Transform message views by applying the pruning plan:
-/// - Filter out stripped user messages from User views
-/// - Filter out cleared thinking blocks from Assistant views
-/// - Remap masked tool result indexes to their replacement indexes
+/// Filters stripped user messages and cleared thinking blocks; remaps
+/// masked tool result indexes to their replacements.
 fn transform_message_views(
     messages: &[MessageView],
     plan: &PruningPlan,
@@ -476,7 +427,6 @@ fn transform_message_views(
                 }
             }
             MessageView::ToolResults(tool_results_view) => {
-                // Remap masked tool result indexes to their replacement indexes.
                 let remapped: Vec<MessageBlockIndex> = tool_results_view
                     .indexes
                     .iter()

@@ -7,10 +7,6 @@ use crate::code_assistant::{CodeAssistant, SearchCodeParams};
 
 use super::super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn parse_params<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
 ) -> Result<T, ToolSetsError> {
@@ -28,8 +24,7 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
-        // Note: `definitions` intentionally retained for $ref resolution
-        // by the compose TS generator.
+        // `definitions` retained for $ref resolution by the compose TS generator.
         obj.insert(
             "additionalProperties".into(),
             serde_json::Value::Bool(false),
@@ -38,16 +33,8 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
-// ---------------------------------------------------------------------------
-// Schema
-// ---------------------------------------------------------------------------
-
 static SEARCH_CODE_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<SearchCodeParams>);
-
-// ---------------------------------------------------------------------------
-// Toolset
-// ---------------------------------------------------------------------------
 
 pub struct CodeAssistantToolSet {
     service: Arc<CodeAssistant>,

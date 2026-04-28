@@ -1,17 +1,10 @@
-//! Stream accumulator for Anthropic SSE events.
-//!
-//! Adapted from the Pi agent crate's `StreamState`. Processes streaming events
-//! one at a time and accumulates text blocks, tool calls, thinking blocks, and
-//! usage statistics into a final result that can be converted to `PromptResponse`.
+//! Stream accumulator for Anthropic SSE events: collects text, tool calls,
+//! thinking blocks, and usage into a final response.
 
 use crate::types::{
     AnthropicContentBlock, AnthropicDelta, AnthropicDeltaUsage, AnthropicMessageDelta,
     AnthropicMessageStart, AnthropicStopReason, AnthropicStreamEvent,
 };
-
-// ============================================================================
-// Accumulated content blocks (Pi-style internal types)
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub(crate) enum AccumulatedBlock {
@@ -45,7 +38,6 @@ pub(crate) struct AccumulatedUsage {
     pub cache_write_tokens: u64,
 }
 
-/// Final accumulated result from processing a complete SSE stream.
 #[derive(Debug)]
 pub(crate) struct AccumulatedResponse {
     pub content: Vec<AccumulatedBlock>,
@@ -53,25 +45,14 @@ pub(crate) struct AccumulatedResponse {
     pub stop_reason: Option<AccumulatedStopReason>,
 }
 
-// ============================================================================
-// Stream Accumulator
-// ============================================================================
-
-/// Stateful accumulator that processes `AnthropicStreamEvent`s and builds up
-/// the final response. Mirrors the Pi agent crate's `StreamState` but without
-/// the async stream machinery — we just call `process_event` for each SSE
-/// event and then `finish` to get the result.
 pub(crate) struct StreamAccumulator {
     content: Vec<AccumulatedBlock>,
     usage: AccumulatedUsage,
     stop_reason: Option<AccumulatedStopReason>,
-    /// Buffer for tool-call JSON arguments being streamed incrementally.
     current_tool_json: String,
     current_tool_id: Option<String>,
     current_tool_name: Option<String>,
-    /// Set to true once we've seen `MessageStop` or `Error`.
     done: bool,
-    /// Error message from the API, if any.
     error_message: Option<String>,
 }
 
@@ -89,13 +70,11 @@ impl StreamAccumulator {
         }
     }
 
-    /// Returns true if the stream is complete (MessageStop or Error received).
     pub fn is_done(&self) -> bool {
         self.done
     }
 
-    /// Process a single SSE event's JSON data. Returns an error string if the
-    /// API sent an error event.
+    /// Returns an error string for `error` events; otherwise `Ok(())`.
     pub fn process_event(&mut self, data: &str) -> Result<(), String> {
         let event: AnthropicStreamEvent = serde_json::from_str(data)
             .map_err(|e| format!("JSON parse error: {e}\nData: {data}"))?;
@@ -133,7 +112,6 @@ impl StreamAccumulator {
         Ok(())
     }
 
-    /// Consume the accumulator and return the final response.
     pub fn finish(self) -> AccumulatedResponse {
         AccumulatedResponse {
             content: self.content,
@@ -226,7 +204,6 @@ impl StreamAccumulator {
             ref mut arguments, ..
         }) = self.content.get_mut(idx)
         {
-            // Parse the accumulated JSON string into a Value.
             *arguments = match serde_json::from_str(&self.current_tool_json) {
                 Ok(args) => args,
                 Err(e) => {

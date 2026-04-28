@@ -32,7 +32,6 @@ impl Query {
         ctx.data_unchecked::<AppConfigYaml>().0.clone()
     }
 
-    /// The currently authenticated user, if any.
     async fn me(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Me>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         match sub.originating_user_id() {
@@ -49,7 +48,6 @@ impl Query {
         }
     }
 
-    /// Look up a single agent by ID.
     async fn agent(&self, ctx: &Context<'_>, id: AgentId) -> async_graphql::Result<Option<Agent>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         match app.agents().find_by_id(sub, id).await {
@@ -92,9 +90,8 @@ impl Query {
         )
     }
 
-    /// Export a thread as Pi-compatible JSONL (v3 format).
-    ///
-    /// When `thread_id` is omitted the current main thread is exported.
+    /// Pi-compatible JSONL (v3). When `thread_id` is omitted the current
+    /// main thread is exported.
     async fn export_thread(
         &self,
         ctx: &Context<'_>,
@@ -106,9 +103,6 @@ impl Query {
         Ok(jsonl)
     }
 
-    // ── Sandbox ─────────────────────────────────────────────────────────
-
-    /// Look up a single sandbox by ID.
     async fn sandbox(
         &self,
         ctx: &Context<'_>,
@@ -122,9 +116,6 @@ impl Query {
         }
     }
 
-    // ── Audit Log ───────────────────────────────────────────────────────
-
-    /// Query audit log entries.
     async fn audit_log(
         &self,
         ctx: &Context<'_>,

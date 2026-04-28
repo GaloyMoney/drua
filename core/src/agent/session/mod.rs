@@ -63,12 +63,8 @@ impl Sessions {
         Ok(session)
     }
 
-    /// Apply a fresh set of proposed system blocks (notes/skills/etc) and
-    /// record a user input in a single DB round-trip. The `proposed_system_blocks`
-    /// vec carries the caller's current view of the workspace context — any
-    /// kind that differs from what's persisted is recorded as a
-    /// `SystemBlockUpdated` event. Thread refresh happens lazily in
-    /// `next_prompt`.
+    /// Diffs proposed blocks against persisted; differing kinds emit
+    /// `SystemBlockUpdated`. Thread refresh happens lazily in `next_prompt`.
     #[instrument(
         name = "domain.agent_session.add_user_input",
         skip(self, prompt, proposed_system_blocks)

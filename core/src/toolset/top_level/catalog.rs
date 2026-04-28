@@ -22,10 +22,6 @@ use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::schema_for;
 
-// ---------------------------------------------------------------------------
-// CatalogEntry (shared data shape)
-// ---------------------------------------------------------------------------
-
 pub struct CatalogEntry {
     pub prefixed_name: String,
     pub upstream_name: String,
@@ -36,10 +32,6 @@ pub struct CatalogEntry {
     pub default_output_filter: Option<OutputFilter>,
 }
 
-// ---------------------------------------------------------------------------
-// search_tools
-// ---------------------------------------------------------------------------
-
 pub struct SearchCatalog {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
 }
@@ -49,9 +41,6 @@ impl SearchCatalog {
         Self { sets }
     }
 
-    /// Run the catalog search under the caller's subject. The read lock is
-    /// held only for the synchronous scan and is dropped before this
-    /// method returns.
     fn execute_search(
         &self,
         subject: &AuthSubject,
@@ -102,16 +91,12 @@ impl SearchCatalog {
         entries
     }
 
-    /// Normalize a string for fuzzy keyword matching: lowercase and
-    /// collapse underscores/hyphens into spaces so "search code",
+    /// Lowercase and collapse `_`/`-` into spaces so "search code",
     /// "search_code", and "search-code" all match each other.
     fn normalize(s: &str) -> String {
         s.to_lowercase().replace(['_', '-'], " ")
     }
 
-    /// Count how many `keywords` appear somewhere in `entry`'s searchable
-    /// text (tool name + upstream name + brief description). Used for
-    /// ranking search results.
     fn keyword_score(entry: &CatalogEntry, keywords: &[String]) -> usize {
         let haystack = [
             Self::normalize(&entry.tool_name),
@@ -125,7 +110,6 @@ impl SearchCatalog {
             .count()
     }
 
-    /// Format search results as text grouped by category.
     fn format_results(results: &[CatalogEntry]) -> String {
         if results.is_empty() {
             return "No tools found matching your query.".to_string();
@@ -160,44 +144,28 @@ static SEARCH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-// ---------------------------------------------------------------------------
-// Output shapes (schemars-derived, also used for serialization)
-// ---------------------------------------------------------------------------
-
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct SearchToolsOutput {
-    /// Matching tools.
     tools: Vec<SearchToolEntry>,
-    /// Number of tools returned.
     total: usize,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct SearchToolEntry {
-    /// Prefixed tool name for use with describe_tool / call_tool.
     name: String,
-    /// Tool category (e.g. "ci", "observability").
     category: String,
-    /// Brief description of the tool.
     description: String,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct DescribeToolOutput {
-    /// Prefixed tool name.
     name: String,
-    /// Upstream service name.
     upstream: String,
-    /// Tool category.
     category: String,
-    /// Full description of the tool.
     description: String,
-    /// JSON Schema for tool parameters.
     input_schema: serde_json::Value,
-    /// JSON Schema for tool output (if declared).
     #[serde(skip_serializing_if = "Option::is_none")]
     output_schema: Option<serde_json::Value>,
-    /// Default output filter description.
     default_output_filter: String,
 }
 
@@ -251,10 +219,6 @@ impl TopLevelTool for SearchCatalog {
     }
 }
 
-// ---------------------------------------------------------------------------
-// describe_tool
-// ---------------------------------------------------------------------------
-
 pub struct DescribeCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
 }
@@ -264,8 +228,6 @@ impl DescribeCatalogTool {
         Self { sets }
     }
 
-    /// Locate a single catalog entry by prefixed name, filtered by the
-    /// subject's visibility.
     fn execute_describe(&self, subject: &AuthSubject, prefixed_name: &str) -> Option<CatalogEntry> {
         let sets = self.sets.read().expect("toolset lock poisoned");
         visible_entries(subject, &sets)
@@ -273,7 +235,6 @@ impl DescribeCatalogTool {
             .find(|e| e.prefixed_name == prefixed_name)
     }
 
-    /// Format a catalog entry as a detailed markdown description.
     fn format_entry(entry: &CatalogEntry) -> String {
         let tool = &entry.full_tool;
         let description = tool
@@ -296,10 +257,8 @@ impl DescribeCatalogTool {
             .map(|s| format!("\n\n### Output schema\n```json\n{s}\n```"))
             .unwrap_or_default();
 
-        // Embed a TypeScript signature so agents writing `compose` scripts
-        // can read the typed shape directly here, without a follow-up
-        // `compose_types` round trip. `compose_types` remains useful for
-        // batch / prefix-glob lookups.
+        // Embed a TS signature so agents writing `compose` scripts can read the typed
+        // shape inline; `compose_types` remains useful for batch/prefix-glob lookups.
         let input_schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
         let input_ts = json_schema_ts::schema_to_ts_params(&input_schema_value);
         let output_ts = tool
@@ -405,13 +364,8 @@ impl TopLevelTool for DescribeCatalogTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// call_tool
-// ---------------------------------------------------------------------------
-
-/// The call-a-prefixed-tool meta-tool. Dispatches into the visible +
-/// executable `SearchableToolSet` for the caller and applies an optional
-/// output filter.
+/// Dispatches into the visible + executable `SearchableToolSet` for the
+/// caller and applies an optional output filter.
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
 }
@@ -421,11 +375,6 @@ impl CallCatalogTool {
         Self { sets }
     }
 
-    /// Look up the toolset backing `prefixed_name`, filtered by the
-    /// subject's visibility. Returns the Arc'd toolset, the inner tool
-    /// name with the prefix stripped, and the tool-specific default
-    /// output filter. Returns `None` if the tool is not known or hidden
-    /// from `subject`.
     fn find_set(
         &self,
         subject: &AuthSubject,
@@ -508,8 +457,8 @@ impl TopLevelTool for CallCatalogTool {
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
-        // Override the entrypoint-level action with the concrete upstream
-        // tool name. This is the terminal handler — no domain service involved.
+        // Override entrypoint action with the concrete upstream tool name —
+        // terminal handler, no domain service involved.
         Audit::record_action(format!("catalog: {}", tool_name));
 
         let result = set.call(subject, &name, inner_args).await;
@@ -520,13 +469,6 @@ impl TopLevelTool for CallCatalogTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Enumerate every [`CatalogEntry`] exposed by the toolsets that
-/// `subject` can see. Toolsets whose `is_visible(subject)` returns
-/// `false` are skipped entirely.
 fn visible_entries(
     subject: &AuthSubject,
     sets: &[Arc<dyn SearchableToolSet>],
@@ -564,10 +506,6 @@ fn first_sentence(s: &str) -> String {
         .unwrap_or_else(|| s.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use rmcp::model::{CallToolResult, JsonObject};
@@ -602,8 +540,6 @@ mod tests {
             }
         }
 
-        /// Build a stub with explicit input/output JSON Schemas, used to
-        /// exercise the TypeScript signature embed in `describe_tool`.
         fn with_typed_tool(
             name: &str,
             description: &str,
@@ -732,9 +668,6 @@ mod tests {
 
     #[test]
     fn describe_tool_includes_ts_signature() {
-        // Tool with both an input and output schema; describe_tool's
-        // formatted output should embed the TypeScript signature so
-        // agents writing compose scripts get the typed shape inline.
         let stub = StubToolSet::with_typed_tool(
             "list_envs",
             "List environments.",
@@ -772,7 +705,6 @@ mod tests {
             formatted.contains("function list_envs(args: {"),
             "missing function declaration in:\n{formatted}"
         );
-        // Required fields render without `?`, optional fields with `?`.
         assert!(
             formatted.contains("name: string"),
             "missing required string param in:\n{formatted}"
@@ -781,7 +713,6 @@ mod tests {
             formatted.contains("limit?: number"),
             "missing optional number param in:\n{formatted}"
         );
-        // Output schema → inline object type with `Promise<...>` wrapper.
         assert!(
             formatted.contains("Promise<{"),
             "missing Promise wrapper in:\n{formatted}"
