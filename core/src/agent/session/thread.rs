@@ -1,10 +1,3 @@
-// `SessionThread` append commands (`add_user_message`, `add_assistant_message`,
-// `add_assistant_tool_use`, `add_tool_results`) are intentionally not
-// `Idempotent<…>`: the parent `AgentSession` enforces turn ordering via the
-// `turn: NextTurn` field before invoking these. Adding redundant guards here
-// would obscure that the public boundary for replay safety is `AgentSession`,
-// not this nested entity.
-
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 

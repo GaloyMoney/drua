@@ -1,12 +1,3 @@
-// Append commands on `AgentSession` (`add_user_input`, `add_sandbox_notification`,
-// `next_prompt`, `add_tool_results`, `assistant_response_received`) are
-// intrinsically non-idempotent: each call advances the conversation by one
-// turn. Replay safety lives at the prompt-executor layer (`cache_key` plus the
-// per-thread `turn` state machine), not in the entity. State-replacing
-// commands (`update_tool_definitions`, `push_system_block`,
-// `apply_proposed_system_blocks`) DO short-circuit when the new value matches
-// the current one.
-
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
