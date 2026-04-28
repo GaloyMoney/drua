@@ -131,6 +131,23 @@
 </section>
 
 <section>
+  <h4>Sandboxes</h4>
+  {% if workflow.sandboxes.is_empty() %}
+  <p><em>No sandboxes declared. Steps cannot reference a sandbox.</em></p>
+  {% else %}
+  <ul>
+    {% for sb in workflow.sandboxes %}
+    <li>
+      <strong>{{ sb.name }}</strong> — <code>{{ sb.kind }}</code>
+      {% match sb.repo_url %}{% when Some(u) %} <code>{{ u }}</code>{% match sb.branch %}{% when Some(b) %}@<code>{{ b }}</code>{% when None %}{% endmatch %}{% when None %}{% endmatch %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p><small>The executor brings these up before the first step and suspends them after the run.</small></p>
+  {% endif %}
+</section>
+
+<section>
   <h4>Steps</h4>
   {% if workflow.steps.is_empty() %}
   <p><em>No steps.</em></p>

@@ -6,10 +6,10 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::WorkflowDefinitionId;
-use crate::sandbox::SandboxAgentMode;
+use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
-    StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowStepDef,
-    WorkflowTrigger, Workflows,
+    StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
+    WorkflowStepDef, WorkflowTrigger, Workflows,
 };
 use crate::workspace::Workspaces;
 
@@ -35,6 +35,10 @@ enum WorkflowParams {
         sandbox_mode: Option<SandboxAgentMode>,
         #[serde(default)]
         timeout_seconds: Option<u64>,
+        /// Declared sandboxes for the workflow. The step's `sandbox`
+        /// (if set) must reference one of these by name.
+        #[serde(default)]
+        sandboxes: Vec<WorkflowSandboxParam>,
     },
     List,
     Get {
@@ -48,6 +52,68 @@ enum WorkflowParams {
     Runs {
         definition_id: WorkflowDefinitionId,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkflowSandboxParam {
+    Scratch {
+        name: String,
+        #[serde(default)]
+        cpu: Option<String>,
+        #[serde(default)]
+        memory: Option<String>,
+        #[serde(default)]
+        disk_size: Option<String>,
+    },
+    Repo {
+        name: String,
+        repo_url: String,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        cpu: Option<String>,
+        #[serde(default)]
+        memory: Option<String>,
+        #[serde(default)]
+        disk_size: Option<String>,
+    },
+}
+
+impl WorkflowSandboxParam {
+    fn into_decl(self) -> WorkflowSandboxDecl {
+        let (name, mode, cpu, memory, disk_size) = match self {
+            WorkflowSandboxParam::Scratch {
+                name,
+                cpu,
+                memory,
+                disk_size,
+            } => (name, SandboxMode::Scratch, cpu, memory, disk_size),
+            WorkflowSandboxParam::Repo {
+                name,
+                repo_url,
+                branch,
+                cpu,
+                memory,
+                disk_size,
+            } => (
+                name,
+                SandboxMode::Repo { repo_url, branch },
+                cpu,
+                memory,
+                disk_size,
+            ),
+        };
+        let specs = match (cpu, memory, disk_size) {
+            (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
+                cpu,
+                memory,
+                disk_size,
+            }),
+            _ => None,
+        };
+        WorkflowSandboxDecl { name, mode, specs }
+    }
 }
 
 impl WorkflowParams {
@@ -95,6 +161,24 @@ struct WorkflowDefinitionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_provider: Option<String>,
     steps: Vec<WorkflowStepOutput>,
+    sandboxes: Vec<WorkflowSandboxOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct WorkflowSandboxOutput {
+    name: String,
+    /// `"scratch"` or `"repo"`.
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_size: Option<String>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -188,7 +272,24 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "sandbox": {
                 "type": "string",
-                "description": "Optional sandbox name to attach to the agent step (create)."
+                "description": "Optional sandbox name to attach to the agent step (create). Must reference an entry in `sandboxes`."
+            },
+            "sandboxes": {
+                "type": "array",
+                "description": "Sandboxes declared by this workflow. Each entry has `kind` (scratch or repo) and a `name`; repo entries also take `repo_url` and optional `branch`. Optional `cpu`/`memory`/`disk_size` override defaults.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["scratch", "repo"] },
+                        "name": { "type": "string" },
+                        "repo_url": { "type": "string" },
+                        "branch": { "type": "string" },
+                        "cpu": { "type": "string" },
+                        "memory": { "type": "string" },
+                        "disk_size": { "type": "string" }
+                    },
+                    "required": ["kind", "name"]
+                }
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -259,6 +360,7 @@ impl TopLevelTool for WorkflowTool {
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                sandboxes,
             } => {
                 if !subject.can_write_workspace() {
                     return Err(ToolSetsError::Unauthorized);
@@ -289,6 +391,9 @@ impl TopLevelTool for WorkflowTool {
                     .map(|w| w.name)
                     .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
 
+                let sandbox_decls: Vec<WorkflowSandboxDecl> =
+                    sandboxes.into_iter().map(|s| s.into_decl()).collect();
+
                 let definition = self
                     .workflows
                     .create(
@@ -299,6 +404,7 @@ impl TopLevelTool for WorkflowTool {
                         description,
                         trigger,
                         vec![step],
+                        sandbox_decls,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -409,6 +515,33 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
         trigger_type,
         trigger_provider,
         steps: d.steps.iter().map(step_to_output).collect(),
+        sandboxes: d.sandboxes.iter().map(sandbox_to_output).collect(),
+    }
+}
+
+fn sandbox_to_output(d: &WorkflowSandboxDecl) -> WorkflowSandboxOutput {
+    let (kind, repo_url, branch) = match &d.mode {
+        SandboxMode::Scratch => ("scratch".to_string(), None, None),
+        SandboxMode::Repo { repo_url, branch } => {
+            ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+        }
+    };
+    let (cpu, memory, disk_size) = match &d.specs {
+        Some(s) => (
+            Some(s.cpu.clone()),
+            Some(s.memory.clone()),
+            Some(s.disk_size.clone()),
+        ),
+        None => (None, None, None),
+    };
+    WorkflowSandboxOutput {
+        name: d.name.clone(),
+        kind,
+        repo_url,
+        branch,
+        cpu,
+        memory,
+        disk_size,
     }
 }
 
@@ -566,6 +699,19 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
         out.push_str(&format!("description: {desc}\n"));
     }
     out.push_str(&format!("trigger:     {trigger}\n"));
+    if !d.sandboxes.is_empty() {
+        out.push_str(&format!("sandboxes:   {}\n", d.sandboxes.len()));
+        for sb in &d.sandboxes {
+            let kind = match &sb.mode {
+                SandboxMode::Scratch => "scratch".to_string(),
+                SandboxMode::Repo { repo_url, branch } => match branch {
+                    Some(b) => format!("repo({repo_url}@{b})"),
+                    None => format!("repo({repo_url})"),
+                },
+            };
+            out.push_str(&format!("  - {} kind={kind}\n", sb.name));
+        }
+    }
     out.push_str(&format!("steps:       {}\n", d.steps.len()));
     for step in &d.steps {
         match step {

@@ -10,7 +10,8 @@ use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
 use crate::workspace::Workspaces;
 
-use super::executor;
+use super::executor::Executor;
+use super::repo::WorkflowDefinitionRepo;
 use super::run::WorkflowRunRepo;
 use super::Workflows;
 
@@ -23,6 +24,7 @@ pub struct ExecuteRunConfig {
 
 pub struct ExecuteRunJobInitializer {
     runs: WorkflowRunRepo,
+    definitions: WorkflowDefinitionRepo,
     agents: Arc<Agents>,
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
@@ -31,12 +33,14 @@ pub struct ExecuteRunJobInitializer {
 impl ExecuteRunJobInitializer {
     pub fn new(
         runs: WorkflowRunRepo,
+        definitions: WorkflowDefinitionRepo,
         agents: Arc<Agents>,
         skills: Arc<Skills>,
         sandboxes: Arc<Sandboxes>,
     ) -> Self {
         Self {
             runs,
+            definitions,
             agents,
             skills,
             sandboxes,
@@ -57,21 +61,19 @@ impl JobInitializer for ExecuteRunJobInitializer {
         _spawner: JobSpawner<Self::Config>,
     ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
         let config: ExecuteRunConfig = job.config()?;
-        Ok(Box::new(ExecuteRunRunner {
-            runs: self.runs.clone(),
-            agents: Arc::clone(&self.agents),
-            skills: Arc::clone(&self.skills),
-            sandboxes: Arc::clone(&self.sandboxes),
-            config,
-        }))
+        let executor = Executor::new(
+            self.runs.clone(),
+            self.definitions.clone(),
+            Arc::clone(&self.agents),
+            Arc::clone(&self.skills),
+            Arc::clone(&self.sandboxes),
+        );
+        Ok(Box::new(ExecuteRunRunner { executor, config }))
     }
 }
 
 struct ExecuteRunRunner {
-    runs: WorkflowRunRepo,
-    agents: Arc<Agents>,
-    skills: Arc<Skills>,
-    sandboxes: Arc<Sandboxes>,
+    executor: Executor,
     config: ExecuteRunConfig,
 }
 
@@ -82,14 +84,7 @@ impl JobRunner for ExecuteRunRunner {
         &self,
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        executor::execute_run(
-            self.runs.clone(),
-            Arc::clone(&self.agents),
-            Arc::clone(&self.skills),
-            Arc::clone(&self.sandboxes),
-            self.config.run_id,
-        )
-        .await?;
+        self.executor.run(self.config.run_id).await?;
         Ok(JobCompletion::Complete)
     }
 }

@@ -17,7 +17,7 @@ use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
 
-pub use definition::{WorkflowStepDef, WorkflowTrigger};
+pub use definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
 pub use error::*;
 pub use job::{
@@ -35,7 +35,6 @@ pub struct Workflows {
     repo: WorkflowDefinitionRepo,
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
-    sandboxes: Arc<Sandboxes>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
 }
 
@@ -44,14 +43,12 @@ impl Workflows {
         pool: &sqlx::PgPool,
         library: Library,
         skills: Arc<Skills>,
-        sandboxes: Arc<Sandboxes>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new(pool, library),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
-            sandboxes,
             execute_run_spawner,
         }
     }
@@ -60,14 +57,12 @@ impl Workflows {
     pub fn new_without_library(
         pool: &sqlx::PgPool,
         skills: Arc<Skills>,
-        sandboxes: Arc<Sandboxes>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new_without_library(pool),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
-            sandboxes,
             execute_run_spawner,
         }
     }
@@ -78,7 +73,13 @@ impl Workflows {
         skills: Arc<Skills>,
         sandboxes: Arc<Sandboxes>,
     ) -> ExecuteRunJobInitializer {
-        ExecuteRunJobInitializer::new(WorkflowRunRepo::new(pool), agents, skills, sandboxes)
+        ExecuteRunJobInitializer::new(
+            WorkflowRunRepo::new(pool),
+            WorkflowDefinitionRepo::new_without_library(pool),
+            agents,
+            skills,
+            sandboxes,
+        )
     }
 
     fn generate_webhook_secret() -> String {
@@ -87,24 +88,21 @@ impl Workflows {
         format!("whsec_{}", hex::encode(bytes))
     }
 
-    /// Resolve `skill:` / `sandbox:` references at create time so the
-    /// operator gets immediate feedback rather than a runtime
-    /// `SkillNotFound` deep inside the executor. Skips sandbox-exported
-    /// skills — those resolve per attachment at run time.
+    /// Resolve `skill:` references and validate sandbox references
+    /// against the workflow's own declarations. Skill resolution skips
+    /// sandbox-exported skills — those resolve per attachment at run time.
     async fn validate_steps(
         &self,
-        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         steps: &[WorkflowStepDef],
+        sandboxes: &[WorkflowSandboxDecl],
     ) -> Result<(), WorkflowError> {
-        let sandbox_names: Vec<String> = self
-            .sandboxes
-            .list_for_workspace(sub, workspace_id)
-            .await
-            .map_err(|e| WorkflowError::Sandbox(e.to_string()))?
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let mut decl_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for decl in sandboxes {
+            if !decl_names.insert(decl.name.as_str()) {
+                return Err(WorkflowError::DuplicateSandboxName(decl.name.clone()));
+            }
+        }
 
         for step in steps {
             match step {
@@ -119,8 +117,8 @@ impl Workflows {
                     }
 
                     if let Some(sandbox_name) = sandbox {
-                        if !sandbox_names.iter().any(|n| n == sandbox_name) {
-                            return Err(WorkflowError::SandboxNotFound(sandbox_name.clone()));
+                        if !decl_names.contains(sandbox_name.as_str()) {
+                            return Err(WorkflowError::UndeclaredSandbox(sandbox_name.clone()));
                         }
                     }
                 }
@@ -142,6 +140,7 @@ impl Workflows {
         description: Option<String>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
+        sandboxes: Vec<WorkflowSandboxDecl>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         sub.can(AuthVerb::Create, AuthResource::Workflow(workspace_id, None))?;
 
@@ -151,7 +150,7 @@ impl Workflows {
             ));
         }
 
-        self.validate_steps(sub, workspace_id, &steps).await?;
+        self.validate_steps(workspace_id, &steps, &sandboxes).await?;
 
         let trigger = match trigger {
             WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
@@ -167,7 +166,8 @@ impl Workflows {
             .workspace_id(workspace_id)
             .name(name)
             .trigger(trigger)
-            .steps(steps);
+            .steps(steps)
+            .sandboxes(sandboxes);
         if !workspace_name.is_empty() {
             builder = builder.workspace_name(workspace_name);
         }
@@ -193,14 +193,23 @@ impl Workflows {
         workspace_id: WorkspaceId,
         file_hash: GitFileHash,
     ) -> Result<(), WorkflowError> {
-        let (doc_id, name, description, trigger, steps, workspace_name, original_path) = match file
-        {
+        let (
+            doc_id,
+            name,
+            description,
+            trigger,
+            steps,
+            sandboxes,
+            workspace_name,
+            original_path,
+        ) = match file {
             RuntimeFile::Workflow {
                 doc_id,
                 name,
                 description,
                 trigger,
                 steps,
+                sandboxes,
                 workspace_name,
                 original_path,
                 ..
@@ -210,6 +219,7 @@ impl Workflows {
                 description.clone(),
                 trigger.clone(),
                 steps.clone(),
+                sandboxes.clone(),
                 workspace_name.clone(),
                 original_path.clone(),
             ),
@@ -243,6 +253,7 @@ impl Workflows {
                     Some(description.clone()),
                     Some(trigger),
                     Some(steps),
+                    Some(sandboxes),
                     file_hash,
                 )
                 .did_execute()
@@ -266,7 +277,8 @@ impl Workflows {
                 .workspace_id(workspace_id)
                 .name(name.clone())
                 .trigger(trigger)
-                .steps(steps);
+                .steps(steps)
+                .sandboxes(sandboxes);
             if let Some(ws) = workspace_name {
                 builder = builder.workspace_name(ws);
             }
@@ -373,8 +385,9 @@ impl Workflows {
 
         let run = self.run_repo.create(new).await?;
 
+        let queue_id = format!("workflow:{}", definition.id);
         self.execute_run_spawner
-            .spawn(::job::JobId::new(), ExecuteRunConfig { run_id: run.id })
+            .spawn_with_queue_id(run.id, ExecuteRunConfig { run_id: run.id }, &queue_id)
             .await
             .map_err(|e| WorkflowError::Job(e.to_string()))?;
 

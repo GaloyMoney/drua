@@ -1,8 +1,8 @@
 use sha1::{Digest, Sha1};
 
 use crate::primitives::{NoteId, SkillId, WorkflowDefinitionId, WorkspaceId};
-use crate::sandbox::SandboxAgentMode;
-use crate::workflow::{WorkflowStepDef, WorkflowTrigger};
+use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+use crate::workflow::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileHash(String);
@@ -96,6 +96,8 @@ pub enum RuntimeFile {
         description: Option<String>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
+        #[serde(default)]
+        sandboxes: Vec<WorkflowSandboxDecl>,
         created_at: String,
         updated_at: String,
         slug: String,
@@ -198,6 +200,7 @@ impl RuntimeFile {
         description: Option<&str>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
+        sandboxes: Vec<WorkflowSandboxDecl>,
         created_at: &str,
         updated_at: &str,
     ) -> Self {
@@ -209,6 +212,7 @@ impl RuntimeFile {
             description,
             trigger,
             steps,
+            sandboxes,
             created_at,
             updated_at,
             None,
@@ -224,6 +228,7 @@ impl RuntimeFile {
         description: Option<&str>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
+        sandboxes: Vec<WorkflowSandboxDecl>,
         created_at: &str,
         updated_at: &str,
         original_path: Option<String>,
@@ -236,6 +241,7 @@ impl RuntimeFile {
             description: description.map(|s| s.to_string()),
             trigger,
             steps,
+            sandboxes,
             created_at: created_at.to_string(),
             updated_at: updated_at.to_string(),
             slug: slugify(name),
@@ -387,6 +393,7 @@ impl RuntimeFile {
                 description,
                 trigger,
                 steps,
+                sandboxes,
                 created_at,
                 updated_at,
                 ..
@@ -396,6 +403,7 @@ impl RuntimeFile {
                 description.as_deref(),
                 trigger,
                 steps,
+                sandboxes,
                 created_at,
                 updated_at,
             ),
@@ -681,11 +689,104 @@ struct WorkflowYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     trigger: WorkflowTriggerYaml,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sandboxes: Vec<WorkflowSandboxYaml>,
     steps: Vec<WorkflowStepYaml>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     created: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     updated: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkflowSandboxYaml {
+    Scratch {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_size: Option<String>,
+    },
+    Repo {
+        name: String,
+        repo_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_size: Option<String>,
+    },
+}
+
+impl WorkflowSandboxYaml {
+    fn from_runtime(d: &WorkflowSandboxDecl) -> Self {
+        let (cpu, memory, disk_size) = match &d.specs {
+            Some(s) => (
+                Some(s.cpu.clone()),
+                Some(s.memory.clone()),
+                Some(s.disk_size.clone()),
+            ),
+            None => (None, None, None),
+        };
+        match &d.mode {
+            SandboxMode::Scratch => WorkflowSandboxYaml::Scratch {
+                name: d.name.clone(),
+                cpu,
+                memory,
+                disk_size,
+            },
+            SandboxMode::Repo { repo_url, branch } => WorkflowSandboxYaml::Repo {
+                name: d.name.clone(),
+                repo_url: repo_url.clone(),
+                branch: branch.clone(),
+                cpu,
+                memory,
+                disk_size,
+            },
+        }
+    }
+
+    fn into_runtime(self) -> WorkflowSandboxDecl {
+        let (name, mode, cpu, memory, disk_size) = match self {
+            WorkflowSandboxYaml::Scratch {
+                name,
+                cpu,
+                memory,
+                disk_size,
+            } => (name, SandboxMode::Scratch, cpu, memory, disk_size),
+            WorkflowSandboxYaml::Repo {
+                name,
+                repo_url,
+                branch,
+                cpu,
+                memory,
+                disk_size,
+            } => (
+                name,
+                SandboxMode::Repo { repo_url, branch },
+                cpu,
+                memory,
+                disk_size,
+            ),
+        };
+        let specs = match (cpu, memory, disk_size) {
+            (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
+                cpu,
+                memory,
+                disk_size,
+            }),
+            // Partial overrides aren't supported — fall back to defaults
+            // so the YAML doesn't carry half-set specs.
+            _ => None,
+        };
+        WorkflowSandboxDecl { name, mode, specs }
+    }
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -763,12 +864,14 @@ impl WorkflowStepYaml {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_workflow_yaml(
     doc_id: WorkflowDefinitionId,
     name: &str,
     description: Option<&str>,
     trigger: &WorkflowTrigger,
     steps: &[WorkflowStepDef],
+    sandboxes: &[WorkflowSandboxDecl],
     created_at: &str,
     updated_at: &str,
 ) -> String {
@@ -777,6 +880,10 @@ fn render_workflow_yaml(
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
         trigger: WorkflowTriggerYaml::from_runtime(trigger),
+        sandboxes: sandboxes
+            .iter()
+            .map(WorkflowSandboxYaml::from_runtime)
+            .collect(),
         steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
         created: created_at.to_string(),
         updated: updated_at.to_string(),
@@ -827,6 +934,11 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
         .into_iter()
         .map(WorkflowStepYaml::into_runtime)
         .collect();
+    let sandboxes: Vec<WorkflowSandboxDecl> = yaml
+        .sandboxes
+        .into_iter()
+        .map(WorkflowSandboxYaml::into_runtime)
+        .collect();
 
     let slug = slugify(&name);
     let id_prefix = workflow_id.to_string()[..8].to_string();
@@ -839,6 +951,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
         description: yaml.description,
         trigger,
         steps,
+        sandboxes,
         created_at: yaml.created,
         updated_at: yaml.updated,
         slug,
@@ -1212,9 +1325,17 @@ mod tests {
         vec![WorkflowStepDef::AgentStep {
             name: "investigate".to_string(),
             skill: "alert-investigator".to_string(),
-            sandbox: None,
+            sandbox: Some("investigation".to_string()),
             sandbox_mode: None,
             timeout_seconds: Some(120),
+        }]
+    }
+
+    fn sample_sandboxes() -> Vec<WorkflowSandboxDecl> {
+        vec![WorkflowSandboxDecl {
+            name: "investigation".to_string(),
+            mode: SandboxMode::Scratch,
+            specs: None,
         }]
     }
 
@@ -1232,6 +1353,7 @@ mod tests {
                 secret: "whsec_should-not-be-serialized".to_string(),
             },
             sample_steps(),
+            sample_sandboxes(),
             "2026-04-27T00:00:00Z",
             "2026-04-27T00:00:00Z",
         );
@@ -1267,6 +1389,34 @@ mod tests {
                     _ => panic!("expected webhook trigger"),
                 }
                 assert_eq!(steps.len(), 1);
+            }
+            _ => panic!("expected workflow"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_preserves_sandboxes() {
+        let id = WorkflowDefinitionId::new();
+        let original = RuntimeFile::for_workflow(
+            id,
+            None,
+            None,
+            "alert-response",
+            None,
+            WorkflowTrigger::Manual,
+            sample_steps(),
+            sample_sandboxes(),
+            "2026-04-27T00:00:00Z",
+            "2026-04-27T00:00:00Z",
+        );
+        let content = original.content();
+        let path = original.relative_path();
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        match parsed.file {
+            RuntimeFile::Workflow { sandboxes, .. } => {
+                assert_eq!(sandboxes.len(), 1);
+                assert_eq!(sandboxes[0].name, "investigation");
+                assert!(matches!(sandboxes[0].mode, SandboxMode::Scratch));
             }
             _ => panic!("expected workflow"),
         }

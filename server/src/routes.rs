@@ -1147,6 +1147,7 @@ fn workflow_definition_to_view_for_list(
         webhook_secret: None,
         webhook_url: None,
         steps: d.steps.iter().map(workflow_step_to_view).collect(),
+        sandboxes: d.sandboxes.iter().map(workflow_sandbox_to_view).collect(),
         created_at: d.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
     }
 }
@@ -1176,7 +1177,23 @@ fn workflow_definition_to_view_for_detail(
         webhook_secret: secret,
         webhook_url,
         steps: d.steps.iter().map(workflow_step_to_view).collect(),
+        sandboxes: d.sandboxes.iter().map(workflow_sandbox_to_view).collect(),
         created_at: d.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+fn workflow_sandbox_to_view(d: &domain::workflow::WorkflowSandboxDecl) -> WorkflowSandboxView {
+    let (kind, repo_url, branch) = match &d.mode {
+        SandboxMode::Scratch => ("scratch".to_string(), None, None),
+        SandboxMode::Repo { repo_url, branch } => {
+            ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+        }
+    };
+    WorkflowSandboxView {
+        name: d.name.clone(),
+        kind,
+        repo_url,
+        branch,
     }
 }
 

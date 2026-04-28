@@ -53,3 +53,6 @@ CREATE INDEX idx_agents_workflow_run_id ON agents(workflow_run_id) WHERE workflo
 
 ALTER TABLE notes ADD COLUMN workflow_id UUID NULL REFERENCES workflow_definitions(id);
 CREATE INDEX idx_notes_workflow_id ON notes(workflow_id) WHERE workflow_id IS NOT NULL;
+
+ALTER TABLE sandboxes ADD COLUMN workflow_id UUID NULL REFERENCES workflow_definitions(id);
+CREATE INDEX idx_sandboxes_workflow_id ON sandboxes(workflow_id) WHERE workflow_id IS NOT NULL;

@@ -23,7 +23,8 @@ es_entity::entity_id! {
     WorkflowRunId;
 
     UserId => McpCredsOwnerId,
-    AgentId => McpCredsOwnerId
+    AgentId => McpCredsOwnerId,
+    WorkflowRunId => job::JobId,
 }
 
 /// Who owns a set of MCP credentials — either a human user or an internal agent.

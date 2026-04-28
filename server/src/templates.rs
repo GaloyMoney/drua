@@ -169,6 +169,7 @@ pub struct WorkflowDefinitionView {
     pub webhook_secret: Option<String>,
     pub webhook_url: Option<String>,
     pub steps: Vec<WorkflowStepView>,
+    pub sandboxes: Vec<WorkflowSandboxView>,
     pub created_at: String,
 }
 
@@ -179,6 +180,15 @@ pub struct WorkflowStepView {
     pub skill: String,
     pub sandbox: Option<String>,
     pub timeout_seconds: Option<u64>,
+}
+
+#[allow(dead_code)]
+pub struct WorkflowSandboxView {
+    pub name: String,
+    /// `"scratch"` or `"repo"`.
+    pub kind: String,
+    pub repo_url: Option<String>,
+    pub branch: Option<String>,
 }
 
 #[allow(dead_code)]

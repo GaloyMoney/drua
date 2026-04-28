@@ -51,6 +51,8 @@ pub enum SandboxEvent {
         specs: SandboxSpecs,
         mode: SandboxMode,
         mount_path: String,
+        #[serde(default)]
+        workflow_id: Option<WorkflowDefinitionId>,
     },
     StateChanged {
         state: SandboxState,
@@ -93,6 +95,10 @@ pub struct Sandbox {
     pub exported_skills: Vec<ExportedSkill>,
     /// At most one Write entry, enforced by `attach_agent`.
     pub attached_agents: Vec<(AgentId, SandboxAgentMode)>,
+    /// `Some` for sandboxes brought up by a workflow run; the executor
+    /// reuses these across runs of the same definition.
+    #[builder(default)]
+    pub workflow_id: Option<WorkflowDefinitionId>,
     events: EntityEvents<SandboxEvent>,
 }
 
@@ -280,6 +286,7 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                     specs,
                     mode,
                     mount_path,
+                    workflow_id,
                 } => {
                     builder = builder
                         .id(*id)
@@ -290,7 +297,8 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                         .mount_path(mount_path.clone())
                         .state(SandboxState::Provisioning)
                         .exported_system_prompt(None)
-                        .exported_skills(Vec::new());
+                        .exported_skills(Vec::new())
+                        .workflow_id(*workflow_id);
                 }
                 SandboxEvent::StateChanged { state } => {
                     if *state != SandboxState::Errored {
@@ -342,6 +350,8 @@ pub struct NewSandbox {
     pub(super) mode: SandboxMode,
     #[builder(default, setter(into))]
     pub(super) mount_path: String,
+    #[builder(default)]
+    pub(super) workflow_id: Option<WorkflowDefinitionId>,
 }
 
 impl NewSandbox {
@@ -363,6 +373,7 @@ impl IntoEvents<SandboxEvent> for NewSandbox {
                 specs: self.specs,
                 mode: self.mode,
                 mount_path: self.mount_path,
+                workflow_id: self.workflow_id,
             }],
         )
     }
@@ -629,6 +640,7 @@ mod tests {
                     specs: test_specs(),
                     mode: SandboxMode::Scratch,
                     mount_path: "/workspace".into(),
+                    workflow_id: None,
                 },
                 SandboxEvent::AgentAttached {
                     agent_id: a,

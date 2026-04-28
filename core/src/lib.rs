@@ -217,7 +217,6 @@ impl App {
             pool,
             library.clone(),
             Arc::clone(&skills),
-            Arc::clone(&sandboxes),
             execute_run_spawner,
         ));
 

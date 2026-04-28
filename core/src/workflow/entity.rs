@@ -6,7 +6,7 @@ use es_entity::*;
 use crate::library::GitFileHash;
 use crate::primitives::*;
 
-use super::definition::{WorkflowStepDef, WorkflowTrigger};
+use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -21,6 +21,8 @@ pub enum WorkflowDefinitionEvent {
         description: Option<String>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
+        #[serde(default)]
+        sandboxes: Vec<WorkflowSandboxDecl>,
         /// On-disk path before sync canonicalisation; the
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
@@ -31,6 +33,8 @@ pub enum WorkflowDefinitionEvent {
         description: Option<String>,
         trigger: Option<WorkflowTrigger>,
         steps: Option<Vec<WorkflowStepDef>>,
+        #[serde(default)]
+        sandboxes: Option<Vec<WorkflowSandboxDecl>>,
     },
 }
 
@@ -46,6 +50,8 @@ pub struct WorkflowDefinition {
     pub description: Option<String>,
     pub trigger: WorkflowTrigger,
     pub steps: Vec<WorkflowStepDef>,
+    #[builder(default)]
+    pub sandboxes: Vec<WorkflowSandboxDecl>,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     events: EntityEvents<WorkflowDefinitionEvent>,
@@ -74,6 +80,7 @@ impl WorkflowDefinition {
             self.description.as_deref(),
             self.trigger.clone(),
             self.steps.clone(),
+            self.sandboxes.clone(),
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
             self.original_path.clone(),
@@ -95,6 +102,7 @@ impl WorkflowDefinition {
         description: Option<Option<String>>,
         trigger: Option<WorkflowTrigger>,
         steps: Option<Vec<WorkflowStepDef>>,
+        sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
         if self.file_hash() == incoming_file_hash {
@@ -125,12 +133,16 @@ impl WorkflowDefinition {
         if let Some(ref s) = steps {
             self.steps = s.clone();
         }
+        if let Some(ref s) = sandboxes {
+            self.sandboxes = s.clone();
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
             description: description.flatten(),
             trigger: merged_trigger,
             steps,
+            sandboxes,
         });
         Idempotent::Executed(())
     }
@@ -158,6 +170,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     description,
                     trigger,
                     steps,
+                    sandboxes,
                     original_path,
                     ..
                 } => {
@@ -169,6 +182,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .description(description.clone())
                         .trigger(trigger.clone())
                         .steps(steps.clone())
+                        .sandboxes(sandboxes.clone())
                         .original_path(original_path.clone());
                 }
                 WorkflowDefinitionEvent::Updated {
@@ -176,6 +190,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     description,
                     trigger,
                     steps,
+                    sandboxes,
                     ..
                 } => {
                     if let Some(n) = name {
@@ -189,6 +204,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(s) = steps {
                         builder = builder.steps(s.clone());
+                    }
+                    if let Some(s) = sandboxes {
+                        builder = builder.sandboxes(s.clone());
                     }
                 }
             }
@@ -213,6 +231,8 @@ pub struct NewWorkflowDefinition {
     pub(super) description: Option<String>,
     pub(super) trigger: WorkflowTrigger,
     pub(super) steps: Vec<WorkflowStepDef>,
+    #[builder(default)]
+    pub(super) sandboxes: Vec<WorkflowSandboxDecl>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
 }
@@ -235,6 +255,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 description: self.description,
                 trigger: self.trigger,
                 steps: self.steps,
+                sandboxes: self.sandboxes,
                 original_path: self.original_path,
             }],
         )

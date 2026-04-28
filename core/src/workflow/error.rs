@@ -38,6 +38,12 @@ pub enum WorkflowError {
     SkillNotFound(String),
     #[error("WorkflowError - SandboxNotFound: {0}")]
     SandboxNotFound(String),
+    #[error("WorkflowError - DuplicateSandboxName: {0}")]
+    DuplicateSandboxName(String),
+    #[error("WorkflowError - UndeclaredSandbox: step references undeclared sandbox: {0}")]
+    UndeclaredSandbox(String),
+    #[error("WorkflowError - SandboxNotReady: {name} is in state {state}")]
+    SandboxNotReady { name: String, state: String },
     #[error("WorkflowError - StepFailed: {step}: {reason}")]
     StepFailed { step: String, reason: String },
     #[error("WorkflowError - Agent: {0}")]
