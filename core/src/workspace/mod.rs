@@ -144,8 +144,9 @@ impl Workspaces {
         Audit::record_workspace_id(id);
         let mut op = self.repo.begin_op().await?;
         let mut workspace = self.repo.find_by_id_in_op(&mut op, id).await?;
-        workspace.update(description);
-        self.repo.update_in_op(&mut op, &mut workspace).await?;
+        if workspace.update(description).did_execute() {
+            self.repo.update_in_op(&mut op, &mut workspace).await?;
+        }
         op.commit().await?;
         Ok(workspace)
     }

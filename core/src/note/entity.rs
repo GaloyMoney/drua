@@ -131,7 +131,10 @@ impl Note {
         content: String,
         tags: Vec<String>,
         file_hash: GitFileHash,
-    ) {
+    ) -> Idempotent<()> {
+        if self.file_hash.as_ref() == Some(&file_hash) {
+            return Idempotent::AlreadyApplied;
+        }
         self.title = title.clone();
         self.content = content.clone();
         self.tags = tags.clone();
@@ -142,6 +145,7 @@ impl Note {
             tags,
             file_hash,
         });
+        Idempotent::Executed(())
     }
 }
 
@@ -342,15 +346,26 @@ mod tests {
     #[test]
     fn note_update() {
         let mut note = new_note();
-        note.update(
+        let res = note.update(
             "Updated Title".into(),
             "Updated content".into(),
             vec!["new-tag".into()],
             test_hash(),
         );
+        assert!(matches!(res, es_entity::Idempotent::Executed(())));
         assert_eq!(note.title, "Updated Title");
         assert_eq!(note.content, "Updated content");
         assert_eq!(note.tags, vec!["new-tag"]);
+    }
+
+    #[test]
+    fn note_update_is_idempotent_on_same_file_hash() {
+        let mut note = new_note();
+        let hash = test_hash();
+        let _ = note.update("T".into(), "C".into(), vec!["t".into()], hash.clone());
+        let res = note.update("T2".into(), "C2".into(), vec!["t2".into()], hash);
+        assert!(matches!(res, es_entity::Idempotent::AlreadyApplied));
+        assert_eq!(note.title, "T", "second update must not mutate");
     }
 
     #[test]
