@@ -42,6 +42,10 @@ impl WorkspaceSecret {
             .expect("entity_first_persisted_at not found")
     }
 
+    /// Always `Executed` at the entity layer: encrypted blobs differ across
+    /// encryptions of identical plaintext (fresh nonce per encryption), so a
+    /// ciphertext-equality guard would incorrectly fire on every retry. The
+    /// service layer compares decrypted plaintext before calling.
     pub(super) fn update_value(&mut self, encrypted_value: Encrypted) -> Idempotent<()> {
         self.encrypted_value = encrypted_value.clone();
         self.events

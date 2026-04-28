@@ -48,9 +48,13 @@ impl Workspace {
         self.archived_at.is_some()
     }
 
-    pub(super) fn update(&mut self, description: Option<String>) {
+    pub(super) fn update(&mut self, description: Option<String>) -> Idempotent<()> {
+        if self.description == description {
+            return Idempotent::AlreadyApplied;
+        }
         self.description = description.clone();
         self.events.push(WorkspaceEvent::Updated { description });
+        Idempotent::Executed(())
     }
 
     pub(super) fn archive(&mut self) -> Idempotent<()> {
@@ -172,6 +176,20 @@ mod tests {
         let _ = ws.archive();
         assert!(ws.is_archived());
         assert!(ws.archived_at.is_some());
+    }
+
+    #[test]
+    fn workspace_update_is_idempotent_on_same_description() {
+        let mut ws = new_workspace();
+        let res = ws.update(Some("A test workspace".to_string()));
+        assert!(matches!(res, es_entity::Idempotent::AlreadyApplied));
+
+        let res = ws.update(Some("A new description".to_string()));
+        assert!(matches!(res, es_entity::Idempotent::Executed(())));
+        assert_eq!(ws.description.as_deref(), Some("A new description"));
+
+        let res = ws.update(Some("A new description".to_string()));
+        assert!(matches!(res, es_entity::Idempotent::AlreadyApplied));
     }
 
     #[test]

@@ -147,9 +147,9 @@ impl Notes {
         );
         let file_hash = runtime_file.file_hash();
 
-        note.update(title, content, tags, file_hash);
-
-        self.repo.update_in_op(&mut op, &mut note).await?;
+        if note.update(title, content, tags, file_hash).did_execute() {
+            self.repo.update_in_op(&mut op, &mut note).await?;
+        }
         op.commit().await?;
         Ok(note)
     }

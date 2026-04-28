@@ -1,3 +1,12 @@
+// Append commands on `AgentSession` (`add_user_input`, `add_sandbox_notification`,
+// `next_prompt`, `add_tool_results`, `assistant_response_received`) are
+// intrinsically non-idempotent: each call advances the conversation by one
+// turn. Replay safety lives at the prompt-executor layer (`cache_key` plus the
+// per-thread `turn` state machine), not in the entity. State-replacing
+// commands (`update_tool_definitions`, `push_system_block`,
+// `apply_proposed_system_blocks`) DO short-circuit when the new value matches
+// the current one.
+
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
@@ -350,14 +359,32 @@ impl AgentSession {
         self.build_prompt(target, prompt_definition)
     }
 
-    pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) {
+    pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) -> Idempotent<()> {
+        let latest = self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::ToolDefsUpdated { tool_defs } => Some(tool_defs),
+            AgentSessionEvent::Initialized { tool_defs, .. } => Some(tool_defs),
+            _ => None,
+        });
+        if latest == Some(&tool_defs) {
+            return Idempotent::AlreadyApplied;
+        }
         self.events
             .push(AgentSessionEvent::ToolDefsUpdated { tool_defs });
+        Idempotent::Executed(())
     }
 
-    pub fn push_system_block(&mut self, block: SystemBlock) {
+    pub fn push_system_block(&mut self, block: SystemBlock) -> Idempotent<()> {
+        let kind = block.kind();
+        let latest_of_kind = self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::SystemBlockUpdated { block: b } if b.kind() == kind => Some(b),
+            _ => None,
+        });
+        if latest_of_kind == Some(&block) {
+            return Idempotent::AlreadyApplied;
+        }
         self.events
             .push(AgentSessionEvent::SystemBlockUpdated { block });
+        Idempotent::Executed(())
     }
 
     /// Diffs proposed against current per-kind blocks; emits `SystemBlockUpdated`
@@ -1129,10 +1156,10 @@ mod tests {
     fn next_prompt_creates_thread_and_returns_prompt() {
         let mut session = new_session();
 
-        session.push_system_block(SystemBlock::Base {
+        let _ = session.push_system_block(SystemBlock::Base {
             text: "You are helpful.".into(),
         });
-        session.update_tool_definitions(vec![ToolDefinition {
+        let _ = session.update_tool_definitions(vec![ToolDefinition {
             name: "get_weather".into(),
             description: Some("Get weather".into()),
             input_schema: serde_json::json!({"type": "object"}),
@@ -1690,7 +1717,7 @@ mod tests {
     /// Drive the session to create an initial thread with the given blocks.
     fn seed_initial_thread(session: &mut AgentSession, blocks: Vec<SystemBlock>) {
         for b in blocks {
-            session.push_system_block(b);
+            let _ = session.push_system_block(b);
         }
         session
             .add_user_input(TargetThread::Main, user_source(), "hi".into())
