@@ -168,6 +168,12 @@ spec:
               name: {{ template "galoyAgents.fullname" . }}
               key: "anthropic-api-key"
               optional: true
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "openai-api-key"
+              optional: true
         {{- if .Values.galoyAgents.config.githubApp.enabled }}
         - name: GITHUB_APP_PRIVATE_KEY_PATH
           value: "/secrets/github-app/private-key.pem"

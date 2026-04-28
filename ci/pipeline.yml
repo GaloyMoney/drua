@@ -154,6 +154,7 @@ jobs:
         GITHUB_PAT: #@ data.values.github_pat
         LINGO_API_KEY: #@ data.values.lingo_api_key
         ANTHROPIC_API_KEY: #@ data.values.deploy_anthropic_api_key
+        OPENROUTER_API_KEY: #@ data.values.deploy_openrouter_api_key
         GITHUB_APP_PRIVATE_KEY: #@ data.values.deploy_github_app_private_key
         TUNNEL_DEPLOYMENTS_PUBLIC_KEYS: #@ data.values.tunnel_deployments_public_keys
       run:
@@ -180,6 +181,7 @@ jobs:
             github_pat = "${GITHUB_PAT}"
             lingo_api_key = "${LINGO_API_KEY}"
             anthropic_api_key = "${ANTHROPIC_API_KEY}"
+            openrouter_api_key = "${OPENROUTER_API_KEY}"
             EOF
 
             printf '%s' "$GCS_CREDS_JSON" > deployment/tf/gcs-creds.json

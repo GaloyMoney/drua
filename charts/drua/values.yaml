@@ -175,6 +175,7 @@ galoyAgents:
     concourseUsername: ""
     concoursePassword: ""
     anthropicApiKey: ""
+    openaiApiKey: ""
     annotations:
   codeAssistant:
     indexHash: "662e183b8581d71fec1849af1f15d297bb9ecbccefbfa0ab3d81f972a15fca1f"
@@ -290,7 +291,6 @@ sandbox:
   ## Namespace of the OTel collector for trace export.
   ## When set, adds an egress rule allowing port 4318 (OTLP HTTP).
   otelCollectorNamespace: ""
-  anthropicApiKeySecret: ""
   ## Example: Override or supplement nix cache config at runtime
   # env:
   # - name: NIX_CONFIG
