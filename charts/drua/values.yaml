@@ -53,11 +53,12 @@ galoyAgents:
           ## When a user message arrives more than this many seconds after
           ## the previous assistant response, start a fresh thread.
           resetTimeDeltaSeconds: 600
-          ## Cache-aware prune trigger: once this many seconds have passed
-          ## since the last assistant response the provider's prompt cache
-          ## is cold, so opportunistic pruning is free. Anthropic's default
-          ## cache window is ≈ 300s. Set 0 for providers without prompt
-          ## caching to disable opportunistic prunes.
+          ## Cache-aware opportunistic prune trigger: once this many
+          ## seconds have passed since the last assistant response the
+          ## provider's prompt cache is cold, so pruning is free.
+          ## Anthropic's default cache window is ≈ 300s. Omit / leave
+          ## unset to disable the time-based path entirely (token-budget
+          ## pruning still applies).
           pruneAfterSeconds: 300
         systemPrompt: |
           You are the lead agent of your workspace. You investigate / coordinate
