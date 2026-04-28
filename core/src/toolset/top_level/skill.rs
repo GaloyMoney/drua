@@ -7,7 +7,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SkillId;
 use crate::skill::{Skill, Skills};
 use crate::workspace::Workspaces;
@@ -152,7 +152,12 @@ impl TopLevelTool for SkillTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
+        // Management surface: visible iff subject can mutate skills (admin scope).
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Update, AuthResource::Skill(ws, None))
+                .is_ok()
+        })
     }
 
     fn composable(&self) -> bool {
@@ -175,9 +180,6 @@ impl TopLevelTool for SkillTool {
                 description,
                 body,
             } => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let workspace_name = self
                     .workspaces
                     .find_by_id(subject, workspace_id)
@@ -216,9 +218,6 @@ impl TopLevelTool for SkillTool {
                 description,
                 body,
             } => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let skill = self
                     .skills
                     .update(subject, skill_id, workspace_id, name, description, body)
@@ -238,9 +237,6 @@ impl TopLevelTool for SkillTool {
             }
 
             SkillParams::Delete { skill_id } => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 self.skills
                     .delete(subject, skill_id, workspace_id)
                     .await

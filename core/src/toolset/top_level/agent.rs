@@ -3,9 +3,9 @@
 //! Single tool with a `command` discriminator (like `text_editor`):
 //! `create`, `list`, `attach_sandbox`, `detach_sandbox`.
 //!
-//! Read commands (`list`) require `can_read_workspace`; write commands
-//! (`create`, `attach_sandbox`, `detach_sandbox`) enforce
-//! `can_write_workspace` inside `call()`.
+//! Authorization is delegated entirely to [`Agents`] / [`Sandboxes`]:
+//! every service method runs `subject.can(verb, resource)` itself, so
+//! this layer only routes parameters and surfaces errors.
 
 use std::sync::{Arc, LazyLock};
 
@@ -14,9 +14,9 @@ use serde::Deserialize;
 
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::{AgentId, SandboxId};
-use crate::sandbox::{SandboxAgentMode, Sandboxes};
+use crate::sandbox::SandboxAgentMode;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -55,12 +55,11 @@ impl WorkspaceAgentCommand {
 
 pub struct WorkspaceAgent {
     agents: Arc<Agents>,
-    sandboxes: Arc<Sandboxes>,
 }
 
 impl WorkspaceAgent {
-    pub fn new(agents: Arc<Agents>, sandboxes: Arc<Sandboxes>) -> Self {
-        Self { agents, sandboxes }
+    pub fn new(agents: Arc<Agents>) -> Self {
+        Self { agents }
     }
 }
 
@@ -100,7 +99,11 @@ impl TopLevelTool for WorkspaceAgent {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Read, AuthResource::Agent(ws, None))
+                .is_ok()
+        })
     }
 
     fn composable(&self) -> bool {
@@ -119,9 +122,6 @@ impl TopLevelTool for WorkspaceAgent {
 
         match params.command {
             WorkspaceAgentCommand::Create => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let name = params.name.ok_or_else(|| {
                     ToolSetsError::MissingArgument("name is required for create".to_string())
                 })?;
@@ -147,9 +147,6 @@ impl TopLevelTool for WorkspaceAgent {
             }
 
             WorkspaceAgentCommand::AttachSandbox => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let agent_id = params.agent_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument(
                         "agent_id is required for attach_sandbox".to_string(),
@@ -162,15 +159,6 @@ impl TopLevelTool for WorkspaceAgent {
                 })?;
                 let mode = params.mode.unwrap_or(SandboxAgentMode::Read);
 
-                let sandbox = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-                if sandbox.workspace_id != workspace_id {
-                    return Err(ToolSetsError::Unauthorized);
-                }
-
                 let agent = self
                     .agents
                     .attach_sandbox(subject, agent_id, sandbox_id, mode)
@@ -182,9 +170,6 @@ impl TopLevelTool for WorkspaceAgent {
             }
 
             WorkspaceAgentCommand::DetachSandbox => {
-                if !subject.can_write_workspace() {
-                    return Err(ToolSetsError::Unauthorized);
-                }
                 let agent_id = params.agent_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument(
                         "agent_id is required for detach_sandbox".to_string(),
@@ -195,24 +180,6 @@ impl TopLevelTool for WorkspaceAgent {
                         "sandbox_id is required for detach_sandbox".to_string(),
                     )
                 })?;
-
-                let existing = self
-                    .agents
-                    .find_by_id(subject, agent_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
-                if existing.workspace_id != workspace_id {
-                    return Err(ToolSetsError::Unauthorized);
-                }
-
-                let sandbox = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-                if sandbox.workspace_id != workspace_id {
-                    return Err(ToolSetsError::Unauthorized);
-                }
 
                 let agent = self
                     .agents

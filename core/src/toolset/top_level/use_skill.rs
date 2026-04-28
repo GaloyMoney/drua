@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::skill::Skills;
 
 use super::super::error::ToolSetsError;
@@ -123,7 +123,11 @@ impl TopLevelTool for UseSkillTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some()
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Use, AuthResource::Skill(ws, None))
+                .is_ok()
+        })
     }
 
     fn composable(&self) -> bool {

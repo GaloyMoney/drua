@@ -15,7 +15,7 @@ use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::{AgentId, SandboxId, UserId};
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -164,7 +164,11 @@ impl TopLevelTool for WorkspaceLog {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_read_workspace()
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Read, AuthResource::AuditLog(ws))
+                .is_ok()
+        })
     }
 
     async fn call(
@@ -173,6 +177,10 @@ impl TopLevelTool for WorkspaceLog {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        // `Audit` has no per-subject service API, so authz lives here.
+        subject
+            .can(AuthVerb::Read, AuthResource::AuditLog(workspace_id))
+            .map_err(|_| ToolSetsError::Unauthorized)?;
         Audit::record_action("audit.query");
         let params: AuditLogParams = parse_params(arguments)?;
 

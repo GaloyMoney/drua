@@ -4,7 +4,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::SearchResult;
 use crate::note::Notes;
 use crate::primitives::{NoteId, WorkflowDefinitionId};
@@ -198,7 +198,11 @@ impl TopLevelTool for NotesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some()
+        subject.workspace_id().is_some_and(|ws| {
+            subject
+                .can(AuthVerb::Read, AuthResource::Note(ws, None))
+                .is_ok()
+        })
     }
 
     async fn call(

@@ -80,19 +80,6 @@ impl AuthSubject {
         self.has_scope(&AuthScope::Admin)
     }
 
-    /// `WorkspaceRead`/`WorkspaceWrite` were collapsed into
-    /// [`AuthScope::WorkspaceAdmin`]; this is the single workspace-level check.
-    pub fn can_read_workspace(&self) -> bool {
-        self.workspace_id()
-            .is_some_and(|ws| self.has_scope(&AuthScope::WorkspaceAdmin(ws)))
-    }
-
-    /// Currently identical to [`Self::can_read_workspace`]; kept distinct so
-    /// write-side call sites stay readable and can diverge later.
-    pub fn can_write_workspace(&self) -> bool {
-        self.can_read_workspace()
-    }
-
     /// Users implicitly have all scopes.
     pub fn has_scope(&self, scope: &AuthScope) -> bool {
         match self {
@@ -141,5 +128,109 @@ impl AuthSubject {
             },
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws() -> WorkspaceId {
+        WorkspaceId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
+    }
+
+    fn other_ws() -> WorkspaceId {
+        WorkspaceId::from(uuid::Uuid::parse_str("b1b2b3b4-c1c2-d1d2-e1e2-e3e4e5e6e7e8").unwrap())
+    }
+
+    fn member(ws: WorkspaceId) -> AuthSubject {
+        AuthSubject::Agent(ws, AgentId::new(), vec![AuthScope::WorkspaceMember(ws)])
+    }
+
+    fn admin(ws: WorkspaceId) -> AuthSubject {
+        AuthSubject::Agent(ws, AgentId::new(), vec![AuthScope::WorkspaceAdmin(ws)])
+    }
+
+    #[test]
+    fn user_is_omnipotent() {
+        let user = AuthSubject::User(UserId::new());
+        assert!(user
+            .can(AuthVerb::Delete, AuthResource::Sandbox(ws(), None))
+            .is_ok());
+    }
+
+    #[test]
+    fn anonymous_authentication_required() {
+        let err = AuthSubject::Anonymous
+            .can(AuthVerb::Read, AuthResource::Workspace(None))
+            .unwrap_err();
+        assert!(matches!(err, AuthorizationError::AuthenticationRequired));
+    }
+
+    #[test]
+    fn workspace_admin_permits_management_resources() {
+        let s = admin(ws());
+        for verb in [
+            AuthVerb::Read,
+            AuthVerb::Create,
+            AuthVerb::Update,
+            AuthVerb::Delete,
+        ] {
+            assert!(s.can(verb, AuthResource::Sandbox(ws(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Agent(ws(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Workflow(ws(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Skill(ws(), None)).is_ok());
+        }
+        assert!(s.can(AuthVerb::Read, AuthResource::AuditLog(ws())).is_ok());
+    }
+
+    /// Negative case: a `WorkspaceMember` cannot manage skills (or any
+    /// admin-only resource) — the privileged tool would be hidden via
+    /// visibility AND rejected at service entry. This is the consolidation
+    /// invariant the refactor guarantees.
+    #[test]
+    fn workspace_member_cannot_manage_admin_resources() {
+        let s = member(ws());
+        assert!(s
+            .can(AuthVerb::Update, AuthResource::Skill(ws(), None))
+            .is_err());
+        assert!(s
+            .can(AuthVerb::Create, AuthResource::Sandbox(ws(), None))
+            .is_err());
+        assert!(s
+            .can(AuthVerb::Read, AuthResource::Agent(ws(), None))
+            .is_err());
+        assert!(s
+            .can(AuthVerb::Read, AuthResource::Workflow(ws(), None))
+            .is_err());
+        assert!(s.can(AuthVerb::Read, AuthResource::AuditLog(ws())).is_err());
+    }
+
+    #[test]
+    fn workspace_member_can_use_skills_and_notes() {
+        let s = member(ws());
+        assert!(s
+            .can(AuthVerb::Use, AuthResource::Skill(ws(), None))
+            .is_ok());
+        assert!(s
+            .can(AuthVerb::Read, AuthResource::Skill(ws(), None))
+            .is_ok());
+        assert!(s
+            .can(AuthVerb::Create, AuthResource::Note(ws(), None))
+            .is_ok());
+        assert!(s
+            .can(AuthVerb::Update, AuthResource::Note(ws(), None))
+            .is_ok());
+    }
+
+    #[test]
+    fn cross_workspace_admin_cannot_access_other_workspace() {
+        let s = admin(ws());
+        assert!(s
+            .can(AuthVerb::Read, AuthResource::Sandbox(other_ws(), None))
+            .is_err());
+        assert!(s
+            .can(AuthVerb::Update, AuthResource::Skill(other_ws(), None))
+            .is_err());
     }
 }

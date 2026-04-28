@@ -199,10 +199,7 @@ impl App {
             context_generation.clone(),
         ));
 
-        toolsets.register_top_level(WorkspaceAgent::new(
-            Arc::clone(&agents),
-            Arc::clone(&sandboxes),
-        ));
+        toolsets.register_top_level(WorkspaceAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
