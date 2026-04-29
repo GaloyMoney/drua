@@ -308,6 +308,7 @@ async fn library_search(
         .filter_map(|s| match s.as_str() {
             "skill" => Some(drua_core::library::DocType::Skill),
             "note" => Some(drua_core::library::DocType::Note),
+            "space_file" => Some(drua_core::library::DocType::SpaceFile),
             _ => None,
         })
         .collect();
@@ -360,10 +361,6 @@ async fn library_search(
     let views: Vec<LibraryHitView> = hits
         .into_iter()
         .map(|h| {
-            let workspace_name = workspace_lookup
-                .get(&h.workspace_id)
-                .cloned()
-                .unwrap_or_else(|| h.workspace_id.to_string());
             let (type_label, type_class, detail_url) = match h.doc_type {
                 drua_core::library::DocType::Skill => (
                     "Skill".to_string(),
@@ -388,10 +385,25 @@ async fn library_search(
                     ("Space File".to_string(), "space_file".to_string(), None)
                 }
             };
+            let scope_label = match (&h.doc_type, &h.space_slug, h.workspace_id.is_nil()) {
+                (drua_core::library::DocType::SpaceFile, Some(slug), _) => {
+                    match &h.relative_path {
+                        Some(path) => format!("space: {slug}/{path}"),
+                        None => format!("space: {slug}"),
+                    }
+                }
+                (_, _, true) => "global".to_string(),
+                _ => {
+                    let name = workspace_lookup
+                        .get(&h.workspace_id)
+                        .cloned()
+                        .unwrap_or_else(|| h.workspace_id.to_string());
+                    format!("workspace: {name}")
+                }
+            };
             LibraryHitView {
                 id: h.doc_id.to_string(),
-                workspace_id: h.workspace_id.to_string(),
-                workspace_name,
+                scope_label,
                 type_label,
                 type_class,
                 title: h.title,

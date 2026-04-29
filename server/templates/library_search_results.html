@@ -20,7 +20,7 @@
       {% when None %}{{ hit.title }}
       {% endmatch %}
     </span>
-    <span class="lib-hit-meta">workspace: {{ hit.workspace_name }} &middot; score: {{ hit.score }}</span>
+    <span class="lib-hit-meta">{{ hit.scope_label }} &middot; score: {{ hit.score }}</span>
   </div>
   {% if !hit.snippet.is_empty() %}
   <div class="lib-snippet">{{ hit.snippet }}</div>

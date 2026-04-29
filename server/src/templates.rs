@@ -98,10 +98,14 @@ pub struct LibraryTemplate {
 #[allow(dead_code)]
 pub struct LibraryHitView {
     pub id: String,
-    pub workspace_id: String,
-    pub workspace_name: String,
+    /// Already-formatted scope line — e.g. `workspace: oncall` for
+    /// workspace-scoped hits, `space: my-runbooks` for space files,
+    /// or `global` for global skills. The template renders this
+    /// verbatim.
+    pub scope_label: String,
     pub type_label: String,
-    /// CSS class on the type badge: `skill`, `note`, or `workflow`.
+    /// CSS class on the type badge: `skill`, `note`, `workflow`, or
+    /// `space_file`.
     pub type_class: String,
     pub title: String,
     pub snippet: String,

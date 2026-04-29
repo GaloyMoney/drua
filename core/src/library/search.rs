@@ -23,6 +23,11 @@ pub struct GlobalSearchHit {
     pub content: String,
     pub tags: Vec<String>,
     pub score: f64,
+    /// Populated only for `doc_type = SpaceFile`. Lets callers cite a
+    /// hit as `<space_slug>/<relative_path>` instead of the meaningless
+    /// nil workspace id space-file rows carry in `library_search_data`.
+    pub space_slug: Option<String>,
+    pub relative_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,7 +286,49 @@ impl SearchStore {
             Vec::new()
         };
 
-        Ok(rrf_fuse(fts_rows, vec_rows, limit))
+        let mut hits = rrf_fuse(fts_rows, vec_rows, limit);
+        self.enrich_space_hits(&mut hits).await?;
+        Ok(hits)
+    }
+
+    /// SpaceFile rows in `library_search_data` carry a nil `workspace_id`
+    /// — the meaningful citation is `(space_slug, relative_path)`,
+    /// which lives in `space_search_data` + `spaces`. Single batched
+    /// query keyed by the SpaceFile doc_ids in the result set.
+    async fn enrich_space_hits(
+        &self,
+        hits: &mut [GlobalSearchHit],
+    ) -> Result<(), LibraryError> {
+        let space_ids: Vec<uuid::Uuid> = hits
+            .iter()
+            .filter(|h| h.doc_type == DocType::SpaceFile)
+            .map(|h| h.doc_id)
+            .collect();
+        if space_ids.is_empty() {
+            return Ok(());
+        }
+        let rows = sqlx::query!(
+            r#"SELECT ssd.doc_id, s.slug AS space_slug, ssd.relative_path
+               FROM space_search_data ssd
+               JOIN spaces s ON s.id = ssd.space_id
+               WHERE ssd.doc_id = ANY($1)"#,
+            &space_ids,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let by_id: std::collections::HashMap<uuid::Uuid, (String, String)> = rows
+            .into_iter()
+            .map(|r| (r.doc_id, (r.space_slug, r.relative_path)))
+            .collect();
+        for hit in hits.iter_mut() {
+            if hit.doc_type == DocType::SpaceFile {
+                if let Some((slug, path)) = by_id.get(&hit.doc_id) {
+                    hit.space_slug = Some(slug.clone());
+                    hit.relative_path = Some(path.clone());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -368,6 +415,8 @@ fn rrf_fuse(
             content: c.content,
             tags: c.tags,
             score: (c.score / max_score).clamp(0.0, 1.0),
+            space_slug: None,
+            relative_path: None,
         })
         .collect();
 
