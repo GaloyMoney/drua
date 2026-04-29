@@ -245,8 +245,10 @@ type Query {
 	"""
 	exportThread(agentId: AgentId!, threadId: SessionThreadId): String!
 	"""
-	Cross-type, cross-workspace library search. Filters are additive
-	(AND). Results are scoped to workspaces the subject can read.
+	Cross-type, cross-workspace library search. Open to any
+	authenticated subject; library content is globally discoverable.
+	`workspaceId` is optional — when set the workspace is validated
+	via `find_by_id`; when omitted no workspace filter is applied.
 	"""
 	librarySearch(input: LibrarySearchInput!): [LibrarySearchHit!]!
 	me: Me
