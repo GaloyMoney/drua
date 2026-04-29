@@ -253,26 +253,24 @@ mod schema_tests {
     #[test]
     fn no_boolean_schemas_in_concourse_outputs() {
         fn assert_no_bool_schemas(value: &serde_json::Value, path: &str) {
-            match value {
-                serde_json::Value::Object(map) => {
-                    if let Some(props) = map.get("properties").and_then(|v| v.as_object()) {
-                        for (k, v) in props {
-                            assert!(
-                                !matches!(v, serde_json::Value::Bool(_)),
-                                "boolean schema at {path}.properties.{k}"
-                            );
-                            assert_no_bool_schemas(v, &format!("{path}.properties.{k}"));
-                        }
-                    }
-                    if let Some(items) = map.get("items") {
-                        assert!(
-                            !matches!(items, serde_json::Value::Bool(_)),
-                            "boolean schema at {path}.items"
-                        );
-                        assert_no_bool_schemas(items, &format!("{path}.items"));
-                    }
+            let Some(map) = value.as_object() else {
+                return;
+            };
+            if let Some(props) = map.get("properties").and_then(|v| v.as_object()) {
+                for (k, v) in props {
+                    assert!(
+                        !matches!(v, serde_json::Value::Bool(_)),
+                        "boolean schema at {path}.properties.{k}"
+                    );
+                    assert_no_bool_schemas(v, &format!("{path}.properties.{k}"));
                 }
-                _ => {}
+            }
+            if let Some(items) = map.get("items") {
+                assert!(
+                    !matches!(items, serde_json::Value::Bool(_)),
+                    "boolean schema at {path}.items"
+                );
+                assert_no_bool_schemas(items, &format!("{path}.items"));
             }
         }
         for (name, schema) in [
