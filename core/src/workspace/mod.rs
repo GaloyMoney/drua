@@ -131,10 +131,13 @@ impl Workspaces {
         Ok(self.repo.list_all().await?)
     }
 
-    /// Authorizing facade over [`Library::search_global`]. With
-    /// `workspace_filter = Some(id)` the workspace is validated via
-    /// [`Self::find_by_id`]; with `None` results span every workspace the
-    /// subject can read. `Library` stays oblivious to membership rules.
+    /// Authorizing facade over [`Library::search_global`]. Any
+    /// non-anonymous subject may search; `workspace_filter` is optional.
+    /// With `Some(id)` the workspace is validated via [`Self::find_by_id`];
+    /// with `None` the result set is intersected against the subject's
+    /// readable workspaces (no collection-level scope required, so a
+    /// workspace-scoped agent gets just their own). `Library` stays
+    /// oblivious to membership rules.
     #[instrument(name = "domain.workspace.library_search", skip(self, sub))]
     pub async fn library_search(
         &self,
@@ -144,6 +147,9 @@ impl Workspaces {
         doc_types: &[crate::library::DocType],
         limit: usize,
     ) -> Result<Vec<crate::library::GlobalSearchHit>, WorkspaceError> {
+        if matches!(sub, AuthSubject::Anonymous) {
+            return Err(AuthorizationError::AuthenticationRequired.into());
+        }
         Audit::record_action_if_unset("workspace.library_search");
         let workspace_ids: Vec<uuid::Uuid> = match workspace_filter {
             Some(id) => {
@@ -151,9 +157,14 @@ impl Workspaces {
                 vec![uuid::Uuid::from(id)]
             }
             None => self
-                .list_all(sub)
+                .repo
+                .list_all()
                 .await?
                 .into_iter()
+                .filter(|ws| {
+                    sub.can(AuthVerb::Read, AuthResource::Workspace(Some(ws.id)))
+                        .is_ok()
+                })
                 .map(|ws| uuid::Uuid::from(ws.id))
                 .collect(),
         };

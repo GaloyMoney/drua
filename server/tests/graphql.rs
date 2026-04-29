@@ -503,6 +503,42 @@ async fn library_search_returns_empty_for_empty_query_state() {
 }
 
 #[tokio::test]
+async fn library_search_workspace_scoped_agent_no_filter() {
+    // Workspace-scoped agents (no collection-level Workspace(None) scope)
+    // must still be able to search without specifying a workspace_id —
+    // the service intersects against their readable workspaces.
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+
+    let user = test_sub();
+    let ws = app
+        .workspaces()
+        .create(&user, "library-search-scope-test", None)
+        .await
+        .expect("create workspace");
+
+    let agent_sub = drua_core::auth::AuthSubject::Agent(
+        ws.id,
+        drua_core::primitives::AgentId::new(),
+        vec![drua_core::auth::AuthScope::WorkspaceMember(ws.id)],
+    );
+
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &agent_sub,
+        r#"query($input: LibrarySearchInput!) {
+            librarySearch(input: $input) { id }
+        }"#,
+        serde_json::json!({ "input": { "query": "anything", "limit": 10 } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert!(data["librarySearch"].is_array());
+}
+
+#[tokio::test]
 async fn library_search_anonymous_is_unauthorized() {
     let pool = pool().await;
     let app = test_app(&pool).await;
