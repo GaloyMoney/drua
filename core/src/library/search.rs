@@ -33,6 +33,12 @@ pub struct LibraryFile {
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
+    /// Populated only for `doc_type = SpaceFile`. The space's slug and
+    /// the file's path inside `spaces/<slug>/`. Joined from
+    /// `space_search_data` + `spaces` so callers can cite a hit as
+    /// `<space_slug>/<relative_path>` without a follow-up lookup.
+    pub space_slug: Option<String>,
+    pub relative_path: Option<String>,
 }
 
 impl std::fmt::Display for SearchResult {
@@ -105,7 +111,9 @@ impl SearchStore {
 
     /// Bulk fetch by `doc_id`. Doc type is part of the table's primary
     /// key but not required here — UUIDs don't collide across types in
-    /// practice. Caller filters / orders as needed.
+    /// practice. Space-file rows are joined to `space_search_data` and
+    /// `spaces` so each `LibraryFile` carries its `(space_slug, relative_path)`
+    /// citation; non-space rows leave both fields `None`.
     #[tracing::instrument(name = "library.search_store.find_by_ids", skip(self, ids))]
     pub async fn find_by_ids(
         &self,
@@ -115,9 +123,14 @@ impl SearchStore {
             return Ok(Vec::new());
         }
         let rows = sqlx::query!(
-            r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags
-               FROM library_search_data
-               WHERE doc_id = ANY($1)"#,
+            r#"SELECT lsd.doc_id, lsd.doc_type, lsd.workspace_id,
+                      lsd.title_text, lsd.content_text, lsd.tags,
+                      s.slug AS "space_slug?",
+                      ssd.relative_path AS "relative_path?"
+               FROM library_search_data lsd
+               LEFT JOIN space_search_data ssd ON ssd.doc_id = lsd.doc_id
+               LEFT JOIN spaces s ON s.id = ssd.space_id
+               WHERE lsd.doc_id = ANY($1)"#,
             ids,
         )
         .fetch_all(&self.pool)
@@ -131,6 +144,8 @@ impl SearchStore {
                 title: r.title_text,
                 body: r.content_text,
                 tags: parse_tags(&r.tags),
+                space_slug: r.space_slug,
+                relative_path: r.relative_path,
             })
             .collect())
     }

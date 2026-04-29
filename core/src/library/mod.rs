@@ -427,14 +427,12 @@ impl Library {
         }
         crate::audit::Audit::record_action_if_unset("library.search");
         let effective_types: Vec<DocType> = if doc_types.is_empty() {
-            vec![DocType::Skill, DocType::Note]
+            vec![DocType::Skill, DocType::Note, DocType::SpaceFile]
         } else {
             doc_types
                 .iter()
                 .copied()
-                // `SpaceFile` filtered until the authz join through
-                // `Space.authorized_workspaces` lands.
-                .filter(|d| !matches!(d, DocType::Workflow | DocType::SpaceFile))
+                .filter(|d| !matches!(d, DocType::Workflow))
                 .collect()
         };
         if effective_types.is_empty() {
