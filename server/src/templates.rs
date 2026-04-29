@@ -84,6 +84,41 @@ pub struct CodeAssistantSearchResultsTemplate {
 #[template(path = "audit.html")]
 pub struct AuditTemplate {}
 
+pub struct LibraryWorkspaceOption {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "library.html")]
+pub struct LibraryTemplate {
+    pub workspaces: Vec<LibraryWorkspaceOption>,
+}
+
+#[allow(dead_code)]
+pub struct LibraryHitView {
+    pub id: String,
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub type_label: String,
+    /// CSS class on the type badge: `skill`, `note`, or `workflow`.
+    pub type_class: String,
+    pub title: String,
+    pub snippet: String,
+    pub score: String,
+    pub tags: Vec<String>,
+    /// `Some` when a workspace-scoped detail page exists for this type.
+    pub detail_url: Option<String>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "library_search_results.html")]
+pub struct LibrarySearchResultsTemplate {
+    pub query: String,
+    pub hits: Vec<LibraryHitView>,
+    pub error: Option<String>,
+}
+
 #[allow(dead_code)]
 pub struct AuditEntryView {
     pub acting_user: Option<String>,

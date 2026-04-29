@@ -22,7 +22,7 @@ pub use file::{
     render_workflow_yaml, DocType, GitFileHash, ParsedWorkflowFile, SearchableFields, UpstreamOp,
 };
 pub use job::LIBRARY_LOCK_QUEUE;
-pub use search::SearchResult;
+pub use search::{GlobalSearchHit, SearchResult};
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
     SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
@@ -250,6 +250,32 @@ impl Library {
         };
         self.search
             .search(workspace_id, query, query_embedding, doc_type, limit)
+            .await
+    }
+
+    /// Cross-workspace search. `workspace_ids` is the caller's pre-authorized
+    /// set — empty returns no results so the resolver must filter to the
+    /// subject's readable workspaces before calling.
+    #[tracing::instrument(name = "library.search_global", skip(self, workspace_ids))]
+    pub async fn search_global(
+        &self,
+        workspace_ids: &[uuid::Uuid],
+        query: &str,
+        doc_types: &[DocType],
+        limit: usize,
+    ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
+        if workspace_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query_embedding = match self.embedder.embed_query(query).await {
+            Ok(emb) => Some(emb),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
+                None
+            }
+        };
+        self.search
+            .search_global(workspace_ids, query, query_embedding, doc_types, limit)
             .await
     }
 }

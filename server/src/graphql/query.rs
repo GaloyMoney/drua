@@ -5,6 +5,7 @@ use async_graphql::{
 
 use super::agent::Agent;
 use super::audit::{AuditEntry, AuditLogQueryInput};
+use super::library::{LibrarySearchHit, LibrarySearchInput};
 use super::primitives::*;
 use super::sandbox::Sandbox;
 use super::workspace::Workspace;
@@ -133,5 +134,55 @@ impl Query {
         };
         let entries = app.audit().find(&query).await?;
         Ok(entries.into_iter().map(AuditEntry::from).collect())
+    }
+
+    /// Cross-type, cross-workspace library search. Filters are additive
+    /// (AND). Results are scoped to workspaces the subject can read.
+    async fn library_search(
+        &self,
+        ctx: &Context<'_>,
+        input: LibrarySearchInput,
+    ) -> async_graphql::Result<Vec<LibrarySearchHit>> {
+        use drua_core::auth::{AuthResource, AuthVerb};
+
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+
+        let readable: Vec<uuid::Uuid> = app
+            .workspaces()
+            .list_all(sub)
+            .await?
+            .into_iter()
+            .map(|ws| uuid::Uuid::from(ws.id))
+            .collect();
+
+        let workspace_ids = match input.workspace_id {
+            Some(id) => {
+                sub.can(AuthVerb::Read, AuthResource::Workspace(Some(id)))?;
+                let id_uuid = uuid::Uuid::from(id);
+                if !readable.contains(&id_uuid) {
+                    return Ok(Vec::new());
+                }
+                vec![id_uuid]
+            }
+            None => readable,
+        };
+
+        let doc_types: Vec<drua_core::library::DocType> = input
+            .types
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+
+        let limit = input.limit.clamp(1, 200) as usize;
+        let hits = app
+            .library()
+            .search_global(&workspace_ids, &input.query, &doc_types, limit)
+            .await?;
+
+        Ok(hits
+            .into_iter()
+            .map(LibrarySearchHit::from_domain)
+            .collect())
     }
 }

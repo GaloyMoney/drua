@@ -117,6 +117,35 @@ type ErrorEvent {
 	message: String!
 }
 
+enum LibraryFileType {
+	NOTE
+	SKILL
+	WORKFLOW
+}
+
+type LibrarySearchHit {
+	id: UUID!
+	score: Float!
+	snippet: String!
+	tags: [String!]!
+	title: String!
+	type: LibraryFileType!
+	workspaceId: WorkspaceId!
+}
+
+input LibrarySearchInput {
+	limit: Int! = 50
+	query: String!
+	"""
+	Empty / omitted = all types.
+	"""
+	types: [LibraryFileType!]
+	"""
+	Omitted = all workspaces the subject can read.
+	"""
+	workspaceId: WorkspaceId
+}
+
 input McpCredentialsCreateInput {
 	name: String!
 	"""
@@ -209,6 +238,11 @@ type Query {
 	main thread is exported.
 	"""
 	exportThread(agentId: AgentId!, threadId: SessionThreadId): String!
+	"""
+	Cross-type, cross-workspace library search. Filters are additive
+	(AND). Results are scoped to workspaces the subject can read.
+	"""
+	librarySearch(input: LibrarySearchInput!): [LibrarySearchHit!]!
 	me: Me
 	ping: String!
 	sandbox(id: SandboxId!): Sandbox

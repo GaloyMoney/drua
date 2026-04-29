@@ -2,6 +2,7 @@
 pub(crate) mod macros;
 mod agent;
 mod audit;
+mod library;
 mod mcp_creds;
 mod mutation;
 pub(crate) mod primitives;
