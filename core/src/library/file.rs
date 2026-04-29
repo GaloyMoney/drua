@@ -333,8 +333,6 @@ impl UpstreamOp {
     }
 }
 
-// ── Render helpers ────────────────────────────────────────────────────────────
-
 pub fn render_note_markdown(
     doc_id: uuid::Uuid,
     title: &str,
@@ -372,8 +370,6 @@ pub fn render_skill_markdown(
         body
     )
 }
-
-// ── Skill parser ──────────────────────────────────────────────────────────────
 
 /// Handles three formats:
 /// 1. Full frontmatter (canonical) — `needs_rewrite = false`.
@@ -600,8 +596,6 @@ fn name_from_filename(path: &str) -> Option<String> {
     }
 }
 
-// ── Workflow YAML ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct WorkflowYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -810,7 +804,6 @@ pub fn render_workflow_yaml(
     serde_yaml::to_string(&yaml).unwrap_or_else(|e| format!("# yaml render error: {e}\n"))
 }
 
-/// Returns parsed `WorkflowYaml` payload alongside the canonical `ParsedFile`.
 pub struct ParsedWorkflowFile {
     pub parsed: ParsedFile,
     pub trigger: WorkflowTrigger,
@@ -995,8 +988,7 @@ mod tests {
         let parsed = parse_skill_markdown("not markdown", path).expect("filename fallback");
         assert!(parsed.needs_rewrite);
         assert_eq!(parsed.file.title, "Test");
-        // Body parsed from content (no heading, no frontmatter).
-        // Body string is description here (skill projection).
+        assert_eq!(parsed.file.body, "");
     }
 
     #[test]

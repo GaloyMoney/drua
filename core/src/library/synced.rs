@@ -14,8 +14,6 @@ use super::{Library, LibraryError, LIBRARY_LOCK_QUEUE};
 use crate::primitives::WorkspaceId;
 use crate::workspace::Workspaces;
 
-// ── SyncedFile: collapsed payload shape for every entity-backed file ─────────
-
 /// Type-erased projection of a `LibrarySynced` entity into a serialisable
 /// shape suitable for the obix inbox + git write pipeline.
 ///
@@ -90,8 +88,6 @@ impl SyncedFile {
     }
 }
 
-// ── LibrarySynced trait ──────────────────────────────────────────────────────
-
 /// Implemented on entity types whose mutations should sync to the library.
 pub trait LibrarySynced: Sized + Send + Sync + 'static {
     type Event: es_entity::EsEvent + 'static;
@@ -154,6 +150,11 @@ pub trait LibrarySynced: Sized + Send + Sync + 'static {
 }
 
 /// Per-repo `post_persist_hook` body collapses to a one-liner over this.
+#[tracing::instrument(
+    name = "library.sync_to_library",
+    skip_all,
+    fields(doc_type = E::DOC_TYPE.as_str())
+)]
 pub async fn sync_to_library<E, OP>(
     library: Option<&Library>,
     op: &mut OP,
@@ -174,11 +175,8 @@ where
     library.write_in_op(op, &file).await
 }
 
-// ── LibraryImporter (reverse sync — implemented on the service) ─────────────
-
-/// Boxed std error used by the generic runner to log per-type upsert
-/// failures uniformly (skill/workflow services return their own error
-/// enums; boxing avoids a per-type `From` impl on `LibraryError`).
+/// Boxed std error so the generic runner can log per-type upsert failures
+/// uniformly without forcing a `From` impl on `LibraryError` per service.
 pub type UpsertError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Implemented on **services** (`Skills`, `Workflows`, …) that import
@@ -186,7 +184,6 @@ pub type UpsertError = Box<dyn std::error::Error + Send + Sync>;
 /// the forward-sync projection (`LibrarySynced::DOC_TYPE` is the source of
 /// truth for subdir/extension and file format identity).
 pub trait LibraryImporter: Send + Sync + 'static {
-    /// The entity type this service imports from the library.
     type Entity: LibrarySynced;
 
     /// Reverse-sync `JobType` name; must be unique per impl.
@@ -201,7 +198,6 @@ pub trait LibraryImporter: Send + Sync + 'static {
     /// write job to trigger canonicalisation.
     fn parse(content: &str, path: &str) -> Option<ParsedFile>;
 
-    /// Apply a parsed file to the entity service inside a transaction.
     fn upsert_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -224,8 +220,6 @@ pub struct Changes {
     pub head_commit: String,
     pub files: Vec<ParsedFile>,
 }
-
-// ── Generic reverse-sync runner ──────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncFromLibraryConfig {
@@ -296,6 +290,11 @@ struct SyncFromLibraryRunner<S: LibraryImporter> {
 
 #[async_trait::async_trait]
 impl<S: LibraryImporter> JobRunner for SyncFromLibraryRunner<S> {
+    #[tracing::instrument(
+        name = "library.sync_from_library.run",
+        skip_all,
+        fields(job_type = S::JOB_TYPE)
+    )]
     async fn run(
         &self,
         current_job: CurrentJob,
@@ -414,8 +413,6 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
     }
 }
 
-// ── Hook (Phase 0) ───────────────────────────────────────────────────────────
-
 /// Batches all library writes in a single transaction into one inbox row +
 /// one search-index pass. Registered via `op.add_commit_hook` from per-repo
 /// `post_persist_hook` bodies; `merge` collapses repeated registrations
@@ -470,7 +467,9 @@ impl CommitHook for LibrarySyncHook {
     }
 }
 
-/// Register a library write to fire at transaction commit.
+/// Falls back to `force_execute_pre_commit` when `add_commit_hook` returns
+/// `Err(hook)` — the documented contract for `AtomicOperation` impls (e.g.
+/// raw `sqlx::Transaction`) that don't support hooks.
 pub(super) async fn enqueue_write<OP: AtomicOperation>(
     op: &mut OP,
     inbox: &obix::Inbox,
@@ -483,8 +482,6 @@ pub(super) async fn enqueue_write<OP: AtomicOperation>(
     }
     Ok(())
 }
-
-// ── slugify ──────────────────────────────────────────────────────────────────
 
 pub(super) fn slugify(title: &str) -> String {
     title
