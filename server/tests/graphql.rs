@@ -462,7 +462,8 @@ async fn library_search_returns_empty_for_empty_query_state() {
     .await;
     assert_no_errors(&result);
 
-    // Workspace filter — workspace doesn't exist for this user, so empty
+    // Workspace filter — non-existent workspace fails service-layer
+    // find_by_id (this is a 404, not a silent empty result).
     let bogus_ws = "00000000-0000-0000-0000-000000000000";
     let result = execute_graphql(
         &schema,
@@ -474,10 +475,12 @@ async fn library_search_returns_empty_for_empty_query_state() {
         serde_json::json!({ "input": { "query": "x", "workspaceId": bogus_ws, "limit": 10 } }),
     )
     .await;
-    let data = assert_no_errors(&result);
-    assert_eq!(data["librarySearch"].as_array().unwrap().len(), 0);
+    assert!(
+        result.get("errors").is_some(),
+        "non-existent workspace_id should error: {result:#}"
+    );
 
-    // Both filters combined
+    // Both filters combined — same non-existent workspace, same error.
     let result = execute_graphql(
         &schema,
         &app,
@@ -493,8 +496,10 @@ async fn library_search_returns_empty_for_empty_query_state() {
         }}),
     )
     .await;
-    let data = assert_no_errors(&result);
-    assert_eq!(data["librarySearch"].as_array().unwrap().len(), 0);
+    assert!(
+        result.get("errors").is_some(),
+        "non-existent workspace_id should error: {result:#}"
+    );
 }
 
 #[tokio::test]

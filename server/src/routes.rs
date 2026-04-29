@@ -286,40 +286,21 @@ async fn library_search(
         .into_response();
     }
 
-    let workspaces = match state.app.workspaces().list_all(&sub).await {
-        Ok(ws) => ws,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to list workspaces for library search");
-            return LibrarySearchResultsTemplate {
-                query: trimmed.to_string(),
-                hits: vec![],
-                error: Some(format!("failed to list workspaces: {e}")),
-            }
-            .into_response();
-        }
-    };
-
-    let mut workspace_lookup: std::collections::HashMap<uuid::Uuid, String> =
-        std::collections::HashMap::with_capacity(workspaces.len());
-    for ws in &workspaces {
-        workspace_lookup.insert(uuid::Uuid::from(ws.id), ws.name.clone());
-    }
-
-    let workspace_ids: Vec<uuid::Uuid> = match params.workspace_id.as_deref() {
-        Some(s) if !s.is_empty() => match uuid::Uuid::parse_str(s) {
-            Ok(uuid) if workspace_lookup.contains_key(&uuid) => vec![uuid],
-            Ok(_) => vec![],
-            Err(_) => {
-                return LibrarySearchResultsTemplate {
-                    query: trimmed.to_string(),
-                    hits: vec![],
-                    error: Some("invalid workspace id".to_string()),
+    let workspace_filter: Option<domain::primitives::WorkspaceId> =
+        match params.workspace_id.as_deref() {
+            Some(s) if !s.is_empty() => match uuid::Uuid::parse_str(s) {
+                Ok(uuid) => Some(domain::primitives::WorkspaceId::from(uuid)),
+                Err(_) => {
+                    return LibrarySearchResultsTemplate {
+                        query: trimmed.to_string(),
+                        hits: vec![],
+                        error: Some("invalid workspace id".to_string()),
+                    }
+                    .into_response();
                 }
-                .into_response();
-            }
-        },
-        _ => workspace_lookup.keys().copied().collect(),
-    };
+            },
+            _ => None,
+        };
 
     let doc_types: Vec<drua_core::library::DocType> = params
         .t
@@ -333,8 +314,8 @@ async fn library_search(
 
     let hits = match state
         .app
-        .library()
-        .search_global(&workspace_ids, trimmed, &doc_types, 50)
+        .workspaces()
+        .library_search(&sub, trimmed, workspace_filter, &doc_types, 50)
         .await
     {
         Ok(h) => h,
@@ -348,6 +329,17 @@ async fn library_search(
             .into_response();
         }
     };
+
+    // Workspace-name lookup for display only — auth already enforced above.
+    let workspace_lookup: std::collections::HashMap<uuid::Uuid, String> = state
+        .app
+        .workspaces()
+        .list_all(&sub)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ws| (uuid::Uuid::from(ws.id), ws.name))
+        .collect();
 
     let views: Vec<LibraryHitView> = hits
         .into_iter()

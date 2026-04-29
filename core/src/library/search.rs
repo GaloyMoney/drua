@@ -246,13 +246,9 @@ struct GlobalVecRow {
     distance: Option<f64>,
 }
 
-/// Reciprocal Rank Fusion of FTS + vector hits, normalized so a
-/// document at rank 0 in BOTH lists scores 1.0 and rank-0 in only
-/// one list scores 0.5. The raw per-list contribution is
-/// `1 / (K + rank + 1)`, max = `1/(K+1)` per list, summed over
-/// `N_LISTS` lists, then divided by the static 2-list ceiling. When
-/// the embedder fails and only FTS rows are present, scores cap at 0.5,
-/// signalling "matched only one of two retrieval signals".
+/// Reciprocal Rank Fusion of FTS + vector hits, normalized to `[0, 1]`.
+/// Rank 0 in both lists → 1.0; rank 0 in one list → 0.5 (also the cap
+/// when the embedder is unavailable and only FTS rows are present).
 fn rrf_fuse(
     fts_rows: Vec<GlobalFtsRow>,
     vec_rows: Vec<GlobalVecRow>,
