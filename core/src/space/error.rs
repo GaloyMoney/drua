@@ -20,7 +20,15 @@ pub enum SpaceError {
     #[error("SpaceError - Library: {0}")]
     Library(#[from] LibraryError),
     #[error(
-        "SpaceError - InvalidSlug: {slug:?} (must be [a-z0-9-]+, no leading/trailing hyphens)"
+        "SpaceError - InvalidSlug: {slug:?} (must be [a-z0-9-]+, no leading/trailing or double hyphens)"
     )]
     InvalidSlug { slug: String },
+    #[error("SpaceError - MissingField: {0}")]
+    MissingField(String),
+}
+
+impl From<derive_builder::UninitializedFieldError> for SpaceError {
+    fn from(err: derive_builder::UninitializedFieldError) -> Self {
+        Self::MissingField(err.field_name().to_string())
+    }
 }

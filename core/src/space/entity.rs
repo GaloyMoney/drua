@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
+use super::error::SpaceError;
 use crate::primitives::*;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +100,7 @@ impl TryFromEvents<SpaceEvent> for Space {
 }
 
 #[derive(Debug, Builder)]
+#[builder(build_fn(error = "SpaceError", validate = "Self::validate"))]
 pub struct NewSpace {
     #[builder(setter(into))]
     pub(super) id: SpaceId,
@@ -112,12 +114,41 @@ pub struct NewSpace {
     pub(super) authorized_workspaces: Vec<WorkspaceId>,
 }
 
+impl NewSpaceBuilder {
+    fn validate(&self) -> Result<(), SpaceError> {
+        if let Some(slug) = self.slug.as_ref() {
+            validate_slug(slug)?;
+        }
+        Ok(())
+    }
+}
+
 impl NewSpace {
     pub fn builder() -> NewSpaceBuilder {
         let mut builder = NewSpaceBuilder::default();
         builder.id(SpaceId::new());
         builder
     }
+}
+
+/// Slugs must be lowercase alphanumeric + `-`, with no leading/trailing
+/// `-` and no empty segments. This keeps `spaces/<slug>/` safe for
+/// filesystem and git refspecs.
+fn validate_slug(slug: &str) -> Result<(), SpaceError> {
+    if slug.is_empty() || slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
+        return Err(SpaceError::InvalidSlug {
+            slug: slug.to_string(),
+        });
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(SpaceError::InvalidSlug {
+            slug: slug.to_string(),
+        });
+    }
+    Ok(())
 }
 
 impl IntoEvents<SpaceEvent> for NewSpace {
@@ -195,6 +226,63 @@ mod tests {
         let mut s = new_space(vec![creator]);
         let res = s.authorize_workspace(creator);
         assert!(!res.did_execute());
+    }
+
+    #[test]
+    fn build_rejects_invalid_slug() {
+        let res = NewSpace::builder().slug("Invalid Slug").build();
+        assert!(matches!(
+            res,
+            Err(super::SpaceError::InvalidSlug { slug }) if slug == "Invalid Slug"
+        ));
+    }
+
+    #[test]
+    fn build_accepts_valid_slug() {
+        let res = NewSpace::builder().slug("on-call").build();
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn slug_accepts_simple_kebab() {
+        assert!(super::validate_slug("oncall").is_ok());
+        assert!(super::validate_slug("on-call").is_ok());
+        assert!(super::validate_slug("incident-2024-q1").is_ok());
+    }
+
+    #[test]
+    fn slug_rejects_empty() {
+        assert!(super::validate_slug("").is_err());
+    }
+
+    #[test]
+    fn slug_rejects_uppercase() {
+        assert!(super::validate_slug("OnCall").is_err());
+    }
+
+    #[test]
+    fn slug_rejects_path_separators() {
+        assert!(super::validate_slug("on/call").is_err());
+        assert!(super::validate_slug("on\\call").is_err());
+        assert!(super::validate_slug("..").is_err());
+    }
+
+    #[test]
+    fn slug_rejects_leading_or_trailing_hyphen() {
+        assert!(super::validate_slug("-oncall").is_err());
+        assert!(super::validate_slug("oncall-").is_err());
+    }
+
+    #[test]
+    fn slug_rejects_double_hyphen() {
+        assert!(super::validate_slug("on--call").is_err());
+    }
+
+    #[test]
+    fn slug_rejects_special_chars() {
+        assert!(super::validate_slug("on call").is_err());
+        assert!(super::validate_slug("on.call").is_err());
+        assert!(super::validate_slug("oncall!").is_err());
     }
 
     #[test]

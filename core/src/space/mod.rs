@@ -27,8 +27,9 @@ impl Spaces {
     }
 
     /// Persists the entity and queues a `SpaceInit` op so the library
-    /// gets `spaces/<slug>/.gitkeep` committed in the same transaction.
-    /// The creating subject's workspace is seeded into
+    /// gets `spaces/<slug>/.gitkeep` committed in the same transaction
+    /// (mirrors `Workspaces::create`'s explicit `sync_workspace_folder_in_op`
+    /// call). The creating subject's workspace is seeded into
     /// `authorized_workspaces`; non-agent subjects (e.g. plain `User`)
     /// produce a space with an empty authorized list.
     #[instrument(name = "domain.space.create", skip(self, sub))]
@@ -41,18 +42,15 @@ impl Spaces {
         sub.can(AuthVerb::Create, AuthResource::Space(None))?;
         Audit::record_action_if_unset("space.create");
 
-        let slug = slug.into();
-        validate_slug(&slug)?;
-
         let initial_workspaces: Vec<WorkspaceId> = sub.workspace_id().into_iter().collect();
 
         let mut builder = NewSpace::builder();
-        builder.slug(slug);
+        builder.slug(slug.into());
         if let Some(desc) = description {
             builder.description(desc);
         }
         builder.authorized_workspaces(initial_workspaces);
-        let new_space = builder.build().expect("could not build new space");
+        let new_space = builder.build()?;
 
         let mut op = self.repo.begin_op().await?;
         let space = self.repo.create_in_op(&mut op, new_space).await?;
@@ -63,72 +61,5 @@ impl Spaces {
 
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
         Ok(space)
-    }
-}
-
-/// Slugs must be lowercase alphanumeric + `-`, with no leading/trailing
-/// `-` and no empty segments. This keeps `spaces/<slug>/` safe for
-/// filesystem and git refspecs.
-fn validate_slug(slug: &str) -> Result<(), SpaceError> {
-    if slug.is_empty() || slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
-        return Err(SpaceError::InvalidSlug {
-            slug: slug.to_string(),
-        });
-    }
-    if !slug
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
-        return Err(SpaceError::InvalidSlug {
-            slug: slug.to_string(),
-        });
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slug_accepts_simple_kebab() {
-        assert!(validate_slug("oncall").is_ok());
-        assert!(validate_slug("on-call").is_ok());
-        assert!(validate_slug("incident-2024-q1").is_ok());
-    }
-
-    #[test]
-    fn slug_rejects_empty() {
-        assert!(validate_slug("").is_err());
-    }
-
-    #[test]
-    fn slug_rejects_uppercase() {
-        assert!(validate_slug("OnCall").is_err());
-    }
-
-    #[test]
-    fn slug_rejects_path_separators() {
-        assert!(validate_slug("on/call").is_err());
-        assert!(validate_slug("on\\call").is_err());
-        assert!(validate_slug("..").is_err());
-    }
-
-    #[test]
-    fn slug_rejects_leading_or_trailing_hyphen() {
-        assert!(validate_slug("-oncall").is_err());
-        assert!(validate_slug("oncall-").is_err());
-    }
-
-    #[test]
-    fn slug_rejects_double_hyphen() {
-        assert!(validate_slug("on--call").is_err());
-    }
-
-    #[test]
-    fn slug_rejects_special_chars() {
-        assert!(validate_slug("on call").is_err());
-        assert!(validate_slug("on.call").is_err());
-        assert!(validate_slug("oncall!").is_err());
     }
 }
