@@ -220,6 +220,7 @@ impl App {
             (*library).clone(),
             Arc::clone(&skills),
             execute_run_spawner,
+            &jobs,
         ));
 
         let workspaces = Arc::new(Workspaces::new(
@@ -302,9 +303,8 @@ impl App {
         }
 
         {
-            let sync_init = library::space::file_sync::SpaceFilesSyncJobInitializer::new(
-                Arc::clone(&library),
-            );
+            let sync_init =
+                library::space::file_sync::SpaceFilesSyncJobInitializer::new(Arc::clone(&library));
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
                 .spawn_with_queue_id(

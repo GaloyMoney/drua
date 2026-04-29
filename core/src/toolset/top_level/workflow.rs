@@ -55,6 +55,20 @@ enum WorkflowParams {
         definition_id: WorkflowDefinitionId,
         #[serde(default)]
         payload: Option<serde_json::Value>,
+        /// Block until the run reaches a terminal state. Defaults to
+        /// `true` so the trigger response carries the final state and
+        /// step outputs without a follow-up `run` poll.
+        #[serde(default)]
+        wait: Option<bool>,
+        /// Wait budget when `wait` is true. Defaults to 360 seconds.
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
+    AwaitRun {
+        run_id: WorkflowRunId,
+        /// Wait budget. Defaults to 360 seconds.
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
     },
     Runs {
         definition_id: WorkflowDefinitionId,
@@ -175,6 +189,7 @@ impl WorkflowParams {
             Self::List => "workflow.list",
             Self::Get { .. } => "workflow.get",
             Self::Trigger { .. } => "workflow.trigger",
+            Self::AwaitRun { .. } => "workflow.await_run",
             Self::Runs { .. } => "workflow.runs",
             Self::Run { .. } => "workflow.run",
         }
@@ -300,8 +315,8 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "runs", "run"],
-                "description": "Which workflow operation to perform. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
+                "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run"],
+                "description": "Which workflow operation to perform. `trigger` blocks until the run terminates by default (`wait=true`, 360s budget). `await_run` re-attaches to an in-flight run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
             },
             "name": {
                 "type": "string",
@@ -368,7 +383,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "timeout_seconds": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Per-step timeout in seconds (create). Defaults to 300."
+                "description": "Per-step timeout in seconds (create); wait budget in seconds (trigger / await_run). Defaults: create=300, trigger/await_run=360."
             },
             "definition_id": {
                 "type": "string",
@@ -382,6 +397,10 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "payload": {
                 "description": "Trigger context payload (trigger). Defaults to {}."
+            },
+            "wait": {
+                "type": "boolean",
+                "description": "Block until the run terminates (trigger). Defaults to true."
             }
         },
         "required": ["command"],
@@ -405,8 +424,11 @@ impl TopLevelTool for WorkflowTool {
          `name`; either `steps` array or single-step shorthand `skill`; \
          optional `provider`, `sandboxes`, `manual`), `list`, `get` \
          (requires `definition_id`), `trigger` (requires `definition_id`, \
-         optional `payload`), `runs` (requires `definition_id`; truncated \
-         step outputs), `run` (requires `run_id`; full per-step outputs)."
+         optional `payload`; blocks until terminal by default — `wait=false` \
+         to fire-and-forget; `timeout_seconds` overrides the 360s budget), \
+         `await_run` (requires `run_id`; blocks until terminal), `runs` \
+         (requires `definition_id`; truncated step outputs), `run` \
+         (requires `run_id`; full per-step outputs)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -552,6 +574,8 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::Trigger {
                 definition_id,
                 payload,
+                wait,
+                timeout_seconds,
             } => {
                 let payload =
                     payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
@@ -560,15 +584,39 @@ impl TopLevelTool for WorkflowTool {
                     .trigger_run(subject, definition_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let text = format!(
-                    "Workflow run started.\n  run_id:        {}\n  definition_id: {}\n  state:         {}\n\nInspect with: workflow command=run run_id={}",
-                    run.id,
-                    run.definition_id,
-                    run_state_str(run.state),
-                    run.id,
-                );
+
+                let run = if wait.unwrap_or(true) {
+                    let timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(360));
+                    self.workflows
+                        .await_run_completion(subject, run.id, Some(timeout))
+                        .await
+                        .map_err(|e| ToolSetsError::Workflow(e.to_string()))?
+                } else {
+                    run
+                };
+
+                let text = format_run_text(&run);
                 let out = WorkflowOutput {
                     command: "trigger".to_string(),
+                    run: Some(run_to_output(&run)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            WorkflowParams::AwaitRun {
+                run_id,
+                timeout_seconds,
+            } => {
+                let timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(360));
+                let run = self
+                    .workflows
+                    .await_run_completion(subject, run_id, Some(timeout))
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let text = format_run_text(&run);
+                let out = WorkflowOutput {
+                    command: "await_run".to_string(),
                     run: Some(run_to_output(&run)),
                     ..Default::default()
                 };
