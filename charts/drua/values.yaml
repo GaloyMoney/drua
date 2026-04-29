@@ -186,7 +186,7 @@ galoyAgents:
     openaiApiKey: ""
     annotations:
   codeAssistant:
-    indexHash: "662e183b8581d71fec1849af1f15d297bb9ecbccefbfa0ab3d81f972a15fca1f"
+    indexHash: "ca383347b941da1a625ae623bdac66572fd3a267d46e7e5242cc2bf7eab89505"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
