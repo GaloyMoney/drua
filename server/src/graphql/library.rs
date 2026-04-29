@@ -47,7 +47,8 @@ pub struct LibrarySearchInput {
 #[derive(SimpleObject, Clone)]
 pub struct LibrarySearchHit {
     pub id: UUID,
-    pub workspace_id: WorkspaceId,
+    /// `null` for global content (skills with no workspace).
+    pub workspace_id: Option<WorkspaceId>,
     pub r#type: LibraryFileType,
     pub title: String,
     pub snippet: String,
@@ -58,9 +59,14 @@ pub struct LibrarySearchHit {
 impl LibrarySearchHit {
     pub fn from_domain(hit: GlobalSearchHit) -> Self {
         let snippet = make_snippet(&hit.content, 240);
+        let workspace_id = if hit.workspace_id.is_nil() {
+            None
+        } else {
+            Some(WorkspaceId::from(hit.workspace_id))
+        };
         Self {
             id: UUID::from(hit.doc_id),
-            workspace_id: WorkspaceId::from(hit.workspace_id),
+            workspace_id,
             r#type: hit.doc_type.into(),
             title: hit.title,
             snippet,

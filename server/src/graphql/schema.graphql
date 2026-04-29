@@ -133,7 +133,10 @@ type LibrarySearchHit {
 	tags: [String!]!
 	title: String!
 	type: LibraryFileType!
-	workspaceId: WorkspaceId!
+	"""
+	`null` for global content (skills with no workspace).
+	"""
+	workspaceId: WorkspaceId
 }
 
 input LibrarySearchInput {

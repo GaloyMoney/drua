@@ -122,7 +122,7 @@ impl SearchStore {
         let ids = [workspace_id, uuid::Uuid::nil()];
         let doc_types: Vec<DocType> = doc_type.into_iter().collect();
         let hits = self
-            .search_in_workspaces(&ids, query, query_embedding, &doc_types, limit)
+            .search_in_workspaces(Some(&ids), query, query_embedding, &doc_types, limit)
             .await?;
         Ok(hits
             .into_iter()
@@ -137,9 +137,10 @@ impl SearchStore {
             .collect())
     }
 
-    /// Cross-workspace variant of [`Self::search`]. The nil UUID is appended
-    /// internally so global-scoped library files surface in cross-workspace
-    /// search; callers only need to pass the user's readable workspace ids.
+    /// Cross-workspace variant of [`Self::search`]. Empty `workspace_ids`
+    /// = no filter (every workspace plus global). Otherwise the caller's
+    /// list is used as-is, with the nil UUID appended so global-scoped
+    /// files always surface alongside.
     #[tracing::instrument(name = "library.search_store.search_global", skip_all)]
     pub async fn search_global(
         &self,
@@ -149,29 +150,35 @@ impl SearchStore {
         doc_types: &[DocType],
         limit: usize,
     ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
-        if workspace_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut ids: Vec<uuid::Uuid> = workspace_ids.to_vec();
-        if !ids.contains(&uuid::Uuid::nil()) {
-            ids.push(uuid::Uuid::nil());
-        }
-        self.search_in_workspaces(&ids, query, query_embedding, doc_types, limit)
-            .await
+        let workspace_filter: Option<Vec<uuid::Uuid>> = if workspace_ids.is_empty() {
+            None
+        } else {
+            let mut ids: Vec<uuid::Uuid> = workspace_ids.to_vec();
+            if !ids.contains(&uuid::Uuid::nil()) {
+                ids.push(uuid::Uuid::nil());
+            }
+            Some(ids)
+        };
+        self.search_in_workspaces(
+            workspace_filter.as_deref(),
+            query,
+            query_embedding,
+            doc_types,
+            limit,
+        )
+        .await
     }
 
-    /// Shared FTS + vector search over an explicit set of workspace ids.
+    /// Shared FTS + vector search. `workspace_filter = None` = no
+    /// workspace clause; `Some(&[..])` filters to those ids.
     async fn search_in_workspaces(
         &self,
-        workspace_ids: &[uuid::Uuid],
+        workspace_filter: Option<&[uuid::Uuid]>,
         query: &str,
         query_embedding: Option<Vec<f32>>,
         doc_types: &[DocType],
         limit: usize,
     ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
-        if workspace_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         let over_fetch = (limit * 3).max(10) as i64;
         let doc_type_filter: Option<Vec<String>> = if doc_types.is_empty() {
             None
@@ -184,13 +191,13 @@ impl SearchStore {
             r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,
                       ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
                FROM library_search_data
-               WHERE workspace_id = ANY($2)
+               WHERE ($2::uuid[] IS NULL OR workspace_id = ANY($2))
                  AND search_tsv @@ plainto_tsquery('english', $1)
                  AND ($3::text[] IS NULL OR doc_type = ANY($3))
                ORDER BY rank DESC
                LIMIT $4"#,
             query,
-            workspace_ids,
+            workspace_filter,
             doc_type_filter.as_deref(),
             over_fetch,
         )
@@ -204,13 +211,13 @@ impl SearchStore {
                 r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,
                           embedding <=> $1 AS distance
                    FROM library_search_data
-                   WHERE workspace_id = ANY($2)
+                   WHERE ($2::uuid[] IS NULL OR workspace_id = ANY($2))
                      AND embedding IS NOT NULL
                      AND ($3::text[] IS NULL OR doc_type = ANY($3))
                    ORDER BY distance ASC
                    LIMIT $4"#,
                 vec as Vector,
-                workspace_ids,
+                workspace_filter,
                 doc_type_filter.as_deref(),
                 over_fetch,
             )

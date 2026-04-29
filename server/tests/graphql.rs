@@ -504,9 +504,10 @@ async fn library_search_returns_empty_for_empty_query_state() {
 
 #[tokio::test]
 async fn library_search_workspace_scoped_agent_no_filter() {
-    // Workspace-scoped agents (no collection-level Workspace(None) scope)
-    // must still be able to search without specifying a workspace_id —
-    // the service intersects against their readable workspaces.
+    // Library content is openly discoverable: any non-anonymous subject
+    // — including a workspace-scoped agent without the collection-level
+    // Workspace(None) scope — can search globally and receive results
+    // spanning every workspace plus global content.
     let pool = pool().await;
     let app = test_app(&pool).await;
     let schema = drua_server::graphql::schema(Some(app.clone()));

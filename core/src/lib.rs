@@ -230,7 +230,7 @@ impl App {
             library.clone(),
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
-        toolsets.register_top_level(LibraryTool::new(Arc::clone(&workspaces)));
+        toolsets.register_top_level(LibraryTool::new(Arc::new(library.clone())));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));
         toolsets.register_top_level(WorkflowTool::new(

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,\n                      ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank\n               FROM library_search_data\n               WHERE workspace_id = ANY($2)\n                 AND search_tsv @@ plainto_tsquery('english', $1)\n                 AND ($3::text[] IS NULL OR doc_type = ANY($3))\n               ORDER BY rank DESC\n               LIMIT $4",
+  "query": "SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,\n                      ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank\n               FROM library_search_data\n               WHERE ($2::uuid[] IS NULL OR workspace_id = ANY($2))\n                 AND search_tsv @@ plainto_tsquery('english', $1)\n                 AND ($3::text[] IS NULL OR doc_type = ANY($3))\n               ORDER BY rank DESC\n               LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -57,5 +57,5 @@
       null
     ]
   },
-  "hash": "e201bc239f24e0f3b0b74a640636669f8fa0ce433a76b6deddef7ac28b17bee8"
+  "hash": "9a3a4c3c0b92cc2a020650c18ebca0f497a34e59b16a855ab17961e53b118975"
 }

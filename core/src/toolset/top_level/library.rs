@@ -5,8 +5,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{DocType, GlobalSearchHit};
-use crate::workspace::Workspaces;
+use crate::library::{DocType, GlobalSearchHit, Library};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -83,7 +82,6 @@ struct LibraryOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct LibrarySearchHit {
     id: String,
-    workspace_id: String,
     r#type: LibraryFileType,
     title: String,
     snippet: String,
@@ -95,7 +93,6 @@ impl From<GlobalSearchHit> for LibrarySearchHit {
     fn from(hit: GlobalSearchHit) -> Self {
         Self {
             id: hit.doc_id.to_string(),
-            workspace_id: hit.workspace_id.to_string(),
             r#type: hit.doc_type.into(),
             title: hit.title,
             snippet: make_snippet(&hit.content, SNIPPET_CHARS),
@@ -153,12 +150,12 @@ static LIBRARY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 pub struct LibraryTool {
-    workspaces: Arc<Workspaces>,
+    library: Arc<Library>,
 }
 
 impl LibraryTool {
-    pub fn new(workspaces: Arc<Workspaces>) -> Self {
-        Self { workspaces }
+    pub fn new(library: Arc<Library>) -> Self {
+        Self { library }
     }
 }
 
@@ -212,10 +209,9 @@ impl TopLevelTool for LibraryTool {
             .collect();
 
         let hits = self
-            .workspaces
-            .library_search(subject, &query, None, &doc_types, limit)
-            .await
-            .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+            .library
+            .search_global(subject, &[], &query, &doc_types, limit)
+            .await?;
 
         let total = hits.len();
         let hits: Vec<LibrarySearchHit> = hits.into_iter().map(LibrarySearchHit::from).collect();
@@ -329,7 +325,6 @@ mod tests {
             command: "search".into(),
             hits: Some(vec![LibrarySearchHit {
                 id: "11111111-1111-1111-1111-111111111111".into(),
-                workspace_id: "22222222-2222-2222-2222-222222222222".into(),
                 r#type: LibraryFileType::Skill,
                 title: "auth".into(),
                 snippet: "snippet".into(),
@@ -343,6 +338,10 @@ mod tests {
         assert_eq!(v["total"], 1);
         assert_eq!(v["hits"][0]["type"], "skill");
         assert_eq!(v["hits"][0]["score"], 0.9);
+        assert!(
+            !v["hits"][0].as_object().unwrap().contains_key("workspace_id"),
+            "tool searches are always global; workspace_id is not on hits"
+        );
     }
 
     #[test]
