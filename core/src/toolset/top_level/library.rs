@@ -6,7 +6,6 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::library::{DocType, GlobalSearchHit};
-use crate::primitives::WorkspaceId;
 use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
@@ -59,8 +58,6 @@ enum LibraryParams {
         query: String,
         #[serde(default)]
         types: Option<Vec<LibraryFileType>>,
-        #[serde(default)]
-        workspace_id: Option<WorkspaceId>,
         #[serde(default = "default_search_limit")]
         limit: usize,
     },
@@ -144,11 +141,6 @@ static LIBRARY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 },
                 "description": "Restrict results to these library file types. Omit / empty = all searchable types. (Workflows are git-synced but not indexed for search.)"
             },
-            "workspace_id": {
-                "type": "string",
-                "format": "uuid",
-                "description": "Restrict results to one workspace. Omit to search every workspace the subject can read (search)."
-            },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
@@ -177,13 +169,13 @@ impl TopLevelTool for LibraryTool {
     }
 
     fn description(&self) -> &str {
-        "Cross-type library search across skills and notes. Use this for \
-         any library lookup — alternative to `use_skill` if you want to \
-         discover content without invoking it. Filters: `types` \
-         (skill/note, multi-select), `workspace_id` (single workspace; \
-         default = every workspace the subject can read). Results are \
-         scored hybrid FTS + semantic similarity. (Workflows live in the \
-         library repo but are not search-indexed.)"
+        "Cross-type, cross-workspace library search across skills and \
+         notes. Always global — results span every workspace the subject \
+         can read. Use this for any library lookup — alternative to \
+         `use_skill` if you want to discover content without invoking it. \
+         Filter `types` (skill/note, multi-select). Results are scored \
+         hybrid FTS + semantic similarity. (Workflows live in the library \
+         repo but are not search-indexed.)"
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -209,7 +201,6 @@ impl TopLevelTool for LibraryTool {
         let LibraryParams::Search {
             query,
             types,
-            workspace_id,
             limit,
         } = params;
 
@@ -222,7 +213,7 @@ impl TopLevelTool for LibraryTool {
 
         let hits = self
             .workspaces
-            .library_search(subject, &query, workspace_id, &doc_types, limit)
+            .library_search(subject, &query, None, &doc_types, limit)
             .await
             .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
 
@@ -285,19 +276,24 @@ mod tests {
     fn parse_search_minimal() {
         let json = serde_json::json!({"command": "search", "query": "auth flow"});
         let params: LibraryParams = serde_json::from_value(json).unwrap();
-        match params {
-            LibraryParams::Search {
-                query,
-                types,
-                workspace_id,
-                limit,
-            } => {
-                assert_eq!(query, "auth flow");
-                assert!(types.is_none());
-                assert!(workspace_id.is_none());
-                assert_eq!(limit, DEFAULT_SEARCH_LIMIT);
-            }
-        }
+        let LibraryParams::Search {
+            query,
+            types,
+            limit,
+        } = params;
+        assert_eq!(query, "auth flow");
+        assert!(types.is_none());
+        assert_eq!(limit, DEFAULT_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn schema_does_not_advertise_workspace_id() {
+        let schema = &*LIBRARY_SCHEMA;
+        let props = schema["properties"].as_object().expect("properties");
+        assert!(
+            !props.contains_key("workspace_id"),
+            "library tool is global: workspace_id must not be exposed"
+        );
     }
 
     #[test]
