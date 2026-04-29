@@ -21,12 +21,14 @@ fn default_search_limit() -> usize {
     DEFAULT_SEARCH_LIMIT
 }
 
+/// Workflows are git-synced to the library repo but excluded from search
+/// (`Library::search_global` filters them out). Mirrors the GraphQL
+/// `LibraryFileType` enum.
 #[derive(serde::Serialize, Deserialize, Copy, Clone, Debug, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum LibraryFileType {
     Skill,
     Note,
-    Workflow,
 }
 
 impl From<LibraryFileType> for DocType {
@@ -34,17 +36,18 @@ impl From<LibraryFileType> for DocType {
         match t {
             LibraryFileType::Skill => DocType::Skill,
             LibraryFileType::Note => DocType::Note,
-            LibraryFileType::Workflow => DocType::Workflow,
         }
     }
 }
 
+/// Workflow rows can't reach this conversion in practice — `Library::
+/// search_global` drops them before fusion. Default to Note if one ever
+/// does, matching the GraphQL fallback.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
         match t {
             DocType::Skill => LibraryFileType::Skill,
-            DocType::Note => LibraryFileType::Note,
-            DocType::Workflow => LibraryFileType::Workflow,
+            DocType::Note | DocType::Workflow => LibraryFileType::Note,
         }
     }
 }
@@ -137,9 +140,9 @@ static LIBRARY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "enum": ["skill", "note", "workflow"]
+                    "enum": ["skill", "note"]
                 },
-                "description": "Restrict results to these library file types. Omit / empty = all types (search)."
+                "description": "Restrict results to these library file types. Omit / empty = all searchable types. (Workflows are git-synced but not indexed for search.)"
             },
             "workspace_id": {
                 "type": "string",
@@ -174,12 +177,13 @@ impl TopLevelTool for LibraryTool {
     }
 
     fn description(&self) -> &str {
-        "Cross-type library search across skills, notes, and workflows. \
-         Use this for any library lookup — alternative to `use_skill` if you \
-         want to discover content without invoking it. Filters: `types` \
-         (skill/note/workflow, multi-select), `workspace_id` (single \
-         workspace; default = every workspace the subject can read). \
-         Results are scored hybrid FTS + semantic similarity."
+        "Cross-type library search across skills and notes. Use this for \
+         any library lookup — alternative to `use_skill` if you want to \
+         discover content without invoking it. Filters: `types` \
+         (skill/note, multi-select), `workspace_id` (single workspace; \
+         default = every workspace the subject can read). Results are \
+         scored hybrid FTS + semantic similarity. (Workflows live in the \
+         library repo but are not search-indexed.)"
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -261,7 +265,6 @@ impl LibrarySearchHit {
         match self.r#type {
             LibraryFileType::Skill => "skill",
             LibraryFileType::Note => "note",
-            LibraryFileType::Workflow => "workflow",
         }
     }
 }
@@ -302,7 +305,7 @@ mod tests {
         let json = serde_json::json!({
             "command": "search",
             "query": "x",
-            "types": ["skill", "workflow"],
+            "types": ["skill", "note"],
             "limit": 5
         });
         let params: LibraryParams = serde_json::from_value(json).unwrap();
@@ -310,8 +313,18 @@ mod tests {
         let types = types.expect("types");
         assert_eq!(types.len(), 2);
         assert!(matches!(types[0], LibraryFileType::Skill));
-        assert!(matches!(types[1], LibraryFileType::Workflow));
+        assert!(matches!(types[1], LibraryFileType::Note));
         assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn workflow_type_rejected_at_input_boundary() {
+        let json = serde_json::json!({
+            "command": "search",
+            "query": "x",
+            "types": ["workflow"]
+        });
+        assert!(serde_json::from_value::<LibraryParams>(json).is_err());
     }
 
     #[test]
@@ -351,11 +364,17 @@ mod tests {
     }
 
     #[test]
-    fn doc_type_roundtrip() {
-        for t in [DocType::Skill, DocType::Note, DocType::Workflow] {
+    fn searchable_doc_type_roundtrip() {
+        for t in [DocType::Skill, DocType::Note] {
             let lft: LibraryFileType = t.into();
             let back: DocType = lft.into();
             assert_eq!(t.as_str(), back.as_str());
         }
+    }
+
+    #[test]
+    fn workflow_doc_type_collapses_to_note() {
+        let lft: LibraryFileType = DocType::Workflow.into();
+        assert!(matches!(lft, LibraryFileType::Note));
     }
 }
