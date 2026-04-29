@@ -203,11 +203,8 @@ async fn apply_upsert(
             &SearchableFields {
                 doc_id,
                 doc_type: DocType::SpaceFile,
-                // TODO(authz): space file ACL goes through
-                // `Space.authorized_workspaces`; the search resolver
-                // will join via `space_search_data` rather than match
-                // this column. Stored as nil() until that resolver
-                // lands.
+                // Space files aren't workspace-scoped — `nil()` reflects
+                // "library-global" in the FTS index.
                 workspace_id: uuid::Uuid::nil(),
                 title: title.clone(),
                 body: body.clone(),

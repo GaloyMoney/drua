@@ -208,6 +208,22 @@ impl Library {
         )?;
         crate::audit::Audit::record_action_if_unset("space.create");
 
+        let mut op = self.space_repo.begin_op().await?;
+        let space = self.create_space_in_op(&mut op, sub, slug, description).await?;
+        op.commit().await?;
+        Ok(space)
+    }
+
+    /// Composable variant — caller owns the `op`. Skips the auth check
+    /// (caller is expected to have authorised the broader transaction).
+    #[tracing::instrument(name = "library.create_space_in_op", skip(self, op, sub))]
+    pub async fn create_space_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        sub: &crate::auth::AuthSubject,
+        slug: impl Into<String> + std::fmt::Debug,
+        description: Option<String>,
+    ) -> Result<Space, LibraryError> {
         let initial_workspaces: Vec<crate::primitives::WorkspaceId> =
             sub.workspace_id().into_iter().collect();
 
@@ -219,14 +235,8 @@ impl Library {
         builder.authorized_workspaces(initial_workspaces);
         let new_space = builder.build()?;
 
-        let mut op = self.space_repo.begin_op().await?;
-        let space = self
-            .space_repo
-            .create_in_op(&mut op, new_space)
-            .await
-            .map_err(SpaceError::from)?;
-        self.sync_space_folder_in_op(&mut op, &space.slug).await?;
-        op.commit().await?;
+        let space = self.space_repo.create_in_op(op, new_space).await?;
+        self.sync_space_folder_in_op(op, &space.slug).await?;
 
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
         Ok(space)
@@ -247,8 +257,7 @@ impl Library {
         let space = self
             .space_repo
             .maybe_find_by_slug(slug)
-            .await
-            .map_err(SpaceError::from)?
+            .await?
             .ok_or_else(|| SpaceError::NotFound {
                 slug: slug.to_string(),
             })?;
@@ -299,11 +308,7 @@ impl Library {
         &self,
         slug: &str,
     ) -> Result<Option<Space>, LibraryError> {
-        Ok(self
-            .space_repo
-            .maybe_find_by_slug(slug)
-            .await
-            .map_err(SpaceError::from)?)
+        Ok(self.space_repo.maybe_find_by_slug(slug).await?)
     }
 
     /// Removes search data and queues a job to delete

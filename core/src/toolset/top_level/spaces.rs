@@ -100,10 +100,9 @@ impl TopLevelTool for SpacesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_workspace_admin()
-            && subject
-                .can(AuthVerb::Create, AuthResource::Space(None))
-                .is_ok()
+        subject
+            .can(AuthVerb::Create, AuthResource::Space(None))
+            .is_ok()
     }
 
     async fn call(

@@ -12,4 +12,10 @@ pub enum LibraryError {
     Authorization(#[from] crate::auth::error::AuthorizationError),
     #[error("LibraryError - Space: {0}")]
     Space(#[from] super::space::SpaceError),
+    #[error("LibraryError - SpaceCreate: {0}")]
+    SpaceCreate(#[from] super::space::repo::SpaceCreateError),
+    #[error("LibraryError - SpaceFind: {0}")]
+    SpaceFind(#[from] super::space::repo::SpaceFindError),
+    #[error("LibraryError - SpaceQuery: {0}")]
+    SpaceQuery(#[from] super::space::repo::SpaceQueryError),
 }

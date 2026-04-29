@@ -14,8 +14,9 @@ pub enum SpaceEvent {
         id: SpaceId,
         slug: String,
         description: Option<String>,
-        /// Workspaces seeded with access at creation time. Always
-        /// non-empty: the creating agent's workspace is auto-added.
+        /// Seeded with `sub.workspace_id()` when the creator is an
+        /// agent; empty when created by a `User` subject. Mutated later
+        /// via `WorkspaceAuthorized`.
         authorized_workspaces: Vec<WorkspaceId>,
     },
     /// Adds a workspace to `authorized_workspaces` (idempotent).
