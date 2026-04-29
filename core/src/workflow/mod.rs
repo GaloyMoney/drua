@@ -12,7 +12,7 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
-use crate::library::{GitFileHash, Library, RuntimeFile};
+use crate::library::{GitFileHash, Library};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -20,10 +20,7 @@ use crate::skill::Skills;
 pub use definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
 pub use error::*;
-pub use job::{
-    ExecuteRunJobInitializer, SyncWorkflowsFromLibraryConfig,
-    SyncWorkflowsFromLibraryJobInitializer,
-};
+pub use job::ExecuteRunJobInitializer;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
 use job::ExecuteRunConfig;
@@ -216,39 +213,42 @@ impl Workflows {
 
     /// Mirrors `Skills::upsert_from_library_in_op`. On create: mints a
     /// fresh webhook secret. On update: preserves the DB-side secret;
-    /// the file never carries it.
+    /// the file never carries it. Re-parses the canonical YAML payload to
+    /// recover format-specific fields (trigger/steps/sandboxes) that
+    /// `SyncedFile` does not carry.
     #[instrument(name = "core.workflow.upsert_from_library_in_op", skip_all)]
     pub(crate) async fn upsert_from_library_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        file: &RuntimeFile,
+        file: &crate::library::SyncedFile,
         workspace_id: WorkspaceId,
         file_hash: GitFileHash,
     ) -> Result<(), WorkflowError> {
-        let (doc_id, name, description, trigger, steps, sandboxes, workspace_name, original_path) =
-            match file {
-                RuntimeFile::Workflow {
-                    doc_id,
-                    name,
-                    description,
-                    trigger,
-                    steps,
-                    sandboxes,
-                    workspace_name,
-                    original_path,
-                    ..
-                } => (
-                    *doc_id,
-                    name.clone(),
-                    description.clone(),
-                    trigger.clone(),
-                    steps.clone(),
-                    sandboxes.clone(),
-                    workspace_name.clone(),
-                    original_path.clone(),
-                ),
-                _ => return Ok(()),
-            };
+        if file.doc_type != crate::library::DocType::Workflow {
+            return Ok(());
+        }
+
+        let synthetic_path = file
+            .original_path
+            .clone()
+            .unwrap_or_else(|| file.relative_path());
+        let parsed = match crate::library::parse_workflow_yaml(&file.rendered, &synthetic_path) {
+            Some(p) => p,
+            None => {
+                return Err(WorkflowError::BuildEntity(
+                    "workflow YAML failed to round-trip".into(),
+                ))
+            }
+        };
+
+        let doc_id = WorkflowDefinitionId::from(file.doc_id);
+        let name = file.title.clone();
+        let description = parsed.description;
+        let trigger = parsed.trigger;
+        let steps = parsed.steps;
+        let sandboxes = parsed.sandboxes;
+        let workspace_name = file.workspace_name.clone();
+        let original_path = file.original_path.clone();
 
         // Soft check: a multi-file library push can legitimately land
         // a workflow before its referenced skill, so warn don't fail.

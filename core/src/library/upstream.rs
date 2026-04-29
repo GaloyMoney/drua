@@ -310,13 +310,20 @@ impl Upstream {
         Ok(Some(hash))
     }
 
-    /// Returns `(relative_path, content)` tuples for changed `.md` files.
-    /// `last_commit = None` lists all tracked skill files at HEAD.
-    pub async fn changed_skill_files(
+    /// Returns `(relative_path, content)` tuples for changed files under
+    /// `runtime/{subdir}/` and `runtime/workspaces/*/{subdir}/` whose
+    /// extension matches `ext`. `last_commit = None` lists all tracked
+    /// files at HEAD.
+    pub async fn changed_files(
         &self,
         last_commit: Option<&str>,
+        subdir: &str,
+        ext: &str,
     ) -> Result<Vec<(String, String)>, LibraryError> {
         self.require_git_repo()?;
+
+        let dot_ext = format!(".{ext}");
+        let needle = format!("/{subdir}/");
 
         let paths = match last_commit {
             Some(commit) => {
@@ -326,7 +333,7 @@ impl Upstream {
                         "--name-only",
                         &format!("{commit}..HEAD"),
                         "--",
-                        "runtime/skills/",
+                        &format!("runtime/{subdir}/"),
                         "runtime/workspaces/",
                     ])
                     .current_dir(&self.repo_path)
@@ -341,18 +348,15 @@ impl Upstream {
 
                 String::from_utf8_lossy(&output.stdout)
                     .lines()
-                    .filter(|p| p.ends_with(".md") && p.contains("/skills/"))
+                    .filter(|p| p.ends_with(&dot_ext) && p.contains(&needle))
                     .map(|s| s.to_string())
                     .collect::<Vec<_>>()
             }
             None => {
+                let global_glob = format!("runtime/{subdir}/*.{ext}");
+                let scoped_glob = format!("runtime/workspaces/*/{subdir}/*.{ext}");
                 let output = tokio::process::Command::new("git")
-                    .args([
-                        "ls-files",
-                        "--",
-                        "runtime/skills/*.md",
-                        "runtime/workspaces/*/skills/*.md",
-                    ])
+                    .args(["ls-files", "--", &global_glob, &scoped_glob])
                     .current_dir(&self.repo_path)
                     .output()
                     .await
@@ -377,79 +381,7 @@ impl Upstream {
             match tokio::fs::read_to_string(&full_path).await {
                 Ok(content) => results.push((path, content)),
                 Err(e) => {
-                    tracing::debug!(path = %path, error = %e, "skipping unreadable skill file");
-                }
-            }
-        }
-        Ok(results)
-    }
-
-    pub async fn changed_workflow_files(
-        &self,
-        last_commit: Option<&str>,
-    ) -> Result<Vec<(String, String)>, LibraryError> {
-        self.require_git_repo()?;
-
-        let paths = match last_commit {
-            Some(commit) => {
-                let output = tokio::process::Command::new("git")
-                    .args([
-                        "diff",
-                        "--name-only",
-                        &format!("{commit}..HEAD"),
-                        "--",
-                        "runtime/workflows/",
-                        "runtime/workspaces/",
-                    ])
-                    .current_dir(&self.repo_path)
-                    .output()
-                    .await
-                    .map_err(|e| LibraryError::Git(format!("git diff: {e}")))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(LibraryError::Git(format!("git diff failed: {stderr}")));
-                }
-
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter(|p| p.ends_with(".yml") && p.contains("/workflows/"))
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-            }
-            None => {
-                let output = tokio::process::Command::new("git")
-                    .args([
-                        "ls-files",
-                        "--",
-                        "runtime/workflows/*.yml",
-                        "runtime/workspaces/*/workflows/*.yml",
-                    ])
-                    .current_dir(&self.repo_path)
-                    .output()
-                    .await
-                    .map_err(|e| LibraryError::Git(format!("git ls-files: {e}")))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(LibraryError::Git(format!("git ls-files failed: {stderr}")));
-                }
-
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter(|p| !p.is_empty())
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-            }
-        };
-
-        let mut results = Vec::with_capacity(paths.len());
-        for path in paths {
-            let full_path = self.repo_path.join(&path);
-            match tokio::fs::read_to_string(&full_path).await {
-                Ok(content) => results.push((path, content)),
-                Err(e) => {
-                    tracing::debug!(path = %path, error = %e, "skipping unreadable workflow file");
+                    tracing::debug!(path = %path, error = %e, "skipping unreadable library file");
                 }
             }
         }

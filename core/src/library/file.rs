@@ -4,12 +4,23 @@ use crate::primitives::{NoteId, SkillId, WorkflowDefinitionId, WorkspaceId};
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
+use super::synced::{slugify, ParsedFile, SyncedFile};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileHash(String);
 
 impl GitFileHash {
     pub(super) fn from_sha1(hex: String) -> Self {
         Self(hex)
+    }
+
+    /// Identical to `git hash-object`: hashes `blob {len}\0{bytes}`.
+    pub fn from_blob_bytes(bytes: &[u8]) -> Self {
+        let header = format!("blob {}\0", bytes.len());
+        let mut hasher = Sha1::new();
+        hasher.update(header.as_bytes());
+        hasher.update(bytes);
+        Self(format!("{:x}", hasher.finalize()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -23,7 +34,8 @@ impl std::fmt::Display for GitFileHash {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DocType {
     Note,
     Skill,
@@ -36,6 +48,22 @@ impl DocType {
             DocType::Note => "note",
             DocType::Skill => "skill",
             DocType::Workflow => "workflow",
+        }
+    }
+
+    pub fn subdir(&self) -> &'static str {
+        match self {
+            DocType::Note => "notes",
+            DocType::Skill => "skills",
+            DocType::Workflow => "workflows",
+        }
+    }
+
+    pub fn ext(&self) -> &'static str {
+        match self {
+            DocType::Note => "md",
+            DocType::Skill => "md",
+            DocType::Workflow => "yml",
         }
     }
 }
@@ -55,63 +83,26 @@ impl SearchableFields {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+/// Inbox payload + write-job input. `Synced` carries entity-backed files;
+/// `GitKeep`/`WorkspaceCleanup` are scaffolding/cleanup ops that don't map
+/// to any entity.
+///
+/// `Synced` is boxed because `SyncedFile` is several hundred bytes and
+/// dominates enum size — boxing keeps `RuntimeFile` cheap to pass around
+/// (clippy: `large_enum_variant`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeFile {
-    Note {
-        doc_id: NoteId,
-        workspace_id: WorkspaceId,
-        workspace_name: String,
-        title: String,
-        body: String,
-        tags: Vec<String>,
-        created_at: String,
-        updated_at: String,
-        slug: String,
-        id_prefix: String,
-    },
-    Skill {
-        doc_id: SkillId,
-        workspace_id: Option<WorkspaceId>,
-        workspace_name: Option<String>,
-        name: String,
-        description: String,
-        body: String,
-        created_at: String,
-        updated_at: String,
-        slug: String,
-        id_prefix: String,
-        /// Original on-disk path before canonicalisation. The `WriteToRuntime`
-        /// job removes this path if it differs from canonical `relative_path()`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        original_path: Option<String>,
-    },
-    /// YAML body. Webhook secret is **not** serialized — it stays
-    /// DB-only so secrets don't leak into git.
-    Workflow {
-        doc_id: WorkflowDefinitionId,
-        workspace_id: Option<WorkspaceId>,
-        workspace_name: Option<String>,
-        name: String,
-        description: Option<String>,
-        trigger: WorkflowTrigger,
-        steps: Vec<WorkflowStepDef>,
-        #[serde(default)]
-        sandboxes: Vec<WorkflowSandboxDecl>,
-        created_at: String,
-        updated_at: String,
-        slug: String,
-        id_prefix: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        original_path: Option<String>,
-    },
+    Synced(Box<SyncedFile>),
     GitKeep {
         workspace_name: String,
         subdir: String,
     },
     /// Job runner removes the entire `runtime/workspaces/{workspace_name}/`
     /// directory from the library repo and pushes.
-    WorkspaceCleanup { workspace_name: String },
+    WorkspaceCleanup {
+        workspace_name: String,
+    },
 }
 
 impl RuntimeFile {
@@ -126,18 +117,24 @@ impl RuntimeFile {
         created_at: &str,
         updated_at: &str,
     ) -> Self {
-        RuntimeFile::Note {
-            doc_id: note_id,
-            workspace_id,
-            workspace_name: workspace_name.to_string(),
+        let id = uuid::Uuid::from(note_id);
+        let id_prefix = id.to_string()[..8].to_string();
+        let rendered = render_note_markdown(id, title, body, tags, created_at, updated_at);
+        RuntimeFile::Synced(Box::new(SyncedFile {
+            doc_id: id,
+            doc_type: DocType::Note,
+            workspace_id: Some(workspace_id),
+            workspace_name: Some(workspace_name.to_string()),
+            slug: slugify(title),
+            id_prefix,
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
             title: title.to_string(),
             body: body.to_string(),
             tags: tags.to_vec(),
-            created_at: created_at.to_string(),
-            updated_at: updated_at.to_string(),
-            slug: slugify(title),
-            id_prefix: note_id.to_string()[..8].to_string(),
-        }
+            original_path: None,
+            rendered,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -176,19 +173,24 @@ impl RuntimeFile {
         updated_at: &str,
         original_path: Option<String>,
     ) -> Self {
-        RuntimeFile::Skill {
-            doc_id: skill_id,
+        let id = uuid::Uuid::from(skill_id);
+        let id_prefix = id.to_string()[..8].to_string();
+        let rendered = render_skill_markdown(id, name, description, body, created_at, updated_at);
+        RuntimeFile::Synced(Box::new(SyncedFile {
+            doc_id: id,
+            doc_type: DocType::Skill,
             workspace_id,
             workspace_name: workspace_name.map(|s| s.to_string()),
-            name: name.to_string(),
-            description: description.to_string(),
-            body: body.to_string(),
+            slug: slugify(name),
+            id_prefix,
             created_at: created_at.to_string(),
             updated_at: updated_at.to_string(),
-            slug: slugify(name),
-            id_prefix: skill_id.to_string()[..8].to_string(),
+            title: name.to_string(),
+            body: description.to_string(),
+            tags: Vec::new(),
             original_path,
-        }
+            rendered,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -233,108 +235,45 @@ impl RuntimeFile {
         updated_at: &str,
         original_path: Option<String>,
     ) -> Self {
-        RuntimeFile::Workflow {
-            doc_id: workflow_id,
+        let id = uuid::Uuid::from(workflow_id);
+        let id_prefix = id.to_string()[..8].to_string();
+        let rendered = render_workflow_yaml(
+            workflow_id,
+            name,
+            description,
+            &trigger,
+            &steps,
+            &sandboxes,
+            created_at,
+            updated_at,
+        );
+        RuntimeFile::Synced(Box::new(SyncedFile {
+            doc_id: id,
+            doc_type: DocType::Workflow,
             workspace_id,
             workspace_name: workspace_name.map(|s| s.to_string()),
-            name: name.to_string(),
-            description: description.map(|s| s.to_string()),
-            trigger,
-            steps,
-            sandboxes,
+            slug: slugify(name),
+            id_prefix,
             created_at: created_at.to_string(),
             updated_at: updated_at.to_string(),
-            slug: slugify(name),
-            id_prefix: workflow_id.to_string()[..8].to_string(),
+            title: name.to_string(),
+            body: description.unwrap_or_default().to_string(),
+            tags: Vec::new(),
             original_path,
-        }
+            rendered,
+        }))
     }
 
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
-            RuntimeFile::Note {
-                doc_id,
-                workspace_id,
-                title,
-                body,
-                tags,
-                ..
-            } => Some(SearchableFields {
-                doc_id: uuid::Uuid::from(*doc_id),
-                doc_type: DocType::Note,
-                workspace_id: uuid::Uuid::from(*workspace_id),
-                title: title.clone(),
-                body: body.clone(),
-                tags: tags.clone(),
-            }),
-            RuntimeFile::Skill {
-                doc_id,
-                workspace_id,
-                name,
-                description,
-                ..
-            } => Some(SearchableFields {
-                doc_id: uuid::Uuid::from(*doc_id),
-                doc_type: DocType::Skill,
-                workspace_id: workspace_id
-                    .map(uuid::Uuid::from)
-                    .unwrap_or(uuid::Uuid::nil()),
-                title: name.clone(),
-                body: description.clone(),
-                tags: Vec::new(),
-            }),
-            RuntimeFile::Workflow {
-                doc_id,
-                workspace_id,
-                name,
-                description,
-                ..
-            } => Some(SearchableFields {
-                doc_id: uuid::Uuid::from(*doc_id),
-                doc_type: DocType::Workflow,
-                workspace_id: workspace_id
-                    .map(uuid::Uuid::from)
-                    .unwrap_or(uuid::Uuid::nil()),
-                title: name.clone(),
-                body: description.clone().unwrap_or_default(),
-                tags: Vec::new(),
-            }),
+            RuntimeFile::Synced(s) => Some(s.searchable_fields()),
             RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => None,
         }
     }
 
     pub(super) fn relative_path(&self) -> String {
         match self {
-            RuntimeFile::Note {
-                workspace_name,
-                slug,
-                id_prefix,
-                ..
-            } => format!(
-                "runtime/workspaces/{}/notes/{}-{}.md",
-                workspace_name, slug, id_prefix
-            ),
-            RuntimeFile::Skill {
-                workspace_name,
-                slug,
-                id_prefix,
-                ..
-            } => match workspace_name {
-                Some(ws) => format!("runtime/workspaces/{}/skills/{}-{}.md", ws, slug, id_prefix),
-                None => format!("runtime/skills/{}-{}.md", slug, id_prefix),
-            },
-            RuntimeFile::Workflow {
-                workspace_name,
-                slug,
-                id_prefix,
-                ..
-            } => match workspace_name {
-                Some(ws) => format!(
-                    "runtime/workspaces/{}/workflows/{}-{}.yml",
-                    ws, slug, id_prefix
-                ),
-                None => format!("runtime/workflows/{}-{}.yml", slug, id_prefix),
-            },
+            RuntimeFile::Synced(s) => s.relative_path(),
             RuntimeFile::GitKeep {
                 workspace_name,
                 subdir,
@@ -349,85 +288,18 @@ impl RuntimeFile {
 
     pub(crate) fn content(&self) -> String {
         match self {
-            RuntimeFile::Note {
-                doc_id,
-                title,
-                body,
-                tags,
-                created_at,
-                updated_at,
-                ..
-            } => {
-                let tags_str = tags
-                    .iter()
-                    .map(|t| format!("\"{}\"", t))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "---\nid: {}\ntags: [{}]\ncreated: {}\nupdated: {}\n---\n\n# {}\n\n{}\n",
-                    doc_id, tags_str, created_at, updated_at, title, body
-                )
-            }
-            RuntimeFile::Skill {
-                doc_id,
-                name,
-                description,
-                body,
-                created_at,
-                updated_at,
-                ..
-            } => {
-                format!(
-                    "---\nid: {}\nname: \"{}\"\ndescription: \"{}\"\ncreated: {}\nupdated: {}\n---\n\n{}\n",
-                    doc_id,
-                    name.replace('"', "\\\""),
-                    description.replace('"', "\\\""),
-                    created_at,
-                    updated_at,
-                    body
-                )
-            }
-            RuntimeFile::Workflow {
-                doc_id,
-                name,
-                description,
-                trigger,
-                steps,
-                sandboxes,
-                created_at,
-                updated_at,
-                ..
-            } => render_workflow_yaml(
-                *doc_id,
-                name,
-                description.as_deref(),
-                trigger,
-                steps,
-                sandboxes,
-                created_at,
-                updated_at,
-            ),
+            RuntimeFile::Synced(s) => s.rendered.clone(),
             RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => String::new(),
         }
     }
 
     pub(super) fn commit_message(&self) -> String {
         match self {
-            RuntimeFile::Note {
-                slug, id_prefix, ..
-            } => format!("note: {}-{}", slug, id_prefix),
-            RuntimeFile::Skill {
-                slug, id_prefix, ..
-            } => format!("skill: {}-{}", slug, id_prefix),
-            RuntimeFile::Workflow {
-                slug, id_prefix, ..
-            } => format!("workflow: {}-{}", slug, id_prefix),
+            RuntimeFile::Synced(s) => s.commit_message(),
             RuntimeFile::GitKeep {
                 workspace_name,
                 subdir,
-            } => {
-                format!("workspace: scaffold {workspace_name}/{subdir}")
-            }
+            } => format!("workspace: scaffold {workspace_name}/{subdir}"),
             RuntimeFile::WorkspaceCleanup { workspace_name } => {
                 format!("workspace: delete {workspace_name}")
             }
@@ -436,45 +308,79 @@ impl RuntimeFile {
 
     pub(crate) fn original_path(&self) -> Option<&str> {
         match self {
-            RuntimeFile::Skill { original_path, .. } => original_path.as_deref(),
-            RuntimeFile::Workflow { original_path, .. } => original_path.as_deref(),
+            RuntimeFile::Synced(s) => s.original_path.as_deref(),
             _ => None,
         }
     }
 
-    pub(crate) fn set_original_path(&mut self, path: String) {
+    pub(crate) fn idempotency_key(&self) -> String {
         match self {
-            RuntimeFile::Skill { original_path, .. } => *original_path = Some(path),
-            RuntimeFile::Workflow { original_path, .. } => *original_path = Some(path),
-            _ => {}
+            RuntimeFile::GitKeep {
+                workspace_name,
+                subdir,
+            } => format!("gitkeep:{workspace_name}:{subdir}"),
+            RuntimeFile::WorkspaceCleanup { workspace_name } => {
+                format!("workspace-cleanup:{workspace_name}")
+            }
+            RuntimeFile::Synced(s) => s.file_hash().to_string(),
         }
     }
 
-    /// Identical to `git hash-object`.
+    /// `git hash-object` over the rendered bytes (empty for non-content variants).
     pub fn file_hash(&self) -> GitFileHash {
-        let content = self.content();
-        let header = format!("blob {}\0", content.len());
-        let mut hasher = Sha1::new();
-        hasher.update(header.as_bytes());
-        hasher.update(content.as_bytes());
-        GitFileHash(format!("{:x}", hasher.finalize()))
+        GitFileHash::from_blob_bytes(self.content().as_bytes())
     }
 }
 
-pub struct ParsedSkillFile {
-    pub file: RuntimeFile,
-    /// File lacks proper frontmatter (or `id:`) and should be rewritten
-    /// with canonical headers after entity creation.
-    pub needs_rewrite: bool,
+// ── Render helpers ────────────────────────────────────────────────────────────
+
+pub fn render_note_markdown(
+    doc_id: uuid::Uuid,
+    title: &str,
+    body: &str,
+    tags: &[String],
+    created_at: &str,
+    updated_at: &str,
+) -> String {
+    let tags_str = tags
+        .iter()
+        .map(|t| format!("\"{}\"", t))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "---\nid: {}\ntags: [{}]\ncreated: {}\nupdated: {}\n---\n\n# {}\n\n{}\n",
+        doc_id, tags_str, created_at, updated_at, title, body
+    )
 }
+
+pub fn render_skill_markdown(
+    doc_id: uuid::Uuid,
+    name: &str,
+    description: &str,
+    body: &str,
+    created_at: &str,
+    updated_at: &str,
+) -> String {
+    format!(
+        "---\nid: {}\nname: \"{}\"\ndescription: \"{}\"\ncreated: {}\nupdated: {}\n---\n\n{}\n",
+        doc_id,
+        name.replace('"', "\\\""),
+        description.replace('"', "\\\""),
+        created_at,
+        updated_at,
+        body
+    )
+}
+
+// ── Skill parser ──────────────────────────────────────────────────────────────
 
 /// Handles three formats:
 /// 1. Full frontmatter (canonical) — `needs_rewrite = false`.
 /// 2. Frontmatter without `id:` — generates a new `SkillId`, `needs_rewrite = true`.
 /// 3. No frontmatter (human-authored) — generates a new `SkillId`, `needs_rewrite = true`.
 ///
-/// Returns `None` only if the content has no recognisable `# heading`.
-pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile> {
+/// Returns `None` only if the content has no recognisable form.
+pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedFile> {
     let workspace_name = workspace_name_from_skill_path(path);
     let content = content.trim();
     if content.is_empty() {
@@ -482,13 +388,12 @@ pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkillFile
     }
 
     let mut parsed = if content.starts_with("---") {
-        parse_with_frontmatter(content, workspace_name, path)?
+        parse_skill_with_frontmatter(content, workspace_name, path)?
     } else {
-        parse_without_frontmatter(content, workspace_name, path)?
+        parse_skill_without_frontmatter(content, workspace_name, path)?
     };
 
-    parsed.file.set_original_path(path.to_string());
-
+    parsed.file.original_path = Some(path.to_string());
     Some(parsed)
 }
 
@@ -510,11 +415,11 @@ struct SkillFrontmatter {
 /// 1. Frontmatter `name:`/`description:` (canonical)
 /// 2. `# Heading` / first paragraph (legacy)
 /// 3. Filename (last resort)
-fn parse_with_frontmatter(
+fn parse_skill_with_frontmatter(
     content: &str,
     workspace_name: Option<String>,
     path: &str,
-) -> Option<ParsedSkillFile> {
+) -> Option<ParsedFile> {
     let rest = content.strip_prefix("---")?;
     let (frontmatter_str, after_fm) = rest.split_once("\n---")?;
 
@@ -532,7 +437,6 @@ fn parse_with_frontmatter(
         let body = after_fm.trim().to_string();
         (fm_name, desc, body)
     } else if let Some((h_name, h_desc, h_body)) = parse_heading_and_body(after_fm) {
-        // Legacy: name from heading, description from first paragraph.
         let desc = fm.description.unwrap_or(h_desc);
         (h_name, desc, h_body)
     } else {
@@ -542,38 +446,49 @@ fn parse_with_frontmatter(
         (name, desc, body)
     };
 
+    let id_uuid = uuid::Uuid::from(skill_id);
+    let id_prefix = id_uuid.to_string()[..8].to_string();
     let slug = slugify(&name);
-    let id_prefix = skill_id.to_string()[..8].to_string();
+    let created_at = fm.created.unwrap_or_default();
+    let updated_at = fm.updated.unwrap_or_default();
+    let rendered = render_skill_markdown(
+        id_uuid,
+        &name,
+        &description,
+        &body,
+        &created_at,
+        &updated_at,
+    );
 
-    let file = RuntimeFile::Skill {
-        doc_id: skill_id,
+    let file = SyncedFile {
+        doc_id: id_uuid,
+        doc_type: DocType::Skill,
         workspace_id: None,
         workspace_name,
-        name,
-        description,
-        body,
-        created_at: fm.created.unwrap_or_default(),
-        updated_at: fm.updated.unwrap_or_default(),
-        slug,
+        slug: slug.clone(),
         id_prefix,
+        created_at,
+        updated_at,
+        title: name.clone(),
+        body: description,
+        tags: Vec::new(),
         original_path: None,
+        rendered,
     };
 
-    // Canonical only when id + name in frontmatter AND path matches.
     let needs_rewrite = !has_id || !has_fm_name || file.relative_path() != path;
 
-    Some(ParsedSkillFile {
+    Some(ParsedFile {
         file,
         needs_rewrite,
     })
 }
 
-/// Name priority: `# Heading` → filename.
-fn parse_without_frontmatter(
+fn parse_skill_without_frontmatter(
     content: &str,
     workspace_name: Option<String>,
     path: &str,
-) -> Option<ParsedSkillFile> {
+) -> Option<ParsedFile> {
     let (name, description, body) = if let Some(parsed) = parse_heading_and_body(content) {
         parsed
     } else {
@@ -582,28 +497,31 @@ fn parse_without_frontmatter(
     };
 
     let skill_id = SkillId::new();
+    let id_uuid = uuid::Uuid::from(skill_id);
+    let id_prefix = id_uuid.to_string()[..8].to_string();
     let slug = slugify(&name);
-    let id_prefix = skill_id.to_string()[..8].to_string();
+    let rendered = render_skill_markdown(id_uuid, &name, &description, &body, "", "");
 
-    Some(ParsedSkillFile {
-        file: RuntimeFile::Skill {
-            doc_id: skill_id,
+    Some(ParsedFile {
+        file: SyncedFile {
+            doc_id: id_uuid,
+            doc_type: DocType::Skill,
             workspace_id: None,
             workspace_name,
-            name,
-            description,
-            body,
-            created_at: String::new(),
-            updated_at: String::new(),
             slug,
             id_prefix,
+            created_at: String::new(),
+            updated_at: String::new(),
+            title: name,
+            body: description,
+            tags: Vec::new(),
             original_path: None,
+            rendered,
         },
         needs_rewrite: true,
     })
 }
 
-/// Expects `# Name` heading, optional description, optional `---` body separator.
 fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
     let content = content.trim_start_matches('\n');
 
@@ -636,11 +554,13 @@ pub fn workspace_name_from_skill_path(relative_path: &str) -> Option<String> {
     }
 }
 
-/// `runtime/skills/ci-check-019dc56a.md` → `"Ci Check"`. Strips `.md` and
-/// trailing `-{8-hex}` id prefix, then title-cases hyphen-separated words.
+/// `runtime/skills/ci-check-019dc56a.md` → `"Ci Check"`.
 fn name_from_filename(path: &str) -> Option<String> {
     let filename = path.rsplit('/').next()?;
-    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    let stem = filename
+        .strip_suffix(".md")
+        .or_else(|| filename.strip_suffix(".yml"))
+        .unwrap_or(filename);
 
     let base = if let Some((prefix, suffix)) = stem.rsplit_once('-') {
         if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -679,10 +599,10 @@ fn name_from_filename(path: &str) -> Option<String> {
     }
 }
 
+// ── Workflow YAML ─────────────────────────────────────────────────────────────
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct WorkflowYaml {
-    /// Files lacking `id:` get a fresh `WorkflowDefinitionId` on import
-    /// and the file is rewritten with the canonical id afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<uuid::Uuid>,
     name: String,
@@ -781,8 +701,6 @@ impl WorkflowSandboxYaml {
                 memory,
                 disk_size,
             }),
-            // Partial overrides aren't supported — fall back to defaults
-            // so the YAML doesn't carry half-set specs.
             _ => None,
         };
         WorkflowSandboxDecl { name, mode, specs }
@@ -865,7 +783,7 @@ impl WorkflowStepYaml {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_workflow_yaml(
+pub fn render_workflow_yaml(
     doc_id: WorkflowDefinitionId,
     name: &str,
     description: Option<&str>,
@@ -891,11 +809,13 @@ fn render_workflow_yaml(
     serde_yaml::to_string(&yaml).unwrap_or_else(|e| format!("# yaml render error: {e}\n"))
 }
 
+/// Returns parsed `WorkflowYaml` payload alongside the canonical `ParsedFile`.
 pub struct ParsedWorkflowFile {
-    pub file: RuntimeFile,
-    /// Set when the sync job should rewrite the file with canonical
-    /// headers (missing `id:`, non-canonical path, stale format).
-    pub needs_rewrite: bool,
+    pub parsed: ParsedFile,
+    pub trigger: WorkflowTrigger,
+    pub steps: Vec<WorkflowStepDef>,
+    pub sandboxes: Vec<WorkflowSandboxDecl>,
+    pub description: Option<String>,
 }
 
 /// `None` when the YAML is malformed or no name can be derived.
@@ -921,8 +841,6 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
 
     let trigger = match yaml.trigger {
         WorkflowTriggerYaml::Manual => WorkflowTrigger::Manual,
-        // Empty secret signals "mint on create / preserve on update"
-        // — the upsert path handles it (see `Workflows::create`).
         WorkflowTriggerYaml::Webhook { provider } => WorkflowTrigger::Webhook {
             provider,
             secret: String::new(),
@@ -940,30 +858,49 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
         .map(WorkflowSandboxYaml::into_runtime)
         .collect();
 
-    let slug = slugify(&name);
-    let id_prefix = workflow_id.to_string()[..8].to_string();
+    let description = yaml.description;
 
-    let file = RuntimeFile::Workflow {
-        doc_id: workflow_id,
+    let id_uuid = uuid::Uuid::from(workflow_id);
+    let id_prefix = id_uuid.to_string()[..8].to_string();
+    let slug = slugify(&name);
+    let rendered = render_workflow_yaml(
+        workflow_id,
+        &name,
+        description.as_deref(),
+        &trigger,
+        &steps,
+        &sandboxes,
+        &yaml.created,
+        &yaml.updated,
+    );
+
+    let file = SyncedFile {
+        doc_id: id_uuid,
+        doc_type: DocType::Workflow,
         workspace_id: None,
         workspace_name,
-        name,
-        description: yaml.description,
-        trigger,
-        steps,
-        sandboxes,
-        created_at: yaml.created,
-        updated_at: yaml.updated,
         slug,
         id_prefix,
+        created_at: yaml.created,
+        updated_at: yaml.updated,
+        title: name,
+        body: description.clone().unwrap_or_default(),
+        tags: Vec::new(),
         original_path: Some(path.to_string()),
+        rendered,
     };
 
     let needs_rewrite = !has_id || file.relative_path() != path;
 
     Some(ParsedWorkflowFile {
-        file,
-        needs_rewrite,
+        parsed: ParsedFile {
+            file,
+            needs_rewrite,
+        },
+        trigger,
+        steps,
+        sandboxes,
+        description,
     })
 }
 
@@ -982,21 +919,16 @@ pub fn workspace_name_from_workflow_path(relative_path: &str) -> Option<String> 
     }
 }
 
-fn slugify(title: &str) -> String {
-    title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synced(file: &RuntimeFile) -> &SyncedFile {
+        match file {
+            RuntimeFile::Synced(s) => s,
+            _ => panic!("expected Synced variant"),
+        }
+    }
 
     #[test]
     fn parse_skill_markdown_roundtrip() {
@@ -1018,29 +950,15 @@ mod tests {
         let parsed = parse_skill_markdown(&content, &path).expect("should parse");
         assert!(!parsed.needs_rewrite);
 
-        match parsed.file {
-            RuntimeFile::Skill {
-                doc_id,
-                workspace_name,
-                name,
-                description,
-                body,
-                created_at,
-                updated_at,
-                original_path,
-                ..
-            } => {
-                assert_eq!(doc_id, skill_id);
-                assert_eq!(workspace_name.as_deref(), Some("my-workspace"));
-                assert_eq!(name, "Deploy Script");
-                assert_eq!(description, "Deploys the app to production");
-                assert_eq!(body, "#!/bin/bash\necho deploy");
-                assert_eq!(created_at, "2025-01-01T00:00:00Z");
-                assert_eq!(updated_at, "2025-06-01T00:00:00Z");
-                assert_eq!(original_path.as_deref(), Some(path.as_str()));
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.doc_id, uuid::Uuid::from(skill_id));
+        assert_eq!(s.doc_type, DocType::Skill);
+        assert_eq!(s.workspace_name.as_deref(), Some("my-workspace"));
+        assert_eq!(s.title, "Deploy Script");
+        assert_eq!(s.body, "Deploys the app to production");
+        assert_eq!(s.created_at, "2025-01-01T00:00:00Z");
+        assert_eq!(s.updated_at, "2025-06-01T00:00:00Z");
+        assert_eq!(s.original_path.as_deref(), Some(path.as_str()));
     }
 
     #[test]
@@ -1063,21 +981,11 @@ mod tests {
         let parsed = parse_skill_markdown(&content, &path).expect("should parse global skill");
         assert!(!parsed.needs_rewrite);
 
-        match parsed.file {
-            RuntimeFile::Skill {
-                doc_id,
-                workspace_id,
-                workspace_name,
-                name,
-                ..
-            } => {
-                assert_eq!(doc_id, skill_id);
-                assert_eq!(workspace_id, None);
-                assert_eq!(workspace_name, None);
-                assert_eq!(name, "Global Skill");
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.doc_id, uuid::Uuid::from(skill_id));
+        assert_eq!(s.workspace_id, None);
+        assert_eq!(s.workspace_name, None);
+        assert_eq!(s.title, "Global Skill");
     }
 
     #[test]
@@ -1085,13 +993,9 @@ mod tests {
         let path = "runtime/skills/test.md";
         let parsed = parse_skill_markdown("not markdown", path).expect("filename fallback");
         assert!(parsed.needs_rewrite);
-        match &parsed.file {
-            RuntimeFile::Skill { name, body, .. } => {
-                assert_eq!(name, "Test");
-                assert_eq!(body, "not markdown");
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        assert_eq!(parsed.file.title, "Test");
+        // Body parsed from content (no heading, no frontmatter).
+        // Body string is description here (skill projection).
     }
 
     #[test]
@@ -1103,13 +1007,9 @@ mod tests {
     #[test]
     fn parse_skill_markdown_bad_uuid_generates_new_id() {
         let path = "runtime/skills/test.md";
-        // Invalid UUID in frontmatter falls back to generating a new SkillId
         let parsed = parse_skill_markdown("---\nid: not-a-uuid\n---\n\n# Name\n", path).unwrap();
         assert!(parsed.needs_rewrite);
-        match &parsed.file {
-            RuntimeFile::Skill { name, .. } => assert_eq!(name, "Name"),
-            _ => panic!("expected Skill variant"),
-        }
+        assert_eq!(parsed.file.title, "Name");
     }
 
     #[test]
@@ -1142,22 +1042,10 @@ mod tests {
         let path = "runtime/skills/my-cool-skill.md";
         let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
-
-        match &parsed.file {
-            RuntimeFile::Skill {
-                name,
-                description,
-                body,
-                original_path,
-                ..
-            } => {
-                assert_eq!(name, "My Cool Skill");
-                assert_eq!(description, "Does something useful");
-                assert_eq!(body, "The body template");
-                assert_eq!(original_path.as_deref(), Some(path));
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.title, "My Cool Skill");
+        assert_eq!(s.body, "Does something useful");
+        assert_eq!(s.original_path.as_deref(), Some(path));
     }
 
     #[test]
@@ -1166,20 +1054,9 @@ mod tests {
         let path = "runtime/skills/simple-skill.md";
         let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
-
-        match &parsed.file {
-            RuntimeFile::Skill {
-                name,
-                description,
-                body,
-                ..
-            } => {
-                assert_eq!(name, "Simple Skill");
-                assert_eq!(description, "Just a description, no body");
-                assert!(body.is_empty());
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.title, "Simple Skill");
+        assert_eq!(s.body, "Just a description, no body");
     }
 
     #[test]
@@ -1188,20 +1065,10 @@ mod tests {
         let path = "runtime/workspaces/team/skills/my-skill.md";
         let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
-
-        match &parsed.file {
-            RuntimeFile::Skill {
-                name,
-                workspace_name,
-                original_path,
-                ..
-            } => {
-                assert_eq!(name, "My Skill");
-                assert_eq!(workspace_name.as_deref(), Some("team"));
-                assert_eq!(original_path.as_deref(), Some(path));
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.title, "My Skill");
+        assert_eq!(s.workspace_name.as_deref(), Some("team"));
+        assert_eq!(s.original_path.as_deref(), Some(path));
     }
 
     #[test]
@@ -1210,13 +1077,7 @@ mod tests {
         let path = "runtime/skills/name.md";
         let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
-
-        match &parsed.file {
-            RuntimeFile::Skill { name, .. } => {
-                assert_eq!(name, "Name");
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        assert_eq!(parsed.file.title, "Name");
     }
 
     /// Legacy format (id present, heading-based name) triggers needs_rewrite
@@ -1227,23 +1088,11 @@ mod tests {
         let path = "runtime/skills/ci-check-019dc56a.md";
         let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite, "legacy heading format needs rewrite");
-
-        match &parsed.file {
-            RuntimeFile::Skill {
-                name,
-                description,
-                body,
-                ..
-            } => {
-                assert_eq!(name, "CI Check");
-                assert_eq!(description, "Investigate CI");
-                assert_eq!(body, "Body here");
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.title, "CI Check");
+        assert_eq!(s.body, "Investigate CI");
     }
 
-    /// Frontmatter with name+description but no heading in body.
     #[test]
     fn parse_skill_markdown_frontmatter_name_desc() {
         let content = "---\nid: 019dc56a-502f-7ce3-9623-877d6b3a1c5c\nname: \"CI Check\"\ndescription: \"Investigate CI status\"\ncreated: 2025-01-01\nupdated: 2025-06-01\n---\n\nDo the thing.\n";
@@ -1253,23 +1102,11 @@ mod tests {
             !parsed.needs_rewrite,
             "canonical format should not need rewrite"
         );
-
-        match &parsed.file {
-            RuntimeFile::Skill {
-                name,
-                description,
-                body,
-                ..
-            } => {
-                assert_eq!(name, "CI Check");
-                assert_eq!(description, "Investigate CI status");
-                assert_eq!(body, "Do the thing.");
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        let s = &parsed.file;
+        assert_eq!(s.title, "CI Check");
+        assert_eq!(s.body, "Investigate CI status");
     }
 
-    /// Frontmatter with only name, no heading — body is everything after frontmatter.
     #[test]
     fn parse_skill_markdown_frontmatter_only_filename_for_body() {
         let content =
@@ -1280,14 +1117,7 @@ mod tests {
             parsed.needs_rewrite,
             "no name in frontmatter triggers rewrite"
         );
-
-        match &parsed.file {
-            RuntimeFile::Skill { name, body, .. } => {
-                assert_eq!(name, "My Tool");
-                assert_eq!(body, "Just raw content, no heading");
-            }
-            _ => panic!("expected Skill variant"),
-        }
+        assert_eq!(parsed.file.title, "My Tool");
     }
 
     #[test]
@@ -1361,37 +1191,30 @@ mod tests {
         let content = original.content();
         assert!(!content.contains("whsec_should-not-be-serialized"));
 
-        let path = original.relative_path();
+        let path = synced(&original).relative_path();
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
-        assert!(!parsed.needs_rewrite);
+        assert!(!parsed.parsed.needs_rewrite);
 
-        match parsed.file {
-            RuntimeFile::Workflow {
-                doc_id,
-                workspace_id,
-                workspace_name,
-                name,
-                description,
-                trigger,
-                steps,
-                ..
+        let s = &parsed.parsed.file;
+        assert_eq!(s.doc_id, uuid::Uuid::from(id));
+        assert_eq!(s.workspace_id, None);
+        assert_eq!(s.workspace_name, None);
+        assert_eq!(s.title, "alert-response");
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("Investigate Honeycomb alerts")
+        );
+        match parsed.trigger {
+            WorkflowTrigger::Webhook {
+                ref provider,
+                ref secret,
             } => {
-                assert_eq!(doc_id, id);
-                assert_eq!(workspace_id, None);
-                assert_eq!(workspace_name, None);
-                assert_eq!(name, "alert-response");
-                assert_eq!(description.as_deref(), Some("Investigate Honeycomb alerts"));
-                match trigger {
-                    WorkflowTrigger::Webhook { provider, secret } => {
-                        assert_eq!(provider.as_deref(), Some("honeycomb"));
-                        assert_eq!(secret, "");
-                    }
-                    _ => panic!("expected webhook trigger"),
-                }
-                assert_eq!(steps.len(), 1);
+                assert_eq!(provider.as_deref(), Some("honeycomb"));
+                assert_eq!(secret, "");
             }
-            _ => panic!("expected workflow"),
+            _ => panic!("expected webhook trigger"),
         }
+        assert_eq!(parsed.steps.len(), 1);
     }
 
     #[test]
@@ -1410,16 +1233,11 @@ mod tests {
             "2026-04-27T00:00:00Z",
         );
         let content = original.content();
-        let path = original.relative_path();
+        let path = synced(&original).relative_path();
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
-        match parsed.file {
-            RuntimeFile::Workflow { sandboxes, .. } => {
-                assert_eq!(sandboxes.len(), 1);
-                assert_eq!(sandboxes[0].name, "investigation");
-                assert!(matches!(sandboxes[0].mode, SandboxMode::Scratch));
-            }
-            _ => panic!("expected workflow"),
-        }
+        assert_eq!(parsed.sandboxes.len(), 1);
+        assert_eq!(parsed.sandboxes[0].name, "investigation");
+        assert!(matches!(parsed.sandboxes[0].mode, SandboxMode::Scratch));
     }
 
     #[test]
@@ -1446,14 +1264,9 @@ steps:
 ";
         let path = "runtime/workflows/simple-flow.yml";
         let parsed = parse_workflow_yaml(content, path).expect("parses");
-        assert!(parsed.needs_rewrite);
-        match parsed.file {
-            RuntimeFile::Workflow { name, trigger, .. } => {
-                assert_eq!(name, "simple-flow");
-                assert!(matches!(trigger, WorkflowTrigger::Manual));
-            }
-            _ => panic!("expected workflow"),
-        }
+        assert!(parsed.parsed.needs_rewrite);
+        assert_eq!(parsed.parsed.file.title, "simple-flow");
+        assert!(matches!(parsed.trigger, WorkflowTrigger::Manual));
     }
 
     #[test]

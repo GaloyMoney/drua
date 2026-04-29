@@ -40,21 +40,7 @@ impl SkillRepo {
         entity: &Skill,
         mut new_events: es_entity::LastPersisted<'_, SkillEvent>,
     ) -> Result<(), crate::library::LibraryError> {
-        let library = match &self.library {
-            Some(lib) => lib,
-            None => return Ok(()),
-        };
-        let needs_sync = new_events.any(|persisted| {
-            matches!(
-                &persisted.event,
-                SkillEvent::Initialized { .. } | SkillEvent::Updated { .. }
-            )
-        });
-        if needs_sync {
-            let runtime_file = entity.as_runtime_file();
-            library.write_in_op(op, &runtime_file).await?;
-        }
-        Ok(())
+        crate::library::sync_to_library(self.library.as_ref(), op, entity, &mut new_events).await
     }
 }
 

@@ -72,19 +72,9 @@ impl WorkflowDefinition {
     }
 
     pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        crate::library::RuntimeFile::for_workflow_with_original_path(
-            self.id,
-            Some(self.workspace_id),
-            self.workspace_name.as_deref(),
-            &self.name,
-            self.description.as_deref(),
-            self.trigger.clone(),
-            self.steps.clone(),
-            self.sandboxes.clone(),
-            &self.created_at().to_rfc3339(),
-            &self.updated_at().to_rfc3339(),
-            self.original_path.clone(),
-        )
+        crate::library::RuntimeFile::Synced(Box::new(
+            <Self as crate::library::LibrarySynced>::to_synced_file(self),
+        ))
     }
 
     /// Computed (not stored) so it matches what `WriteToRuntime` writes;
@@ -151,6 +141,91 @@ impl WorkflowDefinition {
 impl core::fmt::Display for WorkflowDefinition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "WorkflowDefinition: {}, name: {}", self.id, self.name)
+    }
+}
+
+impl crate::library::LibrarySynced for WorkflowDefinition {
+    type Event = WorkflowDefinitionEvent;
+    const DOC_TYPE: crate::library::DocType = crate::library::DocType::Workflow;
+
+    fn is_content_event(ev: &WorkflowDefinitionEvent) -> bool {
+        matches!(
+            ev,
+            WorkflowDefinitionEvent::Initialized { .. } | WorkflowDefinitionEvent::Updated { .. }
+        )
+    }
+
+    fn workspace(&self) -> Option<(WorkspaceId, &str)> {
+        self.workspace_name
+            .as_deref()
+            .map(|n| (self.workspace_id, n))
+    }
+
+    fn id(&self) -> uuid::Uuid {
+        self.id.into()
+    }
+
+    fn display_name(&self) -> &str {
+        &self.name
+    }
+
+    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.events
+            .entity_first_persisted_at()
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
+    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.events
+            .entity_last_modified_at()
+            .or_else(|| self.events.entity_first_persisted_at())
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
+    fn original_path(&self) -> Option<&str> {
+        self.original_path.as_deref()
+    }
+
+    fn index_body(&self) -> &str {
+        self.description.as_deref().unwrap_or("")
+    }
+
+    fn render(&self) -> String {
+        crate::library::render_workflow_yaml(
+            self.id,
+            &self.name,
+            self.description.as_deref(),
+            &self.trigger,
+            &self.steps,
+            &self.sandboxes,
+            &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
+            &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
+        )
+    }
+}
+
+impl crate::library::LibraryFileFormat for WorkflowDefinition {
+    type Service = super::Workflows;
+    const WORKSPACE_REQUIRED: bool = true;
+
+    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
+        crate::library::parse_workflow_yaml(content, path).map(|p| p.parsed)
+    }
+
+    async fn upsert_in_op(
+        service: &Self::Service,
+        op: &mut es_entity::DbOp<'_>,
+        file: &crate::library::SyncedFile,
+        workspace_id: Option<WorkspaceId>,
+        file_hash: GitFileHash,
+    ) -> Result<(), crate::library::UpsertError> {
+        let ws_id = workspace_id.ok_or_else(|| -> crate::library::UpsertError {
+            "workflow upsert requires a workspace id".into()
+        })?;
+        service
+            .upsert_from_library_in_op(op, file, ws_id, file_hash)
+            .await
+            .map_err(|e| Box::new(e) as crate::library::UpsertError)
     }
 }
 
