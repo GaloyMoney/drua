@@ -94,7 +94,7 @@ impl SearchableFields {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpstreamOp {
-    Synced(Box<SyncedFile>),
+    WriteFile(Box<SyncedFile>),
     /// Job runner writes `.gitkeep` markers in `notes/`, `skills/`, and
     /// `workflows/` under `runtime/workspaces/{workspace_name}/` in a
     /// single commit + push.
@@ -123,7 +123,7 @@ impl UpstreamOp {
         let id = uuid::Uuid::from(note_id);
         let id_prefix = id.to_string()[..8].to_string();
         let rendered = render_note_markdown(id, title, body, tags, created_at, updated_at);
-        UpstreamOp::Synced(Box::new(SyncedFile {
+        UpstreamOp::WriteFile(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Note,
             workspace_id: Some(workspace_id),
@@ -179,7 +179,7 @@ impl UpstreamOp {
         let id = uuid::Uuid::from(skill_id);
         let id_prefix = id.to_string()[..8].to_string();
         let rendered = render_skill_markdown(id, name, description, body, created_at, updated_at);
-        UpstreamOp::Synced(Box::new(SyncedFile {
+        UpstreamOp::WriteFile(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Skill,
             workspace_id,
@@ -250,7 +250,7 @@ impl UpstreamOp {
             created_at,
             updated_at,
         );
-        UpstreamOp::Synced(Box::new(SyncedFile {
+        UpstreamOp::WriteFile(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Workflow,
             workspace_id,
@@ -269,14 +269,14 @@ impl UpstreamOp {
 
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
-            UpstreamOp::Synced(s) => Some(s.searchable_fields()),
+            UpstreamOp::WriteFile(s) => Some(s.searchable_fields()),
             UpstreamOp::WorkspaceInit { .. } | UpstreamOp::WorkspaceCleanup { .. } => None,
         }
     }
 
     pub(super) fn relative_path(&self) -> String {
         match self {
-            UpstreamOp::Synced(s) => s.relative_path(),
+            UpstreamOp::WriteFile(s) => s.relative_path(),
             UpstreamOp::WorkspaceInit { workspace_name }
             | UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("runtime/workspaces/{workspace_name}")
@@ -286,14 +286,14 @@ impl UpstreamOp {
 
     pub(crate) fn content(&self) -> String {
         match self {
-            UpstreamOp::Synced(s) => s.rendered.clone(),
+            UpstreamOp::WriteFile(s) => s.rendered.clone(),
             UpstreamOp::WorkspaceInit { .. } | UpstreamOp::WorkspaceCleanup { .. } => String::new(),
         }
     }
 
     pub(super) fn commit_message(&self) -> String {
         match self {
-            UpstreamOp::Synced(s) => s.commit_message(),
+            UpstreamOp::WriteFile(s) => s.commit_message(),
             UpstreamOp::WorkspaceInit { workspace_name } => {
                 format!("workspace: init {workspace_name}")
             }
@@ -305,7 +305,7 @@ impl UpstreamOp {
 
     pub(crate) fn original_path(&self) -> Option<&str> {
         match self {
-            UpstreamOp::Synced(s) => s.original_path.as_deref(),
+            UpstreamOp::WriteFile(s) => s.original_path.as_deref(),
             _ => None,
         }
     }
@@ -318,7 +318,7 @@ impl UpstreamOp {
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace-cleanup:{workspace_name}")
             }
-            UpstreamOp::Synced(s) => s.file_hash().to_string(),
+            UpstreamOp::WriteFile(s) => s.file_hash().to_string(),
         }
     }
 
@@ -914,7 +914,7 @@ mod tests {
 
     fn synced(file: &UpstreamOp) -> &SyncedFile {
         match file {
-            UpstreamOp::Synced(s) => s,
+            UpstreamOp::WriteFile(s) => s,
             _ => panic!("expected Synced variant"),
         }
     }

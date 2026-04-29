@@ -124,7 +124,7 @@ impl Library {
         if !new_events.any(|p| E::is_content_event(&p.event)) {
             return Ok(());
         }
-        let file = UpstreamOp::Synced(Box::new(entity.to_synced_file()));
+        let file = UpstreamOp::WriteFile(Box::new(entity.to_synced_file()));
         self.enqueue_write(op, file.clone()).await?;
         Ok(())
     }

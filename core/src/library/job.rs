@@ -65,7 +65,7 @@ impl JobRunner for WriteToRuntimeRunner {
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 return self.workspace_cleanup(workspace_name).await;
             }
-            UpstreamOp::Synced(_) => {}
+            UpstreamOp::WriteFile(_) => {}
         }
 
         let new_hash = self.file.file_hash();

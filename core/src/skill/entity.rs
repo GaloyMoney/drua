@@ -54,7 +54,7 @@ impl Skill {
     }
 
     pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
-        crate::library::UpstreamOp::Synced(Box::new(
+        crate::library::UpstreamOp::WriteFile(Box::new(
             <Self as crate::library::LibrarySynced>::to_synced_file(self),
         ))
     }
