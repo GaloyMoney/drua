@@ -3,16 +3,22 @@
 //! written back to disk — `doc_id` is `uuidv5(SPACE_FILE_NAMESPACE,
 //! "{space_id}:{relative_path}")` so the same `(space, path)` always
 //! hashes to the same UUID.
+//!
+//! All sync work lives in this module: the runner holds an
+//! `Arc<Library>` and reads everything it needs (upstream, search,
+//! embedder, spaces, pool) through `pub(in crate::library)` accessors
+//! on `Library`.
 
 use std::sync::Arc;
 
 use job::{CurrentJob, Job, JobCompletion, JobId, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::Spaces;
-use crate::library::{Library, LIBRARY_LOCK_QUEUE};
+use crate::library::{
+    DocType, GitFileHash, Library, LibraryError, SearchableFields, SpaceFileChange,
+    LIBRARY_LOCK_QUEUE,
+};
 use crate::primitives::SpaceId;
 
 pub const SPACE_FILES_SYNC_JOB: &str = "library.sync-space-files";
@@ -55,17 +61,11 @@ pub struct SpaceFilesSyncConfig {
 
 pub struct SpaceFilesSyncJobInitializer {
     library: Arc<Library>,
-    spaces: Arc<Spaces>,
-    pool: PgPool,
 }
 
 impl SpaceFilesSyncJobInitializer {
-    pub fn new(library: Arc<Library>, spaces: Arc<Spaces>, pool: PgPool) -> Self {
-        Self {
-            library,
-            spaces,
-            pool,
-        }
+    pub fn new(library: Arc<Library>) -> Self {
+        Self { library }
     }
 }
 
@@ -84,8 +84,6 @@ impl JobInitializer for SpaceFilesSyncJobInitializer {
         let config: SpaceFilesSyncConfig = job.config()?;
         Ok(Box::new(SpaceFilesSyncRunner {
             library: Arc::clone(&self.library),
-            spaces: Arc::clone(&self.spaces),
-            pool: self.pool.clone(),
             config,
             spawner,
         }))
@@ -94,8 +92,6 @@ impl JobInitializer for SpaceFilesSyncJobInitializer {
 
 struct SpaceFilesSyncRunner {
     library: Arc<Library>,
-    spaces: Arc<Spaces>,
-    pool: PgPool,
     config: SpaceFilesSyncConfig,
     spawner: JobSpawner<SpaceFilesSyncConfig>,
 }
@@ -107,13 +103,7 @@ impl JobRunner for SpaceFilesSyncRunner {
         &self,
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        let next_commit = match self
-            .library
-            .sync_space_files_once(
-                &self.pool,
-                &self.spaces,
-                self.config.last_sync_commit.as_deref(),
-            )
+        let next_commit = match sync_once(&self.library, self.config.last_sync_commit.as_deref())
             .await
         {
             Ok(c) => c,
@@ -134,6 +124,159 @@ impl JobRunner for SpaceFilesSyncRunner {
             .await?;
         Ok(JobCompletion::Complete)
     }
+}
+
+/// One pass: pulls upstream, walks `spaces/<slug>/**/*.md` since
+/// `last_commit`, and upserts/deletes `library_search_data` +
+/// `space_search_data` rows. Returns the new HEAD commit.
+async fn sync_once(
+    library: &Library,
+    last_commit: Option<&str>,
+) -> Result<Option<String>, LibraryError> {
+    library.upstream().pull().await?;
+    let head = match library.upstream().head_commit_hash().await? {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+    if last_commit == Some(head.as_str()) {
+        return Ok(Some(head));
+    }
+
+    let changes = library.upstream().changed_space_files(last_commit).await?;
+    for change in changes {
+        if let Err(e) = apply_change(library, change).await {
+            tracing::warn!(error = %e, "failed to apply space-file change");
+        }
+    }
+    Ok(Some(head))
+}
+
+async fn apply_change(library: &Library, change: SpaceFileChange) -> Result<(), LibraryError> {
+    match change {
+        SpaceFileChange::Upserted {
+            slug,
+            relative_path,
+            content,
+        } => apply_upsert(library, slug, relative_path, content).await,
+        SpaceFileChange::Deleted {
+            slug,
+            relative_path,
+        } => apply_delete(library, slug, relative_path).await,
+    }
+}
+
+async fn apply_upsert(
+    library: &Library,
+    slug: String,
+    relative_path: String,
+    content: String,
+) -> Result<(), LibraryError> {
+    let space = match library.find_space_by_slug(&slug).await? {
+        Some(s) => s,
+        None => {
+            tracing::warn!(%slug, "no space matches slug, skipping file");
+            return Ok(());
+        }
+    };
+    let doc_id = doc_id_for(space.id, &relative_path);
+    let content_hash = GitFileHash::from_blob_bytes(content.as_bytes());
+
+    let pool = library.pool();
+    let existing_hash: Option<String> = sqlx::query_scalar!(
+        "SELECT content_hash FROM space_search_data WHERE doc_id = $1",
+        doc_id
+    )
+    .fetch_optional(pool)
+    .await?;
+    if existing_hash.as_deref() == Some(content_hash.as_str()) {
+        tracing::debug!(%slug, %relative_path, "space file unchanged, skipping");
+        return Ok(());
+    }
+
+    let (title, body) = extract_title_and_body(&content, &relative_path);
+
+    let mut tx = pool.begin().await?;
+    library
+        .search_store()
+        .upsert_in_op(
+            &mut tx,
+            &SearchableFields {
+                doc_id,
+                doc_type: DocType::SpaceFile,
+                // TODO(authz): space file ACL goes through
+                // `Space.authorized_workspaces`; the search resolver
+                // will join via `space_search_data` rather than match
+                // this column. Stored as nil() until that resolver
+                // lands.
+                workspace_id: uuid::Uuid::nil(),
+                title: title.clone(),
+                body: body.clone(),
+                tags: Vec::new(),
+            },
+        )
+        .await?;
+
+    let space_uuid = uuid::Uuid::from(space.id);
+    let hash_str = content_hash.as_str().to_string();
+    sqlx::query!(
+        r#"INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (doc_id) DO UPDATE SET
+               relative_path = EXCLUDED.relative_path,
+               content_hash = EXCLUDED.content_hash,
+               title = EXCLUDED.title"#,
+        doc_id,
+        space_uuid,
+        relative_path,
+        hash_str,
+        title,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    // Embedding is best-effort; FTS index works without it.
+    let text = format!("{title}\n\n{body}");
+    match library.embedder().embed_document(&text).await {
+        Ok(emb) => {
+            if let Err(e) = library
+                .search_store()
+                .set_embedding(doc_id, DocType::SpaceFile, emb)
+                .await
+            {
+                tracing::warn!(error = %e, %slug, %relative_path, "set_embedding failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, %slug, %relative_path, "embed_document failed");
+        }
+    }
+    Ok(())
+}
+
+async fn apply_delete(
+    library: &Library,
+    slug: String,
+    relative_path: String,
+) -> Result<(), LibraryError> {
+    let space = match library.find_space_by_slug(&slug).await? {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let doc_id = doc_id_for(space.id, &relative_path);
+    let pool = library.pool();
+    let mut tx = pool.begin().await?;
+    sqlx::query!("DELETE FROM space_search_data WHERE doc_id = $1", doc_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query!(
+        "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
+        doc_id
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -166,10 +309,8 @@ mod tests {
 
     #[test]
     fn extract_title_uses_first_h1() {
-        let (title, _) = extract_title_and_body(
-            "# Incident playbook\n\nbody text\n",
-            "runbooks/foo.md",
-        );
+        let (title, _) =
+            extract_title_and_body("# Incident playbook\n\nbody text\n", "runbooks/foo.md");
         assert_eq!(title, "Incident playbook");
     }
 
@@ -184,8 +325,7 @@ mod tests {
 
     #[test]
     fn extract_title_skips_empty_h1() {
-        let (title, _) =
-            extract_title_and_body("# \n\nbody\n", "runbooks/incident-playbook.md");
+        let (title, _) = extract_title_and_body("# \n\nbody\n", "runbooks/incident-playbook.md");
         assert_eq!(title, "incident playbook");
     }
 }

@@ -30,7 +30,6 @@ use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use library::Library;
-use library::Spaces;
 use mcp_creds::McpCredentials;
 use note::Notes;
 use primitives::ContextGeneration;
@@ -66,7 +65,6 @@ pub struct App {
     tunnels: Arc<tunnel::TunnelRegistry>,
     library: Arc<Library>,
     notes: Arc<Notes>,
-    spaces: Arc<Spaces>,
     jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task lives as long as `App`.
     _prompt_executor: Arc<PromptExecutor>,
@@ -150,15 +148,17 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::init(
-            &config.library,
-            pool,
-            embedder.clone(),
-            &mut jobs,
-            github_app.clone(),
-        )
-        .await
-        .map_err(|e| AppError::Library(e.to_string()))?;
+        let library = Arc::new(
+            Library::init(
+                &config.library,
+                pool,
+                embedder.clone(),
+                &mut jobs,
+                github_app.clone(),
+            )
+            .await
+            .map_err(|e| AppError::Library(e.to_string()))?,
+        );
 
         // Bumped by Notes/Skills mutations (local) and PG NOTIFY (peers).
         // Read on the hot path of `Agents::send_message` to skip DB
@@ -170,7 +170,7 @@ impl App {
         let skills = Arc::new(Skills::new(
             pool,
             Arc::clone(&sandboxes),
-            library.clone(),
+            (*library).clone(),
             context_generation.clone(),
         ));
 
@@ -188,7 +188,7 @@ impl App {
         // system prompts at creation time.
         let notes = Arc::new(Notes::new(
             pool,
-            library.clone(),
+            (*library).clone(),
             context_generation.clone(),
         ));
 
@@ -204,8 +204,8 @@ impl App {
         ));
 
         toolsets.register_top_level(WorkspaceAgent::new(Arc::clone(&agents)));
-        // WorkspaceSandbox registration is deferred until `spaces` exists
-        // (library_space mode needs `Arc<Spaces>` for slug → space lookup).
+        // WorkspaceSandbox registration sits next to the other library-
+        // facing tools below; library_space mode needs `Arc<Library>`.
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
@@ -217,7 +217,7 @@ impl App {
 
         let workflows = Arc::new(Workflows::new(
             pool,
-            library.clone(),
+            (*library).clone(),
             Arc::clone(&skills),
             execute_run_spawner,
         ));
@@ -230,14 +230,12 @@ impl App {
             Arc::clone(&notes),
             workspace_secrets.clone(),
             Arc::clone(&workflows),
-            library.clone(),
+            (*library).clone(),
         ));
-        let spaces = Arc::new(Spaces::new(pool, library.clone()));
-        toolsets.register_top_level(SpacesTool::new(Arc::clone(&spaces)));
+        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library)));
         toolsets.register_top_level(WorkspaceSandbox::new(
             Arc::clone(&sandboxes),
-            Arc::clone(&spaces),
-            config.library.repo_url.clone(),
+            Arc::clone(&library),
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
@@ -250,7 +248,7 @@ impl App {
 
         // Read-only library lookup lives behind progressive disclosure;
         // notes/skill tools cover workspace-scoped writes.
-        toolsets.register_searchable(LibraryToolSet::new(Arc::new(library.clone())));
+        toolsets.register_searchable(LibraryToolSet::new(Arc::clone(&library)));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
@@ -263,7 +261,6 @@ impl App {
         // Reverse-sync (file → entity) for every service that implements
         // `LibraryImporter`. Uses library-lock queue to serialise with
         // forward-sync writes; `merge()` collapses bursts into one batch.
-        let library = Arc::new(library);
         {
             let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
                 Arc::clone(&library),
@@ -307,8 +304,6 @@ impl App {
         {
             let sync_init = library::space::file_sync::SpaceFilesSyncJobInitializer::new(
                 Arc::clone(&library),
-                Arc::clone(&spaces),
-                pool.clone(),
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
@@ -345,7 +340,6 @@ impl App {
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
             notes,
-            spaces,
             jobs,
             _prompt_executor: prompt_executor,
         })
@@ -409,10 +403,6 @@ impl App {
 
     pub fn notes(&self) -> &Notes {
         &self.notes
-    }
-
-    pub fn spaces(&self) -> &Spaces {
-        &self.spaces
     }
 
     /// Gracefully shut down background jobs. Call on SIGTERM / ctrl-c.

@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::Spaces;
+use crate::library::Library;
 use crate::primitives::SandboxId;
 use crate::sandbox::{Sandbox, Sandboxes};
 
@@ -104,24 +104,15 @@ struct WorkspaceSandboxParams {
 
 pub struct WorkspaceSandbox {
     sandboxes: Arc<Sandboxes>,
-    spaces: Arc<Spaces>,
-    /// Library repo URL (from `LibraryConfig.repo_url`). `None` when
-    /// the deployment runs without a library remote — `library_space`
-    /// mode is rejected at the boundary in that case.
-    library_url: Option<String>,
+    /// Library handle for `library_space` mode — supplies both the
+    /// space lookup (`find_space_by_slug_authorized`) and the upstream
+    /// repo URL (`Library::repo_url`).
+    library: Arc<Library>,
 }
 
 impl WorkspaceSandbox {
-    pub fn new(
-        sandboxes: Arc<Sandboxes>,
-        spaces: Arc<Spaces>,
-        library_url: Option<String>,
-    ) -> Self {
-        Self {
-            sandboxes,
-            spaces,
-            library_url,
-        }
+    pub fn new(sandboxes: Arc<Sandboxes>, library: Arc<Library>) -> Self {
+        Self { sandboxes, library }
     }
 }
 
@@ -219,17 +210,16 @@ impl TopLevelTool for WorkspaceSandbox {
                                     .to_string(),
                             )
                         })?;
-                        let library_url = self.library_url.clone().ok_or_else(|| {
-                            ToolSetsError::InvalidArgument(
-                                "library_space mode requires `library.repo_url` to be configured"
-                                    .to_string(),
-                            )
-                        })?;
-                        let space = self
-                            .spaces
-                            .find_by_slug_authorized(subject, &slug)
-                            .await
-                            .map_err(|e| ToolSetsError::Space(e.to_string()))?;
+                        let library_url = self.library.repo_url().map(str::to_string).ok_or_else(
+                            || {
+                                ToolSetsError::InvalidArgument(
+                                    "library_space mode requires `library.repo_url` to be configured"
+                                        .to_string(),
+                                )
+                            },
+                        )?;
+                        let space =
+                            self.library.find_space_by_slug_authorized(subject, &slug).await?;
                         sandbox::SandboxMode::LibrarySpace {
                             library_url,
                             slug: space.slug,

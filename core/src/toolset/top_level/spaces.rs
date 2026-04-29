@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::Spaces;
+use crate::library::Library;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -69,12 +69,12 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 pub struct SpacesTool {
-    spaces: Arc<Spaces>,
+    library: Arc<Library>,
 }
 
 impl SpacesTool {
-    pub fn new(spaces: Arc<Spaces>) -> Self {
-        Self { spaces }
+    pub fn new(library: Arc<Library>) -> Self {
+        Self { library }
     }
 }
 
@@ -116,11 +116,7 @@ impl TopLevelTool for SpacesTool {
 
         let (text, out) = match params {
             SpacesParams::Create { slug, description } => {
-                let space = self
-                    .spaces
-                    .create(subject, slug, description)
-                    .await
-                    .map_err(|e| ToolSetsError::Space(e.to_string()))?;
+                let space = self.library.create_space(subject, slug, description).await?;
 
                 let authorized: Vec<String> = space
                     .authorized_workspaces

@@ -16,6 +16,7 @@ use crate::github_app::GitHubAppTokenProvider;
 use self::inbox::LibraryWriteHandler;
 use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
+use self::space::repo::SpaceRepo;
 use self::upstream::Upstream;
 pub use error::LibraryError;
 pub(crate) use file::name_from_filename;
@@ -25,13 +26,13 @@ pub use file::{
 };
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
-pub use space::Spaces;
-pub use upstream::SpaceFileChange;
+pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
 pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
     SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
 };
+pub use upstream::SpaceFileChange;
 
 const LIBRARY_WRITE_JOB: &str = "library.write";
 const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
@@ -75,10 +76,13 @@ impl LibraryConfig {
 
 #[derive(Clone)]
 pub struct Library {
+    pool: sqlx::PgPool,
     search: SearchStore,
     inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
     upstream: Upstream,
+    space_repo: SpaceRepo,
+    repo_url: Option<String>,
 }
 
 impl Library {
@@ -101,11 +105,21 @@ impl Library {
         let inbox = obix::Inbox::new(pool, jobs, inbox_config, handler);
 
         Ok(Self {
+            pool: pool.clone(),
             search,
             inbox,
             embedder,
             upstream,
+            space_repo: SpaceRepo::new(pool),
+            repo_url: config.repo_url.clone(),
         })
+    }
+
+    /// Library repo URL (from `LibraryConfig.repo_url`). `None` when the
+    /// deployment runs without a library remote — caller-side feature
+    /// gates use this to short-circuit `library_space` flows.
+    pub fn repo_url(&self) -> Option<&str> {
+        self.repo_url.as_deref()
     }
 
     /// Per-repo `post_persist_hook` body collapses to a one-liner over this:
@@ -176,158 +190,120 @@ impl Library {
         Ok(())
     }
 
-    /// One pass of space-file indexing: pulls upstream, walks
-    /// `spaces/<slug>/**/*.md` since `last_commit`, and upserts/deletes
-    /// `library_search_data` + `space_search_data` rows. Returns the new
-    /// HEAD commit (the next call's `last_commit`). Spaces whose slug
-    /// can't be resolved are logged and skipped.
-    #[tracing::instrument(name = "library.sync_space_files_once", skip_all)]
-    pub async fn sync_space_files_once(
+    /// Persists a new `Space` and queues `spaces/<slug>/.gitkeep` for
+    /// upstream commit in the same transaction. The creating subject's
+    /// workspace is auto-seeded into `authorized_workspaces`; non-agent
+    /// subjects (e.g. plain `User`) produce a space with an empty
+    /// authorized list.
+    #[tracing::instrument(name = "library.create_space", skip(self, sub))]
+    pub async fn create_space(
         &self,
-        pool: &sqlx::PgPool,
-        spaces: &Spaces,
-        last_commit: Option<&str>,
-    ) -> Result<Option<String>, LibraryError> {
-        self.upstream.pull().await?;
-        let head = match self.upstream.head_commit_hash().await? {
-            Some(h) => h,
-            None => return Ok(None),
-        };
-        if last_commit == Some(head.as_str()) {
-            return Ok(Some(head));
-        }
+        sub: &crate::auth::AuthSubject,
+        slug: impl Into<String> + std::fmt::Debug,
+        description: Option<String>,
+    ) -> Result<Space, LibraryError> {
+        sub.can(
+            crate::auth::AuthVerb::Create,
+            crate::auth::AuthResource::Space(None),
+        )?;
+        crate::audit::Audit::record_action_if_unset("space.create");
 
-        let changes = self.upstream.changed_space_files(last_commit).await?;
-        for change in changes {
-            if let Err(e) = self.apply_space_change(pool, spaces, change).await {
-                tracing::warn!(error = %e, "failed to apply space-file change");
-            }
+        let initial_workspaces: Vec<crate::primitives::WorkspaceId> =
+            sub.workspace_id().into_iter().collect();
+
+        let mut builder = NewSpace::builder();
+        builder.slug(slug.into());
+        if let Some(desc) = description {
+            builder.description(desc);
         }
-        Ok(Some(head))
+        builder.authorized_workspaces(initial_workspaces);
+        let new_space = builder.build()?;
+
+        let mut op = self.space_repo.begin_op().await?;
+        let space = self
+            .space_repo
+            .create_in_op(&mut op, new_space)
+            .await
+            .map_err(SpaceError::from)?;
+        self.sync_space_folder_in_op(&mut op, &space.slug).await?;
+        op.commit().await?;
+
+        tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
+        Ok(space)
     }
 
-    async fn apply_space_change(
+    /// Resolves a slug to a `Space` after enforcing two checks:
+    /// 1. The subject can read `AuthResource::Space(Some(space.id))`
+    ///    (workspace admins are blanket-allowed by the scope layer).
+    /// 2. The subject's workspace is in `space.authorized_workspaces`.
+    ///
+    /// Used by sandbox-creation flows that need to honor space ACLs.
+    #[tracing::instrument(name = "library.find_space_by_slug_authorized", skip(self, sub))]
+    pub async fn find_space_by_slug_authorized(
         &self,
-        pool: &sqlx::PgPool,
-        spaces: &Spaces,
-        change: SpaceFileChange,
-    ) -> Result<(), LibraryError> {
-        match change {
-            SpaceFileChange::Upserted {
-                slug,
-                relative_path,
-                content,
-            } => {
-                let space = match spaces
-                    .find_by_slug(&slug)
-                    .await
-                    .map_err(|e| LibraryError::Other(format!("space lookup: {e}")))?
-                {
-                    Some(s) => s,
-                    None => {
-                        tracing::warn!(%slug, "no space matches slug, skipping file");
-                        return Ok(());
-                    }
-                };
-                let doc_id = space::file_sync::doc_id_for(space.id, &relative_path);
-                let content_hash = GitFileHash::from_blob_bytes(content.as_bytes());
+        sub: &crate::auth::AuthSubject,
+        slug: &str,
+    ) -> Result<Space, LibraryError> {
+        let space = self
+            .space_repo
+            .maybe_find_by_slug(slug)
+            .await
+            .map_err(SpaceError::from)?
+            .ok_or_else(|| SpaceError::NotFound {
+                slug: slug.to_string(),
+            })?;
 
-                let existing_hash: Option<String> = sqlx::query_scalar!(
-                    "SELECT content_hash FROM space_search_data WHERE doc_id = $1",
-                    doc_id
-                )
-                .fetch_optional(pool)
-                .await?;
-                if existing_hash.as_deref() == Some(content_hash.as_str()) {
-                    tracing::debug!(%slug, %relative_path, "space file unchanged, skipping");
-                    return Ok(());
-                }
+        sub.can(
+            crate::auth::AuthVerb::Read,
+            crate::auth::AuthResource::Space(Some(space.id)),
+        )?;
+        crate::audit::Audit::record_action_if_unset("space.find_by_slug");
 
-                let (title, body) = space::file_sync::extract_title_and_body(&content, &relative_path);
-
-                let mut tx = pool.begin().await?;
-                self.search
-                    .upsert_in_op(
-                        &mut tx,
-                        &SearchableFields {
-                            doc_id,
-                            doc_type: DocType::SpaceFile,
-                            // TODO(authz): space file ACL goes through
-                            // `Space.authorized_workspaces`; the search
-                            // resolver will join via `space_search_data`
-                            // rather than match this column. Stored as
-                            // nil() until that resolver lands.
-                            workspace_id: uuid::Uuid::nil(),
-                            title: title.clone(),
-                            body: body.clone(),
-                            tags: Vec::new(),
-                        },
-                    )
-                    .await?;
-
-                let space_uuid = uuid::Uuid::from(space.id);
-                let hash_str = content_hash.as_str().to_string();
-                sqlx::query!(
-                    r#"INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)
-                       VALUES ($1, $2, $3, $4, $5)
-                       ON CONFLICT (doc_id) DO UPDATE SET
-                           relative_path = EXCLUDED.relative_path,
-                           content_hash = EXCLUDED.content_hash,
-                           title = EXCLUDED.title"#,
-                    doc_id,
-                    space_uuid,
-                    relative_path,
-                    hash_str,
-                    title,
-                )
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-
-                // Embedding is best-effort; FTS index works without it.
-                let text = format!("{title}\n\n{body}");
-                match self.embedder.embed_document(&text).await {
-                    Ok(emb) => {
-                        if let Err(e) = self
-                            .search
-                            .set_embedding(doc_id, DocType::SpaceFile, emb)
-                            .await
-                        {
-                            tracing::warn!(error = %e, %slug, %relative_path, "set_embedding failed");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, %slug, %relative_path, "embed_document failed");
-                    }
-                }
+        let workspace_id = sub
+            .workspace_id()
+            .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
+        if !space.is_workspace_authorized(workspace_id) {
+            return Err(SpaceError::WorkspaceNotAuthorized {
+                slug: space.slug.clone(),
+                workspace_id,
             }
-            SpaceFileChange::Deleted {
-                slug,
-                relative_path,
-            } => {
-                let space = match spaces
-                    .find_by_slug(&slug)
-                    .await
-                    .map_err(|e| LibraryError::Other(format!("space lookup: {e}")))?
-                {
-                    Some(s) => s,
-                    None => return Ok(()),
-                };
-                let doc_id = space::file_sync::doc_id_for(space.id, &relative_path);
-                let mut tx = pool.begin().await?;
-                sqlx::query!("DELETE FROM space_search_data WHERE doc_id = $1", doc_id)
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query!(
-                    "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
-                    doc_id
-                )
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-            }
+            .into());
         }
-        Ok(())
+
+        Ok(space)
+    }
+
+    // --- Internal accessors used by `space::file_sync` to run the
+    //     space-file index job without leaking `Library`'s privates
+    //     to the rest of the crate.
+
+    pub(in crate::library) fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
+
+    pub(in crate::library) fn search_store(&self) -> &SearchStore {
+        &self.search
+    }
+
+    pub(in crate::library) fn embedder(&self) -> &Arc<code_assistant_core::embedder::Embedder> {
+        &self.embedder
+    }
+
+    pub(in crate::library) fn upstream(&self) -> &Upstream {
+        &self.upstream
+    }
+
+    /// No-auth slug → `Space` lookup used by the file-sync job to
+    /// resolve `spaces/<slug>/...` paths to a space id.
+    pub(in crate::library) async fn find_space_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<Space>, LibraryError> {
+        Ok(self
+            .space_repo
+            .maybe_find_by_slug(slug)
+            .await
+            .map_err(SpaceError::from)?)
     }
 
     /// Removes search data and queues a job to delete
@@ -355,6 +331,7 @@ impl Library {
     /// file under `S::Entity::DOC_TYPE`'s subdir since `last_sync_commit`.
     /// On first run (`None`), returns all tracked files. Empty `files` when
     /// HEAD hasn't moved.
+    /// // @@ find_changes should not be on here but in the job that u
     #[tracing::instrument(name = "library.find_changes", skip(self))]
     pub async fn find_changes<S: LibraryImporter>(
         &self,

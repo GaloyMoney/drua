@@ -10,8 +10,6 @@ pub enum LibraryError {
     Inbox(#[from] obix::InboxError),
     #[error("LibraryError - Authorization: {0}")]
     Authorization(#[from] crate::auth::error::AuthorizationError),
-    /// Cross-service error stringified at the boundary (e.g. a space
-    /// lookup failure from inside a library sync job).
-    #[error("LibraryError - Other: {0}")]
-    Other(String),
+    #[error("LibraryError - Space: {0}")]
+    Space(#[from] super::space::SpaceError),
 }

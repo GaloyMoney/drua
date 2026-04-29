@@ -40,8 +40,6 @@ pub enum ToolSetsError {
     Compose(String),
     #[error("ToolSetsError - Workflow: {0}")]
     Workflow(String),
-    #[error("ToolSetsError - Space: {0}")]
-    Space(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }

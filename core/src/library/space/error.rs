@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 use crate::auth::error::AuthorizationError;
-use crate::library::LibraryError;
 
 use super::repo::{SpaceCreateError, SpaceFindError, SpaceQueryError};
 
@@ -17,8 +16,6 @@ pub enum SpaceError {
     Query(#[from] SpaceQueryError),
     #[error("SpaceError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
-    #[error("SpaceError - Library: {0}")]
-    Library(#[from] LibraryError),
     #[error(
         "SpaceError - InvalidSlug: {slug:?} (must be [a-z0-9-]+, no leading/trailing or double hyphens)"
     )]
