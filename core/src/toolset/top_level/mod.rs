@@ -49,15 +49,6 @@ pub(super) fn parse_params<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))
 }
 
-/// schemars 0.8 emits boolean `true` for `serde_json::Value` fields, which
-/// strict JSON-Schema validators (notably Claude Code's MCP client) reject in
-/// `properties`. Use via `#[schemars(schema_with = "super::any_json_schema")]`
-/// on a field whose runtime type is `serde_json::Value` and whose contents are
-/// arbitrary — emits the equivalent empty-object schema `{}`.
-pub(super) fn any_json_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    schemars::schema::Schema::Object(Default::default())
-}
-
 /// Draft-07, inlined sub-schemas, `additionalProperties: false` (avoids
 /// `#[serde(deny_unknown_fields)]` which conflicts with `#[serde(flatten)]`).
 /// `definitions` is **kept** so the compose TS generator can resolve `$ref`s

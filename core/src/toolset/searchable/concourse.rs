@@ -125,6 +125,7 @@ struct JobOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::toolset::any_json_schema")]
     current_build: Option<serde_json::Value>,
 }
 
@@ -160,6 +161,7 @@ struct TriggerBuildOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct PipelineConfigJobOutput {
     name: String,
+    #[schemars(schema_with = "crate::toolset::array_of_any_schema")]
     inputs: Vec<serde_json::Value>,
 }
 
@@ -214,29 +216,125 @@ mod schema_tests {
         assert!(description_for(&schema, "start_time").contains("seconds"));
         assert!(description_for(&schema, "end_time").contains("seconds"));
     }
+
+    /// MCP `structuredContent` must be a JSON object — list-style outputs
+    /// have to be wrapped in a named-field record, not a top-level array.
+    /// Each `(static, field)` is the advertised `outputSchema` and the
+    /// expected wrapper field name.
+    #[test]
+    fn list_outputs_are_object_wrapped_records() {
+        for (schema, field) in [
+            (&*OUT_LIST_PIPELINES, "pipelines"),
+            (&*OUT_LIST_JOBS, "jobs"),
+            (&*OUT_PIPELINE_CONFIG, "jobs"),
+            (&*OUT_LIST_BUILDS, "builds"),
+            (&*OUT_BUILD_RESOURCES, "resources"),
+        ] {
+            assert_eq!(
+                schema.get("type").and_then(|v| v.as_str()),
+                Some("object"),
+                "list outputSchema must be type:object, got: {schema:#}"
+            );
+            let prop = schema
+                .get("properties")
+                .and_then(|p| p.get(field))
+                .unwrap_or_else(|| panic!("missing wrapper field `{field}` in: {schema:#}"));
+            assert_eq!(
+                prop.get("type").and_then(|v| v.as_str()),
+                Some("array"),
+                "wrapper field `{field}` should be an array, got: {prop:#}"
+            );
+        }
+    }
+
+    /// Strict MCP clients reject boolean schemas inside `properties` /
+    /// `items`. `serde_json::Value` fields must serialize as `{}` — and
+    /// `Vec<serde_json::Value>` as `array of {}` — never `true`.
+    #[test]
+    fn no_boolean_schemas_in_concourse_outputs() {
+        fn assert_no_bool_schemas(value: &serde_json::Value, path: &str) {
+            let Some(map) = value.as_object() else {
+                return;
+            };
+            if let Some(props) = map.get("properties").and_then(|v| v.as_object()) {
+                for (k, v) in props {
+                    assert!(
+                        !matches!(v, serde_json::Value::Bool(_)),
+                        "boolean schema at {path}.properties.{k}"
+                    );
+                    assert_no_bool_schemas(v, &format!("{path}.properties.{k}"));
+                }
+            }
+            if let Some(items) = map.get("items") {
+                assert!(
+                    !matches!(items, serde_json::Value::Bool(_)),
+                    "boolean schema at {path}.items"
+                );
+                assert_no_bool_schemas(items, &format!("{path}.items"));
+            }
+        }
+        for (name, schema) in [
+            ("OUT_LIST_PIPELINES", &*OUT_LIST_PIPELINES),
+            ("OUT_LIST_JOBS", &*OUT_LIST_JOBS),
+            ("OUT_PIPELINE_CONFIG", &*OUT_PIPELINE_CONFIG),
+            ("OUT_LIST_BUILDS", &*OUT_LIST_BUILDS),
+            ("OUT_BUILD_RESOURCES", &*OUT_BUILD_RESOURCES),
+        ] {
+            assert_no_bool_schemas(schema, name);
+        }
+    }
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct BuildResourceOutput {
     resource: String,
+    #[schemars(schema_with = "crate::toolset::any_json_schema")]
     version: serde_json::Value,
     first_occurrence: bool,
 }
 
+// List-shaped outputs are wrapped in a named-field object so that
+// `structuredContent` is a JSON object (per the MCP spec) rather than a
+// top-level array.
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct PipelineListOutput {
+    pipelines: Vec<PipelineOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct JobListOutput {
+    jobs: Vec<JobOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct PipelineConfigOutput {
+    jobs: Vec<PipelineConfigJobOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct BuildListOutput {
+    builds: Vec<BuildSummaryOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct BuildResourceListOutput {
+    resources: Vec<BuildResourceOutput>,
+}
+
 static OUT_LIST_PIPELINES: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<Vec<PipelineOutput>>);
-static OUT_LIST_JOBS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<Vec<JobOutput>>);
+    LazyLock::new(schema_for::<PipelineListOutput>);
+static OUT_LIST_JOBS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<JobListOutput>);
 static OUT_BUILD_STATUS: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<BuildStatusOutput>);
 static OUT_BUILD_LOGS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<BuildLogsOutput>);
 static OUT_TRIGGER_BUILD: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<TriggerBuildOutput>);
 static OUT_PIPELINE_CONFIG: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<Vec<PipelineConfigJobOutput>>);
-static OUT_LIST_BUILDS: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<Vec<BuildSummaryOutput>>);
+    LazyLock::new(schema_for::<PipelineConfigOutput>);
+static OUT_LIST_BUILDS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<BuildListOutput>);
 static OUT_BUILD_RESOURCES: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<Vec<BuildResourceOutput>>);
+    LazyLock::new(schema_for::<BuildResourceListOutput>);
 
 pub struct ConcourseToolSet {
     client: Arc<ConcourseClient>,
@@ -334,35 +432,39 @@ impl SearchableToolSet for ConcourseToolSet {
         match tool_name {
             "list_pipelines" => {
                 let pipelines = self.client.list_all_pipelines().await?;
-                let out: Vec<PipelineOutput> = pipelines
-                    .iter()
-                    .map(|p| PipelineOutput {
-                        name: p.name.clone(),
-                        paused: p.paused,
-                        public: p.public,
-                        archived: p.archived,
-                        team: p.team_name.clone(),
-                    })
-                    .collect();
-                Ok(typed_array_result(&out))
+                let out = PipelineListOutput {
+                    pipelines: pipelines
+                        .iter()
+                        .map(|p| PipelineOutput {
+                            name: p.name.clone(),
+                            paused: p.paused,
+                            public: p.public,
+                            archived: p.archived,
+                            team: p.team_name.clone(),
+                        })
+                        .collect(),
+                };
+                Ok(typed_result(&out))
             }
             "list_jobs" => {
                 let params: PipelineParams = parse_params(arguments)?;
                 let jobs = self.client.list_jobs(&params.pipeline).await?;
-                let out: Vec<JobOutput> = jobs
-                    .iter()
-                    .map(|j| JobOutput {
-                        name: j.name.clone(),
-                        paused: j.paused,
-                        pipeline: j.pipeline_name.clone(),
-                        last_status: j.finished_build.as_ref().map(|b| b.status.clone()),
-                        current_build: j
-                            .next_build
-                            .as_ref()
-                            .map(|b| serde_json::json!({"id": b.id, "status": b.status})),
-                    })
-                    .collect();
-                Ok(typed_array_result(&out))
+                let out = JobListOutput {
+                    jobs: jobs
+                        .iter()
+                        .map(|j| JobOutput {
+                            name: j.name.clone(),
+                            paused: j.paused,
+                            pipeline: j.pipeline_name.clone(),
+                            last_status: j.finished_build.as_ref().map(|b| b.status.clone()),
+                            current_build: j
+                                .next_build
+                                .as_ref()
+                                .map(|b| serde_json::json!({"id": b.id, "status": b.status})),
+                        })
+                        .collect(),
+                };
+                Ok(typed_result(&out))
             }
             "get_build_status" => {
                 let params: PipelineJobParams = parse_params(arguments)?;
@@ -420,20 +522,22 @@ impl SearchableToolSet for ConcourseToolSet {
             "get_pipeline_config" => {
                 let params: PipelineParams = parse_params(arguments)?;
                 let config = self.client.get_pipeline_config(&params.pipeline).await?;
-                let out: Vec<PipelineConfigJobOutput> = config
-                    .config
-                    .jobs
-                    .iter()
-                    .map(|j| {
-                        let mut inputs = Vec::new();
-                        extract_get_steps(&j.plan, &mut inputs);
-                        PipelineConfigJobOutput {
-                            name: j.name.clone(),
-                            inputs,
-                        }
-                    })
-                    .collect();
-                Ok(typed_array_result(&out))
+                let out = PipelineConfigOutput {
+                    jobs: config
+                        .config
+                        .jobs
+                        .iter()
+                        .map(|j| {
+                            let mut inputs = Vec::new();
+                            extract_get_steps(&j.plan, &mut inputs);
+                            PipelineConfigJobOutput {
+                                name: j.name.clone(),
+                                inputs,
+                            }
+                        })
+                        .collect(),
+                };
+                Ok(typed_result(&out))
             }
             "list_builds_for_job" => {
                 let params: ListBuildsParams = parse_params(arguments)?;
@@ -442,31 +546,35 @@ impl SearchableToolSet for ConcourseToolSet {
                     .client
                     .list_job_builds(&params.pipeline, &params.job, Some(limit))
                     .await?;
-                let out: Vec<BuildSummaryOutput> = builds
-                    .iter()
-                    .map(|b| BuildSummaryOutput {
-                        build_id: b.id,
-                        name: b.name.clone(),
-                        status: b.status.clone(),
-                        start_time: b.start_time,
-                        end_time: b.end_time,
-                    })
-                    .collect();
-                Ok(typed_array_result(&out))
+                let out = BuildListOutput {
+                    builds: builds
+                        .iter()
+                        .map(|b| BuildSummaryOutput {
+                            build_id: b.id,
+                            name: b.name.clone(),
+                            status: b.status.clone(),
+                            start_time: b.start_time,
+                            end_time: b.end_time,
+                        })
+                        .collect(),
+                };
+                Ok(typed_result(&out))
             }
             "get_build_resources" => {
                 let params: BuildIdParams = parse_params(arguments)?;
                 let resources = self.client.get_build_resources(params.build_id).await?;
-                let out: Vec<BuildResourceOutput> = resources
-                    .inputs
-                    .iter()
-                    .map(|i| BuildResourceOutput {
-                        resource: i.name.clone(),
-                        version: i.version.clone(),
-                        first_occurrence: i.first_occurrence,
-                    })
-                    .collect();
-                Ok(typed_array_result(&out))
+                let out = BuildResourceListOutput {
+                    resources: resources
+                        .inputs
+                        .iter()
+                        .map(|i| BuildResourceOutput {
+                            resource: i.name.clone(),
+                            version: i.version.clone(),
+                            first_occurrence: i.first_occurrence,
+                        })
+                        .collect(),
+                };
+                Ok(typed_result(&out))
             }
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
@@ -510,14 +618,6 @@ fn tool_entry_with_filter(
 }
 
 fn typed_result<T: serde::Serialize>(value: &T) -> CallToolResult {
-    let structured = serde_json::to_value(value).expect("serialization");
-    let text = serde_json::to_string_pretty(&structured).unwrap_or_default();
-    let mut result = CallToolResult::success(vec![Content::text(text)]);
-    result.structured_content = Some(structured);
-    result
-}
-
-fn typed_array_result<T: serde::Serialize>(value: &[T]) -> CallToolResult {
     let structured = serde_json::to_value(value).expect("serialization");
     let text = serde_json::to_string_pretty(&structured).unwrap_or_default();
     let mut result = CallToolResult::success(vec![Content::text(text)]);

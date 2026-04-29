@@ -163,10 +163,10 @@ struct DescribeToolOutput {
     upstream: String,
     category: String,
     description: String,
-    #[schemars(schema_with = "super::any_json_schema")]
+    #[schemars(schema_with = "crate::toolset::any_json_schema")]
     input_schema: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "super::any_json_schema")]
+    #[schemars(schema_with = "crate::toolset::any_json_schema")]
     output_schema: Option<serde_json::Value>,
     default_output_filter: String,
 }
