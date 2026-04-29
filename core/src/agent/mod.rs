@@ -860,21 +860,15 @@ impl Agents {
                 };
 
                 let (response, streamed) = match result {
-                    llm::PromptResult::Stream(handle) => {
-                        match consume_stream(handle, &tx).await {
-                            Ok(resp) => (resp, true),
-                            Err(msg) => {
-                                let _ = sessions
-                                    .assistant_response_failed(
-                                        id,
-                                        current_model.clone(),
-                                        msg,
-                                    )
-                                    .await;
-                                return;
-                            }
+                    llm::PromptResult::Stream(handle) => match consume_stream(handle, &tx).await {
+                        Ok(resp) => (resp, true),
+                        Err(msg) => {
+                            let _ = sessions
+                                .assistant_response_failed(id, current_model.clone(), msg)
+                                .await;
+                            return;
                         }
-                    }
+                    },
                     llm::PromptResult::Complete(response) => (response, false),
                 };
 
