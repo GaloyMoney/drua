@@ -8,6 +8,8 @@ mod upstream;
 
 use std::sync::Arc;
 
+use es_entity::operation::hooks::CommitHook as _;
+
 use crate::github_app::GitHubAppTokenProvider;
 
 use self::inbox::LibraryWriteHandler;
@@ -22,7 +24,7 @@ pub use file::{
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::SearchResult;
 pub use synced::{
-    sync_to_library, Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
+    Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
     SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
 };
 
@@ -114,7 +116,44 @@ impl Library {
         op: &mut impl es_entity::AtomicOperation,
         file: &UpstreamOp,
     ) -> Result<(), LibraryError> {
-        synced::enqueue_write(op, &self.inbox, &self.search, file.clone()).await?;
+        self.enqueue_write(op, file.clone()).await?;
+        Ok(())
+    }
+
+    /// Per-repo `post_persist_hook` body collapses to a one-liner over this:
+    /// projects the entity into a `SyncedFile` and registers the write hook
+    /// when at least one persisted event was a content event.
+    #[tracing::instrument(
+        name = "library.sync_entity_in_op",
+        skip_all,
+        fields(doc_type = E::DOC_TYPE.as_str())
+    )]
+    pub async fn sync_entity_in_op<E, OP>(
+        &self,
+        op: &mut OP,
+        entity: &E,
+        new_events: &mut es_entity::LastPersisted<'_, E::Event>,
+    ) -> Result<(), LibraryError>
+    where
+        E: LibrarySynced,
+        OP: es_entity::AtomicOperation,
+    {
+        if !new_events.any(|p| E::is_content_event(&p.event)) {
+            return Ok(());
+        }
+        let file = UpstreamOp::Synced(Box::new(entity.to_synced_file()));
+        self.write_in_op(op, &file).await
+    }
+
+    async fn enqueue_write<OP: es_entity::AtomicOperation>(
+        &self,
+        op: &mut OP,
+        file: UpstreamOp,
+    ) -> Result<(), sqlx::Error> {
+        let hook = synced::LibrarySyncHook::new(self.inbox.clone(), self.search.clone(), file);
+        if let Err(hook) = op.add_commit_hook(hook) {
+            let _ = hook.force_execute_pre_commit(op).await?;
+        }
         Ok(())
     }
 
@@ -130,7 +169,7 @@ impl Library {
                 workspace_name: workspace_name.to_string(),
                 subdir: subdir.to_string(),
             };
-            synced::enqueue_write(op, &self.inbox, &self.search, file).await?;
+            self.enqueue_write(op, file).await?;
         }
         Ok(())
     }
@@ -152,7 +191,7 @@ impl Library {
         let file = UpstreamOp::WorkspaceCleanup {
             workspace_name: workspace_name.to_string(),
         };
-        synced::enqueue_write(op, &self.inbox, &self.search, file).await?;
+        self.enqueue_write(op, file).await?;
         Ok(())
     }
 

@@ -53,6 +53,8 @@ impl NoteRepo {
         entity: &Note,
         mut new_events: es_entity::LastPersisted<'_, NoteEvent>,
     ) -> Result<(), crate::library::LibraryError> {
-        crate::library::sync_to_library(Some(&self.library), op, entity, &mut new_events).await
+        self.library
+            .sync_entity_in_op(op, entity, &mut new_events)
+            .await
     }
 }

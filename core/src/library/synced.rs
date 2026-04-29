@@ -1,15 +1,12 @@
 use std::sync::Arc;
 
-use es_entity::{
-    operation::hooks::{CommitHook, HookOperation, PreCommitRet},
-    AtomicOperation,
-};
+use es_entity::operation::hooks::{CommitHook, HookOperation, PreCommitRet};
 use job::{CurrentJob, Job, JobCompletion, JobId, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
 
 use super::file::{DocType, GitFileHash, SearchableFields, UpstreamOp};
 use super::search::SearchStore;
-use super::{Library, LibraryError, LIBRARY_LOCK_QUEUE};
+use super::{Library, LIBRARY_LOCK_QUEUE};
 
 use crate::primitives::WorkspaceId;
 use crate::workspace::Workspaces;
@@ -147,32 +144,6 @@ pub trait LibrarySynced: Sized + Send + Sync + 'static {
             rendered: self.render(),
         }
     }
-}
-
-/// Per-repo `post_persist_hook` body collapses to a one-liner over this.
-#[tracing::instrument(
-    name = "library.sync_to_library",
-    skip_all,
-    fields(doc_type = E::DOC_TYPE.as_str())
-)]
-pub async fn sync_to_library<E, OP>(
-    library: Option<&Library>,
-    op: &mut OP,
-    entity: &E,
-    new_events: &mut es_entity::LastPersisted<'_, E::Event>,
-) -> Result<(), LibraryError>
-where
-    E: LibrarySynced,
-    OP: AtomicOperation,
-{
-    let Some(library) = library else {
-        return Ok(());
-    };
-    if !new_events.any(|p| E::is_content_event(&p.event)) {
-        return Ok(());
-    }
-    let file = UpstreamOp::Synced(Box::new(entity.to_synced_file()));
-    library.write_in_op(op, &file).await
 }
 
 /// Boxed std error so the generic runner can log per-type upsert failures
@@ -465,19 +436,6 @@ impl CommitHook for LibrarySyncHook {
         self.files.append(&mut other.files);
         true
     }
-}
-
-pub(super) async fn enqueue_write<OP: AtomicOperation>(
-    op: &mut OP,
-    inbox: &obix::Inbox,
-    search: &SearchStore,
-    file: UpstreamOp,
-) -> Result<(), sqlx::Error> {
-    let hook = LibrarySyncHook::new(inbox.clone(), search.clone(), file);
-    if let Err(hook) = op.add_commit_hook(hook) {
-        let _ = hook.force_execute_pre_commit(op).await?;
-    }
-    Ok(())
 }
 
 pub(super) fn slugify(title: &str) -> String {

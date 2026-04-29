@@ -40,7 +40,11 @@ impl SkillRepo {
         entity: &Skill,
         mut new_events: es_entity::LastPersisted<'_, SkillEvent>,
     ) -> Result<(), crate::library::LibraryError> {
-        crate::library::sync_to_library(self.library.as_ref(), op, entity, &mut new_events).await
+        if let Some(library) = &self.library {
+            library.sync_entity_in_op(op, entity, &mut new_events).await
+        } else {
+            Ok(())
+        }
     }
 }
 
