@@ -163,8 +163,10 @@ struct DescribeToolOutput {
     upstream: String,
     category: String,
     description: String,
+    #[schemars(schema_with = "super::any_json_schema")]
     input_schema: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "super::any_json_schema")]
     output_schema: Option<serde_json::Value>,
     default_output_filter: String,
 }
@@ -729,5 +731,22 @@ mod tests {
         assert_eq!(SearchCatalog::normalize("list-pipelines"), "list pipelines");
         assert_eq!(SearchCatalog::normalize("Search_Code"), "search code");
         assert_eq!(SearchCatalog::normalize("no changes"), "no changes");
+    }
+
+    /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside
+    /// `properties`. `serde_json::Value` fields must serialize as `{}`, not
+    /// `true`.
+    #[test]
+    fn describe_output_schema_has_no_boolean_properties() {
+        let props = DESCRIBE_OUTPUT_SCHEMA
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("describe outputSchema has properties");
+        for (name, schema) in props {
+            assert!(
+                !matches!(schema, serde_json::Value::Bool(_)),
+                "property `{name}` is a boolean schema, MCP validators reject it"
+            );
+        }
     }
 }
