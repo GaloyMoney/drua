@@ -55,14 +55,6 @@ enum WorkflowParams {
         definition_id: WorkflowDefinitionId,
         #[serde(default)]
         payload: Option<serde_json::Value>,
-        /// Block until the run reaches a terminal state. Defaults to
-        /// `true` so the trigger response carries the final state and
-        /// step outputs without a follow-up `run` poll.
-        #[serde(default)]
-        wait: Option<bool>,
-        /// Wait budget when `wait` is true. Defaults to 360 seconds.
-        #[serde(default)]
-        timeout_seconds: Option<u64>,
     },
     AwaitRun {
         run_id: WorkflowRunId,
@@ -78,14 +70,16 @@ enum WorkflowParams {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WorkflowSandboxParam {
+    /// Provision a fresh empty sandbox for this workflow run.
     Scratch {
         name: String,
         #[serde(default)]
         config: Option<ScratchParamConfig>,
     },
+    /// Provision a sandbox that clones a git repo at run start.
     Repo {
         name: String,
         config: RepoParamConfig,
@@ -96,7 +90,7 @@ enum WorkflowSandboxParam {
     Preexisting { name: String },
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 struct ScratchParamConfig {
     #[serde(default)]
     cpu: Option<String>,
@@ -106,7 +100,7 @@ struct ScratchParamConfig {
     disk_size: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct RepoParamConfig {
     repo_url: String,
     #[serde(default)]
@@ -134,10 +128,15 @@ fn specs_from_parts(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct WorkflowStepParam {
     name: String,
+    /// NAME of an existing skill in this workspace (created via the
+    /// `skill` tool). NOT an inline body — the runtime looks up the
+    /// skill by this name at trigger time.
     skill: String,
+    /// Name of a sandbox declared in this workflow's top-level
+    /// `sandboxes` array.
     #[serde(default)]
     sandbox: Option<String>,
     #[serde(default)]
@@ -309,6 +308,27 @@ impl WorkflowTool {
 static WORKFLOW_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<WorkflowOutput>);
 
+/// Schema for an array `items:` slot — derives from the rust type so
+/// the schema and the deserializer can never disagree (the bug from
+/// the third smoke test was a hand-written `kind` vs `#[serde(tag =
+/// "type")]` drift). Strips schemars' root-level `title` /
+/// `additionalProperties` since both apply at the surrounding-object
+/// level, not inside an item entry.
+fn item_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.inline_subschemas = true;
+        s.meta_schema = None;
+    });
+    let generator = settings.into_generator();
+    let schema = generator.into_root_schema_for::<T>();
+    let mut value = serde_json::to_value(schema).expect("schema serialization");
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("title");
+        obj.remove("$schema");
+    }
+    value
+}
+
 static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
         "type": "object",
@@ -316,7 +336,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "command": {
                 "type": "string",
                 "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run"],
-                "description": "Which workflow operation to perform. `trigger` blocks until the run terminates by default (`wait=true`, 360s budget). `await_run` re-attaches to an in-flight run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
+                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run; pair with `await_run` to block until terminal. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
             },
             "name": {
                 "type": "string",
@@ -341,23 +361,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "steps": {
                 "type": "array",
                 "description": "Multi-step form (create). Takes precedence over the single-step shorthand. Each entry needs `name` and `skill`; optional `sandbox`, `sandbox_mode`, `timeout_seconds`.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" },
-                        "skill": {
-                            "type": "string",
-                            "description": "NAME of an existing skill in this workspace (created via the `skill` tool). NOT an inline body — the runtime looks up the skill by this name at trigger time."
-                        },
-                        "sandbox": {
-                            "type": "string",
-                            "description": "Name of a sandbox declared in this workflow's top-level `sandboxes` array."
-                        },
-                        "sandbox_mode": { "type": "string", "enum": ["read", "write"] },
-                        "timeout_seconds": { "type": "integer", "minimum": 1 }
-                    },
-                    "required": ["name", "skill"]
-                }
+                "items": item_schema_for::<WorkflowStepParam>(),
             },
             "sandbox": {
                 "type": "string",
@@ -365,25 +369,13 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "sandboxes": {
                 "type": "array",
-                "description": "Sandboxes declared by this workflow. Each entry has `kind` (scratch or repo) and a `name`; repo entries also take `repo_url` and optional `branch`. Optional `cpu`/`memory`/`disk_size` override defaults.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "kind": { "type": "string", "enum": ["scratch", "repo"] },
-                        "name": { "type": "string" },
-                        "repo_url": { "type": "string" },
-                        "branch": { "type": "string" },
-                        "cpu": { "type": "string" },
-                        "memory": { "type": "string" },
-                        "disk_size": { "type": "string" }
-                    },
-                    "required": ["kind", "name"]
-                }
+                "description": "Sandboxes declared by this workflow. Each entry is a tagged variant: `{type:\"scratch\",name}`, `{type:\"repo\",name,config:{repo_url,branch?,cpu?,memory?,disk_size?}}`, or `{type:\"preexisting\",name}` to attach a sandbox the user already created.",
+                "items": item_schema_for::<WorkflowSandboxParam>(),
             },
             "timeout_seconds": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Per-step timeout in seconds (create); wait budget in seconds (trigger / await_run). Defaults: create=300, trigger/await_run=360."
+                "description": "Per-step timeout in seconds (create); wait budget in seconds (await_run). Defaults: create=300, await_run=360."
             },
             "definition_id": {
                 "type": "string",
@@ -397,10 +389,6 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "payload": {
                 "description": "Trigger context payload (trigger). Defaults to {}."
-            },
-            "wait": {
-                "type": "boolean",
-                "description": "Block until the run terminates (trigger). Defaults to true."
             }
         },
         "required": ["command"],
@@ -424,9 +412,9 @@ impl TopLevelTool for WorkflowTool {
          `name`; either `steps` array or single-step shorthand `skill`; \
          optional `provider`, `sandboxes`, `manual`), `list`, `get` \
          (requires `definition_id`), `trigger` (requires `definition_id`, \
-         optional `payload`; blocks until terminal by default — `wait=false` \
-         to fire-and-forget; `timeout_seconds` overrides the 360s budget), \
-         `await_run` (requires `run_id`; blocks until terminal), `runs` \
+         optional `payload`; returns immediately with the spawned run), \
+         `await_run` (requires `run_id`; blocks until terminal — pair with \
+         `trigger` when you need the final state inline), `runs` \
          (requires `definition_id`; truncated step outputs), `run` \
          (requires `run_id`; full per-step outputs)."
     }
@@ -574,8 +562,6 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::Trigger {
                 definition_id,
                 payload,
-                wait,
-                timeout_seconds,
             } => {
                 let payload =
                     payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
@@ -584,17 +570,6 @@ impl TopLevelTool for WorkflowTool {
                     .trigger_run(subject, definition_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-
-                let run = if wait.unwrap_or(true) {
-                    let timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(360));
-                    self.workflows
-                        .await_run_completion(subject, run.id, Some(timeout))
-                        .await
-                        .map_err(|e| ToolSetsError::Workflow(e.to_string()))?
-                } else {
-                    run
-                };
-
                 let text = format_run_text(&run);
                 let out = WorkflowOutput {
                     command: "trigger".to_string(),
@@ -968,6 +943,15 @@ fn format_run_text(r: &WorkflowRun) -> String {
         out.push_str(&format!("completed_at:  {}\n", t.to_rfc3339()));
     }
     out.push('\n');
+    if matches!(
+        r.state,
+        WorkflowRunState::Pending | WorkflowRunState::Running
+    ) {
+        out.push_str(&format!(
+            "Block until terminal: workflow command=await_run run_id={}\n\n",
+            r.id
+        ));
+    }
     if r.step_results.is_empty() {
         out.push_str("No step results.\n");
         return out;
