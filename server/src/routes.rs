@@ -312,10 +312,26 @@ async fn library_search(
         })
         .collect();
 
+    let workspace_ids: Vec<uuid::Uuid> = match workspace_filter {
+        Some(id) => match state.app.workspaces().find_by_id(&sub, id).await {
+            Ok(_) => vec![uuid::Uuid::from(id)],
+            Err(e) => {
+                tracing::error!(error = %e, "library search workspace lookup failed");
+                return LibrarySearchResultsTemplate {
+                    query: trimmed.to_string(),
+                    hits: vec![],
+                    error: Some(format!("workspace not found: {e}")),
+                }
+                .into_response();
+            }
+        },
+        None => Vec::new(),
+    };
+
     let hits = match state
         .app
-        .workspaces()
-        .library_search(&sub, trimmed, workspace_filter, &doc_types, 50)
+        .library()
+        .search_global(&sub, &workspace_ids, trimmed, &doc_types, 50)
         .await
     {
         Ok(h) => h,

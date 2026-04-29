@@ -255,24 +255,28 @@ impl Library {
             .await
     }
 
-    /// Cross-workspace search. `workspace_ids` is the caller's pre-authorized
-    /// set — empty returns no results so the resolver must filter to the
-    /// subject's readable workspaces before calling.
+    /// Cross-workspace search. Open to any non-anonymous subject;
+    /// library content is globally discoverable. Empty `workspace_ids`
+    /// = no workspace filter (every workspace plus global content);
+    /// otherwise hits are restricted to the supplied ids (plus the nil
+    /// UUID for global, auto-appended).
     ///
     /// Workflows are hosted in the library repo but excluded from search:
     /// passing an empty `doc_types` defaults to `[Skill, Note]`, and any
     /// `Workflow` entry in `doc_types` is silently dropped.
-    #[tracing::instrument(name = "library.search_global", skip(self, workspace_ids))]
+    #[tracing::instrument(name = "library.search_global", skip(self, sub, workspace_ids))]
     pub async fn search_global(
         &self,
+        sub: &crate::auth::AuthSubject,
         workspace_ids: &[uuid::Uuid],
         query: &str,
         doc_types: &[DocType],
         limit: usize,
     ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
-        if workspace_ids.is_empty() {
-            return Ok(Vec::new());
+        if matches!(sub, crate::auth::AuthSubject::Anonymous) {
+            return Err(crate::auth::error::AuthorizationError::AuthenticationRequired.into());
         }
+        crate::audit::Audit::record_action_if_unset("library.search");
         let effective_types: Vec<DocType> = if doc_types.is_empty() {
             vec![DocType::Skill, DocType::Note]
         } else {

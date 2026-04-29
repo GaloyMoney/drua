@@ -8,4 +8,6 @@ pub enum LibraryError {
     Sqlx(#[from] sqlx::Error),
     #[error("LibraryError - Inbox: {0}")]
     Inbox(#[from] obix::InboxError),
+    #[error("LibraryError - Authorization: {0}")]
+    Authorization(#[from] crate::auth::error::AuthorizationError),
 }

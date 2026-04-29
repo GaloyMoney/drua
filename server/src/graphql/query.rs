@@ -136,8 +136,10 @@ impl Query {
         Ok(entries.into_iter().map(AuditEntry::from).collect())
     }
 
-    /// Cross-type, cross-workspace library search. Filters are additive
-    /// (AND). Results are scoped to workspaces the subject can read.
+    /// Cross-type, cross-workspace library search. Open to any
+    /// authenticated subject; library content is globally discoverable.
+    /// `workspaceId` is optional — when set the workspace is validated
+    /// via `find_by_id`; when omitted no workspace filter is applied.
     async fn library_search(
         &self,
         ctx: &Context<'_>,
@@ -152,9 +154,18 @@ impl Query {
             .map(Into::into)
             .collect();
         let limit = input.limit.clamp(1, 200) as usize;
+
+        let workspace_ids: Vec<uuid::Uuid> = match input.workspace_id {
+            Some(id) => {
+                app.workspaces().find_by_id(sub, id).await?;
+                vec![uuid::Uuid::from(id)]
+            }
+            None => Vec::new(),
+        };
+
         let hits = app
-            .workspaces()
-            .library_search(sub, &input.query, input.workspace_id, &doc_types, limit)
+            .library()
+            .search_global(sub, &workspace_ids, &input.query, &doc_types, limit)
             .await?;
 
         Ok(hits

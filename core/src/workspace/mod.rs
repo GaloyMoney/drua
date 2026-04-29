@@ -131,38 +131,6 @@ impl Workspaces {
         Ok(self.repo.list_all().await?)
     }
 
-    /// Authorizing facade over [`Library::search_global`]. With
-    /// `workspace_filter = Some(id)` the workspace is validated via
-    /// [`Self::find_by_id`]; with `None` results span every workspace the
-    /// subject can read. `Library` stays oblivious to membership rules.
-    #[instrument(name = "domain.workspace.library_search", skip(self, sub))]
-    pub async fn library_search(
-        &self,
-        sub: &AuthSubject,
-        query: &str,
-        workspace_filter: Option<WorkspaceId>,
-        doc_types: &[crate::library::DocType],
-        limit: usize,
-    ) -> Result<Vec<crate::library::GlobalSearchHit>, WorkspaceError> {
-        Audit::record_action_if_unset("workspace.library_search");
-        let workspace_ids: Vec<uuid::Uuid> = match workspace_filter {
-            Some(id) => {
-                self.find_by_id(sub, id).await?;
-                vec![uuid::Uuid::from(id)]
-            }
-            None => self
-                .list_all(sub)
-                .await?
-                .into_iter()
-                .map(|ws| uuid::Uuid::from(ws.id))
-                .collect(),
-        };
-        Ok(self
-            .library
-            .search_global(&workspace_ids, query, doc_types, limit)
-            .await?)
-    }
-
     #[instrument(name = "domain.workspace.update", skip(self, sub))]
     pub async fn update(
         &self,

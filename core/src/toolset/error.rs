@@ -34,6 +34,8 @@ pub enum ToolSetsError {
     Note(String),
     #[error("ToolSetsError - Skill: {0}")]
     Skill(String),
+    #[error("ToolSetsError - Library: {0}")]
+    Library(#[from] crate::library::LibraryError),
     #[error("ToolSetsError - Compose: {0}")]
     Compose(String),
     #[error("ToolSetsError - Workflow: {0}")]

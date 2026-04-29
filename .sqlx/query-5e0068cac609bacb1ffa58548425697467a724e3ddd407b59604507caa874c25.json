@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,\n                          embedding <=> $1 AS distance\n                   FROM library_search_data\n                   WHERE workspace_id = ANY($2)\n                     AND embedding IS NOT NULL\n                     AND ($3::text[] IS NULL OR doc_type = ANY($3))\n                   ORDER BY distance ASC\n                   LIMIT $4",
+  "query": "SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,\n                          embedding <=> $1 AS distance\n                   FROM library_search_data\n                   WHERE ($2::uuid[] IS NULL OR workspace_id = ANY($2))\n                     AND embedding IS NOT NULL\n                     AND ($3::text[] IS NULL OR doc_type = ANY($3))\n                   ORDER BY distance ASC\n                   LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -62,5 +62,5 @@
       null
     ]
   },
-  "hash": "c4841f679a80ed56c705bfea444cfe4744e1ef37ecd11eacc07b62318d0da275"
+  "hash": "5e0068cac609bacb1ffa58548425697467a724e3ddd407b59604507caa874c25"
 }
