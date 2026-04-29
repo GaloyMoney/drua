@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::space::Spaces;
+use crate::library::Spaces;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;

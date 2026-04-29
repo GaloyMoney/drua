@@ -8,8 +8,8 @@ pub use entity::{NewSpace, Space, SpaceEvent};
 pub use error::*;
 use repo::*;
 
+use super::Library;
 use crate::audit::Audit;
-use crate::library::Library;
 use crate::primitives::*;
 
 #[derive(Clone)]

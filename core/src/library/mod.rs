@@ -3,6 +3,7 @@ mod file;
 mod inbox;
 mod job;
 mod search;
+pub mod space;
 mod synced;
 mod upstream;
 
@@ -24,6 +25,7 @@ pub use file::{
 };
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
+pub use space::Spaces;
 pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,

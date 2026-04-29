@@ -14,7 +14,6 @@ pub mod primitives;
 pub mod prompt_executor;
 pub mod sandbox;
 pub mod skill;
-pub mod space;
 pub mod toolset;
 pub mod tunnel;
 pub mod user;
@@ -31,13 +30,13 @@ use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
 use library::Library;
+use library::Spaces;
 use mcp_creds::McpCredentials;
 use note::Notes;
 use primitives::ContextGeneration;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
-use space::Spaces;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool, Read,
     SkillTool, SpacesTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
