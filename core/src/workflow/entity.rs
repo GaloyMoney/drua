@@ -191,7 +191,7 @@ impl crate::library::LibrarySynced for WorkflowDefinition {
     }
 
     fn render(&self) -> String {
-        crate::library::render_workflow_yaml(
+        super::yaml::render_workflow_yaml(
             self.id,
             &self.name,
             self.description.as_deref(),

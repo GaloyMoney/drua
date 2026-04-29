@@ -5,6 +5,7 @@ pub mod executor;
 pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
+pub mod yaml;
 
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ impl crate::library::LibraryImporter for Workflows {
     const WORKSPACE_REQUIRED: bool = true;
 
     fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        crate::library::parse_workflow_yaml(content, path).map(|p| p.parsed)
+        yaml::parse_workflow_yaml(content, path).map(|p| p.parsed)
     }
 
     /// On create: mints a fresh webhook secret. On update: preserves the
@@ -68,8 +69,8 @@ impl crate::library::LibraryImporter for Workflows {
             .original_path
             .clone()
             .unwrap_or_else(|| file.relative_path());
-        let parsed = crate::library::parse_workflow_yaml(&file.rendered, &synthetic_path)
-            .ok_or_else(|| {
+        let parsed =
+            yaml::parse_workflow_yaml(&file.rendered, &synthetic_path).ok_or_else(|| {
                 WorkflowError::BuildEntity("workflow YAML failed to round-trip".into())
             })?;
 

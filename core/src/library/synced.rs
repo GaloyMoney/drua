@@ -438,7 +438,7 @@ impl CommitHook for LibrarySyncHook {
     }
 }
 
-pub(super) fn slugify(title: &str) -> String {
+pub(crate) fn slugify(title: &str) -> String {
     title
         .to_lowercase()
         .chars()
