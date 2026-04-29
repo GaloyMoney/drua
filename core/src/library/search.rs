@@ -383,6 +383,7 @@ fn parse_doc_type(s: &str) -> DocType {
         "note" => DocType::Note,
         "skill" => DocType::Skill,
         "workflow" => DocType::Workflow,
+        "space_file" => DocType::SpaceFile,
         _ => DocType::Note,
     }
 }

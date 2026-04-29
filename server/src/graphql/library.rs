@@ -21,14 +21,16 @@ impl From<LibraryFileType> for DocType {
     }
 }
 
-/// Workflow rows can't reach this conversion in practice because
-/// `Library::search_global` drops them before fusion; default to Note
-/// if one ever does.
+/// `Workflow` and `SpaceFile` rows can't reach this conversion in
+/// practice — `Library::search_global` drops `Workflow` before fusion
+/// and space files aren't yet exposed through this resolver (authz
+/// joins through `Space.authorized_workspaces` are still pending).
+/// Default to Note if one ever does.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
         match t {
             DocType::Skill => LibraryFileType::Skill,
-            DocType::Note | DocType::Workflow => LibraryFileType::Note,
+            DocType::Note | DocType::Workflow | DocType::SpaceFile => LibraryFileType::Note,
         }
     }
 }

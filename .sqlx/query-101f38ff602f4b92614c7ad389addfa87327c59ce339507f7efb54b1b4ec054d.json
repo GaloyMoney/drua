@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)\n                       VALUES ($1, $2, $3, $4, $5)\n                       ON CONFLICT (doc_id) DO UPDATE SET\n                           relative_path = EXCLUDED.relative_path,\n                           content_hash = EXCLUDED.content_hash,\n                           title = EXCLUDED.title",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "101f38ff602f4b92614c7ad389addfa87327c59ce339507f7efb54b1b4ec054d"
+}

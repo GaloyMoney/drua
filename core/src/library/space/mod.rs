@@ -1,5 +1,6 @@
 mod entity;
 pub mod error;
+pub mod file_sync;
 pub(crate) mod repo;
 
 use tracing::instrument;
@@ -61,5 +62,11 @@ impl Spaces {
 
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
         Ok(space)
+    }
+
+    /// No-auth slug → space lookup. Used by the library file-sync job
+    /// when resolving `spaces/<slug>/...` paths to space ids.
+    pub(crate) async fn find_by_slug(&self, slug: &str) -> Result<Option<Space>, SpaceError> {
+        Ok(self.repo.maybe_find_by_slug(slug).await?)
     }
 }

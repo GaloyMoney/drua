@@ -38,6 +38,9 @@ pub enum DocType {
     Note,
     Skill,
     Workflow,
+    /// Arbitrary `*.md` file under `spaces/<slug>/`. Not entity-backed —
+    /// indexed directly from disk via the space-file sync job.
+    SpaceFile,
 }
 
 impl DocType {
@@ -46,14 +49,18 @@ impl DocType {
             DocType::Note => "note",
             DocType::Skill => "skill",
             DocType::Workflow => "workflow",
+            DocType::SpaceFile => "space_file",
         }
     }
 
+    /// Used by the runtime/{subdir} layout for entity-backed docs.
+    /// `SpaceFile`'s on-disk root is `spaces/<slug>/`, not under `runtime/`.
     pub fn subdir(&self) -> &'static str {
         match self {
             DocType::Note => "notes",
             DocType::Skill => "skills",
             DocType::Workflow => "workflows",
+            DocType::SpaceFile => "spaces",
         }
     }
 
@@ -62,6 +69,7 @@ impl DocType {
             DocType::Note => "md",
             DocType::Skill => "md",
             DocType::Workflow => "yml",
+            DocType::SpaceFile => "md",
         }
     }
 }

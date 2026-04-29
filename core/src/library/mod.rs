@@ -26,6 +26,7 @@ pub use file::{
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
 pub use space::Spaces;
+pub use upstream::SpaceFileChange;
 pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
@@ -172,6 +173,160 @@ impl Library {
             slug: slug.to_string(),
         };
         self.enqueue_write(op, file).await?;
+        Ok(())
+    }
+
+    /// One pass of space-file indexing: pulls upstream, walks
+    /// `spaces/<slug>/**/*.md` since `last_commit`, and upserts/deletes
+    /// `library_search_data` + `space_search_data` rows. Returns the new
+    /// HEAD commit (the next call's `last_commit`). Spaces whose slug
+    /// can't be resolved are logged and skipped.
+    #[tracing::instrument(name = "library.sync_space_files_once", skip_all)]
+    pub async fn sync_space_files_once(
+        &self,
+        pool: &sqlx::PgPool,
+        spaces: &Spaces,
+        last_commit: Option<&str>,
+    ) -> Result<Option<String>, LibraryError> {
+        self.upstream.pull().await?;
+        let head = match self.upstream.head_commit_hash().await? {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+        if last_commit == Some(head.as_str()) {
+            return Ok(Some(head));
+        }
+
+        let changes = self.upstream.changed_space_files(last_commit).await?;
+        for change in changes {
+            if let Err(e) = self.apply_space_change(pool, spaces, change).await {
+                tracing::warn!(error = %e, "failed to apply space-file change");
+            }
+        }
+        Ok(Some(head))
+    }
+
+    async fn apply_space_change(
+        &self,
+        pool: &sqlx::PgPool,
+        spaces: &Spaces,
+        change: SpaceFileChange,
+    ) -> Result<(), LibraryError> {
+        match change {
+            SpaceFileChange::Upserted {
+                slug,
+                relative_path,
+                content,
+            } => {
+                let space = match spaces
+                    .find_by_slug(&slug)
+                    .await
+                    .map_err(|e| LibraryError::Other(format!("space lookup: {e}")))?
+                {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!(%slug, "no space matches slug, skipping file");
+                        return Ok(());
+                    }
+                };
+                let doc_id = space::file_sync::doc_id_for(space.id, &relative_path);
+                let content_hash = GitFileHash::from_blob_bytes(content.as_bytes());
+
+                let existing_hash: Option<String> = sqlx::query_scalar!(
+                    "SELECT content_hash FROM space_search_data WHERE doc_id = $1",
+                    doc_id
+                )
+                .fetch_optional(pool)
+                .await?;
+                if existing_hash.as_deref() == Some(content_hash.as_str()) {
+                    tracing::debug!(%slug, %relative_path, "space file unchanged, skipping");
+                    return Ok(());
+                }
+
+                let (title, body) = space::file_sync::extract_title_and_body(&content, &relative_path);
+
+                let mut tx = pool.begin().await?;
+                self.search
+                    .upsert_in_op(
+                        &mut tx,
+                        &SearchableFields {
+                            doc_id,
+                            doc_type: DocType::SpaceFile,
+                            // TODO(authz): space file ACL goes through
+                            // `Space.authorized_workspaces`; the search
+                            // resolver will join via `space_search_data`
+                            // rather than match this column. Stored as
+                            // nil() until that resolver lands.
+                            workspace_id: uuid::Uuid::nil(),
+                            title: title.clone(),
+                            body: body.clone(),
+                            tags: Vec::new(),
+                        },
+                    )
+                    .await?;
+
+                let space_uuid = uuid::Uuid::from(space.id);
+                let hash_str = content_hash.as_str().to_string();
+                sqlx::query!(
+                    r#"INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)
+                       VALUES ($1, $2, $3, $4, $5)
+                       ON CONFLICT (doc_id) DO UPDATE SET
+                           relative_path = EXCLUDED.relative_path,
+                           content_hash = EXCLUDED.content_hash,
+                           title = EXCLUDED.title"#,
+                    doc_id,
+                    space_uuid,
+                    relative_path,
+                    hash_str,
+                    title,
+                )
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+
+                // Embedding is best-effort; FTS index works without it.
+                let text = format!("{title}\n\n{body}");
+                match self.embedder.embed_document(&text).await {
+                    Ok(emb) => {
+                        if let Err(e) = self
+                            .search
+                            .set_embedding(doc_id, DocType::SpaceFile, emb)
+                            .await
+                        {
+                            tracing::warn!(error = %e, %slug, %relative_path, "set_embedding failed");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, %slug, %relative_path, "embed_document failed");
+                    }
+                }
+            }
+            SpaceFileChange::Deleted {
+                slug,
+                relative_path,
+            } => {
+                let space = match spaces
+                    .find_by_slug(&slug)
+                    .await
+                    .map_err(|e| LibraryError::Other(format!("space lookup: {e}")))?
+                {
+                    Some(s) => s,
+                    None => return Ok(()),
+                };
+                let doc_id = space::file_sync::doc_id_for(space.id, &relative_path);
+                let mut tx = pool.begin().await?;
+                sqlx::query!("DELETE FROM space_search_data WHERE doc_id = $1", doc_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query!(
+                    "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
+                    doc_id
+                )
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+        }
         Ok(())
     }
 

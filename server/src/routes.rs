@@ -382,6 +382,11 @@ async fn library_search(
                     )),
                 ),
                 drua_core::library::DocType::Note => ("Note".to_string(), "note".to_string(), None),
+                // No detail page for space files yet — they're not workspace-scoped
+                // and `library.get_file(id)` is the only lookup path planned.
+                drua_core::library::DocType::SpaceFile => {
+                    ("Space File".to_string(), "space_file".to_string(), None)
+                }
             };
             LibraryHitView {
                 id: h.doc_id.to_string(),
