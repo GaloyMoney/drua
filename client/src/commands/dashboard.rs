@@ -963,15 +963,29 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
     }
 }
 
-/// Delegates to login flow when credentials are missing/stale.
+/// Delegates to login flow when credentials are missing/stale, or when the
+/// caller passed `--server <url>` that disagrees with the saved config.
 async fn ensure_authenticated(server: Option<String>) -> Result<(Config, GraphqlClient, String)> {
     if let Ok(config) = Config::load() {
-        let client = GraphqlClient::new(&config.server_url, &config.auth_token);
-        if let Ok(user_name) = fetch_user_name(&client).await {
-            return Ok((config, client, user_name));
+        let mismatch = server
+            .as_deref()
+            .is_some_and(|s| s.trim_end_matches('/') != config.server_url.trim_end_matches('/'));
+
+        if mismatch {
+            println!(
+                "--server {} differs from saved {} — re-authenticating…",
+                server.as_deref().unwrap_or(""),
+                config.server_url,
+            );
+            println!();
+        } else {
+            let client = GraphqlClient::new(&config.server_url, &config.auth_token);
+            if let Ok(user_name) = fetch_user_name(&client).await {
+                return Ok((config, client, user_name));
+            }
+            println!("Session expired — starting login flow…");
+            println!();
         }
-        println!("Session expired — starting login flow…");
-        println!();
     } else {
         println!("Not logged in — starting login flow…");
         println!();
