@@ -115,7 +115,10 @@ impl TopLevelTool for SpacesTool {
 
         let (text, out) = match params {
             SpacesParams::Create { slug, description } => {
-                let space = self.library.create_space(subject, slug, description).await?;
+                let space = self
+                    .library
+                    .create_space(subject, slug, description)
+                    .await?;
 
                 let authorized: Vec<String> = space
                     .authorized_workspaces

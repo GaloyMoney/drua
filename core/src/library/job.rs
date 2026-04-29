@@ -8,7 +8,7 @@ use super::upstream::Upstream;
 /// WriteToRuntime and reverse-sync SyncSkillsFromLibrary use this queue).
 pub const LIBRARY_LOCK_QUEUE: &str = "library-lock";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct WriteToRuntimeConfig {
     pub file: UpstreamOp,
 }

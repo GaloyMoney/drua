@@ -608,6 +608,26 @@ impl Sandboxes {
     async fn restart_inner(&self, id: SandboxId) -> Result<Sandbox, SandboxError> {
         let mut op = self.repo.begin_op().await?;
         let mut sandbox = self.repo.find_by_id_in_op(&mut op, id).await?;
+
+        // Refuse to restart while the creation lifecycle is still in
+        // flight — spawning a second one would race the running
+        // `/initialize` (the new lifecycle's `delete_sandbox` kills the
+        // original sandbox-server mid-git, leaving a stale
+        // `.git/index.lock`). Caller should `create wait=true` or poll
+        // `get` instead.
+        match sandbox.state {
+            SandboxState::Provisioning | SandboxState::Initializing => {
+                return Err(SandboxError::NotReady {
+                    state: format!(
+                        "{} (creation in flight; use `create wait=true` or poll \
+                         `get` instead of `restart`)",
+                        sandbox.state
+                    ),
+                });
+            }
+            _ => {}
+        }
+
         if sandbox.provisioning().did_execute() {
             self.repo.update_in_op(&mut op, &mut sandbox).await?;
         }

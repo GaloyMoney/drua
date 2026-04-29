@@ -726,6 +726,20 @@ async fn initialize_library_space(
         .to_str()
         .ok_or("Library clone path is not valid UTF-8")?;
 
+    // Defensive: if a previous run was killed mid-checkout (e.g.
+    // a racing `sandbox.restart` SIGKILLed git), git refuses every
+    // subsequent operation with "Unable to create '.git/index.lock':
+    // File exists". The lock is process-local and stale by the time
+    // we arrive here, so drop it before continuing.
+    let lock = clone_dir.join(".git/index.lock");
+    if lock.exists() {
+        tracing::warn!(
+            path = %lock.display(),
+            "removing orphan .git/index.lock from previous run"
+        );
+        let _ = tokio::fs::remove_file(&lock).await;
+    }
+
     let output = Command::new("git")
         .args(["-C", clone_dir_str, "sparse-checkout", "init", "--cone"])
         .output()

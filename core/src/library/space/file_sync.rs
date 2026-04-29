@@ -103,15 +103,14 @@ impl JobRunner for SpaceFilesSyncRunner {
         &self,
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        let next_commit = match sync_once(&self.library, self.config.last_sync_commit.as_deref())
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "space-file sync cycle failed");
-                self.config.last_sync_commit.clone()
-            }
-        };
+        let next_commit =
+            match sync_once(&self.library, self.config.last_sync_commit.as_deref()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "space-file sync cycle failed");
+                    self.config.last_sync_commit.clone()
+                }
+            };
 
         let next_config = SpaceFilesSyncConfig {
             sync_interval_secs: self.config.sync_interval_secs,

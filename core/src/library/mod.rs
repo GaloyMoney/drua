@@ -219,7 +219,7 @@ impl Library {
             .jobs
             .await_completions(&[job_id], Some(SPACE_INIT_TIMEOUT))
             .await?;
-        if !outcomes.iter().all(|o| o.completed()) {
+        if !outcomes.iter().all(|o| o.is_completed()) {
             return Err(LibraryError::SpaceInitFailed {
                 slug: space.slug.clone(),
             });

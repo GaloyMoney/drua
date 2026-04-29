@@ -115,10 +115,7 @@ impl SearchStore {
     /// `spaces` so each `LibraryFile` carries its `(space_slug, relative_path)`
     /// citation; non-space rows leave both fields `None`.
     #[tracing::instrument(name = "library.search_store.find_by_ids", skip(self, ids))]
-    pub async fn find_by_ids(
-        &self,
-        ids: &[uuid::Uuid],
-    ) -> Result<Vec<LibraryFile>, LibraryError> {
+    pub async fn find_by_ids(&self, ids: &[uuid::Uuid]) -> Result<Vec<LibraryFile>, LibraryError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
