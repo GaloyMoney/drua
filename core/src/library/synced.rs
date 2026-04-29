@@ -467,9 +467,6 @@ impl CommitHook for LibrarySyncHook {
     }
 }
 
-/// Falls back to `force_execute_pre_commit` when `add_commit_hook` returns
-/// `Err(hook)` — the documented contract for `AtomicOperation` impls (e.g.
-/// raw `sqlx::Transaction`) that don't support hooks.
 pub(super) async fn enqueue_write<OP: AtomicOperation>(
     op: &mut OP,
     inbox: &obix::Inbox,
