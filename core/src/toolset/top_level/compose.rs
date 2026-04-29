@@ -55,6 +55,7 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
+    #[schemars(schema_with = "super::any_json_schema")]
     result: serde_json::Value,
     console: Vec<String>,
     tool_calls: usize,
@@ -485,5 +486,22 @@ mod tests {
         assert!(ts.contains("Record<string, number>"), "{ts}");
         assert!(ts.contains("\"pending\""), "{ts}");
         assert!(ts.contains("\"done\""), "{ts}");
+    }
+
+    /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside
+    /// `properties`. The dynamic `result` field must serialize as `{}`, not
+    /// `true`.
+    #[test]
+    fn compose_output_schema_has_no_boolean_properties() {
+        let props = COMPOSE_OUTPUT_SCHEMA
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("compose outputSchema has properties");
+        for (name, schema) in props {
+            assert!(
+                !matches!(schema, serde_json::Value::Bool(_)),
+                "property `{name}` is a boolean schema, MCP validators reject it"
+            );
+        }
     }
 }
