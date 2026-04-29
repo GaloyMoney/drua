@@ -18,4 +18,10 @@ pub enum LibraryError {
     SpaceFind(#[from] super::space::repo::SpaceFindError),
     #[error("LibraryError - SpaceQuery: {0}")]
     SpaceQuery(#[from] super::space::repo::SpaceQueryError),
+    #[error("LibraryError - Job: {0}")]
+    Job(#[from] ::job::JobError),
+    #[error(
+        "LibraryError - SpaceInitFailed: scaffolding commit for space {slug:?} did not complete"
+    )]
+    SpaceInitFailed { slug: String },
 }

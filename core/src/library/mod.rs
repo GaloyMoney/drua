@@ -14,7 +14,7 @@ use es_entity::operation::hooks::CommitHook as _;
 use crate::github_app::GitHubAppTokenProvider;
 
 use self::inbox::LibraryWriteHandler;
-use self::job::WriteToRuntimeJobInitializer;
+use self::job::{WriteToRuntimeConfig, WriteToRuntimeJobInitializer};
 use self::search::SearchStore;
 use self::space::repo::SpaceRepo;
 use self::upstream::Upstream;
@@ -83,6 +83,14 @@ pub struct Library {
     upstream: Upstream,
     space_repo: SpaceRepo,
     repo_url: Option<String>,
+    /// Direct handle to the `WriteToRuntime` spawner so `create_space`
+    /// can fire-and-await its scaffolding commit with a known `JobId`
+    /// (the inbox path uses random `JobId::new()` and we need to
+    /// `await_completions` on that specific job).
+    write_spawner: ::job::JobSpawner<WriteToRuntimeConfig>,
+    /// Cloned out of `Jobs::init` so `Library` can `await_completions`
+    /// without plumbing `Arc<Jobs>` everywhere.
+    jobs: ::job::Jobs,
 }
 
 impl Library {
@@ -100,7 +108,8 @@ impl Library {
         let write_init = WriteToRuntimeJobInitializer::new(upstream.clone());
         let write_spawner = jobs.add_initializer(write_init);
 
-        let handler = LibraryWriteHandler::new(search.clone(), embedder.clone(), write_spawner);
+        let handler =
+            LibraryWriteHandler::new(search.clone(), embedder.clone(), write_spawner.clone());
         let inbox_config = obix::InboxConfig::new(::job::JobType::new(LIBRARY_WRITE_JOB));
         let inbox = obix::Inbox::new(pool, jobs, inbox_config, handler);
 
@@ -112,6 +121,8 @@ impl Library {
             upstream,
             space_repo: SpaceRepo::new(pool),
             repo_url: config.repo_url.clone(),
+            write_spawner,
+            jobs: jobs.clone(),
         })
     }
 
@@ -175,21 +186,6 @@ impl Library {
         Ok(())
     }
 
-    /// Queues a `SpaceInit` op — writes `spaces/{slug}/.gitkeep` so
-    /// sparse-checkout sandboxes have a directory to land in.
-    #[tracing::instrument(name = "library.sync_space_folder_in_op", skip_all)]
-    pub async fn sync_space_folder_in_op(
-        &self,
-        op: &mut impl es_entity::AtomicOperation,
-        slug: &str,
-    ) -> Result<(), LibraryError> {
-        let file = UpstreamOp::SpaceInit {
-            slug: slug.to_string(),
-        };
-        self.enqueue_write(op, file).await?;
-        Ok(())
-    }
-
     /// Persists a new `Space` and queues `spaces/<slug>/.gitkeep` for
     /// upstream commit in the same transaction. The creating subject's
     /// workspace is auto-seeded into `authorized_workspaces`; non-agent
@@ -209,44 +205,36 @@ impl Library {
         crate::audit::Audit::record_action_if_unset("space.create");
 
         let mut op = self.space_repo.begin_op().await?;
-        let space = self.create_space_in_op(&mut op, sub, slug, description).await?;
+        let (space, job_id) = self
+            .create_space_in_op(&mut op, sub, slug, description)
+            .await?;
         op.commit().await?;
 
-        // Block until the WriteToRuntime job has materialised
-        // `spaces/<slug>/.gitkeep` in the local upstream clone — at that
-        // point the commit has been pushed and a sparse-checkout against
-        // the remote will resolve the path. Bounded so a stuck job
-        // queue doesn't block the caller indefinitely.
-        self.wait_for_space_published(&space.slug).await;
+        // Block until the upstream scaffolding commit lands. Without
+        // this, a follow-up `sandbox.create(library_space, slug)` can
+        // race the push and end up with a sparse-checkout against a
+        // commit that doesn't yet contain `spaces/<slug>/`.
+        const SPACE_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let outcomes = self
+            .jobs
+            .await_completions(&[job_id], Some(SPACE_INIT_TIMEOUT))
+            .await?;
+        if !outcomes.iter().all(|o| o.completed()) {
+            return Err(LibraryError::SpaceInitFailed {
+                slug: space.slug.clone(),
+            });
+        }
 
         Ok(space)
     }
 
-    async fn wait_for_space_published(&self, slug: &str) {
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let marker = format!("spaces/{slug}/.gitkeep");
-        let deadline = tokio::time::Instant::now() + TIMEOUT;
-        loop {
-            if self.upstream.file_exists(&marker).await {
-                tracing::debug!(%slug, "space marker present in upstream clone");
-                return;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    %slug,
-                    timeout_secs = TIMEOUT.as_secs(),
-                    "space marker not visible in upstream clone before timeout; \
-                     downstream sparse-checkouts may need to retry"
-                );
-                return;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-    }
-
     /// Composable variant — caller owns the `op`. Skips the auth check
     /// (caller is expected to have authorised the broader transaction).
+    /// Returns both the persisted `Space` and the `JobId` of the
+    /// `WriteToRuntime` job that will commit `spaces/<slug>/.gitkeep`
+    /// upstream. After committing the outer op, callers that need
+    /// upstream synchrony should
+    /// `library.jobs().await_completions(&[job_id], …)`.
     #[tracing::instrument(name = "library.create_space_in_op", skip(self, op, sub))]
     pub async fn create_space_in_op(
         &self,
@@ -254,7 +242,7 @@ impl Library {
         sub: &crate::auth::AuthSubject,
         slug: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
-    ) -> Result<Space, LibraryError> {
+    ) -> Result<(Space, ::job::JobId), LibraryError> {
         let initial_workspaces: Vec<crate::primitives::WorkspaceId> =
             sub.workspace_id().into_iter().collect();
 
@@ -267,10 +255,30 @@ impl Library {
         let new_space = builder.build()?;
 
         let space = self.space_repo.create_in_op(op, new_space).await?;
-        self.sync_space_folder_in_op(op, &space.slug).await?;
+
+        // Spawn the upstream `.gitkeep` commit with a known `JobId` so
+        // the standalone `create_space` can await this exact job.
+        // Persisted in the same `op`, so the spawn is durable: a crash
+        // before the outer commit drops both the entity and the job;
+        // a crash after picks the job up from the persisted queue.
+        let job_id = ::job::JobId::new();
+        let config = WriteToRuntimeConfig {
+            file: UpstreamOp::SpaceInit {
+                slug: space.slug.clone(),
+            },
+        };
+        self.write_spawner
+            .spawn_with_queue_id_in_op(op, job_id, config, LIBRARY_LOCK_QUEUE)
+            .await?;
 
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
-        Ok(space)
+        Ok((space, job_id))
+    }
+
+    /// Cloned `Jobs` handle. Composable callers of `create_space_in_op`
+    /// use this to `await_completions` after their outer op commits.
+    pub fn jobs(&self) -> &::job::Jobs {
+        &self.jobs
     }
 
     /// Resolves a slug to a `Space` after enforcing two checks:
