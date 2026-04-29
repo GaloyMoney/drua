@@ -69,4 +69,42 @@ impl Spaces {
     pub(crate) async fn find_by_slug(&self, slug: &str) -> Result<Option<Space>, SpaceError> {
         Ok(self.repo.maybe_find_by_slug(slug).await?)
     }
+
+    /// Resolves a slug to a `Space` after enforcing two checks:
+    /// 1. The subject can read `AuthResource::Space(Some(space.id))`
+    ///    (workspace admins are blanket-allowed by the scope layer).
+    /// 2. The subject's workspace is in `space.authorized_workspaces`
+    ///    — the per-space membership list.
+    ///
+    /// Used by sandbox-creation flows that need to honor space ACLs
+    /// without exposing the lower-level `find_by_slug` to callers.
+    #[instrument(name = "domain.space.find_by_slug_authorized", skip(self, sub))]
+    pub async fn find_by_slug_authorized(
+        &self,
+        sub: &AuthSubject,
+        slug: &str,
+    ) -> Result<Space, SpaceError> {
+        let space = self
+            .repo
+            .maybe_find_by_slug(slug)
+            .await?
+            .ok_or_else(|| SpaceError::NotFound {
+                slug: slug.to_string(),
+            })?;
+
+        sub.can(AuthVerb::Read, AuthResource::Space(Some(space.id)))?;
+        Audit::record_action_if_unset("space.find_by_slug");
+
+        let workspace_id = sub
+            .workspace_id()
+            .ok_or(AuthorizationError::AuthenticationRequired)?;
+        if !space.is_workspace_authorized(workspace_id) {
+            return Err(SpaceError::WorkspaceNotAuthorized {
+                slug: space.slug.clone(),
+                workspace_id,
+            });
+        }
+
+        Ok(space)
+    }
 }

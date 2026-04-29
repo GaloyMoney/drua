@@ -25,6 +25,15 @@ pub enum SpaceError {
     InvalidSlug { slug: String },
     #[error("SpaceError - MissingField: {0}")]
     MissingField(String),
+    #[error("SpaceError - NotFound: slug {slug:?}")]
+    NotFound { slug: String },
+    #[error(
+        "SpaceError - WorkspaceNotAuthorized: workspace {workspace_id} is not in space {slug:?}'s authorized list"
+    )]
+    WorkspaceNotAuthorized {
+        slug: String,
+        workspace_id: crate::primitives::WorkspaceId,
+    },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {

@@ -204,7 +204,8 @@ impl App {
         ));
 
         toolsets.register_top_level(WorkspaceAgent::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
+        // WorkspaceSandbox registration is deferred until `spaces` exists
+        // (library_space mode needs `Arc<Spaces>` for slug → space lookup).
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
@@ -233,6 +234,11 @@ impl App {
         ));
         let spaces = Arc::new(Spaces::new(pool, library.clone()));
         toolsets.register_top_level(SpacesTool::new(Arc::clone(&spaces)));
+        toolsets.register_top_level(WorkspaceSandbox::new(
+            Arc::clone(&sandboxes),
+            Arc::clone(&spaces),
+            config.library.repo_url.clone(),
+        ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));

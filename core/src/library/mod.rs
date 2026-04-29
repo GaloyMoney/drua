@@ -455,7 +455,9 @@ impl Library {
             doc_types
                 .iter()
                 .copied()
-                .filter(|d| !matches!(d, DocType::Workflow))
+                // `SpaceFile` filtered until the authz join through
+                // `Space.authorized_workspaces` lands.
+                .filter(|d| !matches!(d, DocType::Workflow | DocType::SpaceFile))
                 .collect()
         };
         if effective_types.is_empty() {
