@@ -469,6 +469,9 @@ pub struct WorkspaceHubTemplate {
     pub selected_agent_id: String,
     /// The agent the chat view is rendering for; drives the chat header name.
     pub selected_agent: Option<AgentView>,
+    /// Configured LLM model for the selected agent's role; rendered next to
+    /// "Agent chat" so the user can confirm what's actually serving prompts.
+    pub selected_agent_model: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]

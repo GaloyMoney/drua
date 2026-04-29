@@ -638,6 +638,7 @@ async fn workspaces_page(State(state): State<AppState>, session: Session) -> Res
         agents: vec![],
         selected_agent_id: String::new(),
         selected_agent: None,
+        selected_agent_model: None,
     }
     .into_response()
 }
@@ -1326,6 +1327,9 @@ async fn workspace_chat(
         id: a.id.to_string(),
         name: a.name.clone(),
     });
+    let selected_agent_model = selected_agent
+        .and_then(|a| state.app.agents().model_for_role(a.agent_role))
+        .map(str::to_owned);
     let selected_agent_id = selected_agent_view
         .as_ref()
         .map(|v| v.id.clone())
@@ -1354,6 +1358,7 @@ async fn workspace_chat(
         agents: agent_views,
         selected_agent_id,
         selected_agent: selected_agent_view,
+        selected_agent_model,
     }
     .into_response()
 }

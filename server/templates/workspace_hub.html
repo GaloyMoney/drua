@@ -214,7 +214,7 @@
               {% when Some(sa) %}<h3>{{ sa.name }}</h3>
               {% when None %}<h3>{{ sel.name }}</h3>
             {% endmatch %}
-            <small>Agent chat</small>
+            <small>Agent chat{% match selected_agent_model %}{% when Some(m) %} &middot; <code>{{ m }}</code>{% when None %}{% endmatch %}</small>
           </div>
           <a href="/workspaces/{{ selected_workspace_id }}/agents/{{ selected_agent_id }}"
              class="ws-settings-btn" title="Agent settings">&#9881;</a>
@@ -251,6 +251,72 @@
           container.appendChild(el);
         }
         container.scrollTop = container.scrollHeight;
+      }
+
+      const CHAT_HISTORY_QUERY = `query ChatHistory($agentId: AgentId!) {
+        agent(id: $agentId) {
+          session {
+            chatHistory(last: 50) {
+              role
+              content {
+                __typename
+                ... on TextContent { text }
+                ... on ToolUseContent { name input }
+                ... on ThinkingContent { text }
+                ... on ToolResultContent { content isError }
+                ... on SandboxNotificationContent { sandboxName operation mode text }
+              }
+            }
+          }
+        }
+      }`;
+
+      function renderHistoryBlock(role, block) {
+        const t = block.__typename;
+        if (t === 'TextContent') {
+          if (role === 'USER') {
+            appendMsg('msg-system', '> ' + block.text);
+          } else {
+            appendMsg('msg-assistant', block.text);
+          }
+        } else if (t === 'ThinkingContent') {
+          appendMsg('msg-system', '(thinking) ' + block.text);
+        } else if (t === 'ToolUseContent') {
+          appendMsg('msg-system', 'Tool call: ' + block.name);
+        } else if (t === 'ToolResultContent') {
+          const prefix = block.isError ? 'tool error: ' : 'tool ok: ';
+          appendMsg('msg-system', prefix + (block.content || ''));
+        } else if (t === 'SandboxNotificationContent') {
+          appendMsg('msg-system', '[' + block.sandboxName + '] ' + block.operation + ': ' + block.text);
+        }
+      }
+
+      async function loadHistory() {
+        if (!agentId) return;
+        try {
+          const resp = await fetch('/graphql', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: CHAT_HISTORY_QUERY,
+              variables: { agentId: agentId },
+            }),
+          });
+          if (!resp.ok) return;
+          const body = await resp.json();
+          const messages = body && body.data && body.data.agent && body.data.agent.session
+            ? body.data.agent.session.chatHistory
+            : null;
+          if (!messages || !messages.length) return;
+          for (const msg of messages) {
+            for (const block of msg.content) {
+              renderHistoryBlock(msg.role, block);
+            }
+          }
+          appendMsg('msg-result', '— end of history —');
+        } catch (e) {
+          appendMsg('msg-error', 'Failed to load history: ' + e.message);
+        }
       }
 
       const AGENT_MESSAGE_SUBSCRIPTION = `subscription ($agentId: AgentId!, $prompt: String!) {
@@ -369,6 +435,8 @@
           sendMessage();
         }
       });
+
+      loadHistory();
       </script>
     {% else %}
       <div class="hub-welcome">
