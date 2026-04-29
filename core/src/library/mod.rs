@@ -211,7 +211,38 @@ impl Library {
         let mut op = self.space_repo.begin_op().await?;
         let space = self.create_space_in_op(&mut op, sub, slug, description).await?;
         op.commit().await?;
+
+        // Block until the WriteToRuntime job has materialised
+        // `spaces/<slug>/.gitkeep` in the local upstream clone — at that
+        // point the commit has been pushed and a sparse-checkout against
+        // the remote will resolve the path. Bounded so a stuck job
+        // queue doesn't block the caller indefinitely.
+        self.wait_for_space_published(&space.slug).await;
+
         Ok(space)
+    }
+
+    async fn wait_for_space_published(&self, slug: &str) {
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let marker = format!("spaces/{slug}/.gitkeep");
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            if self.upstream.file_exists(&marker).await {
+                tracing::debug!(%slug, "space marker present in upstream clone");
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    %slug,
+                    timeout_secs = TIMEOUT.as_secs(),
+                    "space marker not visible in upstream clone before timeout; \
+                     downstream sparse-checkouts may need to retry"
+                );
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     /// Composable variant — caller owns the `op`. Skips the auth check

@@ -737,21 +737,40 @@ async fn initialize_library_space(
     }
 
     let space_path = format!("spaces/{slug}");
-    let output = Command::new("git")
-        .args(["-C", clone_dir_str, "sparse-checkout", "set", &space_path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run git sparse-checkout set: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git sparse-checkout set failed: {stderr}"));
-    }
+    let space_dir = clone_dir.join(&space_path);
 
-    // `sparse-checkout set` materializes the configured paths from HEAD
-    // when run after `init`, but a freshly cloned `--no-checkout` repo
-    // hasn't checked out HEAD at all yet — `git checkout` finishes the
-    // job by writing the working tree limited to the sparse paths.
-    if !already_cloned {
+    // Race window: `Library::create_space` queues the `spaces/<slug>/.gitkeep`
+    // commit through an inbox + write job. The MCP boundary already
+    // waits for the local clone on the core server, but remote
+    // (GitHub) propagation can lag a beat. Retry sparse-checkout +
+    // refresh from remote up to `max_attempts` × `retry_delay` before
+    // giving up. Both knobs are env-overridable for fast tests.
+    let max_attempts: u32 = std::env::var("LIBRARY_SPACE_INIT_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    let retry_delay = std::time::Duration::from_secs(
+        std::env::var("LIBRARY_SPACE_INIT_RETRY_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2),
+    );
+
+    for attempt in 1..=max_attempts {
+        let output = Command::new("git")
+            .args(["-C", clone_dir_str, "sparse-checkout", "set", &space_path])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git sparse-checkout set: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git sparse-checkout set failed: {stderr}"));
+        }
+
+        // `sparse-checkout set` materialises the configured paths from
+        // the current HEAD. After a `--no-checkout` clone there's no
+        // working tree yet, and after a remote-side fetch HEAD may
+        // have moved — `git checkout` finishes the job in both cases.
         let output = Command::new("git")
             .args(["-C", clone_dir_str, "checkout"])
             .output()
@@ -761,13 +780,36 @@ async fn initialize_library_space(
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("git checkout failed: {stderr}"));
         }
-    }
 
-    let space_dir = clone_dir.join(&space_path);
-    if !space_dir.is_dir() {
-        return Err(format!(
-            "spaces/{slug} not present in library after sparse checkout"
-        ));
+        if space_dir.is_dir() {
+            break;
+        }
+
+        if attempt == max_attempts {
+            return Err(format!(
+                "spaces/{slug} not present in library after sparse checkout \
+                 (gave up after {max_attempts} attempts)"
+            ));
+        }
+
+        // Fetch the latest from remote and fast-forward HEAD so the
+        // next sparse-checkout pass sees the publish.
+        tracing::warn!(
+            slug,
+            attempt,
+            "spaces/{slug} not yet in HEAD, refreshing from remote"
+        );
+        let _ = Command::new("git")
+            .args(["-C", clone_dir_str, "fetch", "origin"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git fetch: {e}"))?;
+        let _ = Command::new("git")
+            .args(["-C", clone_dir_str, "reset", "--hard", "@{u}"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git reset: {e}"))?;
+        tokio::time::sleep(retry_delay).await;
     }
 
     Ok(InitializeResponse {
@@ -941,7 +983,9 @@ mod tests {
     use super::*;
 
     /// Set WORKSPACE_ROOT to the system temp dir so that tests using
-    /// `std::env::temp_dir()` pass path validation. Called once per process.
+    /// `std::env::temp_dir()` pass path validation. Also tightens the
+    /// `library_space` retry knobs so the sad-path test doesn't sleep
+    /// for the full production budget. Called once per process.
     fn init_test_workspace() {
         use std::sync::Once;
         static INIT: Once = Once::new();
@@ -949,6 +993,8 @@ mod tests {
             let tmp = std::env::temp_dir();
             std::fs::create_dir_all(&tmp).unwrap();
             std::env::set_var("WORKSPACE_ROOT", tmp.to_str().unwrap());
+            std::env::set_var("LIBRARY_SPACE_INIT_MAX_ATTEMPTS", "1");
+            std::env::set_var("LIBRARY_SPACE_INIT_RETRY_SECS", "0");
         });
     }
 
@@ -1744,6 +1790,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_library_space_sparse_clones_only_target_slug() {
+        init_test_workspace();
         if !git_available().await {
             eprintln!("git not available, skipping");
             return;
@@ -1787,6 +1834,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_library_space_is_idempotent_across_restarts() {
+        init_test_workspace();
         if !git_available().await {
             eprintln!("git not available, skipping");
             return;
@@ -1846,6 +1894,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_library_space_unknown_slug_fails() {
+        init_test_workspace();
         if !git_available().await {
             eprintln!("git not available, skipping");
             return;
