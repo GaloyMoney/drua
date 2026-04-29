@@ -339,7 +339,10 @@ mod tests {
         assert_eq!(v["hits"][0]["type"], "skill");
         assert_eq!(v["hits"][0]["score"], 0.9);
         assert!(
-            !v["hits"][0].as_object().unwrap().contains_key("workspace_id"),
+            !v["hits"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("workspace_id"),
             "tool searches are always global; workspace_id is not on hits"
         );
     }
