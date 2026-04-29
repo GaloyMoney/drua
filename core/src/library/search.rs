@@ -107,10 +107,10 @@ impl SearchStore {
         Ok(())
     }
 
-    /// FTS + vector similarity fused via Reciprocal Rank Fusion.
+    /// FTS + vector similarity fused via Reciprocal Rank Fusion. Includes
+    /// `workspace_id` plus the nil UUID so global-scoped library files
+    /// surface alongside workspace-scoped ones.
     #[tracing::instrument(name = "library.search_store.search", skip_all)]
-    // @@ cant this delegate to search_global and pass the sigle workspace_id?
-    // seems like there is a lot of duplication between the 2 fns
     pub async fn search(
         &self,
         workspace_id: uuid::Uuid,
@@ -119,60 +119,27 @@ impl SearchStore {
         doc_type: Option<DocType>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, LibraryError> {
-        let over_fetch = (limit * 3).max(10) as i64;
-        let doc_type_filter = doc_type.map(|dt| dt.as_str().to_string());
-
-        // Include workspace-scoped + global (nil UUID) documents.
-        let global_id = uuid::Uuid::nil();
-        let fts_rows: Vec<FtsRow> = sqlx::query_as!(
-            FtsRow,
-            r#"SELECT doc_id, doc_type, title_text, content_text, tags,
-                      ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
-               FROM library_search_data
-               WHERE workspace_id IN ($2, $5)
-                 AND search_tsv @@ plainto_tsquery('english', $1)
-                 AND ($3::text IS NULL OR doc_type = $3)
-               ORDER BY rank DESC
-               LIMIT $4"#,
-            query,
-            workspace_id,
-            doc_type_filter.as_deref() as Option<&str>,
-            over_fetch,
-            global_id,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let vec_rows: Vec<VecRow> = if let Some(emb) = query_embedding {
-            let vec = Vector::from(emb);
-            sqlx::query_as!(
-                VecRow,
-                r#"SELECT doc_id, doc_type, title_text, content_text, tags,
-                          embedding <=> $1 AS distance
-                   FROM library_search_data
-                   WHERE workspace_id IN ($2, $5)
-                     AND embedding IS NOT NULL
-                     AND ($3::text IS NULL OR doc_type = $3)
-                   ORDER BY distance ASC
-                   LIMIT $4"#,
-                vec as Vector,
-                workspace_id,
-                doc_type_filter.as_deref() as Option<&str>,
-                over_fetch,
-                global_id,
-            )
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            Vec::new()
-        };
-
-        let results = rrf_fuse(fts_rows, vec_rows, limit);
-        Ok(results)
+        let ids = [workspace_id, uuid::Uuid::nil()];
+        let doc_types: Vec<DocType> = doc_type.into_iter().collect();
+        let hits = self
+            .search_in_workspaces(&ids, query, query_embedding, &doc_types, limit)
+            .await?;
+        Ok(hits
+            .into_iter()
+            .map(|h| SearchResult {
+                doc_id: h.doc_id,
+                doc_type: h.doc_type,
+                title: h.title,
+                content: h.content,
+                tags: h.tags,
+                score: h.score,
+            })
+            .collect())
     }
 
-    /// Cross-workspace variant of [`Self::search`]. `workspace_ids` filters
-    /// results to that set (must be non-empty); `doc_types` empty = all types.
+    /// Cross-workspace variant of [`Self::search`]. The nil UUID is appended
+    /// internally so global-scoped library files surface in cross-workspace
+    /// search; callers only need to pass the user's readable workspace ids.
     #[tracing::instrument(name = "library.search_store.search_global", skip_all)]
     pub async fn search_global(
         &self,
@@ -182,7 +149,26 @@ impl SearchStore {
         doc_types: &[DocType],
         limit: usize,
     ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
-        // @@ how do we indicate to also search in the 'global' scope (uuid nil)?
+        if workspace_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut ids: Vec<uuid::Uuid> = workspace_ids.to_vec();
+        if !ids.contains(&uuid::Uuid::nil()) {
+            ids.push(uuid::Uuid::nil());
+        }
+        self.search_in_workspaces(&ids, query, query_embedding, doc_types, limit)
+            .await
+    }
+
+    /// Shared FTS + vector search over an explicit set of workspace ids.
+    async fn search_in_workspaces(
+        &self,
+        workspace_ids: &[uuid::Uuid],
+        query: &str,
+        query_embedding: Option<Vec<f32>>,
+        doc_types: &[DocType],
+        limit: usize,
+    ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
         if workspace_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -234,7 +220,7 @@ impl SearchStore {
             Vec::new()
         };
 
-        Ok(rrf_fuse_global(fts_rows, vec_rows, limit))
+        Ok(rrf_fuse(fts_rows, vec_rows, limit))
     }
 }
 
@@ -260,7 +246,7 @@ struct GlobalVecRow {
     distance: Option<f64>,
 }
 
-fn rrf_fuse_global(
+fn rrf_fuse(
     fts_rows: Vec<GlobalFtsRow>,
     vec_rows: Vec<GlobalVecRow>,
     limit: usize,
@@ -328,26 +314,6 @@ fn rrf_fuse_global(
     results
 }
 
-struct FtsRow {
-    doc_id: uuid::Uuid,
-    doc_type: String,
-    title_text: String,
-    content_text: String,
-    tags: serde_json::Value,
-    #[allow(dead_code)]
-    rank: Option<f32>,
-}
-
-struct VecRow {
-    doc_id: uuid::Uuid,
-    doc_type: String,
-    title_text: String,
-    content_text: String,
-    tags: serde_json::Value,
-    #[allow(dead_code)]
-    distance: Option<f64>,
-}
-
 fn parse_tags(val: &serde_json::Value) -> Vec<String> {
     val.as_array()
         .map(|arr| {
@@ -367,63 +333,3 @@ fn parse_doc_type(s: &str) -> DocType {
     }
 }
 
-/// Reciprocal Rank Fusion (k = 60).
-fn rrf_fuse(fts_rows: Vec<FtsRow>, vec_rows: Vec<VecRow>, limit: usize) -> Vec<SearchResult> {
-    use std::collections::HashMap;
-
-    const K: f64 = 60.0;
-
-    struct Candidate {
-        doc_type: DocType,
-        title: String,
-        content: String,
-        tags: Vec<String>,
-        score: f64,
-    }
-
-    let mut map: HashMap<(uuid::Uuid, String), Candidate> = HashMap::new();
-
-    for (rank, row) in fts_rows.into_iter().enumerate() {
-        let key = (row.doc_id, row.doc_type.clone());
-        let entry = map.entry(key).or_insert_with(|| Candidate {
-            doc_type: parse_doc_type(&row.doc_type),
-            title: row.title_text.clone(),
-            content: row.content_text.clone(),
-            tags: parse_tags(&row.tags),
-            score: 0.0,
-        });
-        entry.score += 1.0 / (K + rank as f64 + 1.0);
-    }
-
-    for (rank, row) in vec_rows.into_iter().enumerate() {
-        let key = (row.doc_id, row.doc_type.clone());
-        let entry = map.entry(key).or_insert_with(|| Candidate {
-            doc_type: parse_doc_type(&row.doc_type),
-            title: row.title_text.clone(),
-            content: row.content_text.clone(),
-            tags: parse_tags(&row.tags),
-            score: 0.0,
-        });
-        entry.score += 1.0 / (K + rank as f64 + 1.0);
-    }
-
-    let mut results: Vec<SearchResult> = map
-        .into_iter()
-        .map(|((doc_id, _), c)| SearchResult {
-            doc_id,
-            doc_type: c.doc_type,
-            title: c.title,
-            content: c.content,
-            tags: c.tags,
-            score: c.score,
-        })
-        .collect();
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    results.truncate(limit);
-    results
-}
