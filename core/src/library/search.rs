@@ -337,4 +337,3 @@ fn parse_doc_type(s: &str) -> DocType {
         _ => DocType::Note,
     }
 }
-
