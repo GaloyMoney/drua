@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{DocType, GlobalSearchHit, Library};
+use crate::library::{DocType, GlobalSearchHit, Library, LibraryFile};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -13,6 +13,7 @@ use super::{parse_params, schema_for};
 
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 const MAX_SEARCH_LIMIT: usize = 200;
+const MAX_GET_FILES: usize = 50;
 const SNIPPET_CHARS: usize = 240;
 
 fn default_search_limit() -> usize {
@@ -60,12 +61,16 @@ enum LibraryParams {
         #[serde(default = "default_search_limit")]
         limit: usize,
     },
+    GetFiles {
+        ids: Vec<uuid::Uuid>,
+    },
 }
 
 impl LibraryParams {
     fn audit_action(&self) -> &'static str {
         match self {
             Self::Search { .. } => "library.search",
+            Self::GetFiles { .. } => "library.get_files",
         }
     }
 }
@@ -76,7 +81,41 @@ struct LibraryOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     hits: Option<Vec<LibrarySearchHit>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    files: Option<Vec<LibraryFileOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     total: Option<usize>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct LibraryFileOutput {
+    id: String,
+    r#type: LibraryFileType,
+    title: String,
+    body: String,
+    tags: Vec<String>,
+    /// `None` for global content (skills with no workspace).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<String>,
+}
+
+impl From<LibraryFile> for LibraryFileOutput {
+    fn from(f: LibraryFile) -> Self {
+        let workspace_id = if f.workspace_id.is_nil() {
+            None
+        } else {
+            Some(f.workspace_id.to_string())
+        };
+        Self {
+            id: f.doc_id.to_string(),
+            r#type: f.doc_type.into(),
+            title: f.title,
+            body: f.body,
+            tags: f.tags,
+            workspace_id,
+        }
+    }
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -123,7 +162,7 @@ static LIBRARY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["search"],
+                "enum": ["search", "get_files"],
                 "description": "Which library operation to perform."
             },
             "query": {
@@ -136,15 +175,21 @@ static LIBRARY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                     "type": "string",
                     "enum": ["skill", "note"]
                 },
-                "description": "Restrict results to these library file types. Omit / empty = all searchable types. (Workflows are git-synced but not indexed for search.)"
+                "description": "Restrict results to these library file types. Omit / empty = all searchable types. (Workflows are git-synced but not indexed for search.) (search)"
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Maximum number of results (default 50, capped at 200)."
+                "description": "Maximum number of search results (default 50, capped at 200) (search)."
+            },
+            "ids": {
+                "type": "array",
+                "items": { "type": "string", "format": "uuid" },
+                "minItems": 1,
+                "description": "Library file ids to fetch in one round-trip — typically copied from search hits. Capped at 50 per call (get_files)."
             }
         },
-        "required": ["command", "query"],
+        "required": ["command"],
         "additionalProperties": false
     })
 });
@@ -166,13 +211,17 @@ impl TopLevelTool for LibraryTool {
     }
 
     fn description(&self) -> &str {
-        "Cross-type, cross-workspace library search across skills and \
-         notes. Always global — results span every workspace the subject \
-         can read. Use this for any library lookup — alternative to \
-         `use_skill` if you want to discover content without invoking it. \
-         Filter `types` (skill/note, multi-select). Results are scored \
-         hybrid FTS + semantic similarity. (Workflows live in the library \
-         repo but are not search-indexed.)"
+        "Cross-type, cross-workspace library lookup across skills and \
+         notes. Two commands: \
+         `search` — hybrid FTS + semantic search returning ranked hits \
+         with snippets. Filter `types` (skill/note, multi-select). \
+         Always global — results span every workspace the subject can \
+         read. Alternative to `use_skill` when you want to discover \
+         content without invoking it. \
+         `get_files` — bulk-fetch full bodies for a list of `ids` \
+         (typically pulled from a prior `search`). Capped at 50 ids per \
+         call; missing ids are returned in `missing`. \
+         (Workflows live in the library repo but are not search-indexed.)"
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -195,12 +244,30 @@ impl TopLevelTool for LibraryTool {
         let params: LibraryParams = parse_params(arguments)?;
         Audit::record_action(params.audit_action());
 
-        let LibraryParams::Search {
-            query,
-            types,
-            limit,
-        } = params;
+        let (text, out) = match params {
+            LibraryParams::Search {
+                query,
+                types,
+                limit,
+            } => self.do_search(subject, query, types, limit).await?,
+            LibraryParams::GetFiles { ids } => self.do_get_files(subject, ids).await?,
+        };
 
+        let structured = serde_json::to_value(&out).expect("LibraryOutput serialization");
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(structured);
+        Ok(result)
+    }
+}
+
+impl LibraryTool {
+    async fn do_search(
+        &self,
+        subject: &AuthSubject,
+        query: String,
+        types: Option<Vec<LibraryFileType>>,
+        limit: usize,
+    ) -> Result<(String, LibraryOutput), ToolSetsError> {
         let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
         let doc_types: Vec<DocType> = types
             .unwrap_or_default()
@@ -239,20 +306,89 @@ impl TopLevelTool for LibraryTool {
             command: "search".to_string(),
             hits: Some(hits),
             total: Some(total),
+            ..Default::default()
         };
-        let structured = serde_json::to_value(&out).expect("LibraryOutput serialization");
-        let mut result = CallToolResult::success(vec![Content::text(text)]);
-        result.structured_content = Some(structured);
-        Ok(result)
+        Ok((text, out))
+    }
+
+    async fn do_get_files(
+        &self,
+        subject: &AuthSubject,
+        ids: Vec<uuid::Uuid>,
+    ) -> Result<(String, LibraryOutput), ToolSetsError> {
+        if ids.is_empty() {
+            return Err(ToolSetsError::MissingArgument(
+                "get_files requires a non-empty `ids` array".to_string(),
+            ));
+        }
+        if ids.len() > MAX_GET_FILES {
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "get_files capped at {MAX_GET_FILES} ids per call (got {})",
+                ids.len()
+            )));
+        }
+
+        let files = self.library.get_files(subject, &ids).await?;
+
+        let returned: std::collections::HashSet<uuid::Uuid> =
+            files.iter().map(|f| f.doc_id).collect();
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !returned.contains(id))
+            .map(|id| id.to_string())
+            .collect();
+
+        let total = files.len();
+        let files: Vec<LibraryFileOutput> =
+            files.into_iter().map(LibraryFileOutput::from).collect();
+
+        let text = if files.is_empty() {
+            format!("No library files found for the supplied {} id(s).", ids.len())
+        } else {
+            let body = files
+                .iter()
+                .map(|f| format!("[{}] {}\n\n{}", f.type_str(), f.title, f.body))
+                .collect::<Vec<_>>()
+                .join("\n---\n");
+            let suffix = if missing.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n({} id(s) not found: {})", missing.len(), missing.join(", "))
+            };
+            format!("Loaded {total} library file(s):\n\n{body}{suffix}")
+        };
+
+        let out = LibraryOutput {
+            command: "get_files".to_string(),
+            files: Some(files),
+            total: Some(total),
+            missing: if missing.is_empty() {
+                None
+            } else {
+                Some(missing)
+            },
+            ..Default::default()
+        };
+        Ok((text, out))
     }
 }
 
 impl LibrarySearchHit {
     fn type_str(&self) -> &'static str {
-        match self.r#type {
-            LibraryFileType::Skill => "skill",
-            LibraryFileType::Note => "note",
-        }
+        type_str(self.r#type)
+    }
+}
+
+impl LibraryFileOutput {
+    fn type_str(&self) -> &'static str {
+        type_str(self.r#type)
+    }
+}
+
+fn type_str(t: LibraryFileType) -> &'static str {
+    match t {
+        LibraryFileType::Skill => "skill",
+        LibraryFileType::Note => "note",
     }
 }
 
@@ -261,25 +397,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn input_schema_has_required_fields() {
+    fn input_schema_has_required_command() {
         let schema = &*LIBRARY_SCHEMA;
         let required = schema["required"].as_array().expect("required array");
         assert!(required.iter().any(|v| v == "command"));
-        assert!(required.iter().any(|v| v == "query"));
+    }
+
+    #[test]
+    fn input_schema_advertises_both_commands() {
+        let schema = &*LIBRARY_SCHEMA;
+        let cmds = schema["properties"]["command"]["enum"]
+            .as_array()
+            .expect("command enum");
+        assert!(cmds.iter().any(|v| v == "search"));
+        assert!(cmds.iter().any(|v| v == "get_files"));
     }
 
     #[test]
     fn parse_search_minimal() {
         let json = serde_json::json!({"command": "search", "query": "auth flow"});
         let params: LibraryParams = serde_json::from_value(json).unwrap();
-        let LibraryParams::Search {
-            query,
-            types,
-            limit,
-        } = params;
-        assert_eq!(query, "auth flow");
-        assert!(types.is_none());
-        assert_eq!(limit, DEFAULT_SEARCH_LIMIT);
+        match params {
+            LibraryParams::Search {
+                query,
+                types,
+                limit,
+            } => {
+                assert_eq!(query, "auth flow");
+                assert!(types.is_none());
+                assert_eq!(limit, DEFAULT_SEARCH_LIMIT);
+            }
+            _ => panic!("expected Search variant"),
+        }
+    }
+
+    #[test]
+    fn parse_get_files() {
+        let json = serde_json::json!({
+            "command": "get_files",
+            "ids": [
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+            ]
+        });
+        let params: LibraryParams = serde_json::from_value(json).unwrap();
+        match params {
+            LibraryParams::GetFiles { ids } => {
+                assert_eq!(ids.len(), 2);
+            }
+            _ => panic!("expected GetFiles variant"),
+        }
     }
 
     #[test]
@@ -301,12 +468,16 @@ mod tests {
             "limit": 5
         });
         let params: LibraryParams = serde_json::from_value(json).unwrap();
-        let LibraryParams::Search { types, limit, .. } = params;
-        let types = types.expect("types");
-        assert_eq!(types.len(), 2);
-        assert!(matches!(types[0], LibraryFileType::Skill));
-        assert!(matches!(types[1], LibraryFileType::Note));
-        assert_eq!(limit, 5);
+        match params {
+            LibraryParams::Search { types, limit, .. } => {
+                let types = types.expect("types");
+                assert_eq!(types.len(), 2);
+                assert!(matches!(types[0], LibraryFileType::Skill));
+                assert!(matches!(types[1], LibraryFileType::Note));
+                assert_eq!(limit, 5);
+            }
+            _ => panic!("expected Search variant"),
+        }
     }
 
     #[test]
@@ -332,6 +503,7 @@ mod tests {
                 tags: vec!["t1".into()],
             }]),
             total: Some(1),
+            ..Default::default()
         };
         let v = serde_json::to_value(&out).unwrap();
         assert_eq!(v["command"], "search");
@@ -345,6 +517,37 @@ mod tests {
                 .contains_key("workspace_id"),
             "tool searches are always global; workspace_id is not on hits"
         );
+    }
+
+    #[test]
+    fn library_file_output_omits_nil_workspace() {
+        let f = LibraryFile {
+            doc_id: uuid::Uuid::new_v4(),
+            doc_type: DocType::Skill,
+            workspace_id: uuid::Uuid::nil(),
+            title: "global skill".into(),
+            body: "body".into(),
+            tags: vec![],
+        };
+        let out = LibraryFileOutput::from(f);
+        assert!(out.workspace_id.is_none());
+        let v = serde_json::to_value(&out).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("workspace_id"));
+    }
+
+    #[test]
+    fn library_file_output_keeps_scoped_workspace() {
+        let ws = uuid::Uuid::new_v4();
+        let f = LibraryFile {
+            doc_id: uuid::Uuid::new_v4(),
+            doc_type: DocType::Note,
+            workspace_id: ws,
+            title: "scoped note".into(),
+            body: "body".into(),
+            tags: vec!["t1".into()],
+        };
+        let out = LibraryFileOutput::from(f);
+        assert_eq!(out.workspace_id.as_deref(), Some(ws.to_string().as_str()));
     }
 
     #[test]

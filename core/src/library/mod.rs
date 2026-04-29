@@ -23,7 +23,7 @@ pub use file::{
     SearchableFields, UpstreamOp,
 };
 pub use job::LIBRARY_LOCK_QUEUE;
-pub use search::{GlobalSearchHit, SearchResult};
+pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
 pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
@@ -305,5 +305,22 @@ impl Library {
                 limit,
             )
             .await
+    }
+
+    /// Bulk lookup by id — returns full title + body for each match.
+    /// Open to any non-anonymous subject (library content is globally
+    /// discoverable). Missing ids are silently dropped; caller compares
+    /// returned count to requested.
+    #[tracing::instrument(name = "library.get_files", skip(self, sub, ids))]
+    pub async fn get_files(
+        &self,
+        sub: &crate::auth::AuthSubject,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<LibraryFile>, LibraryError> {
+        if matches!(sub, crate::auth::AuthSubject::Anonymous) {
+            return Err(crate::auth::error::AuthorizationError::AuthenticationRequired.into());
+        }
+        crate::audit::Audit::record_action_if_unset("library.get_files");
+        self.search.find_by_ids(ids).await
     }
 }

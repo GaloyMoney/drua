@@ -25,6 +25,16 @@ pub struct GlobalSearchHit {
     pub score: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct LibraryFile {
+    pub doc_id: uuid::Uuid,
+    pub doc_type: DocType,
+    pub workspace_id: uuid::Uuid,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+}
+
 impl std::fmt::Display for SearchResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "id: {}\ntitle: {}\n", self.doc_id, self.title)?;
@@ -91,6 +101,38 @@ impl SearchStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Bulk fetch by `doc_id`. Doc type is part of the table's primary
+    /// key but not required here — UUIDs don't collide across types in
+    /// practice. Caller filters / orders as needed.
+    #[tracing::instrument(name = "library.search_store.find_by_ids", skip(self, ids))]
+    pub async fn find_by_ids(
+        &self,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<LibraryFile>, LibraryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query!(
+            r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags
+               FROM library_search_data
+               WHERE doc_id = ANY($1)"#,
+            ids,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| LibraryFile {
+                doc_id: r.doc_id,
+                doc_type: parse_doc_type(&r.doc_type),
+                workspace_id: r.workspace_id,
+                title: r.title_text,
+                body: r.content_text,
+                tags: parse_tags(&r.tags),
+            })
+            .collect())
     }
 
     /// Called during workspace cascade deletion.
