@@ -485,26 +485,6 @@ fn extract_skill_body(rendered: &str) -> Option<String> {
     )
 }
 
-#[cfg(test)]
-mod skill_extract_tests {
-    use super::extract_skill_body;
-
-    #[test]
-    fn extracts_body_from_canonical_skill_markdown() {
-        let rendered = "---\nid: 0\nname: \"X\"\ndescription: \"Y\"\ncreated: \nupdated: \n---\n\n#!/bin/bash\necho hi\n";
-        assert_eq!(
-            extract_skill_body(rendered).unwrap(),
-            "#!/bin/bash\necho hi"
-        );
-    }
-
-    #[test]
-    fn returns_empty_when_body_absent() {
-        let rendered = "---\nid: 0\n---\n\n";
-        assert_eq!(extract_skill_body(rendered).unwrap(), "");
-    }
-}
-
 impl crate::library::LibraryImporter for Skills {
     type Entity = Skill;
     const JOB_TYPE: &'static str = "skill.sync-from-library";
@@ -552,5 +532,25 @@ impl Skills {
             pool: None,
             context_generation: ContextGeneration::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod skill_extract_tests {
+    use super::extract_skill_body;
+
+    #[test]
+    fn extracts_body_from_canonical_skill_markdown() {
+        let rendered = "---\nid: 0\nname: \"X\"\ndescription: \"Y\"\ncreated: \nupdated: \n---\n\n#!/bin/bash\necho hi\n";
+        assert_eq!(
+            extract_skill_body(rendered).unwrap(),
+            "#!/bin/bash\necho hi"
+        );
+    }
+
+    #[test]
+    fn returns_empty_when_body_absent() {
+        let rendered = "---\nid: 0\n---\n\n";
+        assert_eq!(extract_skill_body(rendered).unwrap(), "");
     }
 }
