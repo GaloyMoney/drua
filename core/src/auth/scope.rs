@@ -32,6 +32,12 @@ impl AuthScope {
             AuthScope::Admin => true,
 
             AuthScope::WorkspaceAdmin(ws) => {
+                // Library-wide spaces are managed by any workspace admin;
+                // membership scoping happens via `authorized_workspaces` on
+                // the entity itself.
+                if matches!(resource, AuthResource::Space(_)) {
+                    return true;
+                }
                 resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
             }
 

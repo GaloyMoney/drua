@@ -19,6 +19,7 @@ es_entity::entity_id! {
     WorkspaceSecretId,
     SkillId,
     NoteId,
+    SpaceId,
     WorkflowDefinitionId,
     WorkflowRunId;
 

@@ -158,6 +158,21 @@ impl Library {
         Ok(())
     }
 
+    /// Queues a `SpaceInit` op — writes `spaces/{slug}/.gitkeep` so
+    /// sparse-checkout sandboxes have a directory to land in.
+    #[tracing::instrument(name = "library.sync_space_folder_in_op", skip_all)]
+    pub async fn sync_space_folder_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        slug: &str,
+    ) -> Result<(), LibraryError> {
+        let file = UpstreamOp::SpaceInit {
+            slug: slug.to_string(),
+        };
+        self.enqueue_write(op, file).await?;
+        Ok(())
+    }
+
     /// Removes search data and queues a job to delete
     /// `runtime/workspaces/<name>/` from the library repo. Call inside the
     /// workspace delete transaction for atomicity.

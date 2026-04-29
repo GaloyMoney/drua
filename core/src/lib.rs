@@ -14,6 +14,7 @@ pub mod primitives;
 pub mod prompt_executor;
 pub mod sandbox;
 pub mod skill;
+pub mod space;
 pub mod toolset;
 pub mod tunnel;
 pub mod user;
@@ -36,10 +37,11 @@ use primitives::ContextGeneration;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
+use space::Spaces;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool, Read,
-    SkillTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool, WorkspaceAgent,
-    WorkspaceLog, WorkspaceSandbox,
+    SkillTool, SpacesTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
+    WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 use user::Users;
 use workflow::Workflows;
@@ -65,6 +67,7 @@ pub struct App {
     tunnels: Arc<tunnel::TunnelRegistry>,
     library: Arc<Library>,
     notes: Arc<Notes>,
+    spaces: Arc<Spaces>,
     jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task lives as long as `App`.
     _prompt_executor: Arc<PromptExecutor>,
@@ -229,6 +232,8 @@ impl App {
             Arc::clone(&workflows),
             library.clone(),
         ));
+        let spaces = Arc::new(Spaces::new(pool, library.clone()));
+        toolsets.register_top_level(SpacesTool::new(Arc::clone(&spaces)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));
@@ -315,6 +320,7 @@ impl App {
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
             notes,
+            spaces,
             jobs,
             _prompt_executor: prompt_executor,
         })
@@ -378,6 +384,10 @@ impl App {
 
     pub fn notes(&self) -> &Notes {
         &self.notes
+    }
+
+    pub fn spaces(&self) -> &Spaces {
+        &self.spaces
     }
 
     /// Gracefully shut down background jobs. Call on SIGTERM / ctrl-c.

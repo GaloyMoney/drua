@@ -83,8 +83,7 @@ impl SearchableFields {
 
 /// One operation to apply to the upstream git library — inbox payload +
 /// `WriteToRuntime` job input. `Synced` carries an entity-backed file
-/// write; `WorkspaceInit`/`WorkspaceCleanup` are scaffolding / teardown ops
-/// with no backing entity.
+/// write; the others are scaffolding / teardown ops with no backing entity.
 ///
 /// `Synced` is boxed because `SyncedFile` is several hundred bytes and
 /// dominates enum size — boxing keeps `UpstreamOp` cheap to pass around
@@ -103,6 +102,11 @@ pub enum UpstreamOp {
     /// directory from the library repo and pushes.
     WorkspaceCleanup {
         workspace_name: String,
+    },
+    /// Job runner writes a `.gitkeep` marker at `spaces/{slug}/.gitkeep`
+    /// so the directory is materialized for sparse-checkout sandboxes.
+    SpaceInit {
+        slug: String,
     },
 }
 
@@ -202,7 +206,9 @@ impl UpstreamOp {
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
             UpstreamOp::WriteFile(s) => Some(s.searchable_fields()),
-            UpstreamOp::WorkspaceInit { .. } | UpstreamOp::WorkspaceCleanup { .. } => None,
+            UpstreamOp::WorkspaceInit { .. }
+            | UpstreamOp::WorkspaceCleanup { .. }
+            | UpstreamOp::SpaceInit { .. } => None,
         }
     }
 
@@ -213,13 +219,16 @@ impl UpstreamOp {
             | UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("runtime/workspaces/{workspace_name}")
             }
+            UpstreamOp::SpaceInit { slug } => format!("spaces/{slug}"),
         }
     }
 
     pub(crate) fn content(&self) -> String {
         match self {
             UpstreamOp::WriteFile(s) => s.rendered.clone(),
-            UpstreamOp::WorkspaceInit { .. } | UpstreamOp::WorkspaceCleanup { .. } => String::new(),
+            UpstreamOp::WorkspaceInit { .. }
+            | UpstreamOp::WorkspaceCleanup { .. }
+            | UpstreamOp::SpaceInit { .. } => String::new(),
         }
     }
 
@@ -232,6 +241,7 @@ impl UpstreamOp {
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace: delete {workspace_name}")
             }
+            UpstreamOp::SpaceInit { slug } => format!("space: init {slug}"),
         }
     }
 
@@ -250,6 +260,7 @@ impl UpstreamOp {
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace-cleanup:{workspace_name}")
             }
+            UpstreamOp::SpaceInit { slug } => format!("space-init:{slug}"),
             UpstreamOp::WriteFile(s) => s.file_hash().to_string(),
         }
     }
