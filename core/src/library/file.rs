@@ -609,83 +609,67 @@ struct WorkflowYaml {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum WorkflowSandboxYaml {
     Scratch {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cpu: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        memory: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disk_size: Option<String>,
+        config: Option<ScratchYamlConfig>,
     },
     Repo {
         name: String,
-        repo_url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cpu: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        memory: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disk_size: Option<String>,
+        config: RepoYamlConfig,
     },
+    /// References an existing sandbox in the workflow's workspace by
+    /// name (workspace-unique). The workflow executor only attaches —
+    /// no provisioning, no lifecycle management. No `config` block:
+    /// the sandbox already has its own.
+    Preexisting { name: String },
 }
 
-impl WorkflowSandboxYaml {
-    fn from_runtime(d: &WorkflowSandboxDecl) -> Self {
-        let (cpu, memory, disk_size) = match &d.specs {
-            Some(s) => (
-                Some(s.cpu.clone()),
-                Some(s.memory.clone()),
-                Some(s.disk_size.clone()),
-            ),
-            None => (None, None, None),
-        };
-        match &d.mode {
-            SandboxMode::Scratch => WorkflowSandboxYaml::Scratch {
-                name: d.name.clone(),
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct ScratchYamlConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_size: Option<String>,
+}
+
+impl ScratchYamlConfig {
+    fn into_specs(self) -> Option<SandboxSpecs> {
+        match (self.cpu, self.memory, self.disk_size) {
+            (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
                 cpu,
                 memory,
                 disk_size,
-            },
-            SandboxMode::Repo { repo_url, branch } => WorkflowSandboxYaml::Repo {
-                name: d.name.clone(),
-                repo_url: repo_url.clone(),
-                branch: branch.clone(),
-                cpu,
-                memory,
-                disk_size,
-            },
+            }),
+            _ => None,
         }
     }
+}
 
-    fn into_runtime(self) -> WorkflowSandboxDecl {
-        let (name, mode, cpu, memory, disk_size) = match self {
-            WorkflowSandboxYaml::Scratch {
-                name,
-                cpu,
-                memory,
-                disk_size,
-            } => (name, SandboxMode::Scratch, cpu, memory, disk_size),
-            WorkflowSandboxYaml::Repo {
-                name,
-                repo_url,
-                branch,
-                cpu,
-                memory,
-                disk_size,
-            } => (
-                name,
-                SandboxMode::Repo { repo_url, branch },
-                cpu,
-                memory,
-                disk_size,
-            ),
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RepoYamlConfig {
+    repo_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_size: Option<String>,
+}
+
+impl RepoYamlConfig {
+    fn split(self) -> (SandboxMode, Option<SandboxSpecs>) {
+        let mode = SandboxMode::Repo {
+            repo_url: self.repo_url,
+            branch: self.branch,
         };
-        let specs = match (cpu, memory, disk_size) {
+        let specs = match (self.cpu, self.memory, self.disk_size) {
             (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
                 cpu,
                 memory,
@@ -693,7 +677,69 @@ impl WorkflowSandboxYaml {
             }),
             _ => None,
         };
-        WorkflowSandboxDecl { name, mode, specs }
+        (mode, specs)
+    }
+}
+
+impl WorkflowSandboxYaml {
+    fn from_runtime(d: &WorkflowSandboxDecl) -> Self {
+        match d {
+            WorkflowSandboxDecl::Preexisting { name } => {
+                WorkflowSandboxYaml::Preexisting { name: name.clone() }
+            }
+            WorkflowSandboxDecl::Provisioned { name, mode, specs } => {
+                let (cpu, memory, disk_size) = match specs {
+                    Some(s) => (
+                        Some(s.cpu.clone()),
+                        Some(s.memory.clone()),
+                        Some(s.disk_size.clone()),
+                    ),
+                    None => (None, None, None),
+                };
+                match mode {
+                    SandboxMode::Scratch => {
+                        let config = if cpu.is_some() || memory.is_some() || disk_size.is_some() {
+                            Some(ScratchYamlConfig {
+                                cpu,
+                                memory,
+                                disk_size,
+                            })
+                        } else {
+                            None
+                        };
+                        WorkflowSandboxYaml::Scratch {
+                            name: name.clone(),
+                            config,
+                        }
+                    }
+                    SandboxMode::Repo { repo_url, branch } => WorkflowSandboxYaml::Repo {
+                        name: name.clone(),
+                        config: RepoYamlConfig {
+                            repo_url: repo_url.clone(),
+                            branch: branch.clone(),
+                            cpu,
+                            memory,
+                            disk_size,
+                        },
+                    },
+                }
+            }
+        }
+    }
+
+    fn into_runtime(self) -> WorkflowSandboxDecl {
+        match self {
+            WorkflowSandboxYaml::Preexisting { name } => WorkflowSandboxDecl::Preexisting { name },
+            WorkflowSandboxYaml::Scratch { name, config } => WorkflowSandboxDecl::Provisioned {
+                name,
+                mode: SandboxMode::Scratch,
+                specs: config.unwrap_or_default().into_specs(),
+            },
+            WorkflowSandboxYaml::Repo { name, config } => {
+                let (mode, specs) = config.split();
+                WorkflowSandboxDecl::Provisioned { name, mode, specs }
+            }
+        }
     }
 }
 
@@ -1150,7 +1196,7 @@ mod tests {
     }
 
     fn sample_sandboxes() -> Vec<WorkflowSandboxDecl> {
-        vec![WorkflowSandboxDecl {
+        vec![WorkflowSandboxDecl::Provisioned {
             name: "investigation".to_string(),
             mode: SandboxMode::Scratch,
             specs: None,
@@ -1224,8 +1270,14 @@ mod tests {
         let path = synced(&original).relative_path();
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 1);
-        assert_eq!(parsed.sandboxes[0].name, "investigation");
-        assert!(matches!(parsed.sandboxes[0].mode, SandboxMode::Scratch));
+        assert_eq!(parsed.sandboxes[0].name(), "investigation");
+        assert!(matches!(
+            parsed.sandboxes[0],
+            WorkflowSandboxDecl::Provisioned {
+                mode: SandboxMode::Scratch,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1260,5 +1312,81 @@ steps:
     #[test]
     fn workflow_yaml_returns_none_for_empty() {
         assert!(parse_workflow_yaml("", "runtime/workflows/x.yml").is_none());
+    }
+
+    #[test]
+    fn workflow_yaml_renders_typed_sandboxes_with_nested_config() {
+        let id = WorkflowDefinitionId::new();
+        let original = UpstreamOp::for_workflow(
+            id,
+            None,
+            None,
+            "alert-response",
+            None,
+            WorkflowTrigger::Manual,
+            sample_steps(),
+            vec![
+                WorkflowSandboxDecl::Provisioned {
+                    name: "investigation".to_string(),
+                    mode: SandboxMode::Scratch,
+                    specs: None,
+                },
+                WorkflowSandboxDecl::Provisioned {
+                    name: "build".to_string(),
+                    mode: SandboxMode::Repo {
+                        repo_url: "https://github.com/GaloyMoney/drua".to_string(),
+                        branch: Some("main".to_string()),
+                    },
+                    specs: Some(SandboxSpecs {
+                        cpu: "1".to_string(),
+                        memory: "2Gi".to_string(),
+                        disk_size: "20Gi".to_string(),
+                    }),
+                },
+                WorkflowSandboxDecl::Preexisting {
+                    name: "oncall-shell".to_string(),
+                },
+            ],
+            "2026-04-29T00:00:00Z",
+            "2026-04-29T00:00:00Z",
+        );
+        let content = original.content();
+        assert!(content.contains("type: scratch"));
+        assert!(content.contains("type: repo"));
+        assert!(content.contains("type: preexisting"));
+        assert!(content.contains("config:"));
+        // Round-trip back through the parser to confirm.
+        let path = synced(&original).relative_path();
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert_eq!(parsed.sandboxes.len(), 3);
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_preserves_preexisting_sandbox() {
+        let id = WorkflowDefinitionId::new();
+        let original = UpstreamOp::for_workflow(
+            id,
+            None,
+            None,
+            "uses-existing",
+            None,
+            WorkflowTrigger::Manual,
+            sample_steps(),
+            vec![WorkflowSandboxDecl::Preexisting {
+                name: "investigation".to_string(),
+            }],
+            "2026-04-29T00:00:00Z",
+            "2026-04-29T00:00:00Z",
+        );
+        let content = original.content();
+        assert!(content.contains("type: preexisting"));
+
+        let path = synced(&original).relative_path();
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert_eq!(parsed.sandboxes.len(), 1);
+        assert!(matches!(
+            &parsed.sandboxes[0],
+            WorkflowSandboxDecl::Preexisting { name } if name == "investigation"
+        ));
     }
 }

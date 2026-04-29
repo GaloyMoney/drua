@@ -1522,17 +1522,28 @@ fn workflow_definition_to_view_for_detail(
 }
 
 fn workflow_sandbox_to_view(d: &domain::workflow::WorkflowSandboxDecl) -> WorkflowSandboxView {
-    let (kind, repo_url, branch) = match &d.mode {
-        SandboxMode::Scratch => ("scratch".to_string(), None, None),
-        SandboxMode::Repo { repo_url, branch } => {
-            ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+    use domain::workflow::WorkflowSandboxDecl;
+    match d {
+        WorkflowSandboxDecl::Preexisting { name } => WorkflowSandboxView {
+            name: name.clone(),
+            kind: "preexisting".to_string(),
+            repo_url: None,
+            branch: None,
+        },
+        WorkflowSandboxDecl::Provisioned { name, mode, .. } => {
+            let (kind, repo_url, branch) = match mode {
+                SandboxMode::Scratch => ("scratch".to_string(), None, None),
+                SandboxMode::Repo { repo_url, branch } => {
+                    ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+                }
+            };
+            WorkflowSandboxView {
+                name: name.clone(),
+                kind,
+                repo_url,
+                branch,
+            }
         }
-    };
-    WorkflowSandboxView {
-        name: d.name.clone(),
-        kind,
-        repo_url,
-        branch,
     }
 }
 

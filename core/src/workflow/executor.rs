@@ -168,62 +168,94 @@ impl Executor {
     ) -> Result<HashMap<String, SandboxId>, WorkflowError> {
         let mut ids: HashMap<String, SandboxId> = HashMap::with_capacity(decls.len());
         for decl in decls {
-            let existing = self
-                .sandboxes
-                .find_for_workflow(workspace_id, workflow_id, &decl.name)
-                .await
-                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-
-            let sandbox = match existing {
-                None => {
-                    let mut op = self
-                        .sandboxes
-                        .begin_op()
-                        .await
-                        .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
+            let (decl_name, sandbox) = match decl {
+                // Reference an already-existing sandbox in the
+                // workspace by its (unique) name; attach only.
+                WorkflowSandboxDecl::Preexisting { name } => {
                     let sb = self
                         .sandboxes
-                        .create_for_workflow_in_op(
-                            &mut op,
-                            workspace_id,
-                            workflow_id,
-                            decl.name.clone(),
-                            decl.specs_or_default(),
-                            decl.mode.clone(),
-                        )
+                        .find_by_name_in_workspace_unchecked(workspace_id, name)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::SandboxNotFound(format!(
+                                "preexisting sandbox '{name}': {e}"
+                            ))
+                        })?;
+                    (name, sb)
+                }
+                // Workflow-scoped sandbox: find / create / restart.
+                WorkflowSandboxDecl::Provisioned {
+                    name,
+                    mode,
+                    specs: _,
+                } => {
+                    let existing = self
+                        .sandboxes
+                        .find_for_workflow(workspace_id, workflow_id, name)
                         .await
                         .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                    op.commit()
-                        .await
-                        .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                    self.sandboxes.spawn_sandbox_creation(sb.id);
-                    sb
+
+                    let sandbox = match existing {
+                        None => {
+                            let specs = decl
+                                .specs_or_default()
+                                .expect("specs_or_default returns Some for Provisioned decls");
+                            let mut op = self
+                                .sandboxes
+                                .begin_op()
+                                .await
+                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
+                            let sb = self
+                                .sandboxes
+                                .create_for_workflow_in_op(
+                                    &mut op,
+                                    workspace_id,
+                                    workflow_id,
+                                    name.clone(),
+                                    specs,
+                                    mode.clone(),
+                                )
+                                .await
+                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
+                            op.commit()
+                                .await
+                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
+                            self.sandboxes.spawn_sandbox_creation(sb.id);
+                            sb
+                        }
+                        Some(sb)
+                            if matches!(
+                                sb.state,
+                                SandboxState::Suspended | SandboxState::Errored
+                            ) =>
+                        {
+                            if sb.state == SandboxState::Errored {
+                                tracing::warn!(
+                                    sandbox_id = %sb.id,
+                                    sandbox_name = %name,
+                                    last_error = ?sb.last_error,
+                                    "pre-flight: restarting sandbox in Errored state",
+                                );
+                            }
+                            self.sandboxes
+                                .restart_for_workflow(sb.id)
+                                .await
+                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?
+                        }
+                        Some(sb) => sb,
+                    };
+                    (name, sandbox)
                 }
-                Some(sb) if matches!(sb.state, SandboxState::Suspended | SandboxState::Errored) => {
-                    if sb.state == SandboxState::Errored {
-                        tracing::warn!(
-                            sandbox_id = %sb.id,
-                            sandbox_name = %decl.name,
-                            last_error = ?sb.last_error,
-                            "pre-flight: restarting sandbox in Errored state",
-                        );
-                    }
-                    self.sandboxes
-                        .restart_for_workflow(sb.id)
-                        .await
-                        .map_err(|e| WorkflowError::Sandbox(e.to_string()))?
-                }
-                Some(sb) => sb,
             };
 
             self.sandboxes
                 .wait_until_ready(sandbox.id, SANDBOX_READY_TIMEOUT)
                 .await
                 .map_err(|e| WorkflowError::SandboxNotReady {
-                    name: decl.name.clone(),
+                    name: decl_name.clone(),
                     state: e.to_string(),
                 })?;
-            ids.insert(decl.name.clone(), sandbox.id);
+            ids.insert(decl_name.clone(), sandbox.id);
         }
         Ok(ids)
     }
@@ -248,15 +280,19 @@ impl Executor {
             }
         };
         for decl in &definition.sandboxes {
+            // Preexisting sandboxes are user-managed; never suspend them.
+            let WorkflowSandboxDecl::Provisioned { name, .. } = decl else {
+                continue;
+            };
             let sandbox = match self
                 .sandboxes
-                .find_for_workflow(workspace_id, workflow_id, &decl.name)
+                .find_for_workflow(workspace_id, workflow_id, name)
                 .await
             {
                 Ok(Some(sb)) => sb,
                 Ok(None) => continue,
                 Err(e) => {
-                    tracing::warn!(error = %e, sandbox = %decl.name, "post-flight: lookup failed");
+                    tracing::warn!(error = %e, sandbox = %name, "post-flight: lookup failed");
                     continue;
                 }
             };

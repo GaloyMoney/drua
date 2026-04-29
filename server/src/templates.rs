@@ -220,7 +220,7 @@ pub struct WorkflowStepView {
 #[allow(dead_code)]
 pub struct WorkflowSandboxView {
     pub name: String,
-    /// `"scratch"` or `"repo"`.
+    /// `"scratch"`, `"repo"`, or `"preexisting"`.
     pub kind: String,
     pub repo_url: Option<String>,
     pub branch: Option<String>,
