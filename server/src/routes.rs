@@ -29,6 +29,14 @@ pub struct IndexParams {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth_protected_resource_metadata),
+        )
         .route("/", get(index))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/mcp-creds", get(mcp_creds_list))
@@ -95,6 +103,25 @@ fn mcp_creds_to_view(creds: &McpCreds) -> McpCredsView {
         created_at: creds.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
         is_revoked: creds.is_revoked(),
     }
+}
+
+/// RFC 9728 OAuth 2.0 Protected Resource Metadata. Lets MCP clients that
+/// implement the discovery-first auth flow proceed when no authorization
+/// server is configured: empty `authorization_servers` plus
+/// `bearer_methods_supported: ["header"]` signals "use whatever static
+/// bearer you were configured with." Without this endpoint, recent
+/// Claude Code versions 404 here, fail to parse the empty body as an
+/// OAuth error envelope, and reject the connection before applying the
+/// static `Authorization: Bearer …` header.
+#[instrument(name = "web.oauth_protected_resource_metadata", skip_all)]
+async fn oauth_protected_resource_metadata(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "resource": state.mcp_endpoint,
+        "authorization_servers": [],
+        "bearer_methods_supported": ["header"],
+    }))
 }
 
 #[instrument(name = "web.index", skip_all)]
