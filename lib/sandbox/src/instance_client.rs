@@ -85,6 +85,10 @@ pub struct InitializeRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub github_token: Option<String>,
 }
 
@@ -96,25 +100,26 @@ impl InitializeRequest {
                 mode: "scratch".to_string(),
                 repo_url: None,
                 branch: None,
+                library_url: None,
+                slug: None,
                 github_token,
             },
             SandboxMode::Repo { repo_url, branch } => Self {
                 mode: "repo".to_string(),
                 repo_url: Some(repo_url.clone()),
                 branch: branch.clone(),
+                library_url: None,
+                slug: None,
                 github_token,
             },
-            // TODO(library-space): wire `/initialize` to perform a sparse
-            // checkout of `spaces/<slug>` against the library repo. The
-            // sandbox server side also needs the matching `library_space`
-            // mode handler before this branch can be reached in practice.
-            SandboxMode::LibrarySpace { slug } => {
-                tracing::warn!(
-                    %slug,
-                    "library-space sandbox /initialize not yet implemented"
-                );
-                todo!("library-space sandbox setup not yet implemented")
-            }
+            SandboxMode::LibrarySpace { library_url, slug } => Self {
+                mode: "library_space".to_string(),
+                repo_url: None,
+                branch: None,
+                library_url: Some(library_url.clone()),
+                slug: Some(slug.clone()),
+                github_token,
+            },
         }
     }
 }

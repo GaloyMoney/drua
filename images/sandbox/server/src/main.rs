@@ -33,6 +33,10 @@ struct InitializeRequest {
     #[serde(default)]
     branch: Option<String>,
     #[serde(default)]
+    library_url: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
     github_token: Option<String>,
 }
 
@@ -500,6 +504,8 @@ async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeRespon
         &req.mode,
         req.repo_url.as_deref(),
         req.branch.as_deref(),
+        req.library_url.as_deref(),
+        req.slug.as_deref(),
     )
     .await
 }
@@ -509,12 +515,15 @@ async fn initialize_inner(
     mode: &str,
     repo_url: Option<&str>,
     branch: Option<&str>,
+    library_url: Option<&str>,
+    slug: Option<&str>,
 ) -> Json<InitializeResponse> {
     let result = match mode {
         "scratch" => initialize_scratch(workspace).await,
         "repo" => initialize_repo(workspace, repo_url, branch).await,
+        "library_space" => initialize_library_space(workspace, library_url, slug).await,
         other => Err(format!(
-            "Unknown mode: {other}. Expected 'scratch' or 'repo'."
+            "Unknown mode: {other}. Expected 'scratch', 'repo', or 'library_space'."
         )),
     };
 
@@ -664,6 +673,119 @@ async fn initialize_repo(
         exported_skills: skills,
         error: None,
     })
+}
+
+/// Sparse-checkout of `library_url` narrowed to `spaces/<slug>/`.
+///
+/// Layout: clones into `<workspace>/library/`, configures cone-mode sparse
+/// checkout for the single `spaces/<slug>` directory, and returns the
+/// space dir as `cwd`.
+///
+/// `--filter=blob:none` keeps the initial fetch lightweight (treeless
+/// partial clone — blobs are demand-fetched on read). `--no-checkout`
+/// avoids materializing files before the sparse path is set so we never
+/// touch sibling spaces. Idempotent across restarts via the `.git` check.
+async fn initialize_library_space(
+    workspace: &str,
+    library_url: Option<&str>,
+    slug: Option<&str>,
+) -> Result<InitializeResponse, String> {
+    let library_url = library_url
+        .filter(|u| !u.is_empty())
+        .ok_or("Missing 'library_url' for library_space mode")?;
+    let slug = slug
+        .filter(|s| !s.is_empty())
+        .ok_or("Missing 'slug' for library_space mode")?;
+    validate_space_slug(slug)?;
+
+    let clone_dir = PathBuf::from(workspace).join("library");
+    tokio::fs::create_dir_all(workspace)
+        .await
+        .map_err(|e| format!("Failed to create workspace: {e}"))?;
+
+    let already_cloned = clone_dir.join(".git").is_dir();
+    if !already_cloned {
+        let output = Command::new("git")
+            .args([
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                library_url,
+                clone_dir.to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git clone: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git clone failed: {stderr}"));
+        }
+    }
+
+    let clone_dir_str = clone_dir
+        .to_str()
+        .ok_or("Library clone path is not valid UTF-8")?;
+
+    let output = Command::new("git")
+        .args(["-C", clone_dir_str, "sparse-checkout", "init", "--cone"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git sparse-checkout init: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git sparse-checkout init failed: {stderr}"));
+    }
+
+    let space_path = format!("spaces/{slug}");
+    let output = Command::new("git")
+        .args(["-C", clone_dir_str, "sparse-checkout", "set", &space_path])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git sparse-checkout set: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git sparse-checkout set failed: {stderr}"));
+    }
+
+    // `sparse-checkout set` materializes the configured paths from HEAD
+    // when run after `init`, but a freshly cloned `--no-checkout` repo
+    // hasn't checked out HEAD at all yet — `git checkout` finishes the
+    // job by writing the working tree limited to the sparse paths.
+    if !already_cloned {
+        let output = Command::new("git")
+            .args(["-C", clone_dir_str, "checkout"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git checkout: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git checkout failed: {stderr}"));
+        }
+    }
+
+    let space_dir = clone_dir.join(&space_path);
+    if !space_dir.is_dir() {
+        return Err(format!(
+            "spaces/{slug} not present in library after sparse checkout"
+        ));
+    }
+
+    Ok(InitializeResponse {
+        cwd: space_dir.to_string_lossy().to_string(),
+        exported_system_prompt: None,
+        exported_skills: Vec::new(),
+        error: None,
+    })
+}
+
+/// Reject path-traversal and absolute-path attempts before they reach git.
+/// A space slug is a single directory name under `spaces/`; nested paths,
+/// `..`, and leading `/` are not valid.
+fn validate_space_slug(slug: &str) -> Result<(), String> {
+    if slug.contains('/') || slug.contains('\\') || slug == "." || slug == ".." {
+        return Err(format!("invalid space slug: {slug}"));
+    }
+    Ok(())
 }
 
 fn extract_repo_name(url: &str) -> Result<String, String> {
@@ -1550,6 +1672,201 @@ mod tests {
         assert!(result.unwrap_err().contains("git clone failed"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── initialize_library_space ──────────────────────────────────────
+
+    /// Build a bare git repo with `spaces/<slug>/<file>` for two slugs and
+    /// return its path.
+    async fn make_library_bare_repo(base: &Path) -> PathBuf {
+        let bare_dir = base.join("library.git");
+        let work_dir = base.join("library-work");
+
+        let output = Command::new("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git init --bare failed");
+
+        let output = Command::new("git")
+            .args([
+                "clone",
+                bare_dir.to_str().unwrap(),
+                work_dir.to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git clone failed");
+
+        for slug in ["oncall", "incidents"] {
+            let dir = work_dir.join("spaces").join(slug);
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            tokio::fs::write(dir.join("README.md"), format!("# {slug}\n"))
+                .await
+                .unwrap();
+        }
+
+        for (key, val) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            let _ = Command::new("git")
+                .args(["-C", work_dir.to_str().unwrap(), "config", key, val])
+                .output()
+                .await;
+        }
+        let _ = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "add", "-f", "."])
+            .output()
+            .await;
+        let output = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "commit", "-m", "init"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "push"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        bare_dir
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_sparse_clones_only_target_slug() {
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-init-libspace");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let bare_dir = make_library_bare_repo(&base).await;
+        let workspace = base.join("workspace");
+
+        let result = initialize_library_space(
+            workspace.to_str().unwrap(),
+            Some(bare_dir.to_str().unwrap()),
+            Some("oncall"),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "initialize_library_space failed: {:?}",
+            result
+        );
+        let resp = result.unwrap();
+        assert!(resp.error.is_none());
+        assert!(
+            resp.cwd.ends_with("/library/spaces/oncall"),
+            "unexpected cwd: {}",
+            resp.cwd
+        );
+
+        let library_dir = workspace.join("library");
+        assert!(library_dir.join(".git").is_dir());
+        assert!(library_dir.join("spaces").join("oncall").is_dir());
+        assert!(
+            !library_dir.join("spaces").join("incidents").is_dir(),
+            "sibling space should not be checked out"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_is_idempotent_across_restarts() {
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-libspace-idempotent");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let bare_dir = make_library_bare_repo(&base).await;
+        let workspace = base.join("workspace");
+
+        for _ in 0..2 {
+            let result = initialize_library_space(
+                workspace.to_str().unwrap(),
+                Some(bare_dir.to_str().unwrap()),
+                Some("oncall"),
+            )
+            .await;
+            assert!(result.is_ok(), "second call failed: {:?}", result);
+        }
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_missing_url_fails() {
+        let result =
+            initialize_library_space("/tmp/sandbox-libspace-missing-url", None, Some("oncall"))
+                .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("library_url"));
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_missing_slug_fails() {
+        let result = initialize_library_space(
+            "/tmp/sandbox-libspace-missing-slug",
+            Some("https://example.com/lib.git"),
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("slug"));
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_rejects_traversal_slug() {
+        let result = initialize_library_space(
+            "/tmp/sandbox-libspace-traversal",
+            Some("https://example.com/lib.git"),
+            Some("../etc"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid space slug"));
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_unknown_slug_fails() {
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-libspace-unknown");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let bare_dir = make_library_bare_repo(&base).await;
+        let workspace = base.join("workspace");
+
+        let result = initialize_library_space(
+            workspace.to_str().unwrap(),
+            Some(bare_dir.to_str().unwrap()),
+            Some("does-not-exist"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not present in library"));
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
     // ── Grep tool ────────────────────────────────────────────────────

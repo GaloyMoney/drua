@@ -833,7 +833,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         SandboxMode::Repo { repo_url, branch } => {
             ("Repo".to_string(), Some(repo_url.clone()), branch.clone())
         }
-        SandboxMode::LibrarySpace { slug } => (format!("LibrarySpace({slug})"), None, None),
+        SandboxMode::LibrarySpace { slug, .. } => (format!("LibrarySpace({slug})"), None, None),
     };
 
     let exported_system_prompt = s.exported_system_prompt.as_ref().map(|f| ExportedFileView {
@@ -1526,7 +1526,7 @@ fn workflow_sandbox_to_view(d: &domain::workflow::WorkflowSandboxDecl) -> Workfl
                 SandboxMode::Repo { repo_url, branch } => {
                     ("repo".to_string(), Some(repo_url.clone()), branch.clone())
                 }
-                SandboxMode::LibrarySpace { slug } => {
+                SandboxMode::LibrarySpace { slug, .. } => {
                     (format!("library_space({slug})"), None, None)
                 }
             };
