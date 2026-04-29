@@ -182,8 +182,7 @@ fn make_snippet(content: &str, max_chars: usize) -> String {
     out
 }
 
-static SEARCH_INPUT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<SearchParams>);
+static SEARCH_INPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SearchParams>);
 static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<SearchOutput>);
 static GET_FILES_INPUT_SCHEMA: LazyLock<serde_json::Value> =
@@ -566,7 +565,10 @@ mod tests {
         }];
         let _text = render_get_files_text(&files, &[], 1);
         let v = serde_json::to_value(&files).unwrap();
-        assert_eq!(v[0]["body"].as_str().unwrap().chars().count(), big_body.len());
+        assert_eq!(
+            v[0]["body"].as_str().unwrap().chars().count(),
+            big_body.len()
+        );
     }
 
     #[test]

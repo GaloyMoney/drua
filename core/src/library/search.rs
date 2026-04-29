@@ -107,10 +107,7 @@ impl SearchStore {
     /// key but not required here — UUIDs don't collide across types in
     /// practice. Caller filters / orders as needed.
     #[tracing::instrument(name = "library.search_store.find_by_ids", skip(self, ids))]
-    pub async fn find_by_ids(
-        &self,
-        ids: &[uuid::Uuid],
-    ) -> Result<Vec<LibraryFile>, LibraryError> {
+    pub async fn find_by_ids(&self, ids: &[uuid::Uuid]) -> Result<Vec<LibraryFile>, LibraryError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
