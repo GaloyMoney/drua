@@ -37,14 +37,16 @@ use session::Sessions;
 
 /// Snapshot of dynamic system blocks (notes + skills), keyed by
 /// `ContextGeneration` at fetch time. Skips DB round-trips on the hot path.
+/// Skills are scoped to `(workspace_id, attached_sandbox_id)` because each
+/// agent's exported sandbox skills depend on its own attachment.
 #[derive(Clone)]
-struct CachedWorkspaceContext {
+struct CachedAgentContext {
     generation: u64,
     notes_block: Option<session::message::SystemBlock>,
     skills_block: Option<session::message::SystemBlock>,
 }
 
-impl CachedWorkspaceContext {
+impl CachedAgentContext {
     fn to_blocks(&self) -> Vec<session::message::SystemBlock> {
         let mut out = Vec::with_capacity(2);
         if let Some(b) = &self.notes_block {
@@ -68,9 +70,12 @@ pub struct Agents {
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
     context_generation: ContextGeneration,
-    context_cache:
-        Arc<std::sync::RwLock<std::collections::HashMap<WorkspaceId, CachedWorkspaceContext>>>,
+    context_cache: ContextCache,
 }
+
+type ContextCacheKey = (WorkspaceId, Option<SandboxId>);
+type ContextCache =
+    Arc<std::sync::RwLock<std::collections::HashMap<ContextCacheKey, CachedAgentContext>>>;
 
 impl Agents {
     #[allow(clippy::too_many_arguments)]
@@ -99,16 +104,20 @@ impl Agents {
     }
 
     /// Hot-path lookup of dynamic system blocks. Reads `ContextGeneration`
-    /// atomically; only hits DB when the generation has bumped.
+    /// atomically; only hits DB when the generation has bumped. Skills are
+    /// scoped to the agent's attached sandbox so two agents in the same
+    /// workspace with different sandboxes don't share an entry.
     async fn cached_dynamic_blocks(
         &self,
         workspace_id: WorkspaceId,
+        sandbox_id: Option<SandboxId>,
     ) -> Vec<session::message::SystemBlock> {
         let current_gen = self.context_generation.current();
+        let key = (workspace_id, sandbox_id);
 
         {
             let cache = self.context_cache.read().expect("context_cache poisoned");
-            if let Some(cached) = cache.get(&workspace_id) {
+            if let Some(cached) = cache.get(&key) {
                 if cached.generation == current_gen {
                     return cached.to_blocks();
                 }
@@ -126,20 +135,20 @@ impl Agents {
         };
         let skills_block = self
             .skills
-            .skills_context_for_workspace(workspace_id)
+            .skills_context_for_agent(workspace_id, sandbox_id)
             .await
             .ok()
             .flatten()
             .map(|text| session::message::SystemBlock::Skills { text });
 
-        let entry = CachedWorkspaceContext {
+        let entry = CachedAgentContext {
             generation: current_gen,
             notes_block: notes_block.clone(),
             skills_block: skills_block.clone(),
         };
         let result = entry.to_blocks();
         if let Ok(mut cache) = self.context_cache.write() {
-            cache.insert(workspace_id, entry);
+            cache.insert(key, entry);
         }
         result
     }
@@ -369,8 +378,22 @@ impl Agents {
             }
         }
 
-        if let Ok(Some(skills_content)) =
-            self.skills.skills_context_for_workspace(workspace_id).await
+        // Apply attach to the entity first so the initial skills block can
+        // reflect the attached sandbox's exported skills.
+        let initial_sandbox_id = if let Some((sandbox_id, mode)) = attach_sandbox {
+            // Rejects WorkspaceLead before the sandbox round-trip.
+            if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
+                self.repo.update_in_op(op, &mut agent).await?;
+            }
+            Some(sandbox_id)
+        } else {
+            None
+        };
+
+        if let Ok(Some(skills_content)) = self
+            .skills
+            .skills_context_for_agent(workspace_id, initial_sandbox_id)
+            .await
         {
             system_blocks.push(session::message::SystemBlock::Skills {
                 text: skills_content,
@@ -394,10 +417,6 @@ impl Agents {
             .await?;
 
         if let Some((sandbox_id, mode)) = attach_sandbox {
-            // Agent side first: rejects WorkspaceLead before the sandbox round-trip.
-            if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
-                self.repo.update_in_op(op, &mut agent).await?;
-            }
             let sandbox = self
                 .sandboxes
                 .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
@@ -580,6 +599,9 @@ impl Agents {
             )
             .await?;
 
+        self.refresh_skills_block_in_op(&mut op, agent_id, workspace_id, Some(sandbox_id))
+            .await;
+
         op.commit().await?;
 
         Ok(agent)
@@ -623,9 +645,50 @@ impl Agents {
             )
             .await?;
 
+        self.refresh_skills_block_in_op(&mut op, agent_id, agent.workspace_id, None)
+            .await;
+
         op.commit().await?;
 
         Ok(agent)
+    }
+
+    /// Recomputes the `Skills` system block for `agent_id` scoped to
+    /// `sandbox_id` and pushes it. Idempotent: when the block content matches
+    /// the latest persisted skills block, no event is emitted. Errors from
+    /// the skills service or session push are logged and swallowed — sandbox
+    /// attach/detach must not fail because of a transient skills-context
+    /// problem.
+    async fn refresh_skills_block_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        agent_id: AgentId,
+        workspace_id: WorkspaceId,
+        sandbox_id: Option<SandboxId>,
+    ) {
+        let skills_text = match self
+            .skills
+            .skills_context_for_agent(workspace_id, sandbox_id)
+            .await
+        {
+            Ok(Some(text)) => text,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "skills_context_for_agent failed during refresh");
+                return;
+            }
+        };
+        if let Err(e) = self
+            .sessions
+            .push_system_block_in_op(
+                op,
+                agent_id,
+                session::message::SystemBlock::Skills { text: skills_text },
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "push_system_block_in_op failed during skills refresh");
+        }
     }
 
     #[instrument(name = "domain.agent.chat_history", skip(self, sub))]
@@ -763,7 +826,9 @@ impl Agents {
 
         // Pass blocks into `add_user_input` so diff + user-input share a single
         // repo round-trip; `next_prompt` later spawns a new thread if changed.
-        let dynamic_blocks = self.cached_dynamic_blocks(agent.workspace_id).await;
+        let dynamic_blocks = self
+            .cached_dynamic_blocks(agent.workspace_id, agent.attached_sandbox_id())
+            .await;
         let mut proposed_system_blocks = system_prompt::system_blocks_for_role(
             agent.agent_role,
             &self.toolsets,

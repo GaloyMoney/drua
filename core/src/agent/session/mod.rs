@@ -214,6 +214,24 @@ impl Sessions {
         Ok(response)
     }
 
+    /// Pushes a `SystemBlock` to the agent's session in `op`. Idempotent —
+    /// when `block`'s content equals the latest persisted block of the same
+    /// kind no event is emitted.
+    #[instrument(name = "domain.agent_session.push_system_block_in_op", skip(self, op))]
+    pub async fn push_system_block_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        agent_id: AgentId,
+        block: message::SystemBlock,
+    ) -> Result<es_entity::Idempotent<()>, AgentSessionError> {
+        let mut session = self.repo.find_by_agent_id_in_op(op, agent_id).await?;
+        let outcome = session.push_system_block(block);
+        if outcome.did_execute() {
+            self.repo.update_in_op(op, &mut session).await?;
+        }
+        Ok(outcome)
+    }
+
     #[instrument(name = "domain.agent_session.chat_history", skip(self))]
     pub async fn chat_history(
         &self,

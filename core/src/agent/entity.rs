@@ -327,4 +327,34 @@ mod tests {
         assert_eq!(agent.workflow_id, Some(wf));
         assert_eq!(agent.workflow_run_id, Some(run));
     }
+
+    #[test]
+    fn attached_sandbox_id_tracks_attach_and_detach() {
+        let mut agent = build(None, None);
+        assert!(agent.attached_sandbox_id().is_none());
+
+        let sandbox_id = SandboxId::new();
+        let outcome = agent
+            .sandbox_attached(sandbox_id, SandboxAgentMode::Read)
+            .expect("attach");
+        assert!(matches!(outcome, Idempotent::Executed(())));
+        assert_eq!(agent.attached_sandbox_id(), Some(sandbox_id));
+
+        let outcome = agent.sandbox_detached(sandbox_id);
+        assert!(matches!(outcome, Idempotent::Executed(())));
+        assert!(agent.attached_sandbox_id().is_none());
+    }
+
+    #[test]
+    fn sandbox_attached_same_mode_is_idempotent() {
+        let mut agent = build(None, None);
+        let sandbox_id = SandboxId::new();
+        let _ = agent
+            .sandbox_attached(sandbox_id, SandboxAgentMode::Write)
+            .expect("first attach");
+        let outcome = agent
+            .sandbox_attached(sandbox_id, SandboxAgentMode::Write)
+            .expect("re-attach");
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
 }
