@@ -6,7 +6,7 @@ use crate::agent::{Agent, Agents};
 use crate::primitives::{
     AgentId, ChatOutputEvent, SandboxId, WorkflowDefinitionId, WorkflowRunId, WorkspaceId,
 };
-use crate::sandbox::{SandboxAgentMode, SandboxState, Sandboxes};
+use crate::sandbox::{SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
@@ -184,11 +184,7 @@ impl Executor {
                     (name, sb)
                 }
                 // Workflow-scoped sandbox: find / create / restart.
-                WorkflowSandboxDecl::Provisioned {
-                    name,
-                    mode,
-                    specs: _,
-                } => {
+                WorkflowSandboxDecl::Provisioned { name, mode, specs } => {
                     let existing = self
                         .sandboxes
                         .find_for_workflow(workspace_id, workflow_id, name)
@@ -197,9 +193,11 @@ impl Executor {
 
                     let sandbox = match existing {
                         None => {
-                            let specs = decl
-                                .specs_or_default()
-                                .expect("specs_or_default returns Some for Provisioned decls");
+                            let specs = specs.clone().unwrap_or_else(|| SandboxSpecs {
+                                cpu: "500m".to_string(),
+                                memory: "512Mi".to_string(),
+                                disk_size: "10Gi".to_string(),
+                            });
                             let mut op = self
                                 .sandboxes
                                 .begin_op()

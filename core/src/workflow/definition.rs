@@ -77,20 +77,4 @@ impl WorkflowSandboxDecl {
             Self::Provisioned { name, .. } | Self::Preexisting { name } => name,
         }
     }
-
-    /// `None` for `Preexisting` (the user-managed sandbox already
-    /// has its own specs); defaults match the MCP `sandbox create`
-    /// tool for `Provisioned` decls without an explicit override.
-    pub fn specs_or_default(&self) -> Option<SandboxSpecs> {
-        match self {
-            Self::Provisioned { specs, .. } => {
-                Some(specs.clone().unwrap_or_else(|| SandboxSpecs {
-                    cpu: "500m".to_string(),
-                    memory: "512Mi".to_string(),
-                    disk_size: "10Gi".to_string(),
-                }))
-            }
-            Self::Preexisting { .. } => None,
-        }
-    }
 }

@@ -329,6 +329,10 @@ impl Sandboxes {
 
     /// Auth-free counterpart used by the workflow executor at run time.
     /// The run was authorised when triggered.
+    #[instrument(
+        name = "domain.sandbox.find_by_name_in_workspace_unchecked",
+        skip(self)
+    )]
     pub(crate) async fn find_by_name_in_workspace_unchecked(
         &self,
         workspace_id: WorkspaceId,
