@@ -24,6 +24,34 @@ use rmcp::model::{CallToolResult, JsonObject};
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
+/// schemars 0.8 emits boolean `true` for `serde_json::Value` fields, which
+/// strict JSON-Schema validators (notably Claude Code's MCP client) reject
+/// inside `properties`. Use via `#[schemars(schema_with = "...")]` on a field
+/// whose runtime type is `serde_json::Value` and whose contents are arbitrary
+/// — emits the equivalent empty-object schema `{}`.
+pub(crate) fn any_json_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::Schema::Object(Default::default())
+}
+
+/// Companion to [`any_json_schema`] for `Vec<serde_json::Value>` fields —
+/// emits `{ "type": "array", "items": {} }` so the items schema is an
+/// object, not the boolean shorthand schemars defaults to.
+pub(crate) fn array_of_any_schema(
+    _: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    use schemars::schema::{ArrayValidation, InstanceType, Schema, SchemaObject, SingleOrVec};
+    Schema::Object(SchemaObject {
+        instance_type: Some(InstanceType::Array.into()),
+        array: Some(Box::new(ArrayValidation {
+            items: Some(SingleOrVec::Single(Box::new(Schema::Object(
+                Default::default(),
+            )))),
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
+}
+
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,

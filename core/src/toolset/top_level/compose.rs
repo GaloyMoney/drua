@@ -55,7 +55,7 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
-    #[schemars(schema_with = "super::any_json_schema")]
+    #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
     console: Vec<String>,
     tool_calls: usize,
