@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post},
     Extension, Form, Json, Router,
 };
+use axum_extra::extract::Query as RepeatedQuery;
 use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::instrument;
@@ -33,6 +34,8 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/mcp-creds", get(mcp_creds_list))
         .route("/audit", get(audit_page))
         .route("/audit/entries", get(audit_entries))
+        .route("/library", get(library_page))
+        .route("/library/search", get(library_search))
         .route("/code-assistant", get(code_assistant_dashboard))
         .route("/code-assistant/recent", get(code_assistant_recent))
         .route(
@@ -220,6 +223,183 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LibrarySearchParams {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default, rename = "workspaceId")]
+    workspace_id: Option<String>,
+    /// Repeated `t=skill&t=note` checkboxes from the form.
+    #[serde(default)]
+    t: Vec<String>,
+}
+
+#[instrument(name = "web.library_page", skip_all)]
+async fn library_page(State(state): State<AppState>, session: Session) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let workspaces = state
+        .app
+        .workspaces()
+        .list_all(&sub)
+        .await
+        .unwrap_or_default();
+
+    LibraryTemplate {
+        workspaces: workspaces
+            .iter()
+            .map(|ws| LibraryWorkspaceOption {
+                id: ws.id.to_string(),
+                name: ws.name.clone(),
+            })
+            .collect(),
+    }
+    .into_response()
+}
+
+#[instrument(name = "web.library_search", skip_all)]
+async fn library_search(
+    State(state): State<AppState>,
+    session: Session,
+    RepeatedQuery(params): RepeatedQuery<LibrarySearchParams>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let query = params.q.unwrap_or_default();
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return LibrarySearchResultsTemplate {
+            query: String::new(),
+            hits: vec![],
+            error: None,
+        }
+        .into_response();
+    }
+
+    let workspace_filter: Option<domain::primitives::WorkspaceId> =
+        match params.workspace_id.as_deref() {
+            Some(s) if !s.is_empty() => match uuid::Uuid::parse_str(s) {
+                Ok(uuid) => Some(domain::primitives::WorkspaceId::from(uuid)),
+                Err(_) => {
+                    return LibrarySearchResultsTemplate {
+                        query: trimmed.to_string(),
+                        hits: vec![],
+                        error: Some("invalid workspace id".to_string()),
+                    }
+                    .into_response();
+                }
+            },
+            _ => None,
+        };
+
+    let doc_types: Vec<drua_core::library::DocType> = params
+        .t
+        .iter()
+        .filter_map(|s| match s.as_str() {
+            "skill" => Some(drua_core::library::DocType::Skill),
+            "note" => Some(drua_core::library::DocType::Note),
+            _ => None,
+        })
+        .collect();
+
+    let hits = match state
+        .app
+        .workspaces()
+        .library_search(&sub, trimmed, workspace_filter, &doc_types, 50)
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "library search failed");
+            return LibrarySearchResultsTemplate {
+                query: trimmed.to_string(),
+                hits: vec![],
+                error: Some(format!("search failed: {e}")),
+            }
+            .into_response();
+        }
+    };
+
+    // Workspace-name lookup for display only — auth already enforced above.
+    let workspace_lookup: std::collections::HashMap<uuid::Uuid, String> = state
+        .app
+        .workspaces()
+        .list_all(&sub)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ws| (uuid::Uuid::from(ws.id), ws.name))
+        .collect();
+
+    let views: Vec<LibraryHitView> = hits
+        .into_iter()
+        .map(|h| {
+            let workspace_name = workspace_lookup
+                .get(&h.workspace_id)
+                .cloned()
+                .unwrap_or_else(|| h.workspace_id.to_string());
+            let (type_label, type_class, detail_url) = match h.doc_type {
+                drua_core::library::DocType::Skill => (
+                    "Skill".to_string(),
+                    "skill".to_string(),
+                    Some(format!(
+                        "/workspaces/{}/skills/{}",
+                        h.workspace_id, h.doc_id
+                    )),
+                ),
+                drua_core::library::DocType::Workflow => (
+                    "Workflow".to_string(),
+                    "workflow".to_string(),
+                    Some(format!(
+                        "/workspaces/{}/workflows/{}",
+                        h.workspace_id, h.doc_id
+                    )),
+                ),
+                drua_core::library::DocType::Note => ("Note".to_string(), "note".to_string(), None),
+            };
+            LibraryHitView {
+                id: h.doc_id.to_string(),
+                workspace_id: h.workspace_id.to_string(),
+                workspace_name,
+                type_label,
+                type_class,
+                title: h.title,
+                snippet: snippet(&h.content, 240),
+                score: format!("{:.0}%", h.score * 100.0),
+                tags: h.tags,
+                detail_url,
+            }
+        })
+        .collect();
+
+    LibrarySearchResultsTemplate {
+        query: trimmed.to_string(),
+        hits: views,
+        error: None,
+    }
+    .into_response()
+}
+
+fn snippet(content: &str, max_chars: usize) -> String {
+    let trimmed = content.trim();
+    let mut out = String::with_capacity(max_chars + 1);
+    for ch in trimmed.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if trimmed.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 async fn lookup_user_label(app: &drua_core::App, user_id: drua_core::primitives::UserId) -> String {

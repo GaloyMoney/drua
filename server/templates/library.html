@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}Library — Galoy Agents{% endblock %}
+
+{% block nav_library %}class="active"{% endblock %}
+
+{% block head %}
+<style>
+  .lib-search-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .lib-search-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: end;
+    flex-wrap: wrap;
+  }
+  .lib-search-row .grow { flex: 1 1 280px; min-width: 240px; }
+  .lib-search-row label { margin-bottom: 0; }
+  .lib-type-chips {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .lib-type-chips label {
+    display: inline-flex;
+    gap: 0.35rem;
+    align-items: center;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    margin: 0;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .lib-type-chips label.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+    border-color: var(--pico-primary);
+  }
+  .lib-type-chips input { margin: 0; }
+  .lib-active-count {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+  }
+  .lib-hit {
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+  }
+  .lib-hit-header {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 0.25rem;
+  }
+  .lib-hit-title { font-weight: 600; }
+  .lib-hit-meta {
+    font-size: 0.78rem;
+    color: var(--pico-muted-color);
+  }
+  .lib-type-badge {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .lib-type-badge.skill    { background: #1976d2; }
+  .lib-type-badge.note     { background: #388e3c; }
+  .lib-type-badge.workflow { background: #f57c00; }
+  .lib-snippet {
+    font-size: 0.85rem;
+    color: var(--pico-color);
+    white-space: pre-wrap;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2>Library</h2>
+<p><small>Search across all library files (skills, notes, workflows) in workspaces you can read.</small></p>
+
+<form class="lib-search-form"
+      hx-get="/library/search"
+      hx-target="#lib-results"
+      hx-swap="innerHTML"
+      hx-trigger="input changed delay:250ms from:input[name='q'], change"
+      hx-indicator="#lib-spinner"
+      onsubmit="return false;">
+  <div class="lib-search-row">
+    <label class="grow">
+      Search
+      <input type="text" name="q" placeholder="Search library content + titles..." autofocus>
+    </label>
+    <label style="min-width: 220px;">
+      Workspace
+      <select name="workspaceId">
+        <option value="">All workspaces</option>
+        {% for ws in workspaces %}
+        <option value="{{ ws.id }}">{{ ws.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="lib-search-row">
+    <div class="lib-type-chips">
+      <span class="lib-active-count">Type:</span>
+      <label><input type="checkbox" name="t" value="skill">Skill</label>
+      <label><input type="checkbox" name="t" value="note">Note</label>
+      <span id="lib-active-count" class="lib-active-count"></span>
+    </div>
+  </div>
+</form>
+
+<div id="lib-results">
+  <p><em>Type a query above to search the library.</em></p>
+</div>
+<span id="lib-spinner" class="htmx-indicator" aria-busy="true"></span>
+
+<script>
+  // Visual highlight + active filter count.
+  function libUpdateChips() {
+    const checked = document.querySelectorAll('input[name=t]:checked');
+    document.querySelectorAll('.lib-type-chips label').forEach(l => {
+      const cb = l.querySelector('input');
+      if (cb) l.classList.toggle('active', cb.checked);
+    });
+    const ws = document.querySelector('select[name=workspaceId]').value;
+    const active = checked.length + (ws ? 1 : 0);
+    const note = document.getElementById('lib-active-count');
+    if (note) note.textContent = active > 0 ? `(${active} filter${active === 1 ? '' : 's'} active)` : '';
+  }
+  document.addEventListener('change', libUpdateChips);
+  libUpdateChips();
+</script>
+{% endblock %}

@@ -424,6 +424,107 @@ async fn sandbox_query_returns_null_for_missing() {
     assert!(data["sandbox"].is_null());
 }
 
+// ─── Library search query tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn library_search_returns_empty_for_empty_query_state() {
+    // Even with no library data, the query should resolve cleanly
+    // and respect filter shapes (no errors).
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    // No filters
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($input: LibrarySearchInput!) {
+            librarySearch(input: $input) { id title type workspaceId snippet score }
+        }"#,
+        serde_json::json!({ "input": { "query": "anything", "limit": 10 } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert!(data["librarySearch"].is_array());
+
+    // Type filter only
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($input: LibrarySearchInput!) {
+            librarySearch(input: $input) { id type }
+        }"#,
+        serde_json::json!({ "input": { "query": "x", "types": ["SKILL", "NOTE"], "limit": 10 } }),
+    )
+    .await;
+    assert_no_errors(&result);
+
+    // Workspace filter — non-existent workspace fails service-layer
+    // find_by_id (this is a 404, not a silent empty result).
+    let bogus_ws = "00000000-0000-0000-0000-000000000000";
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($input: LibrarySearchInput!) {
+            librarySearch(input: $input) { id }
+        }"#,
+        serde_json::json!({ "input": { "query": "x", "workspaceId": bogus_ws, "limit": 10 } }),
+    )
+    .await;
+    assert!(
+        result.get("errors").is_some(),
+        "non-existent workspace_id should error: {result:#}"
+    );
+
+    // Both filters combined — same non-existent workspace, same error.
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($input: LibrarySearchInput!) {
+            librarySearch(input: $input) { id }
+        }"#,
+        serde_json::json!({ "input": {
+            "query": "x",
+            "types": ["SKILL"],
+            "workspaceId": bogus_ws,
+            "limit": 10
+        }}),
+    )
+    .await;
+    assert!(
+        result.get("errors").is_some(),
+        "non-existent workspace_id should error: {result:#}"
+    );
+}
+
+#[tokio::test]
+async fn library_search_anonymous_is_unauthorized() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let anon = drua_core::auth::AuthSubject::Anonymous;
+
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &anon,
+        r#"query($input: LibrarySearchInput!) {
+            librarySearch(input: $input) { id }
+        }"#,
+        serde_json::json!({ "input": { "query": "anything", "limit": 5 } }),
+    )
+    .await;
+    assert!(
+        result.get("errors").is_some(),
+        "anonymous subject should be rejected: {result:#}"
+    );
+}
+
 // ─── Schema introspection tests ─────────────────────────────────────────────
 
 #[tokio::test]
@@ -482,7 +583,14 @@ async fn schema_has_expected_queries() {
         .map(|f| f["name"].as_str().unwrap().to_string())
         .collect();
 
-    let expected = ["sandbox", "auditLog", "agent", "workspace", "workspaces"];
+    let expected = [
+        "sandbox",
+        "auditLog",
+        "agent",
+        "workspace",
+        "workspaces",
+        "librarySearch",
+    ];
     for name in expected {
         assert!(
             fields.contains(&name.to_string()),

@@ -1,0 +1,30 @@
+{% if let Some(err) = error %}
+<p style="color: var(--pico-del-color);">{{ err }}</p>
+{% endif %}
+
+{% if query.is_empty() %}
+<p><em>Type a query above to search the library.</em></p>
+{% else if hits.is_empty() && error.is_none() %}
+<p>No results for &ldquo;{{ query }}&rdquo;.</p>
+{% else %}
+<p style="font-size: 0.85rem; color: var(--pico-muted-color);">
+  {{ hits.len() }} result{% if hits.len() != 1 %}s{% endif %} for &ldquo;{{ query }}&rdquo;
+</p>
+{% for hit in hits %}
+<div class="lib-hit">
+  <div class="lib-hit-header">
+    <span class="lib-type-badge {{ hit.type_class }}">{{ hit.type_label }}</span>
+    <span class="lib-hit-title">
+      {% match hit.detail_url %}
+      {% when Some with (url) %}<a href="{{ url }}">{{ hit.title }}</a>
+      {% when None %}{{ hit.title }}
+      {% endmatch %}
+    </span>
+    <span class="lib-hit-meta">workspace: {{ hit.workspace_name }} &middot; score: {{ hit.score }}</span>
+  </div>
+  {% if !hit.snippet.is_empty() %}
+  <div class="lib-snippet">{{ hit.snippet }}</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}

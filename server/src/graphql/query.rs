@@ -5,6 +5,7 @@ use async_graphql::{
 
 use super::agent::Agent;
 use super::audit::{AuditEntry, AuditLogQueryInput};
+use super::library::{LibrarySearchHit, LibrarySearchInput};
 use super::primitives::*;
 use super::sandbox::Sandbox;
 use super::workspace::Workspace;
@@ -133,5 +134,32 @@ impl Query {
         };
         let entries = app.audit().find(&query).await?;
         Ok(entries.into_iter().map(AuditEntry::from).collect())
+    }
+
+    /// Cross-type, cross-workspace library search. Filters are additive
+    /// (AND). Results are scoped to workspaces the subject can read.
+    async fn library_search(
+        &self,
+        ctx: &Context<'_>,
+        input: LibrarySearchInput,
+    ) -> async_graphql::Result<Vec<LibrarySearchHit>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+
+        let doc_types: Vec<drua_core::library::DocType> = input
+            .types
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let limit = input.limit.clamp(1, 200) as usize;
+        let hits = app
+            .workspaces()
+            .library_search(sub, &input.query, input.workspace_id, &doc_types, limit)
+            .await?;
+
+        Ok(hits
+            .into_iter()
+            .map(LibrarySearchHit::from_domain)
+            .collect())
     }
 }

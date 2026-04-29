@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT doc_id, doc_type, title_text, content_text, tags,\n                          embedding <=> $1 AS distance\n                   FROM library_search_data\n                   WHERE workspace_id IN ($2, $5)\n                     AND embedding IS NOT NULL\n                     AND ($3::text IS NULL OR doc_type = $3)\n                   ORDER BY distance ASC\n                   LIMIT $4",
+  "query": "SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,\n                          embedding <=> $1 AS distance\n                   FROM library_search_data\n                   WHERE workspace_id = ANY($2)\n                     AND embedding IS NOT NULL\n                     AND ($3::text[] IS NULL OR doc_type = ANY($3))\n                   ORDER BY distance ASC\n                   LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -15,21 +15,26 @@
       },
       {
         "ordinal": 2,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
         "name": "title_text",
         "type_info": "Text"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "content_text",
         "type_info": "Text"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "tags",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "distance",
         "type_info": "Float8"
       }
@@ -42,10 +47,9 @@
             "kind": "Simple"
           }
         },
-        "Uuid",
-        "Text",
-        "Int8",
-        "Uuid"
+        "UuidArray",
+        "TextArray",
+        "Int8"
       ]
     },
     "nullable": [
@@ -54,8 +58,9 @@
       false,
       false,
       false,
+      false,
       null
     ]
   },
-  "hash": "f0065e83d9e6e7f37db8c02e3738e259419b832a77e393a7e94ba088674b8238"
+  "hash": "c4841f679a80ed56c705bfea444cfe4744e1ef37ecd11eacc07b62318d0da275"
 }
