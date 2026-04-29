@@ -1,7 +1,7 @@
 use job::*;
 use serde::{Deserialize, Serialize};
 
-use super::file::RuntimeFile;
+use super::file::UpstreamOp;
 use super::upstream::Upstream;
 
 /// Serializes all git ops on the library repo (both forward-sync
@@ -10,7 +10,7 @@ pub const LIBRARY_LOCK_QUEUE: &str = "library-lock";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct WriteToRuntimeConfig {
-    pub file: RuntimeFile,
+    pub file: UpstreamOp,
 }
 
 pub(super) struct WriteToRuntimeJobInitializer {
@@ -45,7 +45,7 @@ impl JobInitializer for WriteToRuntimeJobInitializer {
 
 struct WriteToRuntimeRunner {
     upstream: Upstream,
-    file: RuntimeFile,
+    file: UpstreamOp,
 }
 
 #[async_trait::async_trait]
@@ -58,7 +58,7 @@ impl JobRunner for WriteToRuntimeRunner {
         self.upstream.pull().await?;
 
         // Workspace cleanup: always execute, no hash comparison.
-        if let RuntimeFile::WorkspaceCleanup { workspace_name } = &self.file {
+        if let UpstreamOp::WorkspaceCleanup { workspace_name } = &self.file {
             let dir_path = format!("runtime/workspaces/{workspace_name}");
             let message = format!("workspace: delete {workspace_name}");
 

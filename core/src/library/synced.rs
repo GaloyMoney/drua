@@ -7,7 +7,7 @@ use es_entity::{
 use job::{CurrentJob, Job, JobCompletion, JobId, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
 
-use super::file::{DocType, GitFileHash, RuntimeFile, SearchableFields};
+use super::file::{DocType, GitFileHash, SearchableFields, UpstreamOp};
 use super::search::SearchStore;
 use super::{Library, LibraryError, LIBRARY_LOCK_QUEUE};
 
@@ -170,21 +170,27 @@ where
     if !new_events.any(|p| E::is_content_event(&p.event)) {
         return Ok(());
     }
-    let file = RuntimeFile::Synced(Box::new(entity.to_synced_file()));
+    let file = UpstreamOp::Synced(Box::new(entity.to_synced_file()));
     library.write_in_op(op, &file).await
 }
 
-// ── LibraryFileFormat (reverse sync) ─────────────────────────────────────────
+// ── LibraryImporter (reverse sync — implemented on the service) ─────────────
 
 /// Boxed std error used by the generic runner to log per-type upsert
 /// failures uniformly (skill/workflow services return their own error
 /// enums; boxing avoids a per-type `From` impl on `LibraryError`).
 pub type UpsertError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Entity service surface needed by the generic reverse-sync runner.
-pub trait LibraryFileFormat: LibrarySynced {
-    /// Service type that owns the upsert path (e.g. `Skills`, `Workflows`).
-    type Service: Send + Sync + 'static;
+/// Implemented on **services** (`Skills`, `Workflows`, …) that import
+/// entities from the git-backed library. The associated `Entity` carries
+/// the forward-sync projection (`LibrarySynced::DOC_TYPE` is the source of
+/// truth for subdir/extension and file format identity).
+pub trait LibraryImporter: Send + Sync + 'static {
+    /// The entity type this service imports from the library.
+    type Entity: LibrarySynced;
+
+    /// Reverse-sync `JobType` name; must be unique per impl.
+    const JOB_TYPE: &'static str;
 
     /// `true` rejects parsed files whose folder doesn't resolve to a
     /// workspace; `false` allows global files.
@@ -197,7 +203,7 @@ pub trait LibraryFileFormat: LibrarySynced {
 
     /// Apply a parsed file to the entity service inside a transaction.
     fn upsert_in_op(
-        service: &Self::Service,
+        &self,
         op: &mut es_entity::DbOp<'_>,
         file: &SyncedFile,
         workspace_id: Option<WorkspaceId>,
@@ -237,36 +243,31 @@ impl SyncFromLibraryConfig {
     }
 }
 
-/// Generic over `E: LibraryFileFormat`. Per-type instances differ only in the
-/// concrete `Service` they hold and the `JobType` string they register under.
-pub struct SyncFromLibraryJobInitializer<E: LibraryFileFormat> {
-    library: Library,
-    service: Arc<E::Service>,
+/// Generic over `S: LibraryImporter`. The service is the parameter — the
+/// associated `Entity` (`LibrarySynced` impl) supplies subdir/extension/
+/// `DOC_TYPE` for the parametric `find_changes`, and `S::JOB_TYPE` is the
+/// unique job-runner name.
+pub struct SyncFromLibraryJobInitializer<S: LibraryImporter> {
+    library: Arc<Library>,
+    service: Arc<S>,
     workspaces: Arc<Workspaces>,
-    job_type: JobType,
 }
 
-impl<E: LibraryFileFormat> SyncFromLibraryJobInitializer<E> {
-    pub fn new(
-        library: Library,
-        service: Arc<E::Service>,
-        workspaces: Arc<Workspaces>,
-        job_type_name: &'static str,
-    ) -> Self {
+impl<S: LibraryImporter> SyncFromLibraryJobInitializer<S> {
+    pub fn new(library: Arc<Library>, service: Arc<S>, workspaces: Arc<Workspaces>) -> Self {
         Self {
             library,
             service,
             workspaces,
-            job_type: JobType::new(job_type_name),
         }
     }
 }
 
-impl<E: LibraryFileFormat> JobInitializer for SyncFromLibraryJobInitializer<E> {
+impl<S: LibraryImporter> JobInitializer for SyncFromLibraryJobInitializer<S> {
     type Config = SyncFromLibraryConfig;
 
     fn job_type(&self) -> JobType {
-        self.job_type.clone()
+        JobType::new(S::JOB_TYPE)
     }
 
     fn init(
@@ -275,8 +276,8 @@ impl<E: LibraryFileFormat> JobInitializer for SyncFromLibraryJobInitializer<E> {
         spawner: JobSpawner<Self::Config>,
     ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
         let config: SyncFromLibraryConfig = job.config()?;
-        Ok(Box::new(SyncFromLibraryRunner::<E> {
-            library: self.library.clone(),
+        Ok(Box::new(SyncFromLibraryRunner::<S> {
+            library: Arc::clone(&self.library),
             service: Arc::clone(&self.service),
             workspaces: Arc::clone(&self.workspaces),
             config,
@@ -285,16 +286,16 @@ impl<E: LibraryFileFormat> JobInitializer for SyncFromLibraryJobInitializer<E> {
     }
 }
 
-struct SyncFromLibraryRunner<E: LibraryFileFormat> {
-    library: Library,
-    service: Arc<E::Service>,
+struct SyncFromLibraryRunner<S: LibraryImporter> {
+    library: Arc<Library>,
+    service: Arc<S>,
     workspaces: Arc<Workspaces>,
     config: SyncFromLibraryConfig,
     spawner: JobSpawner<SyncFromLibraryConfig>,
 }
 
 #[async_trait::async_trait]
-impl<E: LibraryFileFormat> JobRunner for SyncFromLibraryRunner<E> {
+impl<S: LibraryImporter> JobRunner for SyncFromLibraryRunner<S> {
     async fn run(
         &self,
         current_job: CurrentJob,
@@ -304,7 +305,7 @@ impl<E: LibraryFileFormat> JobRunner for SyncFromLibraryRunner<E> {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    doc_type = E::DOC_TYPE.as_str(),
+                    doc_type = <S::Entity as LibrarySynced>::DOC_TYPE.as_str(),
                     "library sync cycle failed"
                 );
                 self.config.last_sync_commit.clone()
@@ -322,14 +323,14 @@ impl<E: LibraryFileFormat> JobRunner for SyncFromLibraryRunner<E> {
     }
 }
 
-impl<E: LibraryFileFormat> SyncFromLibraryRunner<E> {
+impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
     async fn sync_once(
         &self,
         current_job: &CurrentJob,
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let changes = self
             .library
-            .find_changes::<E>(self.config.last_sync_commit.as_deref())
+            .find_changes::<S>(self.config.last_sync_commit.as_deref())
             .await?;
 
         if changes.files.is_empty() {
@@ -341,10 +342,12 @@ impl<E: LibraryFileFormat> SyncFromLibraryRunner<E> {
             return Ok(commit);
         }
 
+        let doc_type = <S::Entity as LibrarySynced>::DOC_TYPE.as_str();
+
         tracing::info!(
             count = changes.files.len(),
             head = %changes.head_commit,
-            doc_type = E::DOC_TYPE.as_str(),
+            doc_type,
             "processing changed files from library"
         );
 
@@ -383,11 +386,8 @@ impl<E: LibraryFileFormat> SyncFromLibraryRunner<E> {
                 None => None,
             };
 
-            if E::WORKSPACE_REQUIRED && ws_id.is_none() {
-                tracing::warn!(
-                    doc_type = E::DOC_TYPE.as_str(),
-                    "workspace required but unresolved; skipping"
-                );
+            if S::WORKSPACE_REQUIRED && ws_id.is_none() {
+                tracing::warn!(doc_type, "workspace required but unresolved; skipping");
                 continue;
             }
             resolved.push((parsed, ws_id));
@@ -396,12 +396,14 @@ impl<E: LibraryFileFormat> SyncFromLibraryRunner<E> {
         let mut op = current_job.begin_op().await?;
         for (parsed, ws_id) in &resolved {
             let file_hash = parsed.file.file_hash();
-            if let Err(e) =
-                E::upsert_in_op(&self.service, &mut op, &parsed.file, *ws_id, file_hash).await
+            if let Err(e) = self
+                .service
+                .upsert_in_op(&mut op, &parsed.file, *ws_id, file_hash)
+                .await
             {
                 tracing::warn!(
                     error = %e,
-                    doc_type = E::DOC_TYPE.as_str(),
+                    doc_type,
                     "failed to upsert from library, skipping"
                 );
             }
@@ -421,11 +423,11 @@ impl<E: LibraryFileFormat> SyncFromLibraryRunner<E> {
 pub(super) struct LibrarySyncHook {
     inbox: obix::Inbox,
     search: SearchStore,
-    files: Vec<RuntimeFile>,
+    files: Vec<UpstreamOp>,
 }
 
 impl LibrarySyncHook {
-    pub(super) fn new(inbox: obix::Inbox, search: SearchStore, file: RuntimeFile) -> Self {
+    pub(super) fn new(inbox: obix::Inbox, search: SearchStore, file: UpstreamOp) -> Self {
         Self {
             inbox,
             search,
@@ -441,17 +443,21 @@ impl CommitHook for LibrarySyncHook {
     ) -> Result<PreCommitRet<'_, Self>, sqlx::Error> {
         for file in &self.files {
             if let Some(fields) = file.searchable_fields() {
-                if let Err(e) = self.search.upsert_in_op(&mut op, &fields).await {
-                    return Err(sqlx_protocol(e));
-                }
+                self.search.upsert_in_op(&mut op, &fields).await?;
             }
 
+            // `InboxError::{Job,Deserialization}` aren't sqlx errors but the
+            // hook contract is `sqlx::Error`-only; unwrap the inner sqlx
+            // error when present, otherwise stringify via `Protocol`.
             if let Err(e) = self
                 .inbox
                 .persist_and_queue_job_in_op(&mut op, file.idempotency_key(), file)
                 .await
             {
-                return Err(sqlx_protocol(e));
+                return Err(match e {
+                    obix::InboxError::Sqlx(s) => s,
+                    other => sqlx::Error::Protocol(format!("library inbox: {other}")),
+                });
             }
         }
 
@@ -464,16 +470,12 @@ impl CommitHook for LibrarySyncHook {
     }
 }
 
-fn sqlx_protocol(e: impl std::fmt::Display) -> sqlx::Error {
-    sqlx::Error::Protocol(format!("library sync: {e}"))
-}
-
 /// Register a library write to fire at transaction commit.
 pub(super) async fn enqueue_write<OP: AtomicOperation>(
     op: &mut OP,
     inbox: &obix::Inbox,
     search: &SearchStore,
-    file: RuntimeFile,
+    file: UpstreamOp,
 ) -> Result<(), sqlx::Error> {
     let hook = LibrarySyncHook::new(inbox.clone(), search.clone(), file);
     if let Err(hook) = op.add_commit_hook(hook) {

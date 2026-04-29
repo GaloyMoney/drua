@@ -30,7 +30,7 @@ impl InboxHandler for LibraryWriteHandler {
         &self,
         event: &InboxEvent,
     ) -> Result<InboxResult, Box<dyn std::error::Error + Send + Sync>> {
-        let file: super::RuntimeFile = event.payload()?;
+        let file: super::UpstreamOp = event.payload()?;
 
         if let Some(fields) = file.searchable_fields() {
             let embedding = self

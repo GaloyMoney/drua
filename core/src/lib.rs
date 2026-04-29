@@ -63,7 +63,7 @@ pub struct App {
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
-    library: Library,
+    library: Arc<Library>,
     notes: Arc<Notes>,
     jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task lives as long as `App`.
@@ -246,15 +246,15 @@ impl App {
             Arc::clone(&workspaces),
         ));
 
-        // Reverse-sync (file → entity) for every type that implements
-        // `LibraryFileFormat`. Uses library-lock queue to serialise with
-        // forward-sync writes; merge() collapses bursts into one batch.
+        // Reverse-sync (file → entity) for every service that implements
+        // `LibraryImporter`. Uses library-lock queue to serialise with
+        // forward-sync writes; `merge()` collapses bursts into one batch.
+        let library = Arc::new(library);
         {
-            let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skill>::new(
-                library.clone(),
+            let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
+                Arc::clone(&library),
                 Arc::clone(&skills),
                 Arc::clone(&workspaces),
-                skill::job::SYNC_SKILLS_FROM_LIBRARY_JOB,
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
@@ -271,13 +271,11 @@ impl App {
         }
 
         {
-            let sync_init =
-                library::SyncFromLibraryJobInitializer::<workflow::WorkflowDefinition>::new(
-                    library.clone(),
-                    Arc::clone(&workflows),
-                    Arc::clone(&workspaces),
-                    workflow::job::SYNC_WORKFLOWS_FROM_LIBRARY_JOB,
-                );
+            let sync_init = library::SyncFromLibraryJobInitializer::<workflow::Workflows>::new(
+                Arc::clone(&library),
+                Arc::clone(&workflows),
+                Arc::clone(&workspaces),
+            );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
                 .spawn_with_queue_id(

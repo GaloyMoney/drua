@@ -83,16 +83,17 @@ impl SearchableFields {
     }
 }
 
-/// Inbox payload + write-job input. `Synced` carries entity-backed files;
-/// `GitKeep`/`WorkspaceCleanup` are scaffolding/cleanup ops that don't map
-/// to any entity.
+/// One operation to apply to the upstream git library — inbox payload +
+/// `WriteToRuntime` job input. `Synced` carries an entity-backed file
+/// write; `GitKeep`/`WorkspaceCleanup` are scaffolding / cleanup ops with
+/// no backing entity.
 ///
 /// `Synced` is boxed because `SyncedFile` is several hundred bytes and
-/// dominates enum size — boxing keeps `RuntimeFile` cheap to pass around
+/// dominates enum size — boxing keeps `UpstreamOp` cheap to pass around
 /// (clippy: `large_enum_variant`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RuntimeFile {
+pub enum UpstreamOp {
     Synced(Box<SyncedFile>),
     GitKeep {
         workspace_name: String,
@@ -105,7 +106,7 @@ pub enum RuntimeFile {
     },
 }
 
-impl RuntimeFile {
+impl UpstreamOp {
     #[allow(clippy::too_many_arguments)]
     pub fn for_note(
         note_id: NoteId,
@@ -120,7 +121,7 @@ impl RuntimeFile {
         let id = uuid::Uuid::from(note_id);
         let id_prefix = id.to_string()[..8].to_string();
         let rendered = render_note_markdown(id, title, body, tags, created_at, updated_at);
-        RuntimeFile::Synced(Box::new(SyncedFile {
+        UpstreamOp::Synced(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Note,
             workspace_id: Some(workspace_id),
@@ -176,7 +177,7 @@ impl RuntimeFile {
         let id = uuid::Uuid::from(skill_id);
         let id_prefix = id.to_string()[..8].to_string();
         let rendered = render_skill_markdown(id, name, description, body, created_at, updated_at);
-        RuntimeFile::Synced(Box::new(SyncedFile {
+        UpstreamOp::Synced(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Skill,
             workspace_id,
@@ -247,7 +248,7 @@ impl RuntimeFile {
             created_at,
             updated_at,
         );
-        RuntimeFile::Synced(Box::new(SyncedFile {
+        UpstreamOp::Synced(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Workflow,
             workspace_id,
@@ -266,21 +267,21 @@ impl RuntimeFile {
 
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
-            RuntimeFile::Synced(s) => Some(s.searchable_fields()),
-            RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => None,
+            UpstreamOp::Synced(s) => Some(s.searchable_fields()),
+            UpstreamOp::GitKeep { .. } | UpstreamOp::WorkspaceCleanup { .. } => None,
         }
     }
 
     pub(super) fn relative_path(&self) -> String {
         match self {
-            RuntimeFile::Synced(s) => s.relative_path(),
-            RuntimeFile::GitKeep {
+            UpstreamOp::Synced(s) => s.relative_path(),
+            UpstreamOp::GitKeep {
                 workspace_name,
                 subdir,
             } => {
                 format!("runtime/workspaces/{workspace_name}/{subdir}/.gitkeep")
             }
-            RuntimeFile::WorkspaceCleanup { workspace_name } => {
+            UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("runtime/workspaces/{workspace_name}")
             }
         }
@@ -288,19 +289,19 @@ impl RuntimeFile {
 
     pub(crate) fn content(&self) -> String {
         match self {
-            RuntimeFile::Synced(s) => s.rendered.clone(),
-            RuntimeFile::GitKeep { .. } | RuntimeFile::WorkspaceCleanup { .. } => String::new(),
+            UpstreamOp::Synced(s) => s.rendered.clone(),
+            UpstreamOp::GitKeep { .. } | UpstreamOp::WorkspaceCleanup { .. } => String::new(),
         }
     }
 
     pub(super) fn commit_message(&self) -> String {
         match self {
-            RuntimeFile::Synced(s) => s.commit_message(),
-            RuntimeFile::GitKeep {
+            UpstreamOp::Synced(s) => s.commit_message(),
+            UpstreamOp::GitKeep {
                 workspace_name,
                 subdir,
             } => format!("workspace: scaffold {workspace_name}/{subdir}"),
-            RuntimeFile::WorkspaceCleanup { workspace_name } => {
+            UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace: delete {workspace_name}")
             }
         }
@@ -308,21 +309,21 @@ impl RuntimeFile {
 
     pub(crate) fn original_path(&self) -> Option<&str> {
         match self {
-            RuntimeFile::Synced(s) => s.original_path.as_deref(),
+            UpstreamOp::Synced(s) => s.original_path.as_deref(),
             _ => None,
         }
     }
 
     pub(crate) fn idempotency_key(&self) -> String {
         match self {
-            RuntimeFile::GitKeep {
+            UpstreamOp::GitKeep {
                 workspace_name,
                 subdir,
             } => format!("gitkeep:{workspace_name}:{subdir}"),
-            RuntimeFile::WorkspaceCleanup { workspace_name } => {
+            UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace-cleanup:{workspace_name}")
             }
-            RuntimeFile::Synced(s) => s.file_hash().to_string(),
+            UpstreamOp::Synced(s) => s.file_hash().to_string(),
         }
     }
 
@@ -923,9 +924,9 @@ pub fn workspace_name_from_workflow_path(relative_path: &str) -> Option<String> 
 mod tests {
     use super::*;
 
-    fn synced(file: &RuntimeFile) -> &SyncedFile {
+    fn synced(file: &UpstreamOp) -> &SyncedFile {
         match file {
-            RuntimeFile::Synced(s) => s,
+            UpstreamOp::Synced(s) => s,
             _ => panic!("expected Synced variant"),
         }
     }
@@ -934,7 +935,7 @@ mod tests {
     fn parse_skill_markdown_roundtrip() {
         let skill_id = SkillId::new();
         let id_prefix = &skill_id.to_string()[..8];
-        let original = RuntimeFile::for_skill(
+        let original = UpstreamOp::for_skill(
             skill_id,
             Some(WorkspaceId::new()),
             Some("my-workspace"),
@@ -965,7 +966,7 @@ mod tests {
     fn parse_skill_markdown_global() {
         let skill_id = SkillId::new();
         let id_prefix = &skill_id.to_string()[..8];
-        let original = RuntimeFile::for_skill(
+        let original = UpstreamOp::for_skill(
             skill_id,
             None,
             None,
@@ -1016,7 +1017,7 @@ mod tests {
     fn parse_skill_hash_matches_original() {
         let skill_id = SkillId::new();
         let id_prefix = &skill_id.to_string()[..8];
-        let original = RuntimeFile::for_skill(
+        let original = UpstreamOp::for_skill(
             skill_id,
             None,
             None,
@@ -1172,7 +1173,7 @@ mod tests {
     #[test]
     fn workflow_yaml_roundtrip_global() {
         let id = WorkflowDefinitionId::new();
-        let original = RuntimeFile::for_workflow(
+        let original = UpstreamOp::for_workflow(
             id,
             None,
             None,
@@ -1220,7 +1221,7 @@ mod tests {
     #[test]
     fn workflow_yaml_roundtrip_preserves_sandboxes() {
         let id = WorkflowDefinitionId::new();
-        let original = RuntimeFile::for_workflow(
+        let original = UpstreamOp::for_workflow(
             id,
             None,
             None,

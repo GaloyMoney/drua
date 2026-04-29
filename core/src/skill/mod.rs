@@ -1,6 +1,5 @@
 mod entity;
 pub mod error;
-pub(crate) mod job;
 pub(crate) mod repo;
 
 use std::sync::Arc;
@@ -503,6 +502,27 @@ mod skill_extract_tests {
     fn returns_empty_when_body_absent() {
         let rendered = "---\nid: 0\n---\n\n";
         assert_eq!(extract_skill_body(rendered).unwrap(), "");
+    }
+}
+
+impl crate::library::LibraryImporter for Skills {
+    type Entity = Skill;
+    const JOB_TYPE: &'static str = "skill.sync-from-library";
+
+    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
+        crate::library::parse_skill_markdown(content, path)
+    }
+
+    async fn upsert_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        file: &crate::library::SyncedFile,
+        workspace_id: Option<WorkspaceId>,
+        file_hash: GitFileHash,
+    ) -> Result<(), crate::library::UpsertError> {
+        self.upsert_from_library_in_op(op, file, workspace_id, file_hash)
+            .await
+            .map_err(|e| Box::new(e) as crate::library::UpsertError)
     }
 }
 

@@ -41,7 +41,7 @@ impl SearchStore {
         &self,
         op: &mut impl es_entity::AtomicOperation,
         fields: &SearchableFields,
-    ) -> Result<(), LibraryError> {
+    ) -> Result<(), sqlx::Error> {
         let tags_json = serde_json::to_value(&fields.tags).unwrap_or_default();
         let doc_type = fields.doc_type.as_str();
         sqlx::query!(

@@ -17,12 +17,12 @@ use self::upstream::Upstream;
 pub use error::LibraryError;
 pub use file::{
     parse_skill_markdown, parse_workflow_yaml, render_note_markdown, render_skill_markdown,
-    render_workflow_yaml, DocType, GitFileHash, ParsedWorkflowFile, RuntimeFile, SearchableFields,
+    render_workflow_yaml, DocType, GitFileHash, ParsedWorkflowFile, SearchableFields, UpstreamOp,
 };
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::SearchResult;
 pub use synced::{
-    sync_to_library, Changes, LibraryFileFormat, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
+    sync_to_library, Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
     SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
 };
 
@@ -112,7 +112,7 @@ impl Library {
     pub async fn write_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
-        file: &RuntimeFile,
+        file: &UpstreamOp,
     ) -> Result<(), LibraryError> {
         synced::enqueue_write(op, &self.inbox, &self.search, file.clone()).await?;
         Ok(())
@@ -126,7 +126,7 @@ impl Library {
         workspace_name: &str,
     ) -> Result<(), LibraryError> {
         for subdir in ["notes", "skills", "workflows"] {
-            let file = RuntimeFile::GitKeep {
+            let file = UpstreamOp::GitKeep {
                 workspace_name: workspace_name.to_string(),
                 subdir: subdir.to_string(),
             };
@@ -149,7 +149,7 @@ impl Library {
             .delete_for_workspace_in_op(op, workspace_id)
             .await?;
 
-        let file = RuntimeFile::WorkspaceCleanup {
+        let file = UpstreamOp::WorkspaceCleanup {
             workspace_name: workspace_name.to_string(),
         };
         synced::enqueue_write(op, &self.inbox, &self.search, file).await?;
@@ -157,11 +157,11 @@ impl Library {
     }
 
     /// Generic reverse-sync. Returns parsed `ParsedFile`s for every changed
-    /// file under `E::DOC_TYPE`'s subdir since `last_sync_commit`. On first
-    /// run (`None`), returns all tracked files. Empty `files` when HEAD
-    /// hasn't moved.
+    /// file under `S::Entity::DOC_TYPE`'s subdir since `last_sync_commit`.
+    /// On first run (`None`), returns all tracked files. Empty `files` when
+    /// HEAD hasn't moved.
     #[tracing::instrument(name = "library.find_changes", skip(self))]
-    pub async fn find_changes<E: LibraryFileFormat>(
+    pub async fn find_changes<S: LibraryImporter>(
         &self,
         last_sync_commit: Option<&str>,
     ) -> Result<Changes, LibraryError> {
@@ -186,19 +186,20 @@ impl Library {
             });
         }
 
+        let doc_type = <S::Entity as LibrarySynced>::DOC_TYPE;
         let changed = self
             .upstream
-            .changed_files(last_sync_commit, E::DOC_TYPE.subdir(), E::DOC_TYPE.ext())
+            .changed_files(last_sync_commit, doc_type.subdir(), doc_type.ext())
             .await?;
 
         let mut files = Vec::with_capacity(changed.len());
         for (path, content) in &changed {
-            match E::parse(content, path) {
+            match S::parse(content, path) {
                 Some(parsed) => files.push(parsed),
                 None => {
                     tracing::warn!(
                         path = %path,
-                        doc_type = E::DOC_TYPE.as_str(),
+                        doc_type = doc_type.as_str(),
                         "failed to parse library file, skipping"
                     );
                 }

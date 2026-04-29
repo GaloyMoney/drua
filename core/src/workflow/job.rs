@@ -85,7 +85,3 @@ impl JobRunner for ExecuteRunRunner {
         Ok(JobCompletion::Complete)
     }
 }
-
-/// Generic-runner JobType name for workflow reverse-sync. The runner
-/// itself lives in `library::SyncFromLibraryJobInitializer<WorkflowDefinition>`.
-pub(crate) const SYNC_WORKFLOWS_FROM_LIBRARY_JOB: &str = "workflow.sync-from-library";

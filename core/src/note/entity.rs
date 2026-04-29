@@ -83,8 +83,8 @@ impl Note {
             .unwrap_or_default()
     }
 
-    pub(super) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        crate::library::RuntimeFile::Synced(Box::new(
+    pub(super) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
+        crate::library::UpstreamOp::Synced(Box::new(
             <Self as crate::library::LibrarySynced>::to_synced_file(self),
         ))
     }
@@ -326,7 +326,7 @@ mod tests {
     use super::{NewNote, Note};
 
     fn test_hash() -> GitFileHash {
-        let rf = crate::library::RuntimeFile::for_note(
+        let rf = crate::library::UpstreamOp::for_note(
             NoteId::new(),
             WorkspaceId::new(),
             "test",

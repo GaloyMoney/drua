@@ -80,7 +80,7 @@ impl Upstream {
     }
 
     /// Same `blob <len>\0<content>` format as `git hash-object`, matching
-    /// [`super::file::RuntimeFile::file_hash`].
+    /// [`super::file::UpstreamOp::file_hash`].
     pub async fn file_hash_on_disk(&self, relative_path: &str) -> Option<GitFileHash> {
         let full_path = self.repo_path.join(relative_path);
         let content = tokio::fs::read(&full_path).await.ok()?;

@@ -53,8 +53,8 @@ impl Skill {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        crate::library::RuntimeFile::Synced(Box::new(
+    pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
+        crate::library::UpstreamOp::Synced(Box::new(
             <Self as crate::library::LibrarySynced>::to_synced_file(self),
         ))
     }
@@ -185,27 +185,6 @@ impl crate::library::LibrarySynced for Skill {
             &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
             &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
         )
-    }
-}
-
-impl crate::library::LibraryFileFormat for Skill {
-    type Service = super::Skills;
-
-    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        crate::library::parse_skill_markdown(content, path)
-    }
-
-    async fn upsert_in_op(
-        service: &Self::Service,
-        op: &mut es_entity::DbOp<'_>,
-        file: &crate::library::SyncedFile,
-        workspace_id: Option<WorkspaceId>,
-        file_hash: GitFileHash,
-    ) -> Result<(), crate::library::UpsertError> {
-        service
-            .upsert_from_library_in_op(op, file, workspace_id, file_hash)
-            .await
-            .map_err(|e| Box::new(e) as crate::library::UpsertError)
     }
 }
 

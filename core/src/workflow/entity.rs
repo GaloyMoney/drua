@@ -71,8 +71,8 @@ impl WorkflowDefinition {
             .expect("entity should have at least one persisted timestamp")
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        crate::library::RuntimeFile::Synced(Box::new(
+    pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
+        crate::library::UpstreamOp::Synced(Box::new(
             <Self as crate::library::LibrarySynced>::to_synced_file(self),
         ))
     }
@@ -201,31 +201,6 @@ impl crate::library::LibrarySynced for WorkflowDefinition {
             &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
             &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
         )
-    }
-}
-
-impl crate::library::LibraryFileFormat for WorkflowDefinition {
-    type Service = super::Workflows;
-    const WORKSPACE_REQUIRED: bool = true;
-
-    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        crate::library::parse_workflow_yaml(content, path).map(|p| p.parsed)
-    }
-
-    async fn upsert_in_op(
-        service: &Self::Service,
-        op: &mut es_entity::DbOp<'_>,
-        file: &crate::library::SyncedFile,
-        workspace_id: Option<WorkspaceId>,
-        file_hash: GitFileHash,
-    ) -> Result<(), crate::library::UpsertError> {
-        let ws_id = workspace_id.ok_or_else(|| -> crate::library::UpsertError {
-            "workflow upsert requires a workspace id".into()
-        })?;
-        service
-            .upsert_from_library_in_op(op, file, ws_id, file_hash)
-            .await
-            .map_err(|e| Box::new(e) as crate::library::UpsertError)
     }
 }
 
