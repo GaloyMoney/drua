@@ -85,8 +85,8 @@ impl SearchableFields {
 
 /// One operation to apply to the upstream git library — inbox payload +
 /// `WriteToRuntime` job input. `Synced` carries an entity-backed file
-/// write; `GitKeep`/`WorkspaceCleanup` are scaffolding / cleanup ops with
-/// no backing entity.
+/// write; `WorkspaceInit`/`WorkspaceCleanup` are scaffolding / teardown ops
+/// with no backing entity.
 ///
 /// `Synced` is boxed because `SyncedFile` is several hundred bytes and
 /// dominates enum size — boxing keeps `UpstreamOp` cheap to pass around
@@ -95,9 +95,11 @@ impl SearchableFields {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpstreamOp {
     Synced(Box<SyncedFile>),
-    GitKeep {
+    /// Job runner writes `.gitkeep` markers in `notes/`, `skills/`, and
+    /// `workflows/` under `runtime/workspaces/{workspace_name}/` in a
+    /// single commit + push.
+    WorkspaceInit {
         workspace_name: String,
-        subdir: String,
     },
     /// Job runner removes the entire `runtime/workspaces/{workspace_name}/`
     /// directory from the library repo and pushes.
@@ -268,20 +270,15 @@ impl UpstreamOp {
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
             UpstreamOp::Synced(s) => Some(s.searchable_fields()),
-            UpstreamOp::GitKeep { .. } | UpstreamOp::WorkspaceCleanup { .. } => None,
+            UpstreamOp::WorkspaceInit { .. } | UpstreamOp::WorkspaceCleanup { .. } => None,
         }
     }
 
     pub(super) fn relative_path(&self) -> String {
         match self {
             UpstreamOp::Synced(s) => s.relative_path(),
-            UpstreamOp::GitKeep {
-                workspace_name,
-                subdir,
-            } => {
-                format!("runtime/workspaces/{workspace_name}/{subdir}/.gitkeep")
-            }
-            UpstreamOp::WorkspaceCleanup { workspace_name } => {
+            UpstreamOp::WorkspaceInit { workspace_name }
+            | UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("runtime/workspaces/{workspace_name}")
             }
         }
@@ -290,17 +287,16 @@ impl UpstreamOp {
     pub(crate) fn content(&self) -> String {
         match self {
             UpstreamOp::Synced(s) => s.rendered.clone(),
-            UpstreamOp::GitKeep { .. } | UpstreamOp::WorkspaceCleanup { .. } => String::new(),
+            UpstreamOp::WorkspaceInit { .. } | UpstreamOp::WorkspaceCleanup { .. } => String::new(),
         }
     }
 
     pub(super) fn commit_message(&self) -> String {
         match self {
             UpstreamOp::Synced(s) => s.commit_message(),
-            UpstreamOp::GitKeep {
-                workspace_name,
-                subdir,
-            } => format!("workspace: scaffold {workspace_name}/{subdir}"),
+            UpstreamOp::WorkspaceInit { workspace_name } => {
+                format!("workspace: init {workspace_name}")
+            }
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace: delete {workspace_name}")
             }
@@ -316,10 +312,9 @@ impl UpstreamOp {
 
     pub(crate) fn idempotency_key(&self) -> String {
         match self {
-            UpstreamOp::GitKeep {
-                workspace_name,
-                subdir,
-            } => format!("gitkeep:{workspace_name}:{subdir}"),
+            UpstreamOp::WorkspaceInit { workspace_name } => {
+                format!("workspace-init:{workspace_name}")
+            }
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 format!("workspace-cleanup:{workspace_name}")
             }

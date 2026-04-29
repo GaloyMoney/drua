@@ -103,23 +103,6 @@ impl Library {
         })
     }
 
-    /// Registers a `LibrarySyncHook` on `op` so that — at commit time — the
-    /// file's search row is upserted and an inbox event is persisted in the
-    /// same transaction. Multiple registrations within one op merge into a
-    /// single hook (one inbox row, one batched search pass).
-    ///
-    /// The inbox handler then embeds the document and spawns a serialized
-    /// `WriteToRuntime` job for git pull/write/commit/push on any node.
-    #[tracing::instrument(name = "library.write_in_op", skip_all)]
-    pub async fn write_in_op(
-        &self,
-        op: &mut impl es_entity::AtomicOperation,
-        file: &UpstreamOp,
-    ) -> Result<(), LibraryError> {
-        self.enqueue_write(op, file.clone()).await?;
-        Ok(())
-    }
-
     /// Per-repo `post_persist_hook` body collapses to a one-liner over this:
     /// projects the entity into a `SyncedFile` and registers the write hook
     /// when at least one persisted event was a content event.
@@ -142,7 +125,8 @@ impl Library {
             return Ok(());
         }
         let file = UpstreamOp::Synced(Box::new(entity.to_synced_file()));
-        self.write_in_op(op, &file).await
+        self.enqueue_write(op, file.clone()).await?;
+        Ok(())
     }
 
     async fn enqueue_write<OP: es_entity::AtomicOperation>(
@@ -157,20 +141,18 @@ impl Library {
         Ok(())
     }
 
-    /// Queues `.gitkeep` files so notes/, skills/, workflows/ folders are committed.
+    /// Queues a single `WorkspaceInit` op — `notes/`, `skills/`,
+    /// `workflows/` `.gitkeep` markers all land in one commit + push.
     #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
     pub async fn sync_workspace_folder_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
         workspace_name: &str,
     ) -> Result<(), LibraryError> {
-        for subdir in ["notes", "skills", "workflows"] {
-            let file = UpstreamOp::GitKeep {
-                workspace_name: workspace_name.to_string(),
-                subdir: subdir.to_string(),
-            };
-            self.enqueue_write(op, file).await?;
-        }
+        let file = UpstreamOp::WorkspaceInit {
+            workspace_name: workspace_name.to_string(),
+        };
+        self.enqueue_write(op, file).await?;
         Ok(())
     }
 
