@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM sandboxes WHERE COALESCE(workspace_id = $1, $1 IS NULL) AND (COALESCE(id < $3, true)) ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN sandbox_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT name, created_at, id FROM sandboxes WHERE ((name = $1) AND (COALESCE((created_at, id) > ($4, $3), $3 IS NULL))) ORDER BY created_at ASC, id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN sandbox_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,9 +31,10 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
+        "Text",
         "Int8",
         "Uuid",
+        "Timestamptz",
         "Bool"
       ]
     },
@@ -45,5 +46,5 @@
       false
     ]
   },
-  "hash": "aa0feb1cbf2a4bf319400cf9284aa896d035d0dac817ab92ccfab96f411dc6b9"
+  "hash": "605c843eb71ec0dd9b8a874025ae4fb1fa1b8a193379e9f8282fb0cc20ec3eaf"
 }

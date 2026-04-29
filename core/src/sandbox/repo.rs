@@ -11,7 +11,7 @@ use super::entity::*;
     entity = "Sandbox",
     columns(
         workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
-        name(ty = "String"),
+        name(ty = "String", list_for(by(created_at))),
         workflow_id(ty = "Option<WorkflowDefinitionId>"),
     )
 )]

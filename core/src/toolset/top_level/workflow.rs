@@ -65,29 +65,59 @@ enum WorkflowParams {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum WorkflowSandboxParam {
     Scratch {
         name: String,
         #[serde(default)]
-        cpu: Option<String>,
-        #[serde(default)]
-        memory: Option<String>,
-        #[serde(default)]
-        disk_size: Option<String>,
+        config: Option<ScratchParamConfig>,
     },
     Repo {
         name: String,
-        repo_url: String,
-        #[serde(default)]
-        branch: Option<String>,
-        #[serde(default)]
-        cpu: Option<String>,
-        #[serde(default)]
-        memory: Option<String>,
-        #[serde(default)]
-        disk_size: Option<String>,
+        config: RepoParamConfig,
     },
+    /// Reference an existing sandbox in the workflow's workspace by
+    /// name. The executor attaches but never provisions, restarts, or
+    /// suspends it; the user owns the lifecycle.
+    Preexisting { name: String },
+}
+
+#[derive(Deserialize, Default)]
+struct ScratchParamConfig {
+    #[serde(default)]
+    cpu: Option<String>,
+    #[serde(default)]
+    memory: Option<String>,
+    #[serde(default)]
+    disk_size: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RepoParamConfig {
+    repo_url: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    cpu: Option<String>,
+    #[serde(default)]
+    memory: Option<String>,
+    #[serde(default)]
+    disk_size: Option<String>,
+}
+
+fn specs_from_parts(
+    cpu: Option<String>,
+    memory: Option<String>,
+    disk_size: Option<String>,
+) -> Option<SandboxSpecs> {
+    match (cpu, memory, disk_size) {
+        (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
+            cpu,
+            memory,
+            disk_size,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -116,37 +146,25 @@ impl WorkflowStepParam {
 
 impl WorkflowSandboxParam {
     fn into_decl(self) -> WorkflowSandboxDecl {
-        let (name, mode, cpu, memory, disk_size) = match self {
-            WorkflowSandboxParam::Scratch {
+        match self {
+            WorkflowSandboxParam::Preexisting { name } => WorkflowSandboxDecl::Preexisting { name },
+            WorkflowSandboxParam::Scratch { name, config } => {
+                let cfg = config.unwrap_or_default();
+                WorkflowSandboxDecl::Provisioned {
+                    name,
+                    mode: SandboxMode::Scratch,
+                    specs: specs_from_parts(cfg.cpu, cfg.memory, cfg.disk_size),
+                }
+            }
+            WorkflowSandboxParam::Repo { name, config } => WorkflowSandboxDecl::Provisioned {
                 name,
-                cpu,
-                memory,
-                disk_size,
-            } => (name, SandboxMode::Scratch, cpu, memory, disk_size),
-            WorkflowSandboxParam::Repo {
-                name,
-                repo_url,
-                branch,
-                cpu,
-                memory,
-                disk_size,
-            } => (
-                name,
-                SandboxMode::Repo { repo_url, branch },
-                cpu,
-                memory,
-                disk_size,
-            ),
-        };
-        let specs = match (cpu, memory, disk_size) {
-            (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
-                cpu,
-                memory,
-                disk_size,
-            }),
-            _ => None,
-        };
-        WorkflowSandboxDecl { name, mode, specs }
+                mode: SandboxMode::Repo {
+                    repo_url: config.repo_url,
+                    branch: config.branch,
+                },
+                specs: specs_from_parts(config.cpu, config.memory, config.disk_size),
+            },
+        }
     }
 }
 
@@ -202,7 +220,7 @@ struct WorkflowDefinitionOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct WorkflowSandboxOutput {
     name: String,
-    /// `"scratch"` or `"repo"`.
+    /// `"scratch"`, `"repo"`, or `"preexisting"`.
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     repo_url: Option<String>,
@@ -613,28 +631,41 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
 }
 
 fn sandbox_to_output(d: &WorkflowSandboxDecl) -> WorkflowSandboxOutput {
-    let (kind, repo_url, branch) = match &d.mode {
-        SandboxMode::Scratch => ("scratch".to_string(), None, None),
-        SandboxMode::Repo { repo_url, branch } => {
-            ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+    match d {
+        WorkflowSandboxDecl::Preexisting { name } => WorkflowSandboxOutput {
+            name: name.clone(),
+            kind: "preexisting".to_string(),
+            repo_url: None,
+            branch: None,
+            cpu: None,
+            memory: None,
+            disk_size: None,
+        },
+        WorkflowSandboxDecl::Provisioned { name, mode, specs } => {
+            let (kind, repo_url, branch) = match mode {
+                SandboxMode::Scratch => ("scratch".to_string(), None, None),
+                SandboxMode::Repo { repo_url, branch } => {
+                    ("repo".to_string(), Some(repo_url.clone()), branch.clone())
+                }
+            };
+            let (cpu, memory, disk_size) = match specs {
+                Some(s) => (
+                    Some(s.cpu.clone()),
+                    Some(s.memory.clone()),
+                    Some(s.disk_size.clone()),
+                ),
+                None => (None, None, None),
+            };
+            WorkflowSandboxOutput {
+                name: name.clone(),
+                kind,
+                repo_url,
+                branch,
+                cpu,
+                memory,
+                disk_size,
+            }
         }
-    };
-    let (cpu, memory, disk_size) = match &d.specs {
-        Some(s) => (
-            Some(s.cpu.clone()),
-            Some(s.memory.clone()),
-            Some(s.disk_size.clone()),
-        ),
-        None => (None, None, None),
-    };
-    WorkflowSandboxOutput {
-        name: d.name.clone(),
-        kind,
-        repo_url,
-        branch,
-        cpu,
-        memory,
-        disk_size,
     }
 }
 
@@ -795,14 +826,17 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
     if !d.sandboxes.is_empty() {
         out.push_str(&format!("sandboxes:   {}\n", d.sandboxes.len()));
         for sb in &d.sandboxes {
-            let kind = match &sb.mode {
-                SandboxMode::Scratch => "scratch".to_string(),
-                SandboxMode::Repo { repo_url, branch } => match branch {
-                    Some(b) => format!("repo({repo_url}@{b})"),
-                    None => format!("repo({repo_url})"),
+            let kind = match sb {
+                WorkflowSandboxDecl::Preexisting { .. } => "preexisting".to_string(),
+                WorkflowSandboxDecl::Provisioned { mode, .. } => match mode {
+                    SandboxMode::Scratch => "scratch".to_string(),
+                    SandboxMode::Repo { repo_url, branch } => match branch {
+                        Some(b) => format!("repo({repo_url}@{b})"),
+                        None => format!("repo({repo_url})"),
+                    },
                 },
             };
-            out.push_str(&format!("  - {} kind={kind}\n", sb.name));
+            out.push_str(&format!("  - {} kind={kind}\n", sb.name()));
         }
     }
     out.push_str(&format!("steps:       {}\n", d.steps.len()));

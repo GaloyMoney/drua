@@ -5,6 +5,7 @@ pub mod executor;
 pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
+pub mod yaml;
 
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ impl crate::library::LibraryImporter for Workflows {
     const WORKSPACE_REQUIRED: bool = true;
 
     fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        crate::library::parse_workflow_yaml(content, path).map(|p| p.parsed)
+        yaml::parse_workflow_yaml(content, path).map(|p| p.parsed)
     }
 
     /// On create: mints a fresh webhook secret. On update: preserves the
@@ -68,8 +69,8 @@ impl crate::library::LibraryImporter for Workflows {
             .original_path
             .clone()
             .unwrap_or_else(|| file.relative_path());
-        let parsed = crate::library::parse_workflow_yaml(&file.rendered, &synthetic_path)
-            .ok_or_else(|| {
+        let parsed =
+            yaml::parse_workflow_yaml(&file.rendered, &synthetic_path).ok_or_else(|| {
                 WorkflowError::BuildEntity("workflow YAML failed to round-trip".into())
             })?;
 
@@ -205,20 +206,31 @@ impl Workflows {
     }
 
     /// Resolve `skill:` references and validate sandbox references
-    /// against the workflow's own declarations. Skill resolution skips
-    /// sandbox-exported skills — those resolve per attachment at run time.
+    /// against the workflow's own declarations. Workspace skills win
+    /// over sandbox-exported skills; an agent step backed by a
+    /// `Preexisting` sandbox may also resolve its skill from that
+    /// sandbox's exported set.
     async fn validate_steps(
         &self,
+        sub: &AuthSubject,
         workspace_id: WorkspaceId,
         steps: &[WorkflowStepDef],
         sandboxes: &[WorkflowSandboxDecl],
     ) -> Result<(), WorkflowError> {
         let mut decl_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for decl in sandboxes {
-            if !decl_names.insert(decl.name.as_str()) {
-                return Err(WorkflowError::DuplicateSandboxName(decl.name.clone()));
+            if !decl_names.insert(decl.name()) {
+                return Err(WorkflowError::DuplicateSandboxName(decl.name().to_string()));
             }
         }
+
+        // Resolve every Preexisting decl up-front: look up the named
+        // sandbox in the workspace + auth-check Read. The map is
+        // consulted per-step so a sandbox-only skill counts as
+        // resolved when its step targets a Preexisting sandbox.
+        let preexisting_ids = self
+            .resolve_preexisting_sandboxes(sub, workspace_id, sandboxes)
+            .await?;
 
         // Collect every bad reference in a single pass so the operator
         // sees the full list (rather than fixing one and re-running).
@@ -233,9 +245,12 @@ impl Workflows {
                     sandbox,
                     ..
                 } => {
+                    let preexisting_sandbox_id = sandbox
+                        .as_deref()
+                        .and_then(|n| preexisting_ids.get(n).copied());
                     let found = self
                         .skills
-                        .find_by_name(skill, Some(workspace_id), None)
+                        .find_by_name(skill, Some(workspace_id), preexisting_sandbox_id)
                         .await
                         .map_err(|e| WorkflowError::Skill(e.to_string()))?;
                     if found.is_none() {
@@ -274,6 +289,34 @@ impl Workflows {
         Ok(())
     }
 
+    /// For every `Preexisting` decl, look the sandbox up by name in
+    /// the workflow's workspace (workspace-unique) and verify `sub`
+    /// can `Read` it. Returns a map from decl name to resolved
+    /// `SandboxId` so the skill lookup can fall back to its exports.
+    async fn resolve_preexisting_sandboxes(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        sandboxes: &[WorkflowSandboxDecl],
+    ) -> Result<std::collections::HashMap<String, SandboxId>, WorkflowError> {
+        let mut out = std::collections::HashMap::new();
+        for decl in sandboxes {
+            let WorkflowSandboxDecl::Preexisting { name } = decl else {
+                continue;
+            };
+            let sb = self
+                .skills
+                .sandboxes()
+                .find_by_name_in_workspace(sub, workspace_id, name)
+                .await
+                .map_err(|e| {
+                    WorkflowError::SandboxNotFound(format!("preexisting sandbox '{name}': {e}"))
+                })?;
+            out.insert(name.clone(), sb.id);
+        }
+        Ok(out)
+    }
+
     /// `workspace_name` is cached on the entity so the forward-sync
     /// hook can render the library path without an extra lookup.
     #[allow(clippy::too_many_arguments)]
@@ -297,7 +340,7 @@ impl Workflows {
             ));
         }
 
-        self.validate_steps(workspace_id, &steps, &sandboxes)
+        self.validate_steps(sub, workspace_id, &steps, &sandboxes)
             .await?;
 
         let trigger = match trigger {

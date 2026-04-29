@@ -17,12 +17,14 @@ use self::job::WriteToRuntimeJobInitializer;
 use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
+pub(crate) use file::name_from_filename;
 pub use file::{
-    parse_skill_markdown, parse_workflow_yaml, render_note_markdown, render_skill_markdown,
-    render_workflow_yaml, DocType, GitFileHash, ParsedWorkflowFile, SearchableFields, UpstreamOp,
+    parse_skill_markdown, render_note_markdown, render_skill_markdown, DocType, GitFileHash,
+    SearchableFields, UpstreamOp,
 };
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, SearchResult};
+pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
     SyncFromLibraryJobInitializer, SyncedFile, UpsertError,

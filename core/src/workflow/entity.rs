@@ -191,7 +191,7 @@ impl crate::library::LibrarySynced for WorkflowDefinition {
     }
 
     fn render(&self) -> String {
-        crate::library::render_workflow_yaml(
+        super::yaml::render_workflow_yaml(
             self.id,
             &self.name,
             self.description.as_deref(),
@@ -348,5 +348,25 @@ mod tests {
         assert_eq!(def.name, "test-flow");
         assert_eq!(def.steps.len(), 1);
         assert!(matches!(def.trigger, WorkflowTrigger::Webhook { .. }));
+    }
+
+    #[test]
+    fn workflow_definition_hydrates_preexisting_sandbox_decl() {
+        let new = NewWorkflowDefinition::builder()
+            .workspace_id(WorkspaceId::new())
+            .name("uses-existing")
+            .trigger(WorkflowTrigger::Manual)
+            .steps(vec![sample_step()])
+            .sandboxes(vec![WorkflowSandboxDecl::Preexisting {
+                name: "investigation".to_string(),
+            }])
+            .build()
+            .unwrap();
+        let def = WorkflowDefinition::try_from_events(new.into_events()).unwrap();
+        assert_eq!(def.sandboxes.len(), 1);
+        assert!(matches!(
+            &def.sandboxes[0],
+            WorkflowSandboxDecl::Preexisting { name } if name == "investigation"
+        ));
     }
 }

@@ -32,6 +32,11 @@ pub enum SandboxError {
     WriteSlotTaken { current_writer: AgentId },
     #[error("SandboxError - sandbox is in {state} state and has no live instance (must be Ready)")]
     NotReady { state: String },
+    #[error("SandboxError - no sandbox named '{name}' in workspace {workspace_id}")]
+    NameNotFound {
+        workspace_id: WorkspaceId,
+        name: String,
+    },
     #[error("SandboxError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
 }

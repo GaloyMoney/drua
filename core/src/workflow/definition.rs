@@ -42,25 +42,39 @@ impl WorkflowStepDef {
     }
 }
 
-/// Top-level sandbox declaration on a workflow. The executor brings these
-/// up before the first step and suspends them after the run finishes;
-/// the entity is shared across runs of the same workflow definition.
+/// Top-level sandbox declaration on a workflow.
+///
+/// `Provisioned` decls are workflow-scoped: the executor brings them
+/// up before the first step (fresh per run, modulo the workflow-scope
+/// reuse handled by the sandbox repo) and suspends them after.
+///
+/// `Preexisting` decls reference an existing sandbox in the workflow's
+/// workspace by its name (workspace-unique via the `(workspace_id,
+/// name)` constraint on `sandboxes`). The executor only attaches and
+/// detaches; it never creates, restarts, or suspends. The user owns
+/// the sandbox lifecycle.
+///
+/// `type` is the discriminator on the wire (matching `WorkflowStepDef`
+/// and `WorkflowTrigger` conventions in this module).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowSandboxDecl {
-    pub name: String,
-    #[serde(flatten)]
-    pub mode: SandboxMode,
-    #[serde(default)]
-    pub specs: Option<SandboxSpecs>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkflowSandboxDecl {
+    Provisioned {
+        name: String,
+        #[serde(flatten)]
+        mode: SandboxMode,
+        #[serde(default)]
+        specs: Option<SandboxSpecs>,
+    },
+    Preexisting {
+        name: String,
+    },
 }
 
 impl WorkflowSandboxDecl {
-    /// Defaults match the MCP `sandbox create` tool defaults.
-    pub fn specs_or_default(&self) -> SandboxSpecs {
-        self.specs.clone().unwrap_or_else(|| SandboxSpecs {
-            cpu: "500m".to_string(),
-            memory: "512Mi".to_string(),
-            disk_size: "10Gi".to_string(),
-        })
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Provisioned { name, .. } | Self::Preexisting { name } => name,
+        }
     }
 }

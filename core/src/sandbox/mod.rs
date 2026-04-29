@@ -304,6 +304,67 @@ impl Sandboxes {
         Ok(self.repo.maybe_find_by_id(id.into()).await?)
     }
 
+    /// Resolve a workspace-scoped sandbox by its (workspace-unique)
+    /// name. Workflow-scoped sandboxes are excluded — those embed a
+    /// per-workflow suffix in `name` and aren't user-addressable.
+    #[instrument(name = "domain.sandbox.find_by_name_in_workspace", skip(self, sub))]
+    pub async fn find_by_name_in_workspace(
+        &self,
+        sub: &AuthSubject,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Sandbox, SandboxError> {
+        let sandbox = self
+            .find_by_name_in_workspace_inner(workspace_id, name)
+            .await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+        )?;
+        Audit::record_action_if_unset("sandbox.find_by_name_in_workspace");
+        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_sandbox_id(sandbox.id);
+        Ok(sandbox)
+    }
+
+    /// Auth-free counterpart used by the workflow executor at run time.
+    /// The run was authorised when triggered.
+    #[instrument(
+        name = "domain.sandbox.find_by_name_in_workspace_unchecked",
+        skip(self)
+    )]
+    pub(crate) async fn find_by_name_in_workspace_unchecked(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Sandbox, SandboxError> {
+        self.find_by_name_in_workspace_inner(workspace_id, name)
+            .await
+    }
+
+    async fn find_by_name_in_workspace_inner(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Sandbox, SandboxError> {
+        let query = PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_name_by_created_at(name.to_string(), query, ListDirection::Ascending)
+            .await?;
+        result
+            .entities
+            .into_iter()
+            .find(|s| s.workspace_id == workspace_id && s.workflow_id.is_none())
+            .ok_or_else(|| SandboxError::NameNotFound {
+                workspace_id,
+                name: name.to_string(),
+            })
+    }
+
     pub async fn begin_op(&self) -> Result<DbOp<'_>, SandboxError> {
         Ok(self.repo.begin_op().await?)
     }
