@@ -26,6 +26,7 @@ pub enum AgentEvent {
         id: AgentId,
         workspace_id: WorkspaceId,
         agent_role: AgentRole,
+        model: String,
         name: String,
         authz_scopes: Vec<AuthScope>,
         workspace_name: String,
@@ -55,6 +56,7 @@ pub struct Agent {
     pub id: AgentId,
     pub workspace_id: WorkspaceId,
     pub agent_role: AgentRole,
+    pub model: String,
     pub name: String,
     /// Set at creation; never updated (rename does not propagate).
     pub workspace_name: String,
@@ -203,6 +205,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                     id,
                     workspace_id,
                     agent_role,
+                    model,
                     name,
                     authz_scopes,
                     workspace_name,
@@ -213,6 +216,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .id(*id)
                         .workspace_id(*workspace_id)
                         .agent_role(*agent_role)
+                        .model(model.clone())
                         .name(name.clone())
                         .workspace_name(workspace_name.clone())
                         .workflow_id(*workflow_id)
@@ -253,6 +257,8 @@ pub struct NewAgent {
     pub(super) workspace_id: WorkspaceId,
     pub(super) agent_role: AgentRole,
     #[builder(setter(into))]
+    pub(super) model: String,
+    #[builder(setter(into))]
     pub(super) name: String,
     pub(super) authz_scopes: Vec<AuthScope>,
     #[builder(setter(into))]
@@ -277,6 +283,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 id: self.id,
                 workspace_id: self.workspace_id,
                 agent_role: self.agent_role,
+                model: self.model,
                 name: self.name,
                 authz_scopes: self.authz_scopes,
                 workspace_name: self.workspace_name,
@@ -299,6 +306,7 @@ mod tests {
             .id(AgentId::new())
             .workspace_id(WorkspaceId::new())
             .agent_role(AgentRole::Agent)
+            .model("test-model")
             .name("test")
             .authz_scopes(Vec::new())
             .workspace_name("ws");
@@ -317,6 +325,7 @@ mod tests {
         let agent = build(None, None);
         assert!(agent.workflow_id.is_none());
         assert!(agent.workflow_run_id.is_none());
+        assert_eq!(agent.model, "test-model");
     }
 
     #[test]

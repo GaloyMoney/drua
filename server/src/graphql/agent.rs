@@ -15,6 +15,7 @@ pub struct Agent {
     workspace_id: WorkspaceId,
     name: String,
     role: AgentRole,
+    model: String,
 
     #[graphql(skip)]
     pub(super) entity: Arc<DomainAgent>,
@@ -53,6 +54,7 @@ impl From<DomainAgent> for Agent {
             workspace_id: entity.workspace_id,
             name: entity.name.clone(),
             role: AgentRole::from(entity.agent_role),
+            model: entity.model.clone(),
             entity: Arc::new(entity),
         }
     }

@@ -68,6 +68,7 @@ struct AgentNode {
     id: String,
     name: String,
     role: String,
+    model: String,
     attached_sandbox: Option<SandboxAttachmentNode>,
 }
 
@@ -90,12 +91,14 @@ const WORKSPACES_QUERY: &str = r#"
                         id
                         name
                         role
+                        model
                         attachedSandbox { name mode }
                     }
                     agents {
                         id
                         name
                         role
+                        model
                         attachedSandbox { name mode }
                     }
                 }
@@ -440,6 +443,7 @@ fn agent_node_to_item(a: AgentNode) -> AgentItem {
         id: a.id,
         name: a.name,
         role: a.role,
+        model: a.model,
         sandbox: a.attached_sandbox.map(|s| SandboxInfo {
             name: s.name,
             mode: s.mode,

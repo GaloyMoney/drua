@@ -275,13 +275,6 @@ impl Agents {
             .ok_or(AgentError::NoLeadAgent(workspace_id))
     }
 
-    pub fn model_for_role(&self, role: AgentRole) -> Option<&str> {
-        self.config
-            .builtin_roles
-            .get(&role)
-            .map(|cfg| cfg.model.as_str())
-    }
-
     #[instrument(name = "domain.agent.create_workspace_lead_in_op", skip(self, op))]
     pub async fn create_workspace_lead_in_op(
         &self,
@@ -341,6 +334,7 @@ impl Agents {
             .id(id)
             .workspace_id(workspace_id)
             .agent_role(agent_role)
+            .model(role_config.model.clone())
             .name(name)
             .authz_scopes(authz_scopes)
             .workspace_name(workspace_name);

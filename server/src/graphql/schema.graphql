@@ -1,6 +1,7 @@
 type Agent {
 	attachedSandbox: SandboxAttachment
 	id: AgentId!
+	model: String!
 	name: String!
 	role: AgentRole!
 	session: AgentSession!
