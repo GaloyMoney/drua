@@ -69,7 +69,9 @@ impl crate::library::LibraryImporter for Workflows {
             .clone()
             .unwrap_or_else(|| file.relative_path());
         let parsed = crate::library::parse_workflow_yaml(&file.rendered, &synthetic_path)
-            .ok_or_else(|| WorkflowError::BuildEntity("workflow YAML failed to round-trip".into()))?;
+            .ok_or_else(|| {
+                WorkflowError::BuildEntity("workflow YAML failed to round-trip".into())
+            })?;
 
         let doc_id = WorkflowDefinitionId::from(file.doc_id);
         let name = file.title.clone();

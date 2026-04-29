@@ -407,7 +407,6 @@ impl Skills {
         op.commit().await?;
         Ok(())
     }
-
 }
 
 /// Extracts the markdown body from a canonical skill file (everything after
