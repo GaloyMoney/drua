@@ -37,7 +37,7 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryTool, Ls, NotesTool, Read,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool, Read,
     SkillTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool, WorkspaceAgent,
     WorkspaceLog, WorkspaceSandbox,
 };
@@ -230,7 +230,6 @@ impl App {
             library.clone(),
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
-        toolsets.register_top_level(LibraryTool::new(Arc::new(library.clone())));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));
         toolsets.register_top_level(WorkflowTool::new(
@@ -238,6 +237,10 @@ impl App {
             Arc::clone(&workspaces),
             None,
         ));
+
+        // Read-only library lookup lives behind progressive disclosure;
+        // notes/skill tools cover workspace-scoped writes.
+        toolsets.register_searchable(LibraryToolSet::new(Arc::new(library.clone())));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
