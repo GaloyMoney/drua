@@ -246,6 +246,13 @@ struct GlobalVecRow {
     distance: Option<f64>,
 }
 
+/// Reciprocal Rank Fusion of FTS + vector hits, normalized so a
+/// document at rank 0 in BOTH lists scores 1.0 and rank-0 in only
+/// one list scores 0.5. The raw per-list contribution is
+/// `1 / (K + rank + 1)`, max = `1/(K+1)` per list, summed over
+/// `N_LISTS` lists, then divided by the static 2-list ceiling. When
+/// the embedder fails and only FTS rows are present, scores cap at 0.5,
+/// signalling "matched only one of two retrieval signals".
 fn rrf_fuse(
     fts_rows: Vec<GlobalFtsRow>,
     vec_rows: Vec<GlobalVecRow>,
@@ -254,6 +261,8 @@ fn rrf_fuse(
     use std::collections::HashMap;
 
     const K: f64 = 60.0;
+    const N_LISTS: f64 = 2.0;
+    let max_score = N_LISTS / (K + 1.0);
 
     struct Candidate {
         doc_type: DocType,
@@ -301,7 +310,7 @@ fn rrf_fuse(
             title: c.title,
             content: c.content,
             tags: c.tags,
-            score: c.score,
+            score: (c.score / max_score).clamp(0.0, 1.0),
         })
         .collect();
 

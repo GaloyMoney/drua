@@ -383,7 +383,7 @@ async fn library_search(
                 type_class,
                 title: h.title,
                 snippet: snippet(&h.content, 240),
-                score: format!("{:.3}", h.score),
+                score: format!("{:.0}%", h.score * 100.0),
                 tags: h.tags,
                 detail_url,
             }
