@@ -45,7 +45,12 @@ pub enum ChatHistoryBlock {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SandboxNotificationOp {
-    Attach { mode: String, mount_path: String },
+    Attach {
+        agent_mode: String,
+        kind: String,
+        cwd: String,
+        scope: Option<String>,
+    },
     Detach,
 }
 
@@ -188,12 +193,17 @@ pub(super) fn build_chat_history<'a>(
                     blocks: vec![ChatHistoryBlock::SandboxNotification {
                         sandbox_name: sandbox_name.clone(),
                         operation: match operation {
-                            SandboxOperation::Attach { mode, mount_path } => {
-                                SandboxNotificationOp::Attach {
-                                    mode: mode.clone(),
-                                    mount_path: mount_path.clone(),
-                                }
-                            }
+                            SandboxOperation::Attach {
+                                agent_mode,
+                                kind,
+                                cwd,
+                                scope,
+                            } => SandboxNotificationOp::Attach {
+                                agent_mode: agent_mode.clone(),
+                                kind: kind.clone(),
+                                cwd: cwd.clone(),
+                                scope: scope.clone(),
+                            },
                             SandboxOperation::Detach => SandboxNotificationOp::Detach,
                         },
                         text: text.clone(),
@@ -468,12 +478,17 @@ fn resolve_message_view(
                     } => ChatHistoryBlock::SandboxNotification {
                         sandbox_name: sandbox_name.clone(),
                         operation: match operation {
-                            SandboxOperation::Attach { mode, mount_path } => {
-                                SandboxNotificationOp::Attach {
-                                    mode: mode.clone(),
-                                    mount_path: mount_path.clone(),
-                                }
-                            }
+                            SandboxOperation::Attach {
+                                agent_mode,
+                                kind,
+                                cwd,
+                                scope,
+                            } => SandboxNotificationOp::Attach {
+                                agent_mode: agent_mode.clone(),
+                                kind: kind.clone(),
+                                cwd: cwd.clone(),
+                                scope: scope.clone(),
+                            },
                             SandboxOperation::Detach => SandboxNotificationOp::Detach,
                         },
                         text: text.clone(),

@@ -57,8 +57,13 @@ pub enum SandboxEvent {
     StateChanged {
         state: SandboxState,
     },
-    /// Repo-mode initialize result (CLAUDE.md / `.claude/commands/*.md`).
-    ExportsUpdated {
+    /// Result of the sandbox-server's `/initialize` call: the
+    /// inside-sandbox working directory plus any repo / library_space
+    /// exports (CLAUDE.md / `.claude/skills/...` / `.claude/commands/*.md`).
+    /// Emitted exactly once per sandbox at the Ready transition,
+    /// regardless of mode.
+    RuntimePopulated {
+        cwd: String,
         exported_system_prompt: Option<ExportedFile>,
         exported_skills: Vec<ExportedSkill>,
     },
@@ -88,6 +93,12 @@ pub struct Sandbox {
     pub mode: SandboxMode,
     /// Cached at creation from the admin client.
     pub mount_path: String,
+    /// Inside-sandbox working directory recorded from `/initialize`.
+    /// Empty string until the sandbox reaches Ready (i.e. before
+    /// `RuntimePopulated` fires); never read by the notification path
+    /// because attach is gated on `state == Ready`.
+    #[builder(default)]
+    pub cwd: String,
     pub state: SandboxState,
     /// Set by `errored()`; cleared on transition out of `Errored`.
     pub last_error: Option<String>,
@@ -112,6 +123,28 @@ impl Sandbox {
     /// K8s CR name / local sandbox dir name. Derived from id for k8s-safe uniqueness.
     pub fn resource_name(&self) -> String {
         format!("sb-{}", self.id)
+    }
+
+    /// `(kind, scope_label)` derived from the bootstrap mode. Used to
+    /// render the `<sandbox>` notification — `kind` picks the body
+    /// template, `scope_label` is shown in the header.
+    pub fn kind_and_scope(&self) -> (&'static str, Option<String>) {
+        match &self.mode {
+            SandboxMode::Scratch => ("scratch", None),
+            SandboxMode::Repo { repo_url, .. } => {
+                let label = repo_url
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .map(|n| n.strip_suffix(".git").unwrap_or(n))
+                    .filter(|n| !n.is_empty())
+                    .map(|n| format!("repo \"{n}\""));
+                ("repo", label)
+            }
+            SandboxMode::LibrarySpace { slug, .. } => {
+                ("library_space", Some(format!("space \"{slug}\"")))
+            }
+        }
     }
 
     /// Read-side fallback for `Skills::find_by_name` over `.claude/commands/*.md`.
@@ -171,24 +204,48 @@ impl Sandbox {
         Idempotent::Executed(())
     }
 
-    /// Transitions to `Ready` and (repo-mode + non-empty) emits `ExportsUpdated`.
+    /// Transitions to `Ready` and emits `RuntimePopulated` with the
+    /// `cwd` reported by `/initialize`. Repo-mode exports are folded
+    /// into the same event so a single emission captures everything
+    /// the runtime call produced.
     pub(super) fn initialized(&mut self, response: &InitializeResponse) -> Idempotent<()> {
         let state_changed = self.transition_in_event(SandboxState::Ready).did_execute();
 
         let has_exports =
             response.exported_system_prompt.is_some() || !response.exported_skills.is_empty();
-        let push_exports = matches!(self.mode, SandboxMode::Repo { .. }) && has_exports;
+        // Repo + LibrarySpace both ship `.claude/...` skills via the
+        // sandbox server's `scan_skills`. Scratch sandboxes never
+        // contain skills, so we drop any spurious exports there.
+        let keep_exports = matches!(
+            self.mode,
+            SandboxMode::Repo { .. } | SandboxMode::LibrarySpace { .. }
+        ) && has_exports;
+        // RuntimePopulated is emit-once at the Ready transition;
+        // `self.cwd` is empty exactly until that event fires.
+        let needs_populate = self.cwd.is_empty();
 
-        if push_exports {
-            self.exported_system_prompt = response.exported_system_prompt.clone();
-            self.exported_skills = response.exported_skills.clone();
-            self.events.push(SandboxEvent::ExportsUpdated {
-                exported_system_prompt: response.exported_system_prompt.clone(),
-                exported_skills: response.exported_skills.clone(),
+        if needs_populate {
+            let exported_system_prompt = if keep_exports {
+                response.exported_system_prompt.clone()
+            } else {
+                None
+            };
+            let exported_skills = if keep_exports {
+                response.exported_skills.clone()
+            } else {
+                Vec::new()
+            };
+            self.cwd = response.cwd.clone();
+            self.exported_system_prompt = exported_system_prompt.clone();
+            self.exported_skills = exported_skills.clone();
+            self.events.push(SandboxEvent::RuntimePopulated {
+                cwd: response.cwd.clone(),
+                exported_system_prompt,
+                exported_skills,
             });
         }
 
-        if state_changed || push_exports {
+        if state_changed || needs_populate {
             Idempotent::Executed(())
         } else {
             Idempotent::AlreadyApplied
@@ -306,11 +363,13 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                     }
                     builder = builder.state(*state);
                 }
-                SandboxEvent::ExportsUpdated {
+                SandboxEvent::RuntimePopulated {
+                    cwd,
                     exported_system_prompt,
                     exported_skills,
                 } => {
                     builder = builder
+                        .cwd(cwd.clone())
                         .exported_system_prompt(exported_system_prompt.clone())
                         .exported_skills(exported_skills.clone());
                 }

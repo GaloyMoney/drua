@@ -62,6 +62,20 @@ impl InstanceClient {
         Ok(resp)
     }
 
+    /// Notifies the sandbox-server that a new agent is attaching.
+    /// The server resets per-tenant state — currently the persistent
+    /// bash session's cwd — so the new agent doesn't inherit the
+    /// prior tenant's `cd`. Idempotent.
+    #[instrument(name = "sandbox.instance.attach", skip(self))]
+    pub async fn attach(&self) -> Result<(), InstanceError> {
+        self.http
+            .post(format!("{}/attach", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     #[instrument(name = "sandbox.instance.execute", skip_all, fields(tool = %req.tool))]
     pub async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, InstanceError> {
         let resp = self

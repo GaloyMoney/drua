@@ -260,8 +260,8 @@ impl From<history::ChatHistoryBlock> for ChatContentBlock {
                 text,
             } => {
                 let (op, mode) = match operation {
-                    history::SandboxNotificationOp::Attach { mode, .. } => {
-                        (SandboxNotificationOperation::Attach, Some(mode))
+                    history::SandboxNotificationOp::Attach { agent_mode, .. } => {
+                        (SandboxNotificationOperation::Attach, Some(agent_mode))
                     }
                     history::SandboxNotificationOp::Detach => {
                         (SandboxNotificationOperation::Detach, None)

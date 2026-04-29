@@ -655,13 +655,39 @@ impl Sandboxes {
         Audit::record_workspace_id(workspace_id);
         Audit::record_agent_id(agent_id);
         let mut sandbox = self.repo.find_by_id_in_op(&mut *op, sandbox_id).await?;
-        if sandbox
+        let did_attach = sandbox
             .attach_agent(agent_id, workspace_id, mode)?
-            .did_execute()
-        {
+            .did_execute();
+        if did_attach {
             self.repo.update_in_op(op, &mut sandbox).await?;
         }
+
+        // Notify the sandbox-server that a new agent is attaching so
+        // it can reset per-tenant state (today: drop the persistent
+        // bash session so the next `/execute` respawns at the cwd
+        // `/initialize` pinned). Best-effort — a transient 5xx is
+        // logged and skipped.
+        if did_attach && sandbox.state == SandboxState::Ready {
+            if let Err(e) = self.notify_sandbox_attach(&sandbox).await {
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "/attach notify failed (best-effort)"
+                );
+            }
+        }
         Ok(sandbox)
+    }
+
+    /// POST `/attach` to the sandbox-server. Resolves `base_url` via
+    /// the admin client (k8s pod IP / local port).
+    async fn notify_sandbox_attach(&self, sandbox: &Sandbox) -> Result<(), SandboxError> {
+        let view = self.admin.get_sandbox(&sandbox.resource_name()).await?;
+        let Some(client) = InstanceClient::from_sandbox(&view) else {
+            return Ok(());
+        };
+        client.attach().await.map_err(SandboxError::from)?;
+        Ok(())
     }
 
     /// Idempotent (no-op if not attached).

@@ -403,14 +403,17 @@ impl Agents {
                 .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
                 .await?;
 
+            let (kind, scope) = sandbox.kind_and_scope();
             self.sessions
                 .sandbox_notification_in_op(
                     op,
                     agent.id,
                     sandbox.name,
                     session::message::SandboxOperation::Attach {
-                        mode: format!("{mode:?}").to_lowercase(),
-                        mount_path: sandbox.mount_path,
+                        agent_mode: format!("{mode:?}").to_lowercase(),
+                        kind: kind.to_string(),
+                        cwd: sandbox.cwd,
+                        scope,
                     },
                 )
                 .await?;
@@ -568,14 +571,17 @@ impl Agents {
             .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
             .await?;
 
+        let (kind, scope) = sandbox.kind_and_scope();
         self.sessions
             .sandbox_notification_in_op(
                 &mut op,
                 agent_id,
                 sandbox.name,
                 session::message::SandboxOperation::Attach {
-                    mode: format!("{mode:?}").to_lowercase(),
-                    mount_path: sandbox.mount_path,
+                    agent_mode: format!("{mode:?}").to_lowercase(),
+                    kind: kind.to_string(),
+                    cwd: sandbox.cwd,
+                    scope,
                 },
             )
             .await?;

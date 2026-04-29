@@ -343,22 +343,57 @@ impl From<llm::prompt::Tool> for ToolDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxOperation {
-    Attach { mode: String, mount_path: String },
+    /// `agent_mode` is the agent's permission (`read`/`write`).
+    /// `kind` is the sandbox's bootstrap mode (`scratch`/`repo`/
+    /// `library_space`). `cwd` is the inside-sandbox working
+    /// directory recorded by the runtime — the notification renders
+    /// it as the agent's only path of interest. `scope` is a short
+    /// human label like `repo "my-app"` or `space "oncall"`, used
+    /// inside the `<sandbox>` text.
+    Attach {
+        agent_mode: String,
+        kind: String,
+        cwd: String,
+        #[serde(default)]
+        scope: Option<String>,
+    },
     Detach,
 }
 
 /// XML matches the `<sandbox>` tag format described in the agent system prompt.
 pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> String {
     match op {
-        SandboxOperation::Attach { mode, mount_path } => {
-            format!(
-                "<sandbox>\n\
-                 Attached sandbox \"{sandbox_name}\" in {mode} mode.\n\
-                 The workspace is mounted at {mount_path}. \
-                 All file operations and command execution are confined to this path — \
-                 do not attempt to read, write, or execute anything outside it.\n\
-                 </sandbox>"
-            )
+        SandboxOperation::Attach {
+            agent_mode,
+            kind,
+            cwd,
+            scope,
+        } => {
+            let header = match scope {
+                Some(label) => {
+                    format!("Attached sandbox \"{sandbox_name}\" ({label}) in {agent_mode} mode.")
+                }
+                None => format!("Attached sandbox \"{sandbox_name}\" in {agent_mode} mode."),
+            };
+            let body = match kind.as_str() {
+                "library_space" => format!(
+                    "Working directory: {cwd}\n\
+                     This is your space's checkout — files you create here are committed \
+                     and pushed back to the space on `git push`. Stay inside this directory; \
+                     tools reject paths outside it."
+                ),
+                "repo" => format!(
+                    "Working directory: {cwd}\n\
+                     The repository is checked out here at the requested branch. Stay inside \
+                     this directory; tools reject paths outside it."
+                ),
+                _ => format!(
+                    "Working directory: {cwd}\n\
+                     Empty workspace — nothing is pre-populated. Stay inside this directory; \
+                     tools reject paths outside it."
+                ),
+            };
+            format!("<sandbox>\n{header}\n{body}\n</sandbox>")
         }
         SandboxOperation::Detach => {
             format!("<sandbox>\nDetached sandbox \"{sandbox_name}\".\n</sandbox>")
