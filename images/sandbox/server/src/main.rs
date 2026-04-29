@@ -197,10 +197,7 @@ async fn execute_text_editor(
     }
 }
 
-async fn editor_view(
-    session: &SharedSession,
-    input: &serde_json::Value,
-) -> Result<String, String> {
+async fn editor_view(session: &SharedSession, input: &serde_json::Value) -> Result<String, String> {
     let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())

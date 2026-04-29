@@ -295,10 +295,7 @@ impl SearchStore {
     /// — the meaningful citation is `(space_slug, relative_path)`,
     /// which lives in `space_search_data` + `spaces`. Single batched
     /// query keyed by the SpaceFile doc_ids in the result set.
-    async fn enrich_space_hits(
-        &self,
-        hits: &mut [GlobalSearchHit],
-    ) -> Result<(), LibraryError> {
+    async fn enrich_space_hits(&self, hits: &mut [GlobalSearchHit]) -> Result<(), LibraryError> {
         let space_ids: Vec<uuid::Uuid> = hits
             .iter()
             .filter(|h| h.doc_type == DocType::SpaceFile)

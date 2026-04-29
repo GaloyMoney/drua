@@ -386,12 +386,10 @@ async fn library_search(
                 }
             };
             let scope_label = match (&h.doc_type, &h.space_slug, h.workspace_id.is_nil()) {
-                (drua_core::library::DocType::SpaceFile, Some(slug), _) => {
-                    match &h.relative_path {
-                        Some(path) => format!("space: {slug}/{path}"),
-                        None => format!("space: {slug}"),
-                    }
-                }
+                (drua_core::library::DocType::SpaceFile, Some(slug), _) => match &h.relative_path {
+                    Some(path) => format!("space: {slug}/{path}"),
+                    None => format!("space: {slug}"),
+                },
                 (_, _, true) => "global".to_string(),
                 _ => {
                     let name = workspace_lookup
