@@ -93,8 +93,9 @@
       hx-get="/library/search"
       hx-target="#lib-results"
       hx-swap="innerHTML"
-      hx-trigger="input changed delay:250ms from:input[name=q], change from:select[name=workspaceId], change from:input[name=t]:checkbox, submit"
-      hx-indicator="#lib-spinner">
+      hx-trigger="input changed delay:250ms from:input[name='q'], change"
+      hx-indicator="#lib-spinner"
+      onsubmit="return false;">
   <div class="lib-search-row">
     <label class="grow">
       Search
@@ -109,14 +110,12 @@
         {% endfor %}
       </select>
     </label>
-    <button type="submit" style="width: auto; margin-bottom: 0;">Search</button>
   </div>
   <div class="lib-search-row">
     <div class="lib-type-chips">
       <span class="lib-active-count">Type:</span>
       <label><input type="checkbox" name="t" value="skill">Skill</label>
       <label><input type="checkbox" name="t" value="note">Note</label>
-      <label><input type="checkbox" name="t" value="workflow">Workflow</label>
       <span id="lib-active-count" class="lib-active-count"></span>
     </div>
   </div>
