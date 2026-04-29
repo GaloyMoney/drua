@@ -46,23 +46,15 @@ impl NoteRepo {
         Ok(())
     }
 
-    /// Fires only on content changes (Initialized/Updated); skips pin/unpin.
+    /// Fires only on content events (Initialized/Updated); skips pin/unpin.
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,
         entity: &Note,
         mut new_events: es_entity::LastPersisted<'_, NoteEvent>,
     ) -> Result<(), crate::library::LibraryError> {
-        let needs_sync = new_events.any(|persisted| {
-            matches!(
-                &persisted.event,
-                NoteEvent::Initialized { .. } | NoteEvent::Updated { .. }
-            )
-        });
-        if needs_sync {
-            let runtime_file = entity.as_runtime_file();
-            self.library.write_in_op(op, &runtime_file).await?;
-        }
-        Ok(())
+        self.library
+            .sync_entity_in_op(op, entity, &mut new_events)
+            .await
     }
 }

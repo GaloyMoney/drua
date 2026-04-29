@@ -3,9 +3,12 @@ mod file;
 mod inbox;
 mod job;
 mod search;
+mod synced;
 mod upstream;
 
 use std::sync::Arc;
+
+use es_entity::operation::hooks::CommitHook as _;
 
 use crate::github_app::GitHubAppTokenProvider;
 
@@ -15,11 +18,15 @@ use self::search::SearchStore;
 use self::upstream::Upstream;
 pub use error::LibraryError;
 pub use file::{
-    parse_skill_markdown, parse_workflow_yaml, DocType, GitFileHash, ParsedSkillFile,
-    ParsedWorkflowFile, RuntimeFile, SearchableFields,
+    parse_skill_markdown, parse_workflow_yaml, render_note_markdown, render_skill_markdown,
+    render_workflow_yaml, DocType, GitFileHash, ParsedWorkflowFile, SearchableFields, UpstreamOp,
 };
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::SearchResult;
+pub use synced::{
+    Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
+    SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
+};
 
 const LIBRARY_WRITE_JOB: &str = "library.write";
 const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
@@ -61,28 +68,6 @@ impl LibraryConfig {
     }
 }
 
-pub struct SkillFileChange {
-    pub file: RuntimeFile,
-    /// File on disk lacks proper frontmatter and should be rewritten with
-    /// canonical headers after entity creation.
-    pub needs_rewrite: bool,
-}
-
-pub struct SkillChanges {
-    pub head_commit: String,
-    pub files: Vec<SkillFileChange>,
-}
-
-pub struct WorkflowFileChange {
-    pub file: RuntimeFile,
-    pub needs_rewrite: bool,
-}
-
-pub struct WorkflowChanges {
-    pub head_commit: String,
-    pub files: Vec<WorkflowFileChange>,
-}
-
 #[derive(Clone)]
 pub struct Library {
     search: SearchStore,
@@ -118,46 +103,56 @@ impl Library {
         })
     }
 
-    /// Upserts search data and persists an inbox event in the same transaction.
-    /// The inbox handler embeds the document and spawns a serialized job for
-    /// git pull/write/commit/push on any node.
-    #[tracing::instrument(name = "library.write_in_op", skip_all)]
-    pub async fn write_in_op(
+    /// Per-repo `post_persist_hook` body collapses to a one-liner over this:
+    /// projects the entity into a `SyncedFile` and registers the write hook
+    /// when at least one persisted event was a content event.
+    #[tracing::instrument(
+        name = "library.sync_entity_in_op",
+        skip_all,
+        fields(doc_type = E::DOC_TYPE.as_str())
+    )]
+    pub async fn sync_entity_in_op<E, OP>(
         &self,
-        op: &mut impl es_entity::AtomicOperation,
-        file: &RuntimeFile,
-    ) -> Result<(), LibraryError> {
-        if let Some(fields) = file.searchable_fields() {
-            self.search.upsert_in_op(op, &fields).await?;
+        op: &mut OP,
+        entity: &E,
+        new_events: &mut es_entity::LastPersisted<'_, E::Event>,
+    ) -> Result<(), LibraryError>
+    where
+        E: LibrarySynced,
+        OP: es_entity::AtomicOperation,
+    {
+        if !new_events.any(|p| E::is_content_event(&p.event)) {
+            return Ok(());
         }
-
-        let idempotency_key = file.file_hash().to_string();
-        let _ = self
-            .inbox
-            .persist_and_queue_job_in_op(op, idempotency_key, file)
-            .await?;
-
+        let file = UpstreamOp::WriteFile(Box::new(entity.to_synced_file()));
+        self.enqueue_write(op, file.clone()).await?;
         Ok(())
     }
 
-    /// Queues `.gitkeep` files so notes/, skills/, workflows/ folders are committed.
+    async fn enqueue_write<OP: es_entity::AtomicOperation>(
+        &self,
+        op: &mut OP,
+        file: UpstreamOp,
+    ) -> Result<(), sqlx::Error> {
+        let hook = synced::LibrarySyncHook::new(self.inbox.clone(), self.search.clone(), file);
+        if let Err(hook) = op.add_commit_hook(hook) {
+            let _ = hook.force_execute_pre_commit(op).await?;
+        }
+        Ok(())
+    }
+
+    /// Queues a single `WorkspaceInit` op — `notes/`, `skills/`,
+    /// `workflows/` `.gitkeep` markers all land in one commit + push.
     #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
     pub async fn sync_workspace_folder_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
         workspace_name: &str,
     ) -> Result<(), LibraryError> {
-        for subdir in ["notes", "skills", "workflows"] {
-            let file = RuntimeFile::GitKeep {
-                workspace_name: workspace_name.to_string(),
-                subdir: subdir.to_string(),
-            };
-            let idempotency_key = format!("gitkeep:{workspace_name}:{subdir}");
-            let _ = self
-                .inbox
-                .persist_and_queue_job_in_op(op, idempotency_key, &file)
-                .await?;
-        }
+        let file = UpstreamOp::WorkspaceInit {
+            workspace_name: workspace_name.to_string(),
+        };
+        self.enqueue_write(op, file).await?;
         Ok(())
     }
 
@@ -175,25 +170,22 @@ impl Library {
             .delete_for_workspace_in_op(op, workspace_id)
             .await?;
 
-        let file = RuntimeFile::WorkspaceCleanup {
+        let file = UpstreamOp::WorkspaceCleanup {
             workspace_name: workspace_name.to_string(),
         };
-        let idempotency_key = format!("workspace-cleanup:{workspace_name}");
-        let _ = self
-            .inbox
-            .persist_and_queue_job_in_op(op, idempotency_key, &file)
-            .await?;
-
+        self.enqueue_write(op, file).await?;
         Ok(())
     }
 
-    /// On first run (`last_sync_commit` = `None`), returns all skill files.
-    /// Returns an empty `files` vec when HEAD hasn't moved.
-    #[tracing::instrument(name = "library.find_new_skills", skip(self))]
-    pub async fn find_new_skills(
+    /// Generic reverse-sync. Returns parsed `ParsedFile`s for every changed
+    /// file under `S::Entity::DOC_TYPE`'s subdir since `last_sync_commit`.
+    /// On first run (`None`), returns all tracked files. Empty `files` when
+    /// HEAD hasn't moved.
+    #[tracing::instrument(name = "library.find_changes", skip(self))]
+    pub async fn find_changes<S: LibraryImporter>(
         &self,
         last_sync_commit: Option<&str>,
-    ) -> Result<SkillChanges, LibraryError> {
+    ) -> Result<Changes, LibraryError> {
         self.upstream.pull().await?;
 
         let head = self.upstream.head_commit_hash().await?;
@@ -201,7 +193,7 @@ impl Library {
             Some(h) => h,
             None => {
                 tracing::debug!("no commits in library repo");
-                return Ok(SkillChanges {
+                return Ok(Changes {
                     head_commit: String::new(),
                     files: Vec::new(),
                 });
@@ -209,83 +201,33 @@ impl Library {
         };
 
         if last_sync_commit == Some(head.as_str()) {
-            return Ok(SkillChanges {
+            return Ok(Changes {
                 head_commit: head,
                 files: Vec::new(),
             });
         }
 
-        let changed = self.upstream.changed_skill_files(last_sync_commit).await?;
-
-        let mut files = Vec::with_capacity(changed.len());
-        for (path, content) in &changed {
-            match file::parse_skill_markdown(content, path) {
-                Some(parsed) => {
-                    files.push(SkillFileChange {
-                        needs_rewrite: parsed.needs_rewrite,
-                        file: parsed.file,
-                    });
-                }
-                None => {
-                    tracing::warn!(path = %path, "failed to parse skill markdown, skipping");
-                }
-            }
-        }
-
-        Ok(SkillChanges {
-            head_commit: head,
-            files,
-        })
-    }
-
-    /// Mirrors [`Self::find_new_skills`] for workflow YAML files.
-    #[tracing::instrument(name = "library.find_new_workflows", skip(self))]
-    pub async fn find_new_workflows(
-        &self,
-        last_sync_commit: Option<&str>,
-    ) -> Result<WorkflowChanges, LibraryError> {
-        self.upstream.pull().await?;
-
-        let head = self.upstream.head_commit_hash().await?;
-        let head = match head {
-            Some(h) => h,
-            None => {
-                tracing::debug!("no commits in library repo");
-                return Ok(WorkflowChanges {
-                    head_commit: String::new(),
-                    files: Vec::new(),
-                });
-            }
-        };
-
-        if last_sync_commit == Some(head.as_str()) {
-            return Ok(WorkflowChanges {
-                head_commit: head,
-                files: Vec::new(),
-            });
-        }
-
+        let doc_type = <S::Entity as LibrarySynced>::DOC_TYPE;
         let changed = self
             .upstream
-            .changed_workflow_files(last_sync_commit)
+            .changed_files(last_sync_commit, doc_type.subdir(), doc_type.ext())
             .await?;
 
         let mut files = Vec::with_capacity(changed.len());
         for (path, content) in &changed {
-            match file::parse_workflow_yaml(content, path) {
-                Some(parsed) => {
-                    files.push(WorkflowFileChange {
-                        needs_rewrite: parsed.needs_rewrite,
-                        file: parsed.file,
-                    });
-                }
+            match S::parse(content, path) {
+                Some(parsed) => files.push(parsed),
                 None => {
-                    tracing::warn!(path = %path, "failed to parse workflow yaml, skipping");
+                    tracing::warn!(
+                        path = %path,
+                        doc_type = doc_type.as_str(),
+                        "failed to parse library file, skipping"
+                    );
                 }
             }
         }
 
-        Ok(WorkflowChanges {
+        Ok(Changes {
             head_commit: head,
             files,
         })

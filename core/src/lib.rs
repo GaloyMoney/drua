@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod agent;
 pub mod audit;
 pub mod auth;
@@ -61,7 +63,7 @@ pub struct App {
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
-    library: Library,
+    library: Arc<Library>,
     notes: Arc<Notes>,
     jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task lives as long as `App`.
@@ -244,12 +246,13 @@ impl App {
             Arc::clone(&workspaces),
         ));
 
-        // Reverse-sync: poll library repo for skill changes and upsert into
-        // DB. Uses library-lock queue to serialize with forward-sync jobs.
+        // Reverse-sync (file → entity) for every service that implements
+        // `LibraryImporter`. Uses library-lock queue to serialise with
+        // forward-sync writes; `merge()` collapses bursts into one batch.
+        let library = Arc::new(library);
         {
-            use skill::job::{SyncSkillsFromLibraryConfig, SyncSkillsFromLibraryJobInitializer};
-            let sync_init = SyncSkillsFromLibraryJobInitializer::new(
-                library.clone(),
+            let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
+                Arc::clone(&library),
                 Arc::clone(&skills),
                 Arc::clone(&workspaces),
             );
@@ -257,7 +260,7 @@ impl App {
             sync_spawner
                 .spawn_with_queue_id(
                     job::JobId::new(),
-                    SyncSkillsFromLibraryConfig {
+                    library::SyncFromLibraryConfig {
                         sync_interval_secs: config.library.skill_sync_interval_secs,
                         last_sync_commit: None,
                     },
@@ -268,8 +271,8 @@ impl App {
         }
 
         {
-            let sync_init = workflow::SyncWorkflowsFromLibraryJobInitializer::new(
-                library.clone(),
+            let sync_init = library::SyncFromLibraryJobInitializer::<workflow::Workflows>::new(
+                Arc::clone(&library),
                 Arc::clone(&workflows),
                 Arc::clone(&workspaces),
             );
@@ -277,7 +280,7 @@ impl App {
             sync_spawner
                 .spawn_with_queue_id(
                     job::JobId::new(),
-                    workflow::SyncWorkflowsFromLibraryConfig {
+                    library::SyncFromLibraryConfig {
                         sync_interval_secs: config.library.skill_sync_interval_secs,
                         last_sync_commit: None,
                     },

@@ -1,7 +1,7 @@
 use job::*;
 use serde::{Deserialize, Serialize};
 
-use super::file::RuntimeFile;
+use super::file::UpstreamOp;
 use super::upstream::Upstream;
 
 /// Serializes all git ops on the library repo (both forward-sync
@@ -10,7 +10,7 @@ pub const LIBRARY_LOCK_QUEUE: &str = "library-lock";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct WriteToRuntimeConfig {
-    pub file: RuntimeFile,
+    pub file: UpstreamOp,
 }
 
 pub(super) struct WriteToRuntimeJobInitializer {
@@ -45,7 +45,7 @@ impl JobInitializer for WriteToRuntimeJobInitializer {
 
 struct WriteToRuntimeRunner {
     upstream: Upstream,
-    file: RuntimeFile,
+    file: UpstreamOp,
 }
 
 #[async_trait::async_trait]
@@ -57,28 +57,15 @@ impl JobRunner for WriteToRuntimeRunner {
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         self.upstream.pull().await?;
 
-        // Workspace cleanup: always execute, no hash comparison.
-        if let RuntimeFile::WorkspaceCleanup { workspace_name } = &self.file {
-            let dir_path = format!("runtime/workspaces/{workspace_name}");
-            let message = format!("workspace: delete {workspace_name}");
-
-            let err_msg = match self
-                .upstream
-                .remove_dir_and_commit(&dir_path, &message)
-                .await
-            {
-                Ok(()) => {
-                    self.upstream.push().await?;
-                    return Ok(JobCompletion::Complete);
-                }
-                Err(e) => e.to_string(),
-            };
-
-            tracing::warn!(error = %err_msg, "workspace cleanup failed, resetting working tree");
-            if let Err(reset_err) = self.upstream.reset_dirty_state().await {
-                tracing::error!(error = %reset_err, "reset after failed cleanup also failed");
+        // Workspace init / cleanup: always execute, no hash comparison.
+        match &self.file {
+            UpstreamOp::WorkspaceInit { workspace_name } => {
+                return self.workspace_init(workspace_name).await;
             }
-            return Err(err_msg.into());
+            UpstreamOp::WorkspaceCleanup { workspace_name } => {
+                return self.workspace_cleanup(workspace_name).await;
+            }
+            UpstreamOp::WriteFile(_) => {}
         }
 
         let new_hash = self.file.file_hash();
@@ -107,7 +94,73 @@ impl JobRunner for WriteToRuntimeRunner {
 }
 
 impl WriteToRuntimeRunner {
-    async fn write_and_push(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn workspace_init(
+        &self,
+        workspace_name: &str,
+    ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+        let subdirs = ["notes", "skills", "workflows"];
+        let paths: Vec<String> = subdirs
+            .iter()
+            .map(|s| format!("runtime/workspaces/{workspace_name}/{s}/.gitkeep"))
+            .collect();
+
+        let err_msg = match self.scaffold_paths(&paths, workspace_name).await {
+            Ok(()) => {
+                self.upstream.push().await?;
+                return Ok(JobCompletion::Complete);
+            }
+            Err(e) => e.to_string(),
+        };
+
+        tracing::warn!(error = %err_msg, "workspace init failed, resetting working tree");
+        if let Err(reset_err) = self.upstream.reset_dirty_state().await {
+            tracing::error!(error = %reset_err, "reset after failed init also failed");
+        }
+        Err(err_msg.into())
+    }
+
+    async fn scaffold_paths(
+        &self,
+        paths: &[String],
+        workspace_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for path in paths {
+            self.upstream.write_file(path, "").await?;
+        }
+        let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        self.upstream
+            .commit_paths(&path_refs, &format!("workspace: init {workspace_name}"))
+            .await?;
+        Ok(())
+    }
+
+    async fn workspace_cleanup(
+        &self,
+        workspace_name: &str,
+    ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+        let dir_path = format!("runtime/workspaces/{workspace_name}");
+        let message = format!("workspace: delete {workspace_name}");
+
+        let err_msg = match self
+            .upstream
+            .remove_dir_and_commit(&dir_path, &message)
+            .await
+        {
+            Ok(()) => {
+                self.upstream.push().await?;
+                return Ok(JobCompletion::Complete);
+            }
+            Err(e) => e.to_string(),
+        };
+
+        tracing::warn!(error = %err_msg, "workspace cleanup failed, resetting working tree");
+        if let Err(reset_err) = self.upstream.reset_dirty_state().await {
+            tracing::error!(error = %reset_err, "reset after failed cleanup also failed");
+        }
+        Err(err_msg.into())
+    }
+
+    async fn write_and_push(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let canonical_path = self.file.relative_path();
         self.upstream
             .write_file(&canonical_path, &self.file.content())

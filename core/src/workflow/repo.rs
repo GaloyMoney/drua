@@ -56,21 +56,10 @@ impl WorkflowDefinitionRepo {
         entity: &WorkflowDefinition,
         mut new_events: es_entity::LastPersisted<'_, WorkflowDefinitionEvent>,
     ) -> Result<(), crate::library::LibraryError> {
-        let library = match &self.library {
-            Some(lib) => lib,
-            None => return Ok(()),
-        };
-        let needs_sync = new_events.any(|persisted| {
-            matches!(
-                &persisted.event,
-                WorkflowDefinitionEvent::Initialized { .. }
-                    | WorkflowDefinitionEvent::Updated { .. }
-            )
-        });
-        if needs_sync {
-            let runtime_file = entity.as_runtime_file();
-            library.write_in_op(op, &runtime_file).await?;
+        if let Some(library) = &self.library {
+            library.sync_entity_in_op(op, entity, &mut new_events).await
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }

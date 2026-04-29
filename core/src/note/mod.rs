@@ -11,7 +11,7 @@ pub use error::*;
 use repo::*;
 
 use crate::auth::AuthSubject;
-use crate::library::{DocType, Library, RuntimeFile, SearchResult};
+use crate::library::{DocType, Library, SearchResult, UpstreamOp};
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -75,7 +75,7 @@ impl Notes {
 
         let note_id = NoteId::new();
         let created_at = op.now().to_rfc3339();
-        let runtime_file = RuntimeFile::for_note(
+        let runtime_file = UpstreamOp::for_note(
             note_id,
             workspace_id,
             workspace_name,
@@ -135,7 +135,7 @@ impl Notes {
         let updated_at = op.now().to_rfc3339();
 
         let created_at = note.created_at();
-        let runtime_file = RuntimeFile::for_note(
+        let runtime_file = UpstreamOp::for_note(
             note.id,
             note.workspace_id,
             &note.workspace_name,

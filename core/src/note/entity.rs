@@ -83,24 +83,10 @@ impl Note {
             .unwrap_or_default()
     }
 
-    pub(super) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        let created_at = self.created_at();
-        let updated_at = self
-            .events
-            .entity_last_modified_at()
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
-
-        crate::library::RuntimeFile::for_note(
-            self.id,
-            self.workspace_id,
-            &self.workspace_name,
-            &self.title,
-            &self.content,
-            &self.tags,
-            &created_at,
-            &updated_at,
-        )
+    pub(super) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
+        crate::library::UpstreamOp::WriteFile(Box::new(
+            <Self as crate::library::LibrarySynced>::to_synced_file(self),
+        ))
     }
 
     pub fn pin(&mut self) -> Idempotent<()> {
@@ -146,6 +132,62 @@ impl Note {
             file_hash,
         });
         Idempotent::Executed(())
+    }
+}
+
+impl crate::library::LibrarySynced for Note {
+    type Event = NoteEvent;
+    const DOC_TYPE: crate::library::DocType = crate::library::DocType::Note;
+
+    fn is_content_event(ev: &NoteEvent) -> bool {
+        matches!(
+            ev,
+            NoteEvent::Initialized { .. } | NoteEvent::Updated { .. }
+        )
+    }
+
+    fn workspace(&self) -> Option<(WorkspaceId, &str)> {
+        Some((self.workspace_id, &self.workspace_name))
+    }
+
+    fn id(&self) -> uuid::Uuid {
+        self.id.into()
+    }
+
+    fn display_name(&self) -> &str {
+        &self.title
+    }
+
+    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.events
+            .entity_first_persisted_at()
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
+    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.events
+            .entity_last_modified_at()
+            .or_else(|| self.events.entity_first_persisted_at())
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
+    fn index_body(&self) -> &str {
+        &self.content
+    }
+
+    fn index_tags(&self) -> Vec<String> {
+        self.tags.clone()
+    }
+
+    fn render(&self) -> String {
+        crate::library::render_note_markdown(
+            self.id.into(),
+            &self.title,
+            &self.content,
+            &self.tags,
+            &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
+            &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
+        )
     }
 }
 
@@ -284,7 +326,7 @@ mod tests {
     use super::{NewNote, Note};
 
     fn test_hash() -> GitFileHash {
-        let rf = crate::library::RuntimeFile::for_note(
+        let rf = crate::library::UpstreamOp::for_note(
             NoteId::new(),
             WorkspaceId::new(),
             "test",

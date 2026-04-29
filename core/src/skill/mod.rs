@@ -1,6 +1,5 @@
 mod entity;
 pub mod error;
-pub(crate) mod job;
 pub(crate) mod repo;
 
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use std::sync::Arc;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
-use crate::library::{DocType, GitFileHash, Library, RuntimeFile, SearchResult};
+use crate::library::{DocType, GitFileHash, Library, SearchResult};
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 pub use entity::*;
@@ -408,39 +407,52 @@ impl Skills {
         op.commit().await?;
         Ok(())
     }
+}
 
-    /// Upsert a skill from a library file within an existing transaction.
-    ///
-    /// When the file carries an `original_path` the entity stores it so the
-    /// `WriteToRuntime` job can remove the old file after writing the
-    /// canonical one.
-    #[instrument(name = "skill.upsert_from_library_in_op", skip_all)]
-    pub(crate) async fn upsert_from_library_in_op(
+/// Extracts the markdown body from a canonical skill file (everything after
+/// the closing `---` of the frontmatter, leading/trailing newlines trimmed).
+fn extract_skill_body(rendered: &str) -> Option<String> {
+    let after_first = rendered.strip_prefix("---")?;
+    let (_, after_fm) = after_first.split_once("\n---")?;
+    Some(
+        after_fm
+            .trim_start_matches('\n')
+            .trim_end_matches('\n')
+            .to_string(),
+    )
+}
+
+impl crate::library::LibraryImporter for Skills {
+    type Entity = Skill;
+    const JOB_TYPE: &'static str = "skill.sync-from-library";
+
+    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
+        crate::library::parse_skill_markdown(content, path)
+    }
+
+    /// Upsert a skill from a library file. When the file carries an
+    /// `original_path` the entity stores it so the `WriteToRuntime` job
+    /// can remove the old file after writing the canonical one. The
+    /// skill content is `(title, body)` projected onto
+    /// `(name, description)`; the on-disk markdown body is reconstructed
+    /// from the rendered file.
+    #[instrument(name = "skill.library_importer.upsert_in_op", skip_all)]
+    async fn upsert_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        file: &RuntimeFile,
+        file: &crate::library::SyncedFile,
         workspace_id: Option<WorkspaceId>,
         file_hash: GitFileHash,
-    ) -> Result<(), SkillError> {
-        let (doc_id, name, description, body, workspace_name, original_path) = match file {
-            RuntimeFile::Skill {
-                doc_id,
-                name,
-                description,
-                body,
-                workspace_name,
-                original_path,
-                ..
-            } => (
-                *doc_id,
-                name,
-                description,
-                body,
-                workspace_name.clone(),
-                original_path.clone(),
-            ),
-            _ => return Ok(()),
-        };
+    ) -> Result<(), crate::library::UpsertError> {
+        if file.doc_type != DocType::Skill {
+            return Ok(());
+        }
+        let doc_id = SkillId::from(file.doc_id);
+        let name = &file.title;
+        let description = &file.body;
+        let body = extract_skill_body(&file.rendered).unwrap_or_default();
+        let workspace_name = file.workspace_name.clone();
+        let original_path = file.original_path.clone();
 
         if let Some(mut existing) = self.repo.maybe_find_by_id_in_op(&mut *op, doc_id).await? {
             if existing
@@ -460,7 +472,7 @@ impl Skills {
                 .id(doc_id)
                 .name(name.clone())
                 .description(description.clone())
-                .body(body.clone());
+                .body(body);
             if let Some(ws_id) = workspace_id {
                 builder = builder.workspace_id(ws_id);
             }
@@ -476,9 +488,6 @@ impl Skills {
             self.repo.create_in_op(op, new).await?;
             tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
-        // Hook fires after the caller commits the op. If multiple skills
-        // are upserted on the same op for the same workspace, `merge()`
-        // collapses them to a single bump+notify.
         self.register_context_bump(op, workspace_id);
         Ok(())
     }
@@ -510,5 +519,25 @@ impl Skills {
             pool: None,
             context_generation: ContextGeneration::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod skill_extract_tests {
+    use super::extract_skill_body;
+
+    #[test]
+    fn extracts_body_from_canonical_skill_markdown() {
+        let rendered = "---\nid: 0\nname: \"X\"\ndescription: \"Y\"\ncreated: \nupdated: \n---\n\n#!/bin/bash\necho hi\n";
+        assert_eq!(
+            extract_skill_body(rendered).unwrap(),
+            "#!/bin/bash\necho hi"
+        );
+    }
+
+    #[test]
+    fn returns_empty_when_body_absent() {
+        let rendered = "---\nid: 0\n---\n\n";
+        assert_eq!(extract_skill_body(rendered).unwrap(), "");
     }
 }

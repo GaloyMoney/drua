@@ -12,7 +12,7 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
-use crate::library::{GitFileHash, Library, RuntimeFile};
+use crate::library::{GitFileHash, Library};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -20,10 +20,7 @@ use crate::skill::Skills;
 pub use definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
 pub use error::*;
-pub use job::{
-    ExecuteRunJobInitializer, SyncWorkflowsFromLibraryConfig,
-    SyncWorkflowsFromLibraryJobInitializer,
-};
+pub use job::ExecuteRunJobInitializer;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
 use job::ExecuteRunConfig;
@@ -36,6 +33,125 @@ pub struct Workflows {
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
+}
+
+impl crate::library::LibraryImporter for Workflows {
+    type Entity = WorkflowDefinition;
+    const JOB_TYPE: &'static str = "workflow.sync-from-library";
+    const WORKSPACE_REQUIRED: bool = true;
+
+    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
+        crate::library::parse_workflow_yaml(content, path).map(|p| p.parsed)
+    }
+
+    /// On create: mints a fresh webhook secret. On update: preserves the
+    /// DB-side secret; the file never carries it. Re-parses the canonical
+    /// YAML payload to recover format-specific fields
+    /// (trigger/steps/sandboxes) that `SyncedFile` does not carry.
+    #[instrument(name = "core.workflow.library_importer.upsert_in_op", skip_all)]
+    async fn upsert_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        file: &crate::library::SyncedFile,
+        workspace_id: Option<WorkspaceId>,
+        file_hash: GitFileHash,
+    ) -> Result<(), crate::library::UpsertError> {
+        let workspace_id = workspace_id.ok_or_else(|| -> crate::library::UpsertError {
+            "workflow upsert requires a workspace id".into()
+        })?;
+
+        if file.doc_type != crate::library::DocType::Workflow {
+            return Ok(());
+        }
+
+        let synthetic_path = file
+            .original_path
+            .clone()
+            .unwrap_or_else(|| file.relative_path());
+        let parsed = crate::library::parse_workflow_yaml(&file.rendered, &synthetic_path)
+            .ok_or_else(|| {
+                WorkflowError::BuildEntity("workflow YAML failed to round-trip".into())
+            })?;
+
+        let doc_id = WorkflowDefinitionId::from(file.doc_id);
+        let name = file.title.clone();
+        let description = parsed.description;
+        let trigger = parsed.trigger;
+        let steps = parsed.steps;
+        let sandboxes = parsed.sandboxes;
+        let workspace_name = file.workspace_name.clone();
+        let original_path = file.original_path.clone();
+
+        // Soft check: a multi-file library push can legitimately land
+        // a workflow before its referenced skill, so warn don't fail.
+        for step in &steps {
+            match step {
+                WorkflowStepDef::AgentStep { skill, .. } => {
+                    if let Ok(None) = self
+                        .skills
+                        .find_by_name(skill, Some(workspace_id), None)
+                        .await
+                    {
+                        tracing::warn!(
+                            workflow = %name,
+                            skill = %skill,
+                            "workflow references unknown skill (will fail at run time if not added before triggering)"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
+            if existing
+                .update_from_library(
+                    Some(name.clone()),
+                    Some(description.clone()),
+                    Some(trigger),
+                    Some(steps),
+                    Some(sandboxes),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                self.repo.update_in_op(op, &mut existing).await?;
+            }
+            tracing::info!(id = %doc_id, name = %name, "updated workflow from library");
+        } else {
+            let trigger = match trigger {
+                WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
+                    WorkflowTrigger::Webhook {
+                        provider,
+                        secret: Self::generate_webhook_secret(),
+                    }
+                }
+                other => other,
+            };
+
+            let mut builder = NewWorkflowDefinition::builder()
+                .id(doc_id)
+                .workspace_id(workspace_id)
+                .name(name.clone())
+                .trigger(trigger)
+                .steps(steps)
+                .sandboxes(sandboxes);
+            if let Some(ws) = workspace_name {
+                builder = builder.workspace_name(ws);
+            }
+            if let Some(desc) = description {
+                builder = builder.description(desc);
+            }
+            if let Some(path) = original_path {
+                builder = builder.original_path(path);
+            }
+            let new = builder
+                .build()
+                .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
+            self.repo.create_in_op(op, new).await?;
+            tracing::info!(id = %doc_id, name = %name, "created workflow from library");
+        }
+        Ok(())
+    }
 }
 
 impl Workflows {
@@ -212,113 +328,6 @@ impl Workflows {
 
         let workflow = self.repo.create(new).await?;
         Ok(workflow)
-    }
-
-    /// Mirrors `Skills::upsert_from_library_in_op`. On create: mints a
-    /// fresh webhook secret. On update: preserves the DB-side secret;
-    /// the file never carries it.
-    #[instrument(name = "core.workflow.upsert_from_library_in_op", skip_all)]
-    pub(crate) async fn upsert_from_library_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        file: &RuntimeFile,
-        workspace_id: WorkspaceId,
-        file_hash: GitFileHash,
-    ) -> Result<(), WorkflowError> {
-        let (doc_id, name, description, trigger, steps, sandboxes, workspace_name, original_path) =
-            match file {
-                RuntimeFile::Workflow {
-                    doc_id,
-                    name,
-                    description,
-                    trigger,
-                    steps,
-                    sandboxes,
-                    workspace_name,
-                    original_path,
-                    ..
-                } => (
-                    *doc_id,
-                    name.clone(),
-                    description.clone(),
-                    trigger.clone(),
-                    steps.clone(),
-                    sandboxes.clone(),
-                    workspace_name.clone(),
-                    original_path.clone(),
-                ),
-                _ => return Ok(()),
-            };
-
-        // Soft check: a multi-file library push can legitimately land
-        // a workflow before its referenced skill, so warn don't fail.
-        for step in &steps {
-            match step {
-                WorkflowStepDef::AgentStep { skill, .. } => {
-                    if let Ok(None) = self
-                        .skills
-                        .find_by_name(skill, Some(workspace_id), None)
-                        .await
-                    {
-                        tracing::warn!(
-                            workflow = %name,
-                            skill = %skill,
-                            "workflow references unknown skill (will fail at run time if not added before triggering)"
-                        );
-                    }
-                }
-            }
-        }
-
-        if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
-            if existing
-                .update_from_library(
-                    Some(name.clone()),
-                    Some(description.clone()),
-                    Some(trigger),
-                    Some(steps),
-                    Some(sandboxes),
-                    file_hash,
-                )
-                .did_execute()
-            {
-                self.repo.update_in_op(op, &mut existing).await?;
-            }
-            tracing::info!(id = %doc_id, name = %name, "updated workflow from library");
-        } else {
-            let trigger = match trigger {
-                WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
-                    WorkflowTrigger::Webhook {
-                        provider,
-                        secret: Self::generate_webhook_secret(),
-                    }
-                }
-                other => other,
-            };
-
-            let mut builder = NewWorkflowDefinition::builder()
-                .id(doc_id)
-                .workspace_id(workspace_id)
-                .name(name.clone())
-                .trigger(trigger)
-                .steps(steps)
-                .sandboxes(sandboxes);
-            if let Some(ws) = workspace_name {
-                builder = builder.workspace_name(ws);
-            }
-            if let Some(desc) = description {
-                builder = builder.description(desc);
-            }
-            if let Some(path) = original_path {
-                builder = builder.original_path(path);
-            }
-            let new = builder
-                .build()
-                .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
-            self.repo.create_in_op(op, new).await?;
-            tracing::info!(id = %doc_id, name = %name, "created workflow from library");
-        }
-        Ok(())
     }
 
     #[instrument(name = "core.workflow.find_by_id", skip_all)]

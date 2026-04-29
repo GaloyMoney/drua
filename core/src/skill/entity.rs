@@ -53,29 +53,10 @@ impl Skill {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::RuntimeFile {
-        let created_at = self
-            .events
-            .entity_first_persisted_at()
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
-        let updated_at = self
-            .events
-            .entity_last_modified_at()
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
-
-        crate::library::RuntimeFile::for_skill_with_original_path(
-            self.id,
-            self.workspace_id,
-            self.workspace_name.as_deref(),
-            &self.name,
-            &self.description,
-            &self.body,
-            &created_at,
-            &updated_at,
-            self.original_path.clone(),
-        )
+    pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
+        crate::library::UpstreamOp::WriteFile(Box::new(
+            <Self as crate::library::LibrarySynced>::to_synced_file(self),
+        ))
     }
 
     /// Hash of the canonical runtime form (matches what `WriteToRuntime`
@@ -145,6 +126,65 @@ impl Skill {
 impl core::fmt::Display for Skill {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Skill: {}, name: {}", self.id, self.name)
+    }
+}
+
+impl crate::library::LibrarySynced for Skill {
+    type Event = SkillEvent;
+    const DOC_TYPE: crate::library::DocType = crate::library::DocType::Skill;
+
+    fn is_content_event(ev: &SkillEvent) -> bool {
+        matches!(
+            ev,
+            SkillEvent::Initialized { .. } | SkillEvent::Updated { .. }
+        )
+    }
+
+    fn workspace(&self) -> Option<(WorkspaceId, &str)> {
+        match (self.workspace_id, self.workspace_name.as_deref()) {
+            (Some(id), Some(name)) => Some((id, name)),
+            _ => None,
+        }
+    }
+
+    fn id(&self) -> uuid::Uuid {
+        self.id.into()
+    }
+
+    fn display_name(&self) -> &str {
+        &self.name
+    }
+
+    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.events
+            .entity_first_persisted_at()
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
+    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.events
+            .entity_last_modified_at()
+            .or_else(|| self.events.entity_first_persisted_at())
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
+    fn original_path(&self) -> Option<&str> {
+        self.original_path.as_deref()
+    }
+
+    fn index_body(&self) -> &str {
+        &self.description
+    }
+
+    fn render(&self) -> String {
+        crate::library::render_skill_markdown(
+            self.id.into(),
+            &self.name,
+            &self.description,
+            &self.body,
+            &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
+            &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
+        )
     }
 }
 
