@@ -4,11 +4,12 @@ use super::primitives::*;
 
 use drua_core::library::{DocType, GlobalSearchHit};
 
+/// Workflow files are git-synced to the library repo but not exposed
+/// here — `library.search_global` filters them out at the boundary.
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
 pub enum LibraryFileType {
     Skill,
     Note,
-    Workflow,
 }
 
 impl From<LibraryFileType> for DocType {
@@ -16,17 +17,18 @@ impl From<LibraryFileType> for DocType {
         match t {
             LibraryFileType::Skill => DocType::Skill,
             LibraryFileType::Note => DocType::Note,
-            LibraryFileType::Workflow => DocType::Workflow,
         }
     }
 }
 
+/// Workflow rows can't reach this conversion in practice because
+/// `Library::search_global` drops them before fusion; default to Note
+/// if one ever does.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
         match t {
             DocType::Skill => LibraryFileType::Skill,
-            DocType::Note => LibraryFileType::Note,
-            DocType::Workflow => LibraryFileType::Workflow,
+            DocType::Note | DocType::Workflow => LibraryFileType::Note,
         }
     }
 }

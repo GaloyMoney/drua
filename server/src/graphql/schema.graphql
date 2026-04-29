@@ -117,10 +117,13 @@ type ErrorEvent {
 	message: String!
 }
 
+"""
+Workflow files are git-synced to the library repo but not exposed
+here — `library.search_global` filters them out at the boundary.
+"""
 enum LibraryFileType {
 	NOTE
 	SKILL
-	WORKFLOW
 }
 
 type LibrarySearchHit {

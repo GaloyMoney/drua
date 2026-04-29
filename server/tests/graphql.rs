@@ -487,7 +487,7 @@ async fn library_search_returns_empty_for_empty_query_state() {
         }"#,
         serde_json::json!({ "input": {
             "query": "x",
-            "types": ["WORKFLOW"],
+            "types": ["SKILL"],
             "workspaceId": bogus_ws,
             "limit": 10
         }}),

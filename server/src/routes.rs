@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post},
     Extension, Form, Json, Router,
 };
+use axum_extra::extract::Query as RepeatedQuery;
 use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::instrument;
@@ -266,7 +267,7 @@ async fn library_page(State(state): State<AppState>, session: Session) -> Respon
 async fn library_search(
     State(state): State<AppState>,
     session: Session,
-    Query(params): Query<LibrarySearchParams>,
+    RepeatedQuery(params): RepeatedQuery<LibrarySearchParams>,
 ) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
@@ -326,7 +327,6 @@ async fn library_search(
         .filter_map(|s| match s.as_str() {
             "skill" => Some(drua_core::library::DocType::Skill),
             "note" => Some(drua_core::library::DocType::Note),
-            "workflow" => Some(drua_core::library::DocType::Workflow),
             _ => None,
         })
         .collect();

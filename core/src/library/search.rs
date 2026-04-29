@@ -109,6 +109,8 @@ impl SearchStore {
 
     /// FTS + vector similarity fused via Reciprocal Rank Fusion.
     #[tracing::instrument(name = "library.search_store.search", skip_all)]
+    // @@ cant this delegate to search_global and pass the sigle workspace_id?
+    // seems like there is a lot of duplication between the 2 fns
     pub async fn search(
         &self,
         workspace_id: uuid::Uuid,
@@ -180,6 +182,7 @@ impl SearchStore {
         doc_types: &[DocType],
         limit: usize,
     ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
+        // @@ how do we indicate to also search in the 'global' scope (uuid nil)?
         if workspace_ids.is_empty() {
             return Ok(Vec::new());
         }

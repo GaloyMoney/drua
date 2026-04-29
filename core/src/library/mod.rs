@@ -256,6 +256,10 @@ impl Library {
     /// Cross-workspace search. `workspace_ids` is the caller's pre-authorized
     /// set — empty returns no results so the resolver must filter to the
     /// subject's readable workspaces before calling.
+    ///
+    /// Workflows are hosted in the library repo but excluded from search:
+    /// passing an empty `doc_types` defaults to `[Skill, Note]`, and any
+    /// `Workflow` entry in `doc_types` is silently dropped.
     #[tracing::instrument(name = "library.search_global", skip(self, workspace_ids))]
     pub async fn search_global(
         &self,
@@ -267,6 +271,18 @@ impl Library {
         if workspace_ids.is_empty() {
             return Ok(Vec::new());
         }
+        let effective_types: Vec<DocType> = if doc_types.is_empty() {
+            vec![DocType::Skill, DocType::Note]
+        } else {
+            doc_types
+                .iter()
+                .copied()
+                .filter(|d| !matches!(d, DocType::Workflow))
+                .collect()
+        };
+        if effective_types.is_empty() {
+            return Ok(Vec::new());
+        }
         let query_embedding = match self.embedder.embed_query(query).await {
             Ok(emb) => Some(emb),
             Err(e) => {
@@ -275,7 +291,13 @@ impl Library {
             }
         };
         self.search
-            .search_global(workspace_ids, query, query_embedding, doc_types, limit)
+            .search_global(
+                workspace_ids,
+                query,
+                query_embedding,
+                &effective_types,
+                limit,
+            )
             .await
     }
 }

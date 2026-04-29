@@ -19,7 +19,7 @@ askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.10", features = ["cookie", "query"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 async-graphql = { version = "8.0.0-rc.4", default-features = false, features = ["tracing", "tempfile"] }
