@@ -408,21 +408,43 @@ impl Skills {
         Ok(())
     }
 
-    /// Upsert a skill from a library file within an existing transaction.
-    ///
-    /// When the file carries an `original_path` the entity stores it so the
-    /// `WriteToRuntime` job can remove the old file after writing the
-    /// canonical one. The skill content is `(title, body)` projected onto
+}
+
+/// Extracts the markdown body from a canonical skill file (everything after
+/// the closing `---` of the frontmatter, leading/trailing newlines trimmed).
+fn extract_skill_body(rendered: &str) -> Option<String> {
+    let after_first = rendered.strip_prefix("---")?;
+    let (_, after_fm) = after_first.split_once("\n---")?;
+    Some(
+        after_fm
+            .trim_start_matches('\n')
+            .trim_end_matches('\n')
+            .to_string(),
+    )
+}
+
+impl crate::library::LibraryImporter for Skills {
+    type Entity = Skill;
+    const JOB_TYPE: &'static str = "skill.sync-from-library";
+
+    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
+        crate::library::parse_skill_markdown(content, path)
+    }
+
+    /// Upsert a skill from a library file. When the file carries an
+    /// `original_path` the entity stores it so the `WriteToRuntime` job
+    /// can remove the old file after writing the canonical one. The
+    /// skill content is `(title, body)` projected onto
     /// `(name, description)`; the on-disk markdown body is reconstructed
     /// from the rendered file.
-    #[instrument(name = "skill.upsert_from_library_in_op", skip_all)]
-    pub(crate) async fn upsert_from_library_in_op(
+    #[instrument(name = "skill.library_importer.upsert_in_op", skip_all)]
+    async fn upsert_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         file: &crate::library::SyncedFile,
         workspace_id: Option<WorkspaceId>,
         file_hash: GitFileHash,
-    ) -> Result<(), SkillError> {
+    ) -> Result<(), crate::library::UpsertError> {
         if file.doc_type != DocType::Skill {
             return Ok(());
         }
@@ -469,40 +491,6 @@ impl Skills {
         }
         self.register_context_bump(op, workspace_id);
         Ok(())
-    }
-}
-
-/// Extracts the markdown body from a canonical skill file (everything after
-/// the closing `---` of the frontmatter, leading/trailing newlines trimmed).
-fn extract_skill_body(rendered: &str) -> Option<String> {
-    let after_first = rendered.strip_prefix("---")?;
-    let (_, after_fm) = after_first.split_once("\n---")?;
-    Some(
-        after_fm
-            .trim_start_matches('\n')
-            .trim_end_matches('\n')
-            .to_string(),
-    )
-}
-
-impl crate::library::LibraryImporter for Skills {
-    type Entity = Skill;
-    const JOB_TYPE: &'static str = "skill.sync-from-library";
-
-    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        crate::library::parse_skill_markdown(content, path)
-    }
-
-    async fn upsert_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        file: &crate::library::SyncedFile,
-        workspace_id: Option<WorkspaceId>,
-        file_hash: GitFileHash,
-    ) -> Result<(), crate::library::UpsertError> {
-        self.upsert_from_library_in_op(op, file, workspace_id, file_hash)
-            .await
-            .map_err(|e| Box::new(e) as crate::library::UpsertError)
     }
 }
 
