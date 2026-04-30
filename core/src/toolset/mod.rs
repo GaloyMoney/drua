@@ -1,4 +1,5 @@
 mod config;
+pub mod edit;
 mod error;
 mod filter;
 pub mod searchable;

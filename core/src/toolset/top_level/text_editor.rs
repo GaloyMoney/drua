@@ -4,6 +4,12 @@
 //! same field names. Forwards the request body verbatim to the
 //! sandbox-tool-server's `/execute` endpoint.
 //!
+//! Argument parsing goes through
+//! [`AnthropicAdapter`](crate::toolset::edit::AnthropicAdapter) (identity
+//! passthrough for the canonical schema) so the command/auth split stays in
+//! sync with the canonical [`EditOp`](crate::toolset::edit::EditOp) used by
+//! every non-Anthropic provider adapter.
+//!
 //! Visibility / authz mirrors [`super::Bash`]:
 //! - Visible only to [`AuthSubject::Agent`] / [`AuthSubject::AgentOnBehalfOfUser`].
 //! - `view` is read-only → executable with either `SandboxUse` *or*
@@ -23,6 +29,9 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
+use crate::toolset::edit::{
+    AnthropicAdapter, AnthropicTextEditorVersion, EditOp, ProviderEditAdapter,
+};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -30,11 +39,15 @@ use super::{schema_for, TextOutput};
 
 pub struct TextEditor {
     sandboxes: Arc<Sandboxes>,
+    adapter: AnthropicAdapter,
 }
 
 impl TextEditor {
     pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+        Self {
+            sandboxes,
+            adapter: AnthropicAdapter::new(AnthropicTextEditorVersion::V20250728),
+        }
     }
 }
 
@@ -42,49 +55,10 @@ static TEXT_EDITOR_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<TextOutput>);
 
 static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    // Union of fields across all commands; `command` discriminates and
-    // the server validates per-command requirements.
-    serde_json::json!({
-    "type": "object",
-    "properties": {
-            "command": {
-                "type": "string",
-                "enum": ["view", "create", "str_replace", "insert"],
-                "description": "Which editor operation to perform."
-            },
-            "path": {
-                "type": "string",
-                "description": "Absolute path to the file or directory inside the sandbox workspace."
-            },
-            "view_range": {
-                "type": "array",
-                "items": { "type": "integer" },
-                "minItems": 2,
-                "maxItems": 2,
-                "description": "[start, end] line range for `view`. -1 for end means EOF. Optional."
-            },
-            "file_text": {
-                "type": "string",
-                "description": "Full file contents for `create`."
-            },
-            "old_str": {
-                "type": "string",
-                "description": "Substring to replace for `str_replace`. Must appear exactly once."
-            },
-            "new_str": {
-                "type": "string",
-                "description": "Replacement text for `str_replace`, or text to insert for `insert`."
-            },
-            "insert_line": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Line number after which to insert text for `insert`. 0 = beginning of file."
-            }
-        },
-        "required": ["command", "path"],
-        "additionalProperties": false,
-    })
+    crate::toolset::edit::edit_input_schema(AnthropicTextEditorVersion::V20250728)
 });
+
+const TOOL_NAME: &str = "str_replace_based_edit_tool";
 
 fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
     subject.scopes().iter().find_map(|s| match s {
@@ -93,15 +67,10 @@ fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
     })
 }
 
-/// `view` is the only read-only operation; everything else mutates.
-fn command_is_mutating(command: &str) -> bool {
-    !matches!(command, "view")
-}
-
 #[async_trait::async_trait]
 impl TopLevelTool for TextEditor {
     fn name(&self) -> &str {
-        "str_replace_based_edit_tool"
+        TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -130,37 +99,40 @@ impl TopLevelTool for TextEditor {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let args = arguments.unwrap_or_default();
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?;
+        let args_value = serde_json::Value::Object(arguments.unwrap_or_default());
+        let mut ops = self
+            .adapter
+            .parse_call(TOOL_NAME, &args_value)
+            .map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))?;
+        let op = ops
+            .pop()
+            .ok_or_else(|| ToolSetsError::InvalidArgument("empty edit op batch".into()))?;
 
-        // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
-        let sandbox_id = if command_is_mutating(command) {
-            writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
-        } else {
+        // Mutating ops require SandboxUse; `view` falls back to SandboxRead.
+        let sandbox_id = if op.is_read_only() {
             subject
                 .readable_sandbox_id()
                 .ok_or(ToolSetsError::Unauthorized)?
+        } else {
+            writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         };
         Audit::record_action("text_editor");
         Audit::record_sandbox_id(sandbox_id);
 
-        let client = if command_is_mutating(command) {
+        let client = if op.is_read_only() {
             self.sandboxes
-                .instance_client_for(subject, sandbox_id)
+                .instance_client_for_read(subject, sandbox_id)
                 .await
         } else {
             self.sandboxes
-                .instance_client_for_read(subject, sandbox_id)
+                .instance_client_for(subject, sandbox_id)
                 .await
         }
         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
         let req = ExecuteRequest {
-            tool: "str_replace_based_edit_tool".to_string(),
-            input: serde_json::Value::Object(args),
+            tool: TOOL_NAME.to_string(),
+            input: edit_op_to_sandbox_input(&op),
         };
 
         match client.execute(&req).await {
@@ -182,5 +154,57 @@ impl TopLevelTool for TextEditor {
                 "sandbox /execute call failed: {e}"
             ))])),
         }
+    }
+}
+
+/// The sandbox executor speaks the Anthropic `text_editor_*` wire format,
+/// so the canonical [`EditOp`] serialises straight through. The two extra
+/// canonical variants ([`EditOp::Delete`] / [`EditOp::Rename`]) cannot
+/// reach this path — Anthropic's schema-less server tool can only emit the
+/// four core commands, and [`AnthropicAdapter::parse_call`] enforces that.
+fn edit_op_to_sandbox_input(op: &EditOp) -> serde_json::Value {
+    serde_json::to_value(op).expect("EditOp is always serializable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_view_to_sandbox_input() {
+        let op = EditOp::View {
+            path: "/w/a.rs".to_string(),
+            view_range: Some([1, -1]),
+        };
+        let v = edit_op_to_sandbox_input(&op);
+        assert_eq!(v["command"], "view");
+        assert_eq!(v["path"], "/w/a.rs");
+        assert_eq!(v["view_range"], serde_json::json!([1, -1]));
+    }
+
+    #[test]
+    fn round_trip_str_replace_to_sandbox_input() {
+        let op = EditOp::StrReplace {
+            path: "/w/a.rs".to_string(),
+            old_str: "let x = 1;".into(),
+            new_str: "let x = 2;".into(),
+        };
+        let v = edit_op_to_sandbox_input(&op);
+        assert_eq!(v["command"], "str_replace");
+        assert_eq!(v["old_str"], "let x = 1;");
+        assert_eq!(v["new_str"], "let x = 2;");
+    }
+
+    #[test]
+    fn round_trip_insert_uses_new_str_field() {
+        let op = EditOp::Insert {
+            path: "/w/a.rs".to_string(),
+            insert_line: 0,
+            new_str: "header\n".into(),
+        };
+        let v = edit_op_to_sandbox_input(&op);
+        assert_eq!(v["command"], "insert");
+        assert_eq!(v["new_str"], "header\n");
+        assert_eq!(v["insert_line"], 0);
     }
 }
