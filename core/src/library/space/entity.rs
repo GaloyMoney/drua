@@ -129,9 +129,7 @@ impl NewSpaceBuilder {
 
 impl NewSpace {
     pub fn builder() -> NewSpaceBuilder {
-        let mut builder = NewSpaceBuilder::default();
-        builder.id(SpaceId::new());
-        builder
+        NewSpaceBuilder::default().id(SpaceId::new())
     }
 }
 
