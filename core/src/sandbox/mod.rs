@@ -686,7 +686,7 @@ impl Sandboxes {
         let Some(client) = InstanceClient::from_sandbox(&view) else {
             return Ok(());
         };
-        client.attach().await.map_err(SandboxError::from)?;
+        client.attach().await?;
         Ok(())
     }
 

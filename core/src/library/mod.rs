@@ -246,12 +246,12 @@ impl Library {
         let initial_workspaces: Vec<crate::primitives::WorkspaceId> =
             sub.workspace_id().into_iter().collect();
 
-        let mut builder = NewSpace::builder();
-        builder.slug(slug.into());
+        let mut builder = NewSpace::builder()
+            .slug(slug.into())
+            .authorized_workspaces(initial_workspaces);
         if let Some(desc) = description {
-            builder.description(desc);
+            builder = builder.description(desc);
         }
-        builder.authorized_workspaces(initial_workspaces);
         let new_space = builder.build()?;
 
         let space = self.space_repo.create_in_op(op, new_space).await?;
@@ -321,10 +321,9 @@ impl Library {
         Ok(space)
     }
 
-    // --- Internal accessors used by `space::file_sync` to run the
-    //     space-file index job without leaking `Library`'s privates
-    //     to the rest of the crate.
-
+    /// Internal access to the search/upstream/embedder primitives so
+    /// `space::file_sync` can drive its index job without leaking
+    /// `Library`'s privates to the rest of the crate.
     pub(in crate::library) fn pool(&self) -> &sqlx::PgPool {
         &self.pool
     }
@@ -375,7 +374,6 @@ impl Library {
     /// file under `S::Entity::DOC_TYPE`'s subdir since `last_sync_commit`.
     /// On first run (`None`), returns all tracked files. Empty `files` when
     /// HEAD hasn't moved.
-    /// // @@ find_changes should not be on here but in the job that u
     #[tracing::instrument(name = "library.find_changes", skip(self))]
     pub async fn find_changes<S: LibraryImporter>(
         &self,

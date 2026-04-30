@@ -1804,8 +1804,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
-    // ── initialize_library_space ──────────────────────────────────────
-
     /// Build a bare git repo with `spaces/<slug>/<file>` for two slugs and
     /// return its path.
     async fn make_library_bare_repo(base: &Path) -> PathBuf {

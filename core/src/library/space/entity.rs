@@ -101,7 +101,10 @@ impl TryFromEvents<SpaceEvent> for Space {
 }
 
 #[derive(Debug, Builder)]
-#[builder(build_fn(error = "SpaceError", validate = "Self::validate"))]
+#[builder(
+    pattern = "owned",
+    build_fn(error = "SpaceError", validate = "Self::validate")
+)]
 pub struct NewSpace {
     #[builder(setter(into))]
     pub(super) id: SpaceId,
