@@ -670,9 +670,6 @@ fn sandbox_to_output(d: &WorkflowSandboxDecl) -> WorkflowSandboxOutput {
                 SandboxMode::Repo { repo_url, branch } => {
                     ("repo".to_string(), Some(repo_url.clone()), branch.clone())
                 }
-                SandboxMode::LibrarySpace { slug, .. } => {
-                    (format!("library_space({slug})"), None, None)
-                }
             };
             let (cpu, memory, disk_size) = match specs {
                 Some(s) => (
@@ -860,9 +857,6 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                         Some(b) => format!("repo({repo_url}@{b})"),
                         None => format!("repo({repo_url})"),
                     },
-                    SandboxMode::LibrarySpace { slug, .. } => {
-                        format!("library_space({slug})")
-                    }
                 },
             };
             out.push_str(&format!("  - {} kind={kind}\n", sb.name()));

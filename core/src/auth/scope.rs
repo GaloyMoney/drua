@@ -32,10 +32,15 @@ impl AuthScope {
             AuthScope::Admin => true,
 
             AuthScope::ProjectAdmin(project) => {
-                // Library-wide spaces are managed by any project admin;
-                // membership scoping happens via `authorized_projects` on
-                // the entity itself.
-                if matches!(resource, AuthResource::Space(_)) {
+                // Spaces are library-wide; project admins manage the
+                // *collection* (`Create`/`Read on Space(None)`) but
+                // do NOT have blanket authority over specific spaces —
+                // visibility there is decided by `Project.mounted_spaces`.
+                if matches!(
+                    (verb, resource),
+                    (AuthVerb::Create, AuthResource::Space(None))
+                        | (AuthVerb::Read, AuthResource::Space(None))
+                ) {
                     return true;
                 }
                 resource
@@ -342,6 +347,25 @@ mod tests {
     fn deserialize_admin_from_plain_string() {
         let parsed: AuthScope = serde_json::from_str(r#""admin""#).unwrap();
         assert_eq!(parsed, AuthScope::Admin);
+    }
+
+    /// Project admins may create and list library-wide spaces, but
+    /// have NO blanket authority over specific spaces — visibility on
+    /// `Space(Some(_))` is decided by `Project.mounted_spaces`, not
+    /// the scope layer.
+    #[test]
+    fn project_admin_space_authz_is_collection_only() {
+        use crate::primitives::SpaceId;
+        let s = AuthScope::ProjectAdmin(test_project_id());
+
+        assert!(s.permits(AuthVerb::Create, &AuthResource::Space(None)));
+        assert!(s.permits(AuthVerb::Read, &AuthResource::Space(None)));
+
+        let space_id = SpaceId::new();
+        assert!(!s.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
+        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
+        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(None)));
+        assert!(!s.permits(AuthVerb::Delete, &AuthResource::Space(None)));
     }
 
     /// Vec<AuthScope> serializes the same as the old Vec<String>.

@@ -14,13 +14,7 @@ pub enum SpaceEvent {
         id: SpaceId,
         slug: String,
         description: Option<String>,
-        /// Seeded with `sub.project_id()` when the creator is an
-        /// agent; empty when created by a `User` subject. Mutated later
-        /// via `ProjectAuthorized`.
-        authorized_projects: Vec<ProjectId>,
     },
-    /// Adds a project to `authorized_projects` (idempotent).
-    ProjectAuthorized { project_id: ProjectId },
 }
 
 #[derive(EsEntity, Builder)]
@@ -30,7 +24,6 @@ pub struct Space {
     pub slug: String,
     #[builder(setter(strip_option), default)]
     pub description: Option<String>,
-    pub authorized_projects: Vec<ProjectId>,
     events: EntityEvents<SpaceEvent>,
 }
 
@@ -39,24 +32,6 @@ impl Space {
         self.events
             .entity_first_persisted_at()
             .expect("entity_first_persisted_at not found")
-    }
-
-    pub fn is_project_authorized(&self, project_id: ProjectId) -> bool {
-        self.authorized_projects.contains(&project_id)
-    }
-
-    /// Used by future `spaces.authorize` MCP command; the
-    /// `ProjectAuthorized` event is already part of the wire schema so
-    /// emitting it later is non-breaking.
-    #[allow(dead_code)]
-    pub(super) fn authorize_project(&mut self, project_id: ProjectId) -> Idempotent<()> {
-        if self.is_project_authorized(project_id) {
-            return Idempotent::AlreadyApplied;
-        }
-        self.authorized_projects.push(project_id);
-        self.events
-            .push(SpaceEvent::ProjectAuthorized { project_id });
-        Idempotent::Executed(())
     }
 }
 
@@ -69,7 +44,6 @@ impl core::fmt::Display for Space {
 impl TryFromEvents<SpaceEvent> for Space {
     fn try_from_events(events: EntityEvents<SpaceEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = SpaceBuilder::default();
-        let mut authorized_projects: Vec<ProjectId> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -77,26 +51,16 @@ impl TryFromEvents<SpaceEvent> for Space {
                     id,
                     slug,
                     description,
-                    authorized_projects: initial,
                 } => {
                     builder = builder.id(*id).slug(slug.clone());
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
                     }
-                    authorized_projects.extend(initial.iter().copied());
-                }
-                SpaceEvent::ProjectAuthorized { project_id } => {
-                    if !authorized_projects.contains(project_id) {
-                        authorized_projects.push(*project_id);
-                    }
                 }
             }
         }
 
-        builder
-            .authorized_projects(authorized_projects)
-            .events(events)
-            .build()
+        builder.events(events).build()
     }
 }
 
@@ -112,10 +76,6 @@ pub struct NewSpace {
     pub(super) slug: String,
     #[builder(setter(into, strip_option), default)]
     pub(super) description: Option<String>,
-    /// Seeded into `authorized_projects` on the `Initialized` event.
-    /// Empty by default; callers should add the creating project.
-    #[builder(default)]
-    pub(super) authorized_projects: Vec<ProjectId>,
 }
 
 impl NewSpaceBuilder {
@@ -161,7 +121,6 @@ impl IntoEvents<SpaceEvent> for NewSpace {
                 id: self.id,
                 slug: self.slug,
                 description: self.description,
-                authorized_projects: self.authorized_projects,
             }],
         )
     }
@@ -172,62 +131,34 @@ mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
     use super::{NewSpace, Space};
-    use crate::primitives::{ProjectId, SpaceId};
 
-    fn new_space(projects: Vec<ProjectId>) -> Space {
+    fn new_space() -> Space {
         let new = NewSpace::builder()
-            .id(SpaceId::new())
+            .id(crate::primitives::SpaceId::new())
             .slug("oncall")
             .description("On-call rotation".to_string())
-            .authorized_projects(projects)
             .build()
             .unwrap();
         Space::try_from_events(new.into_events()).unwrap()
     }
 
     #[test]
-    fn space_hydration_with_initial_project() {
-        let project = ProjectId::new();
-        let s = new_space(vec![project]);
+    fn space_hydration() {
+        let s = new_space();
         assert_eq!(s.slug, "oncall");
         assert_eq!(s.description.as_deref(), Some("On-call rotation"));
-        assert_eq!(s.authorized_projects, vec![project]);
-        assert!(s.is_project_authorized(project));
     }
 
     #[test]
-    fn space_hydration_without_projects() {
+    fn space_hydration_without_description() {
         let new = NewSpace::builder()
-            .id(SpaceId::new())
+            .id(crate::primitives::SpaceId::new())
             .slug("incidents")
             .build()
             .unwrap();
         let s = Space::try_from_events(new.into_events()).unwrap();
         assert_eq!(s.slug, "incidents");
-        assert_eq!(s.authorized_projects, Vec::<ProjectId>::new());
-    }
-
-    #[test]
-    fn authorize_project_appends_and_is_idempotent() {
-        let creator = ProjectId::new();
-        let mut s = new_space(vec![creator]);
-
-        let other = ProjectId::new();
-        let res = s.authorize_project(other);
-        assert!(res.did_execute());
-        assert_eq!(s.authorized_projects, vec![creator, other]);
-
-        let again = s.authorize_project(other);
-        assert!(!again.did_execute());
-        assert_eq!(s.authorized_projects, vec![creator, other]);
-    }
-
-    #[test]
-    fn authorize_project_idempotent_for_creator() {
-        let creator = ProjectId::new();
-        let mut s = new_space(vec![creator]);
-        let res = s.authorize_project(creator);
-        assert!(!res.did_execute());
+        assert_eq!(s.description, None);
     }
 
     #[test]
@@ -285,27 +216,5 @@ mod tests {
         assert!(super::validate_slug("on call").is_err());
         assert!(super::validate_slug("on.call").is_err());
         assert!(super::validate_slug("oncall!").is_err());
-    }
-
-    #[test]
-    fn hydration_replays_authorize_events() {
-        let id = SpaceId::new();
-        let creator = ProjectId::new();
-        let other = ProjectId::new();
-
-        let events = es_entity::EntityEvents::init(
-            id,
-            [
-                super::SpaceEvent::Initialized {
-                    id,
-                    slug: "oncall".to_string(),
-                    description: None,
-                    authorized_projects: vec![creator],
-                },
-                super::SpaceEvent::ProjectAuthorized { project_id: other },
-            ],
-        );
-        let s = Space::try_from_events(events).unwrap();
-        assert_eq!(s.authorized_projects, vec![creator, other]);
     }
 }

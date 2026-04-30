@@ -15,7 +15,6 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::Library;
 use crate::primitives::SandboxId;
 use crate::sandbox::{Sandbox, Sandboxes};
 
@@ -52,10 +51,6 @@ impl SandboxCommand {
 enum SandboxCreateMode {
     Scratch,
     Repo,
-    /// Sparse-checkout of `spaces/<space_slug>/` from the library repo.
-    /// Requires `space_slug` and that the caller's project is in
-    /// `Space.authorized_projects`.
-    LibrarySpace,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -75,10 +70,6 @@ struct ProjectSandboxParams {
     mode: Option<SandboxCreateMode>,
     repo_url: Option<String>,
     branch: Option<String>,
-    /// Required when `mode == "library_space"`. The space's slug
-    /// (from `spaces.create`) — the sandbox lands in
-    /// `<workspace>/library/spaces/<slug>/`.
-    space_slug: Option<String>,
     cpu: Option<String>,
     memory: Option<String>,
     disk_size: Option<String>,
@@ -106,15 +97,11 @@ struct ProjectSandboxParams {
 
 pub struct ProjectSandbox {
     sandboxes: Arc<Sandboxes>,
-    /// Library handle for `library_space` mode — supplies both the
-    /// space lookup (`find_space_by_slug_authorized`) and the upstream
-    /// repo URL (`Library::repo_url`).
-    library: Arc<Library>,
 }
 
 impl ProjectSandbox {
-    pub fn new(sandboxes: Arc<Sandboxes>, library: Arc<Library>) -> Self {
-        Self { sandboxes, library }
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
+        Self { sandboxes }
     }
 }
 
@@ -145,10 +132,9 @@ impl TopLevelTool for ProjectSandbox {
 
     fn description(&self) -> &str {
         "Manage sandboxes. Commands: `create` (requires `name`, `mode` \
-         (`scratch`/`repo`/`library_space`), optional `repo_url`+`branch` \
-         for repo mode, `space_slug` for library_space mode, plus \
-         `cpu`, `memory`, `disk_size`; blocks until state=ready unless \
-         `wait: false`), \
+         (`scratch`/`repo`), optional `repo_url`+`branch` for repo mode, \
+         plus `cpu`, `memory`, `disk_size`; blocks until state=ready \
+         unless `wait: false`), \
          `list`, `get` (requires `sandbox_id`), \
          `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`; \
          per-tool args: ls/read take `path`, grep/glob take `pattern`), \
@@ -206,29 +192,6 @@ impl TopLevelTool for ProjectSandbox {
                         }
                     }
                     SandboxCreateMode::Scratch => sandbox::SandboxMode::Scratch,
-                    SandboxCreateMode::LibrarySpace => {
-                        let slug = params.space_slug.ok_or_else(|| {
-                            ToolSetsError::InvalidArgument(
-                                "space_slug is required when mode is 'library_space'".to_string(),
-                            )
-                        })?;
-                        let library_url = self.library.repo_url().map(str::to_string).ok_or_else(
-                            || {
-                                ToolSetsError::InvalidArgument(
-                                    "library_space mode requires `library.repo_url` to be configured"
-                                        .to_string(),
-                                )
-                            },
-                        )?;
-                        let space = self
-                            .library
-                            .find_space_by_slug_authorized(subject, &slug)
-                            .await?;
-                        sandbox::SandboxMode::LibrarySpace {
-                            library_url,
-                            slug: space.slug,
-                        }
-                    }
                 };
 
                 let specs = sandbox::SandboxSpecs {

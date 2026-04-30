@@ -15,7 +15,7 @@ use repo::*;
 
 use crate::agent::Agents;
 use crate::audit::Audit;
-use crate::library::Library;
+use crate::library::{Library, Space, SpaceError};
 use crate::note::Notes;
 use crate::primitives::*;
 use crate::project_secret::ProjectSecrets;
@@ -233,6 +233,133 @@ impl Projects {
     #[instrument(name = "domain.project.find_by_name", skip(self))]
     pub(crate) async fn find_by_name(&self, name: &str) -> Result<Option<Project>, ProjectError> {
         Ok(self.repo.maybe_find_by_name(name).await?)
+    }
+
+    /// Mounts an existing library space onto `project_id`. Idempotent:
+    /// re-mounting a space already in `mounted_spaces` is a no-op. Slug
+    /// is resolved via `Library` so dangling ids cannot enter
+    /// `mounted_spaces`. Returns the resolved `Space` so callers don't
+    /// have to round-trip through `Library` for the entity.
+    #[instrument(name = "domain.project.mount_space", skip(self, sub))]
+    pub async fn mount_space(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+        slug: &str,
+    ) -> Result<Space, ProjectError> {
+        sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.mount_space");
+        Audit::record_project_id(project_id);
+
+        let space = self
+            .library
+            .find_space_by_slug(slug)
+            .await?
+            .ok_or_else(|| SpaceError::NotFound {
+                slug: slug.to_string(),
+            })?;
+
+        let mut op = self.repo.begin_op().await?;
+        self.mount_space_internal_in_op(&mut op, project_id, space.id)
+            .await?;
+        op.commit().await?;
+        Ok(space)
+    }
+
+    /// Creates a new library space and mounts it onto `project_id`
+    /// in one call. The space row + upstream `.gitkeep` push are
+    /// atomic on the `Library` side; the mount runs in a separate
+    /// transaction. If the mount fails the space exists library-wide
+    /// and the caller can retry via `mount_space` — no dangling state.
+    #[instrument(name = "domain.project.create_and_mount_space", skip(self, sub))]
+    pub async fn create_and_mount_space(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+        slug: impl Into<String> + std::fmt::Debug,
+        description: Option<String>,
+    ) -> Result<Space, ProjectError> {
+        let space = self.library.create_space(sub, slug, description).await?;
+
+        sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
+        Audit::record_project_id(project_id);
+        let mut op = self.repo.begin_op().await?;
+        self.mount_space_internal_in_op(&mut op, project_id, space.id)
+            .await?;
+        op.commit().await?;
+        Ok(space)
+    }
+
+    /// Trusted-caller variant: skips the project-admin check. Used
+    /// by the public `mount_space` / `create_and_mount_space` wrappers
+    /// after they have authorised the broader operation.
+    #[instrument(name = "domain.project.mount_space_internal_in_op", skip(self, op))]
+    async fn mount_space_internal_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        project_id: ProjectId,
+        space_id: SpaceId,
+    ) -> Result<(), ProjectError> {
+        let mut project = self.repo.find_by_id_in_op(&mut *op, project_id).await?;
+        if project.mount_space(space_id).did_execute() {
+            self.repo.update_in_op(&mut *op, &mut project).await?;
+        }
+        Ok(())
+    }
+
+    /// Spaces visible to `project_id` — hydrated from `Library`. Soft-
+    /// deleted spaces silently drop out of the result.
+    #[instrument(name = "domain.project.list_mounted_spaces", skip(self, sub))]
+    pub async fn list_mounted_spaces(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+    ) -> Result<Vec<Space>, ProjectError> {
+        sub.can(AuthVerb::Read, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.list_mounted_spaces");
+        Audit::record_project_id(project_id);
+
+        let project = self.repo.find_by_id(project_id).await?;
+        if project.mounted_spaces.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .library
+            .find_spaces_by_ids(&project.mounted_spaces)
+            .await?)
+    }
+
+    /// Central authorization primitive for sandboxless space access.
+    /// Resolves `slug` via `Library`, asserts the calling subject's
+    /// project has it mounted, and returns the resolved `Space` for
+    /// downstream tracing/audit. Used by `SpaceFs` read ops.
+    #[instrument(name = "domain.project.space_for_subject", skip(self, sub))]
+    pub async fn space_for_subject(
+        &self,
+        sub: &AuthSubject,
+        slug: &str,
+    ) -> Result<Space, ProjectError> {
+        let project_id = sub
+            .project_id()
+            .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
+
+        let space = self
+            .library
+            .find_space_by_slug(slug)
+            .await?
+            .ok_or_else(|| SpaceError::NotFound {
+                slug: slug.to_string(),
+            })?;
+
+        let project = self.repo.find_by_id(project_id).await?;
+        if !project.is_space_mounted(space.id) {
+            return Err(SpaceError::NotMounted {
+                slug: space.slug.clone(),
+                project_id,
+            }
+            .into());
+        }
+        Ok(space)
     }
 }
 

@@ -13,43 +13,6 @@ pub enum SandboxMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
-    /// Sparse-checkout of the library knowledge-base repo at
-    /// `library_url`, narrowed to `spaces/<slug>/`. `slug` will become a
-    /// typed `SpaceId` once the `Space` entity lands.
-    LibrarySpace {
-        library_url: String,
-        slug: String,
-    },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn library_space_round_trips_through_serde() {
-        let mode = SandboxMode::LibrarySpace {
-            library_url: "https://github.com/org/library.git".to_string(),
-            slug: "oncall".to_string(),
-        };
-        let json = serde_json::to_value(&mode).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "mode": "library_space",
-                "library_url": "https://github.com/org/library.git",
-                "slug": "oncall",
-            })
-        );
-        let back: SandboxMode = serde_json::from_value(json).unwrap();
-        match back {
-            SandboxMode::LibrarySpace { library_url, slug } => {
-                assert_eq!(library_url, "https://github.com/org/library.git");
-                assert_eq!(slug, "oncall");
-            }
-            other => panic!("expected LibrarySpace, got {other:?}"),
-        }
-    }
 }
 
 /// K8s applies these to pod resources and the PVC; the local backend logs

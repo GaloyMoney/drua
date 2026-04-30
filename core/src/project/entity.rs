@@ -22,6 +22,10 @@ pub enum ProjectEvent {
     Archived {
         archived_at: DateTime<Utc>,
     },
+    /// Project declares it sees a `Space` (idempotent on `space_id`).
+    SpaceMounted {
+        space_id: SpaceId,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -34,6 +38,8 @@ pub struct Project {
     pub description: Option<String>,
     #[builder(setter(strip_option), default)]
     pub archived_at: Option<DateTime<Utc>>,
+    #[builder(default)]
+    pub mounted_spaces: Vec<SpaceId>,
     events: EntityEvents<ProjectEvent>,
 }
 
@@ -46,6 +52,10 @@ impl Project {
 
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
+    }
+
+    pub fn is_space_mounted(&self, space_id: SpaceId) -> bool {
+        self.mounted_spaces.contains(&space_id)
     }
 
     pub(super) fn update(&mut self, description: Option<String>) -> Idempotent<()> {
@@ -65,6 +75,15 @@ impl Project {
         self.events.push(ProjectEvent::Archived { archived_at });
         Idempotent::Executed(())
     }
+
+    pub(super) fn mount_space(&mut self, space_id: SpaceId) -> Idempotent<()> {
+        if self.is_space_mounted(space_id) {
+            return Idempotent::AlreadyApplied;
+        }
+        self.mounted_spaces.push(space_id);
+        self.events.push(ProjectEvent::SpaceMounted { space_id });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Project {
@@ -76,6 +95,7 @@ impl core::fmt::Display for Project {
 impl TryFromEvents<ProjectEvent> for Project {
     fn try_from_events(events: EntityEvents<ProjectEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = ProjectBuilder::default();
+        let mut mounted_spaces: Vec<SpaceId> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -101,10 +121,18 @@ impl TryFromEvents<ProjectEvent> for Project {
                 ProjectEvent::Archived { archived_at } => {
                     builder = builder.archived_at(*archived_at);
                 }
+                ProjectEvent::SpaceMounted { space_id } => {
+                    if !mounted_spaces.contains(space_id) {
+                        mounted_spaces.push(*space_id);
+                    }
+                }
             }
         }
 
-        builder.events(events).build()
+        builder
+            .mounted_spaces(mounted_spaces)
+            .events(events)
+            .build()
     }
 }
 
@@ -204,5 +232,45 @@ mod tests {
         let project = Project::try_from_events(new.into_events()).unwrap();
         assert_eq!(project.name, "minimal");
         assert_eq!(project.description, None);
+    }
+
+    #[test]
+    fn mount_space_appends_and_is_idempotent() {
+        let mut project = new_project();
+        assert!(project.mounted_spaces.is_empty());
+
+        let space_id = crate::primitives::SpaceId::new();
+        let res = project.mount_space(space_id);
+        assert!(res.did_execute());
+        assert!(project.is_space_mounted(space_id));
+        assert_eq!(project.mounted_spaces, vec![space_id]);
+
+        let again = project.mount_space(space_id);
+        assert!(!again.did_execute());
+        assert_eq!(project.mounted_spaces, vec![space_id]);
+    }
+
+    #[test]
+    fn mount_space_hydration_replays_events() {
+        let id = ProjectId::new();
+        let space_a = crate::primitives::SpaceId::new();
+        let space_b = crate::primitives::SpaceId::new();
+
+        let events = es_entity::EntityEvents::init(
+            id,
+            [
+                super::ProjectEvent::Initialized {
+                    id,
+                    lead_agent_id: AgentId::new(),
+                    name: "p".to_string(),
+                    description: None,
+                },
+                super::ProjectEvent::SpaceMounted { space_id: space_a },
+                super::ProjectEvent::SpaceMounted { space_id: space_b },
+                super::ProjectEvent::SpaceMounted { space_id: space_a },
+            ],
+        );
+        let project = Project::try_from_events(events).unwrap();
+        assert_eq!(project.mounted_spaces, vec![space_a, space_b]);
     }
 }

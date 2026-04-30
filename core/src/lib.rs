@@ -204,8 +204,6 @@ impl App {
         ));
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
-        // ProjectSandbox registration sits next to the other library-
-        // facing tools below; library_space mode needs `Arc<Library>`.
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
@@ -233,11 +231,8 @@ impl App {
             Arc::clone(&workflows),
             (*library).clone(),
         ));
-        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library)));
-        toolsets.register_top_level(ProjectSandbox::new(
-            Arc::clone(&sandboxes),
-            Arc::clone(&library),
-        ));
+        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library), Arc::clone(&projects)));
+        toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&projects)));

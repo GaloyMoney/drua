@@ -24,10 +24,8 @@ pub enum SpaceError {
     MissingField(String),
     #[error("SpaceError - NotFound: slug {slug:?}")]
     NotFound { slug: String },
-    #[error(
-        "SpaceError - ProjectNotAuthorized: project {project_id} is not in space {slug:?}'s authorized list"
-    )]
-    ProjectNotAuthorized {
+    #[error("SpaceError - NotMounted: space {slug:?} is not mounted by project {project_id}")]
+    NotMounted {
         slug: String,
         project_id: crate::primitives::ProjectId,
     },

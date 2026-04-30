@@ -58,8 +58,8 @@ pub enum SandboxEvent {
         state: SandboxState,
     },
     /// Result of the sandbox-server's `/initialize` call: the
-    /// inside-sandbox working directory plus any repo / library_space
-    /// exports (CLAUDE.md / `.claude/skills/...` / `.claude/commands/*.md`).
+    /// inside-sandbox working directory plus any repo-mode exports
+    /// (CLAUDE.md / `.claude/skills/...` / `.claude/commands/*.md`).
     /// Emitted exactly once per sandbox at the Ready transition,
     /// regardless of mode.
     RuntimePopulated {
@@ -141,9 +141,6 @@ impl Sandbox {
                     .map(|n| format!("repo \"{n}\""));
                 ("repo", label)
             }
-            SandboxMode::LibrarySpace { slug, .. } => {
-                ("library_space", Some(format!("space \"{slug}\"")))
-            }
         }
     }
 
@@ -213,13 +210,10 @@ impl Sandbox {
 
         let has_exports =
             response.exported_system_prompt.is_some() || !response.exported_skills.is_empty();
-        // Repo + LibrarySpace both ship `.claude/...` skills via the
+        // Only repo-mode sandboxes ship `.claude/...` skills via the
         // sandbox server's `scan_skills`. Scratch sandboxes never
         // contain skills, so we drop any spurious exports there.
-        let keep_exports = matches!(
-            self.mode,
-            SandboxMode::Repo { .. } | SandboxMode::LibrarySpace { .. }
-        ) && has_exports;
+        let keep_exports = matches!(self.mode, SandboxMode::Repo { .. }) && has_exports;
         // RuntimePopulated is emit-once at the Ready transition;
         // `self.cwd` is empty exactly until that event fires.
         let needs_populate = self.cwd.is_empty();

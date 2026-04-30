@@ -81,7 +81,6 @@ pub struct Library {
     embedder: Arc<code_assistant_core::embedder::Embedder>,
     upstream: Upstream,
     space_repo: SpaceRepo,
-    repo_url: Option<String>,
     /// Direct handle to the `WriteToRuntime` spawner so `create_space`
     /// can fire-and-await its scaffolding commit with a known `JobId`
     /// (the inbox path uses random `JobId::new()` and we need to
@@ -118,17 +117,9 @@ impl Library {
             embedder,
             upstream,
             space_repo: SpaceRepo::new(pool),
-            repo_url: config.repo_url.clone(),
             write_spawner,
             jobs: jobs.clone(),
         })
-    }
-
-    /// Library repo URL (from `LibraryConfig.repo_url`). `None` when the
-    /// deployment runs without a library remote — caller-side feature
-    /// gates use this to short-circuit `library_space` flows.
-    pub fn repo_url(&self) -> Option<&str> {
-        self.repo_url.as_deref()
     }
 
     /// Per-repo `post_persist_hook` body collapses to a one-liner over this:
@@ -185,10 +176,10 @@ impl Library {
     }
 
     /// Persists a new `Space` and queues `spaces/<slug>/.gitkeep` for
-    /// upstream commit in the same transaction. The creating subject's
-    /// project is auto-seeded into `authorized_projects`; non-agent
-    /// subjects (e.g. plain `User`) produce a space with an empty
-    /// authorized list.
+    /// upstream commit in the same transaction. Mounting is decoupled
+    /// from creation — callers that want the creating project to see
+    /// the space follow up with `Projects::mount_space` (or use the
+    /// combined `Projects::create_and_mount_space`).
     #[tracing::instrument(name = "library.create_space", skip(self, sub))]
     pub async fn create_space(
         &self,
@@ -208,10 +199,9 @@ impl Library {
             .await?;
         op.commit().await?;
 
-        // Block until the upstream scaffolding commit lands. Without
-        // this, a follow-up `sandbox.create(library_space, slug)` can
-        // race the push and end up with a sparse-checkout against a
-        // commit that doesn't yet contain `spaces/<slug>/`.
+        // Block until the upstream `spaces/<slug>/.gitkeep` commit
+        // lands so callers can rely on the directory existing once
+        // `create_space` returns.
         const SPACE_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let outcomes = self
             .jobs
@@ -233,20 +223,15 @@ impl Library {
     /// upstream. After committing the outer op, callers that need
     /// upstream synchrony should
     /// `library.jobs().await_completions(&[job_id], …)`.
-    #[tracing::instrument(name = "library.create_space_in_op", skip(self, op, sub))]
+    #[tracing::instrument(name = "library.create_space_in_op", skip(self, op, _sub))]
     pub async fn create_space_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        sub: &crate::auth::AuthSubject,
+        _sub: &crate::auth::AuthSubject,
         slug: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<(Space, ::job::JobId), LibraryError> {
-        let initial_projects: Vec<crate::primitives::ProjectId> =
-            sub.project_id().into_iter().collect();
-
-        let mut builder = NewSpace::builder()
-            .slug(slug.into())
-            .authorized_projects(initial_projects);
+        let mut builder = NewSpace::builder().slug(slug.into());
         if let Some(desc) = description {
             builder = builder.description(desc);
         }
@@ -279,49 +264,9 @@ impl Library {
         &self.jobs
     }
 
-    /// Resolves a slug to a `Space` after enforcing two checks:
-    /// 1. The subject can read `AuthResource::Space(Some(space.id))`
-    ///    (project admins are blanket-allowed by the scope layer).
-    /// 2. The subject's project is in `space.authorized_projects`.
-    ///
-    /// Used by sandbox-creation flows that need to honor space ACLs.
-    #[tracing::instrument(name = "library.find_space_by_slug_authorized", skip(self, sub))]
-    pub async fn find_space_by_slug_authorized(
-        &self,
-        sub: &crate::auth::AuthSubject,
-        slug: &str,
-    ) -> Result<Space, LibraryError> {
-        let space = self
-            .space_repo
-            .maybe_find_by_slug(slug)
-            .await?
-            .ok_or_else(|| SpaceError::NotFound {
-                slug: slug.to_string(),
-            })?;
-
-        sub.can(
-            crate::auth::AuthVerb::Read,
-            crate::auth::AuthResource::Space(Some(space.id)),
-        )?;
-        crate::audit::Audit::record_action_if_unset("space.find_by_slug");
-
-        let project_id = sub
-            .project_id()
-            .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
-        if !space.is_project_authorized(project_id) {
-            return Err(SpaceError::ProjectNotAuthorized {
-                slug: space.slug.clone(),
-                project_id,
-            }
-            .into());
-        }
-
-        Ok(space)
-    }
-
-    /// Lists every space, paginated. Authorized for admin / project-admin
-    /// subjects; the project-membership ACL on `Space` is intentionally
-    /// bypassed so admins can audit the full set.
+    /// Lists every space, paginated. Soft-deleted spaces drop out
+    /// at the SQL layer (`delete = "soft_without_queries"`). Used by
+    /// admin tools and the `spaces` `list { all: true }` flag.
     #[tracing::instrument(name = "library.list_all_spaces", skip(self, sub))]
     pub async fn list_all_spaces(
         &self,
@@ -333,30 +278,6 @@ impl Library {
         )?;
         crate::audit::Audit::record_action_if_unset("space.list_all");
         Ok(self.space_repo.list_all().await?)
-    }
-
-    /// Slug → `Space` lookup that enforces `Read` on the resolved space
-    /// but skips the project-membership check. Intended for admin tools
-    /// that need to inspect any space regardless of `authorized_projects`.
-    #[tracing::instrument(name = "library.find_space_by_slug_admin", skip(self, sub))]
-    pub async fn find_space_by_slug_admin(
-        &self,
-        sub: &crate::auth::AuthSubject,
-        slug: &str,
-    ) -> Result<Space, LibraryError> {
-        let space = self
-            .space_repo
-            .maybe_find_by_slug(slug)
-            .await?
-            .ok_or_else(|| SpaceError::NotFound {
-                slug: slug.to_string(),
-            })?;
-        sub.can(
-            crate::auth::AuthVerb::Read,
-            crate::auth::AuthResource::Space(Some(space.id)),
-        )?;
-        crate::audit::Audit::record_action_if_unset("space.find_by_slug");
-        Ok(space)
     }
 
     /// Internal access to the search/upstream/embedder primitives so
@@ -374,13 +295,28 @@ impl Library {
         &self.upstream
     }
 
-    /// No-auth slug → `Space` lookup used by the file-sync job to
-    /// resolve `spaces/<slug>/...` paths to a space id.
-    pub(in crate::library) async fn find_space_by_slug(
-        &self,
-        slug: &str,
-    ) -> Result<Option<Space>, LibraryError> {
+    /// No-auth slug → `Space` lookup. Soft-deleted entries are filtered
+    /// by the underlying repo. Authorization in the spaces model lives
+    /// on `Project.mounted_spaces`, not the space row — callers must
+    /// enforce mount membership via `Projects::space_for_subject`
+    /// before treating the result as visible to a subject.
+    #[tracing::instrument(name = "library.find_space_by_slug", skip(self))]
+    pub async fn find_space_by_slug(&self, slug: &str) -> Result<Option<Space>, LibraryError> {
         Ok(self.space_repo.maybe_find_by_slug(slug).await?)
+    }
+
+    /// Bulk hydration. Soft-deleted ids silently drop out. Order of
+    /// the returned `Vec` is not aligned with the input slice.
+    #[tracing::instrument(name = "library.find_spaces_by_ids", skip(self, ids))]
+    pub async fn find_spaces_by_ids(
+        &self,
+        ids: &[crate::primitives::SpaceId],
+    ) -> Result<Vec<Space>, LibraryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let map = self.space_repo.find_all::<Space>(ids).await?;
+        Ok(map.into_values().collect())
     }
 
     /// Removes search data and queues a job to delete

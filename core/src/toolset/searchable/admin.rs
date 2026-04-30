@@ -14,7 +14,8 @@ use serde::Deserialize;
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
-use crate::library::{Library, Space};
+use crate::auth::{AuthResource, AuthVerb};
+use crate::library::{Library, Space, SpaceError};
 use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
@@ -621,10 +622,14 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("slug is required for get".to_string())
                 })?;
                 Audit::record_action("spaces.get");
+                subject
+                    .can(AuthVerb::Read, AuthResource::Space(None))
+                    .map_err(|e| ToolSetsError::Library(e.into()))?;
                 let space = self
                     .library
-                    .find_space_by_slug_admin(subject, &slug)
-                    .await?;
+                    .find_space_by_slug(&slug)
+                    .await?
+                    .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_space(
                     &space, false,
                 ))]))
@@ -910,21 +915,11 @@ fn format_projects(project: &[Project]) -> String {
 }
 
 fn format_space(s: &Space, created: bool) -> String {
-    let authorized: Vec<String> = s
-        .authorized_projects
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let auth_str = if authorized.is_empty() {
-        "none".to_string()
-    } else {
-        authorized.join(", ")
-    };
     let description = s.description.as_deref().unwrap_or("\u{2014}");
     let header = if created { "Space created." } else { "Space:" };
     format!(
-        "{header}\n  id: {}\n  slug: {}\n  description: {}\n  authorized_projects: {}",
-        s.id, s.slug, description, auth_str,
+        "{header}\n  id: {}\n  slug: {}\n  description: {}",
+        s.id, s.slug, description,
     )
 }
 
@@ -934,19 +929,15 @@ fn format_spaces(spaces: &[Space]) -> String {
     }
 
     let mut lines = Vec::with_capacity(spaces.len() + 2);
-    lines.push(format!(
-        "{:<38} {:<24} {:<6} {}",
-        "ID", "SLUG", "PROJ#", "DESCRIPTION"
-    ));
+    lines.push(format!("{:<38} {:<24} {}", "ID", "SLUG", "DESCRIPTION"));
     lines.push("-".repeat(100));
 
     for s in spaces {
         let description = s.description.as_deref().unwrap_or("\u{2014}");
         lines.push(format!(
-            "{:<38} {:<24} {:<6} {}",
+            "{:<38} {:<24} {}",
             s.id,
             truncate(&s.slug, 24),
-            s.authorized_projects.len(),
             description,
         ));
     }
