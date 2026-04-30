@@ -224,10 +224,12 @@ impl Sessions {
         Ok(session.chat_history(last_n))
     }
 
-    #[instrument(name = "domain.agent_session.current_model", skip(self))]
-    pub async fn current_model(&self, agent_id: AgentId) -> Result<String, AgentSessionError> {
-        let session = self.repo.find_by_agent_id(agent_id).await?;
-        Ok(session.model().to_owned())
+    #[instrument(name = "domain.agent_session.find_for_agent", skip(self))]
+    pub async fn find_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentSession, AgentSessionError> {
+        Ok(self.repo.find_by_agent_id(agent_id).await?)
     }
 
     #[instrument(name = "domain.agent_session.thread_infos", skip(self))]
