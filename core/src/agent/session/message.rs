@@ -203,7 +203,8 @@ impl From<SystemBlock> for llm::prompt::SystemBlock {
             | SystemBlock::Behavioral { text }
             | SystemBlock::Role { text }
             | SystemBlock::Notes { text }
-            | SystemBlock::Skills { text } => text,
+            | SystemBlock::Skills { text }
+            | SystemBlock::Spaces { text } => text,
         };
         llm::prompt::SystemBlock::Text {
             text,

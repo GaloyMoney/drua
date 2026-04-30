@@ -190,7 +190,11 @@ impl SpaceFs {
         if let Some(n) = args.get("-C").and_then(|v| v.as_i64()) {
             cmd.arg(format!("-C{n}"));
         }
-        if args.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if args
+            .get("multiline")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             cmd.arg("-U").arg("--multiline-dotall");
         }
         if let Some(g) = args.get("glob").and_then(|v| v.as_str()) {

@@ -246,10 +246,7 @@ impl App {
             Arc::clone(&space_fs),
         ));
         toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
-        toolsets.register_top_level(GlobTool::new(
-            Arc::clone(&sandboxes),
-            Arc::clone(&space_fs),
-        ));
+        toolsets.register_top_level(GlobTool::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
         toolsets.register_top_level(Read::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
         toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
 

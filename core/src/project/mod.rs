@@ -380,7 +380,10 @@ impl Projects {
             return Ok(None);
         }
 
-        let spaces = self.library.find_spaces_by_ids(&project.mounted_spaces).await?;
+        let spaces = self
+            .library
+            .find_spaces_by_ids(&project.mounted_spaces)
+            .await?;
         if spaces.is_empty() {
             return Ok(None);
         }

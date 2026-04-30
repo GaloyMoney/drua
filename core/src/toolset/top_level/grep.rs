@@ -25,7 +25,10 @@ pub struct Grep {
 
 impl Grep {
     pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
-        Self { sandboxes, space_fs }
+        Self {
+            sandboxes,
+            space_fs,
+        }
     }
 }
 
@@ -123,9 +126,13 @@ impl TopLevelTool for Grep {
         Audit::record_action("grep");
 
         let args = arguments.unwrap_or_default();
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-        if let Some(sref) = parse_space_path(path) {
+        if let Some(sref) = parse_space_path(&path) {
             let args_value = serde_json::Value::Object(args);
             let res = self.space_fs.grep(subject, sref, &args_value).await;
             return match res {

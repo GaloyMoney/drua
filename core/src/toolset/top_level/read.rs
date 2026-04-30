@@ -36,7 +36,10 @@ pub struct Read {
 
 impl Read {
     pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
-        Self { sandboxes, space_fs }
+        Self {
+            sandboxes,
+            space_fs,
+        }
     }
 }
 
