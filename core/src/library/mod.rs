@@ -319,6 +319,46 @@ impl Library {
         Ok(space)
     }
 
+    /// Lists every space, paginated. Authorized for admin / workspace-admin
+    /// subjects; the workspace-membership ACL on `Space` is intentionally
+    /// bypassed so admins can audit the full set.
+    #[tracing::instrument(name = "library.list_all_spaces", skip(self, sub))]
+    pub async fn list_all_spaces(
+        &self,
+        sub: &crate::auth::AuthSubject,
+    ) -> Result<Vec<Space>, LibraryError> {
+        sub.can(
+            crate::auth::AuthVerb::Read,
+            crate::auth::AuthResource::Space(None),
+        )?;
+        crate::audit::Audit::record_action_if_unset("space.list_all");
+        Ok(self.space_repo.list_all().await?)
+    }
+
+    /// Slug → `Space` lookup that enforces `Read` on the resolved space
+    /// but skips the workspace-membership check. Intended for admin tools
+    /// that need to inspect any space regardless of `authorized_workspaces`.
+    #[tracing::instrument(name = "library.find_space_by_slug_admin", skip(self, sub))]
+    pub async fn find_space_by_slug_admin(
+        &self,
+        sub: &crate::auth::AuthSubject,
+        slug: &str,
+    ) -> Result<Space, LibraryError> {
+        let space = self
+            .space_repo
+            .maybe_find_by_slug(slug)
+            .await?
+            .ok_or_else(|| SpaceError::NotFound {
+                slug: slug.to_string(),
+            })?;
+        sub.can(
+            crate::auth::AuthVerb::Read,
+            crate::auth::AuthResource::Space(Some(space.id)),
+        )?;
+        crate::audit::Audit::record_action_if_unset("space.find_by_slug");
+        Ok(space)
+    }
+
     /// Internal access to the search/upstream/embedder primitives so
     /// `space::file_sync` can drive its index job without leaking
     /// `Library`'s privates to the rest of the crate.

@@ -1,8 +1,8 @@
 //! `AdminToolSet` — admin-only tools exposed exclusively through the
 //! searchable catalog (`search_tools` → `describe_tool` → `call_tool`).
 //!
-//! Consolidated into 4 tools with command discriminators:
-//! `agent`, `sandbox`, `log`, `workspace`.
+//! Consolidated into 5 tools with command discriminators:
+//! `agent`, `sandbox`, `log`, `workspace`, `spaces`.
 //! Prefixed as `drua_admin_agent`, `drua_admin_sandbox`, etc.
 
 use std::sync::{Arc, LazyLock};
@@ -14,6 +14,7 @@ use serde::Deserialize;
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
+use crate::library::{Library, Space};
 use crate::primitives::{AgentId, SandboxId, UserId, WorkspaceId};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
 use crate::workspace::{Workspace, Workspaces};
@@ -206,10 +207,29 @@ struct WorkspaceParams {
     description: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SpacesCommand {
+    Create,
+    List,
+    Get,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SpacesParams {
+    command: SpacesCommand,
+    /// Slug for `create` and `get`. Must match `[a-z0-9-]+` with no
+    /// leading / trailing / double hyphens.
+    slug: Option<String>,
+    /// Optional human-readable summary, used by `create`.
+    description: Option<String>,
+}
+
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
 static SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SandboxParams>);
 static LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LogParams>);
 static WORKSPACE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkspaceParams>);
+static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SpacesParams>);
 
 struct ToolDef {
     name: &'static str,
@@ -246,6 +266,16 @@ static TOOLS: &[ToolDef] = &[
                        `description`; also seeds a WorkspaceLead agent), `list`.",
         schema: &WORKSPACE_SCHEMA,
     },
+    ToolDef {
+        name: "spaces",
+        description: "Manage library spaces — bounded collaborative folders under \
+                       `spaces/<slug>/` in the knowledge-base repo. Commands: \
+                       `create` (requires `slug`, optional `description`; the calling \
+                       subject's workspace is auto-added to the authorized list), \
+                       `list` (no args), \
+                       `get` (requires `slug`; bypasses workspace ACL for admins).",
+        schema: &SPACES_SCHEMA,
+    },
 ];
 
 pub struct AdminToolSet {
@@ -254,6 +284,7 @@ pub struct AdminToolSet {
     sandboxes: Arc<Sandboxes>,
     audit: Arc<Audit>,
     workspaces: Arc<Workspaces>,
+    library: Arc<Library>,
 }
 
 impl AdminToolSet {
@@ -262,6 +293,7 @@ impl AdminToolSet {
         sandboxes: Arc<Sandboxes>,
         audit: Arc<Audit>,
         workspaces: Arc<Workspaces>,
+        library: Arc<Library>,
     ) -> Self {
         let entries = TOOLS
             .iter()
@@ -282,6 +314,7 @@ impl AdminToolSet {
             sandboxes,
             audit,
             workspaces,
+            library,
         }
     }
 }
@@ -319,6 +352,7 @@ impl SearchableToolSet for AdminToolSet {
             "sandbox" => self.sandbox(subject, arguments).await,
             "log" => self.log(arguments).await,
             "workspace" => self.workspace(subject, arguments).await,
+            "spaces" => self.spaces(subject, arguments).await,
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -551,6 +585,53 @@ impl AdminToolSet {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workspaces(&all),
                 )]))
+            }
+        }
+    }
+
+    async fn spaces(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let params: SpacesParams = parse_params(arguments)?;
+
+        match params.command {
+            SpacesCommand::Create => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for create".to_string())
+                })?;
+                let description = params.description.filter(|s| !s.is_empty());
+                Audit::record_action("spaces.create");
+                let space = self
+                    .library
+                    .create_space(subject, slug, description)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format_space(
+                    &space, true,
+                ))]))
+            }
+
+            SpacesCommand::List => {
+                Audit::record_action("spaces.list");
+                let all = self.library.list_all_spaces(subject).await?;
+                Ok(CallToolResult::success(vec![Content::text(format_spaces(
+                    &all,
+                ))]))
+            }
+
+            SpacesCommand::Get => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for get".to_string())
+                })?;
+                Audit::record_action("spaces.get");
+                let space = self
+                    .library
+                    .find_space_by_slug_admin(subject, &slug)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format_space(
+                    &space, false,
+                ))]))
             }
         }
     }
@@ -830,4 +911,130 @@ fn format_workspaces(ws: &[Workspace]) -> String {
         lines.push(format!("{:<38} {:<30} {}", w.id, w.name, description));
     }
     lines.join("\n")
+}
+
+fn format_space(s: &Space, created: bool) -> String {
+    let authorized: Vec<String> = s
+        .authorized_workspaces
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let auth_str = if authorized.is_empty() {
+        "none".to_string()
+    } else {
+        authorized.join(", ")
+    };
+    let description = s.description.as_deref().unwrap_or("\u{2014}");
+    let header = if created { "Space created." } else { "Space:" };
+    format!(
+        "{header}\n  id: {}\n  slug: {}\n  description: {}\n  authorized_workspaces: {}",
+        s.id, s.slug, description, auth_str,
+    )
+}
+
+fn format_spaces(spaces: &[Space]) -> String {
+    if spaces.is_empty() {
+        return "No spaces found.".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(spaces.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<24} {:<6} {}",
+        "ID", "SLUG", "WS#", "DESCRIPTION"
+    ));
+    lines.push("-".repeat(100));
+
+    for s in spaces {
+        let description = s.description.as_deref().unwrap_or("\u{2014}");
+        lines.push(format!(
+            "{:<38} {:<24} {:<6} {}",
+            s.id,
+            truncate(&s.slug, 24),
+            s.authorized_workspaces.len(),
+            description,
+        ));
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(json: serde_json::Value) -> Option<JsonObject> {
+        match json {
+            serde_json::Value::Object(obj) => Some(obj),
+            _ => panic!("expected object"),
+        }
+    }
+
+    #[test]
+    fn spaces_create_parses_full_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "slug": "oncall",
+            "description": "On-call rotation",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Create));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+        assert_eq!(p.description.as_deref(), Some("On-call rotation"));
+    }
+
+    #[test]
+    fn spaces_create_parses_without_description() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "slug": "incidents",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Create));
+        assert_eq!(p.slug.as_deref(), Some("incidents"));
+        assert!(p.description.is_none());
+    }
+
+    #[test]
+    fn spaces_list_parses_no_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "list",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::List));
+        assert!(p.slug.is_none());
+        assert!(p.description.is_none());
+    }
+
+    #[test]
+    fn spaces_get_parses_slug() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "get",
+            "slug": "oncall",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Get));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+    }
+
+    #[test]
+    fn spaces_rejects_unknown_command() {
+        let res: Result<SpacesParams, _> = parse_params(args(serde_json::json!({
+            "command": "destroy",
+        })));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn spaces_schema_includes_command_enum() {
+        let schema = &*SPACES_SCHEMA;
+        let s = serde_json::to_string(schema).unwrap();
+        assert!(s.contains("\"create\""));
+        assert!(s.contains("\"list\""));
+        assert!(s.contains("\"get\""));
+    }
+
+    #[test]
+    fn tools_includes_spaces() {
+        assert!(TOOLS.iter().any(|t| t.name == "spaces"));
+    }
 }
