@@ -45,8 +45,13 @@ pub trait TopLevelTool: Send + Sync {
         true
     }
 
-    /// Default `true`. Override to `false` to prevent recursive dispatch
-    /// (compose itself) or for tools incompatible with compose (agent, use_skill, sandbox).
+    /// Default `true`. Override to `false` only for meta-tools whose
+    /// semantics don't fit a JS bridge — `compose` (recursion),
+    /// `compose_types` (introspection-only), and `use_skill` (spawns a
+    /// nested agent). Workspace-admin tools (`agent`, `sandbox`,
+    /// `skill`, `workflow`, ...) ARE composable: their service methods
+    /// run `subject.can(...)` themselves and the dispatcher passes the
+    /// caller's subject through unchanged, so authz is preserved.
     fn composable(&self) -> bool {
         true
     }

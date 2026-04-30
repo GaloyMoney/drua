@@ -161,7 +161,7 @@ impl TopLevelTool for SkillTool {
     }
 
     fn composable(&self) -> bool {
-        false
+        true
     }
 
     async fn call(

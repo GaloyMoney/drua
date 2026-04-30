@@ -488,6 +488,81 @@ mod tests {
         assert!(ts.contains("\"done\""), "{ts}");
     }
 
+    /// Workspace-admin tools (`agent`, `skill`, `workflow`, `sandbox`,
+    /// `spaces`, `notes`, `log`) MUST be reachable from compose so admins
+    /// can script-automate them. Stub `TopLevelTool` impls mirror the
+    /// real tools' names and `composable() == true`; `generate_dts` then
+    /// declares each one as a callable function on the `tools` namespace.
+    #[test]
+    fn admin_tools_appear_in_compose_dts() {
+        struct StubAdminTool {
+            name: &'static str,
+            composable: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl TopLevelTool for StubAdminTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn description(&self) -> &str {
+                "stub admin tool"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static EMPTY: LazyLock<serde_json::Value> =
+                    LazyLock::new(|| serde_json::json!({"type": "object"}));
+                &EMPTY
+            }
+            fn composable(&self) -> bool {
+                self.composable
+            }
+            async fn call(
+                &self,
+                _subject: &AuthSubject,
+                _arguments: Option<JsonObject>,
+            ) -> Result<CallToolResult, ToolSetsError> {
+                unreachable!("stub: not invoked in this test")
+            }
+        }
+
+        let mut top: HashMap<String, Arc<dyn TopLevelTool>> = HashMap::new();
+        for name in [
+            "agent", "skill", "workflow", "sandbox", "spaces", "notes", "log",
+        ] {
+            top.insert(
+                name.to_string(),
+                Arc::new(StubAdminTool {
+                    name,
+                    composable: true,
+                }) as Arc<dyn TopLevelTool>,
+            );
+        }
+        // A non-composable meta tool should NOT leak into dts.
+        top.insert(
+            "compose".to_string(),
+            Arc::new(StubAdminTool {
+                name: "compose",
+                composable: false,
+            }) as Arc<dyn TopLevelTool>,
+        );
+
+        let sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
+        let dts = generate_dts(&AuthSubject::Anonymous, &sets, &top);
+
+        for name in [
+            "agent", "skill", "workflow", "sandbox", "spaces", "notes", "log",
+        ] {
+            assert!(
+                dts.contains(&format!("function {name}(")),
+                "expected `function {name}(` in dts, got:\n{dts}"
+            );
+        }
+        assert!(
+            !dts.contains("function compose("),
+            "non-composable tool leaked into dts:\n{dts}"
+        );
+    }
+
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside
     /// `properties`. The dynamic `result` field must serialize as `{}`, not
     /// `true`.
