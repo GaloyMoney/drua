@@ -56,6 +56,10 @@ impl Upstream {
         })
     }
 
+    pub fn repo_path(&self) -> &std::path::Path {
+        &self.repo_path
+    }
+
     async fn fresh_token(github_app: &Option<Arc<GitHubAppTokenProvider>>) -> Option<String> {
         match github_app.as_ref() {
             Some(provider) => match provider.generate_token().await {

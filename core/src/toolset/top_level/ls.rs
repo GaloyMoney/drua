@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::{parse_space_path, SpaceFs};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
@@ -28,11 +29,12 @@ struct LsParams {
 
 pub struct Ls {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl Ls {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self { sandboxes, space_fs }
     }
 }
 
@@ -69,12 +71,46 @@ impl TopLevelTool for Ls {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        let params: LsParams = parse_params(arguments)?;
+        Audit::record_action("ls");
+
+        if let Some(sref) = parse_space_path(&params.path) {
+            let res = self.space_fs.view_dir(subject, sref).await;
+            return match res {
+                Ok(output) => {
+                    let filtered = if params.ignore.is_empty() {
+                        output
+                    } else {
+                        output
+                            .lines()
+                            .filter(|line| {
+                                let name = line.trim_end_matches('/');
+                                !params.ignore.iter().any(|ig| ig == name)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    let out = EntriesOutput {
+                        entries: filtered
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(String::from)
+                            .collect(),
+                    };
+                    let structured =
+                        serde_json::to_value(&out).expect("EntriesOutput serialization");
+                    let mut result = CallToolResult::success(vec![Content::text(filtered)]);
+                    result.structured_content = Some(structured);
+                    Ok(result)
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            };
+        }
+
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        Audit::record_action("ls");
         Audit::record_sandbox_id(sandbox_id);
-        let params: LsParams = parse_params(arguments)?;
 
         let client = self
             .sandboxes

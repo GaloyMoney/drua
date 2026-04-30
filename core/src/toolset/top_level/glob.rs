@@ -11,6 +11,7 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::{parse_space_path, SpaceFs};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
@@ -19,11 +20,12 @@ use super::{schema_for, FilesOutput};
 
 pub struct GlobTool {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl GlobTool {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self { sandboxes, space_fs }
     }
 }
 
@@ -77,10 +79,38 @@ impl TopLevelTool for GlobTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        Audit::record_action("glob");
+
+        let args = arguments.unwrap_or_default();
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
+
+        if let Some(sref) = parse_space_path(path) {
+            let res = self.space_fs.glob(subject, sref, pattern).await;
+            return match res {
+                Ok(output) => {
+                    let out = FilesOutput {
+                        files: output
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(String::from)
+                            .collect(),
+                    };
+                    let structured = serde_json::to_value(&out).expect("FilesOutput serialization");
+                    let mut result = CallToolResult::success(vec![Content::text(output)]);
+                    result.structured_content = Some(structured);
+                    Ok(result)
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            };
+        }
+
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        Audit::record_action("glob");
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self
@@ -91,7 +121,7 @@ impl TopLevelTool for GlobTool {
 
         let req = ExecuteRequest {
             tool: "Glob".to_string(),
-            input: serde_json::Value::Object(arguments.unwrap_or_default()),
+            input: serde_json::Value::Object(args),
         };
 
         match client.execute(&req).await {

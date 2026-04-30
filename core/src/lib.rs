@@ -175,13 +175,11 @@ impl App {
         ));
 
         // Sandbox-backed tools must be registered after sandboxes is up
-        // but before toolsets is wrapped in Arc.
+        // but before toolsets is wrapped in Arc. The five read tools
+        // (text_editor, grep, glob, read, ls) are deferred — they take
+        // `Arc<SpaceFs>` for the `space:<slug>/...` re-routing branch
+        // and `SpaceFs` depends on Projects, which doesn't exist yet.
         toolsets.register_top_level(Bash::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(TextEditor::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(GlobTool::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(Read::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
         // Created before Agents so pinned notes can be injected into agent
@@ -231,6 +229,30 @@ impl App {
             Arc::clone(&workflows),
             (*library).clone(),
         ));
+        // Late-binding: Agents needs Projects to render the dynamic
+        // `<spaces>` system block, but Projects::new takes Arc<Agents>.
+        agents.set_projects(Arc::clone(&projects));
+
+        // Sandboxless read facade for `space:<slug>/...` paths. The
+        // five read tools branch on the `space:` prefix and dispatch
+        // through here when present; otherwise they fall through to
+        // the existing sandbox `/execute` path.
+        let space_fs = Arc::new(library::SpaceFs::new(
+            Arc::clone(&library),
+            Arc::clone(&projects),
+        ));
+        toolsets.register_top_level(TextEditor::new(
+            Arc::clone(&sandboxes),
+            Arc::clone(&space_fs),
+        ));
+        toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(GlobTool::new(
+            Arc::clone(&sandboxes),
+            Arc::clone(&space_fs),
+        ));
+        toolsets.register_top_level(Read::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+
         toolsets.register_top_level(SpacesTool::new(Arc::clone(&library), Arc::clone(&projects)));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));

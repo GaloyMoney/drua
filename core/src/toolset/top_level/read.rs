@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::{parse_space_path, SpaceFs};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
@@ -30,11 +31,12 @@ struct ReadParams {
 
 pub struct Read {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl Read {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self { sandboxes, space_fs }
     }
 }
 
@@ -71,12 +73,19 @@ impl TopLevelTool for Read {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        let params: ReadParams = parse_params(arguments)?;
+        Audit::record_action("read");
+
+        // `space:<slug>/...` paths bypass the sandbox entirely.
+        if let Some(sref) = parse_space_path(&params.path) {
+            let view_range = view_range_from_offset_limit(params.offset, params.limit);
+            return space_view_to_result(self.space_fs.view_file(subject, sref, view_range).await);
+        }
+
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        Audit::record_action("read");
         Audit::record_sandbox_id(sandbox_id);
-        let params: ReadParams = parse_params(arguments)?;
 
         // Translate offset/limit into the editor's view_range; start is 1-based, -1 = EOF.
         let mut editor_input = serde_json::json!({
@@ -84,12 +93,7 @@ impl TopLevelTool for Read {
             "path": params.path,
         });
 
-        if params.offset.is_some() || params.limit.is_some() {
-            let start = params.offset.unwrap_or(0) + 1;
-            let end = match params.limit {
-                Some(l) => start + l - 1,
-                None => -1,
-            };
+        if let Some((start, end)) = view_range_from_offset_limit(params.offset, params.limit) {
             editor_input["view_range"] = serde_json::json!([start, end]);
         }
 
@@ -123,5 +127,36 @@ impl TopLevelTool for Read {
                 "sandbox /execute call failed: {e}"
             ))])),
         }
+    }
+}
+
+/// `[start, end]` (1-based, `-1` = EOF) when either bound is supplied;
+/// `None` when both are unset (full file).
+fn view_range_from_offset_limit(offset: Option<i64>, limit: Option<i64>) -> Option<(i64, i64)> {
+    if offset.is_none() && limit.is_none() {
+        return None;
+    }
+    let start = offset.unwrap_or(0) + 1;
+    let end = match limit {
+        Some(l) => start + l - 1,
+        None => -1,
+    };
+    Some((start, end))
+}
+
+fn space_view_to_result(
+    res: Result<String, crate::project::ProjectError>,
+) -> Result<CallToolResult, ToolSetsError> {
+    match res {
+        Ok(content) => {
+            let out = ContentOutput {
+                content: content.clone(),
+            };
+            let structured = serde_json::to_value(&out).expect("ContentOutput serialization");
+            let mut result = CallToolResult::success(vec![Content::text(content)]);
+            result.structured_content = Some(structured);
+            Ok(result)
+        }
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
     }
 }

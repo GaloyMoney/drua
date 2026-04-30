@@ -11,6 +11,7 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::{parse_space_path, SpaceFs};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
@@ -19,11 +20,12 @@ use super::{schema_for, TextOutput};
 
 pub struct Grep {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl Grep {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self { sandboxes, space_fs }
     }
 }
 
@@ -118,10 +120,31 @@ impl TopLevelTool for Grep {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        Audit::record_action("grep");
+
+        let args = arguments.unwrap_or_default();
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+
+        if let Some(sref) = parse_space_path(path) {
+            let args_value = serde_json::Value::Object(args);
+            let res = self.space_fs.grep(subject, sref, &args_value).await;
+            return match res {
+                Ok(output) => {
+                    let out = TextOutput {
+                        output: output.clone(),
+                    };
+                    let structured = serde_json::to_value(&out).expect("TextOutput serialization");
+                    let mut result = CallToolResult::success(vec![Content::text(output)]);
+                    result.structured_content = Some(structured);
+                    Ok(result)
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            };
+        }
+
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        Audit::record_action("grep");
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self
@@ -132,7 +155,7 @@ impl TopLevelTool for Grep {
 
         let req = ExecuteRequest {
             tool: "Grep".to_string(),
-            input: serde_json::Value::Object(arguments.unwrap_or_default()),
+            input: serde_json::Value::Object(args),
         };
 
         match client.execute(&req).await {

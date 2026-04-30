@@ -4,6 +4,8 @@ mod inbox;
 mod job;
 mod search;
 pub mod space;
+mod space_fs;
+mod space_path;
 mod synced;
 mod upstream;
 
@@ -27,6 +29,8 @@ pub use file::{
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
+pub use space_fs::SpaceFs;
+pub use space_path::{parse as parse_space_path, SpaceRef};
 pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
@@ -263,6 +267,14 @@ impl Library {
 
     pub(in crate::library) fn upstream(&self) -> &Upstream {
         &self.upstream
+    }
+
+    /// On-disk root for `spaces/<slug>/` inside the library clone.
+    /// `SpaceFs` reads from here directly; the path is not validated
+    /// against `Space` existence — callers must run
+    /// `Projects::space_for_subject` first.
+    pub fn space_root(&self, slug: &str) -> std::path::PathBuf {
+        self.upstream.repo_path().join("spaces").join(slug)
     }
 
     /// No-auth slug → `Space` lookup. Soft-deleted entries are filtered

@@ -21,6 +21,7 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::{parse_space_path, SpaceFs};
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 
@@ -30,11 +31,12 @@ use super::{schema_for, TextOutput};
 
 pub struct TextEditor {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl TextEditor {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self { sandboxes, space_fs }
     }
 }
 
@@ -134,20 +136,56 @@ impl TopLevelTool for TextEditor {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?;
+            .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?
+            .to_string();
+        Audit::record_action("text_editor");
+
+        // `space:<slug>/...` paths bypass the sandbox. `view` runs
+        // through `SpaceFs`; mutating commands surface a clean
+        // "not yet supported" error rather than crashing.
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(sref) = parse_space_path(path) {
+            if command_is_mutating(&command) {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "write commands on space paths are not yet supported. \
+                     For now, use the spaces tool to create files in spaces."
+                        .to_string(),
+                )]));
+            }
+            let view_range = args
+                .get("view_range")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| {
+                    let s = arr.first()?.as_i64()?;
+                    let e = arr.get(1)?.as_i64()?;
+                    Some((s, e))
+                });
+            let res = self.space_fs.view_file(subject, sref, view_range).await;
+            return match res {
+                Ok(output) => {
+                    let out = TextOutput {
+                        output: output.clone(),
+                    };
+                    let structured = serde_json::to_value(&out).expect("TextOutput serialization");
+                    let mut result = CallToolResult::success(vec![Content::text(output)]);
+                    result.structured_content = Some(structured);
+                    Ok(result)
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            };
+        }
 
         // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
-        let sandbox_id = if command_is_mutating(command) {
+        let sandbox_id = if command_is_mutating(&command) {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
             subject
                 .readable_sandbox_id()
                 .ok_or(ToolSetsError::Unauthorized)?
         };
-        Audit::record_action("text_editor");
         Audit::record_sandbox_id(sandbox_id);
 
-        let client = if command_is_mutating(command) {
+        let client = if command_is_mutating(&command) {
             self.sandboxes
                 .instance_client_for(subject, sandbox_id)
                 .await

@@ -44,6 +44,7 @@ pub enum SystemBlockKind {
     Role,
     Notes,
     Skills,
+    Spaces,
 }
 
 impl SystemBlockKind {
@@ -55,6 +56,7 @@ impl SystemBlockKind {
         SystemBlockKind::Role,
         SystemBlockKind::Notes,
         SystemBlockKind::Skills,
+        SystemBlockKind::Spaces,
     ];
 }
 
@@ -67,6 +69,7 @@ pub enum SystemBlock {
     Role { text: String },
     Notes { text: String },
     Skills { text: String },
+    Spaces { text: String },
 }
 
 impl SystemBlock {
@@ -78,6 +81,7 @@ impl SystemBlock {
             SystemBlock::Role { .. } => SystemBlockKind::Role,
             SystemBlock::Notes { .. } => SystemBlockKind::Notes,
             SystemBlock::Skills { .. } => SystemBlockKind::Skills,
+            SystemBlock::Spaces { .. } => SystemBlockKind::Spaces,
         }
     }
 
@@ -88,7 +92,8 @@ impl SystemBlock {
             | SystemBlock::Behavioral { text }
             | SystemBlock::Role { text }
             | SystemBlock::Notes { text }
-            | SystemBlock::Skills { text } => text,
+            | SystemBlock::Skills { text }
+            | SystemBlock::Spaces { text } => text,
         }
     }
 }

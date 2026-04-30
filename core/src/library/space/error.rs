@@ -29,6 +29,10 @@ pub enum SpaceError {
         slug: String,
         project_id: crate::primitives::ProjectId,
     },
+    #[error("SpaceError - InvalidRelPath: {rel_path:?} (must be relative, no '..' segments)")]
+    InvalidRelPath { rel_path: String },
+    #[error("SpaceError - Io: {0}")]
+    Io(String),
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {
