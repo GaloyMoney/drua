@@ -17,7 +17,6 @@ use super::entity::*;
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")
 )]
 pub struct WorkflowDefinitionRepo {
-    #[allow(dead_code)]
     pool: PgPool,
     library: Option<drua_library::Library>,
 }

@@ -34,6 +34,10 @@ pub enum WorkflowError {
     BuildEntity(String),
     #[error("WorkflowError - InvalidDefinition: {0}")]
     InvalidDefinition(String),
+    #[error("WorkflowError - InvalidCronExpression: {0}")]
+    InvalidCronExpression(String),
+    #[error("WorkflowError - InvalidTimezone: {0}")]
+    InvalidTimezone(String),
     #[error("WorkflowError - SkillNotFound: {0}")]
     SkillNotFound(String),
     #[error("WorkflowError - SandboxNotFound: {0}")]

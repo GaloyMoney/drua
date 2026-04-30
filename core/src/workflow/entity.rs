@@ -408,6 +408,28 @@ mod tests {
     }
 
     #[test]
+    fn workflow_definition_hydrates_cron_trigger() {
+        let new = NewWorkflowDefinition::builder()
+            .project_id(ProjectId::new())
+            .name("scheduled-flow")
+            .trigger(WorkflowTrigger::Cron {
+                schedule: "0 */6 * * * *".to_string(),
+                timezone: Some("UTC".to_string()),
+            })
+            .steps(vec![sample_step()])
+            .build()
+            .unwrap();
+        let def = WorkflowDefinition::try_from_events(new.into_events()).unwrap();
+        match &def.trigger {
+            WorkflowTrigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 */6 * * * *");
+                assert_eq!(timezone.as_deref(), Some("UTC"));
+            }
+            _ => panic!("expected Cron trigger after hydration"),
+        }
+    }
+
+    #[test]
     fn workflow_definition_hydrates_preexisting_sandbox_decl() {
         let new = NewWorkflowDefinition::builder()
             .project_id(ProjectId::new())

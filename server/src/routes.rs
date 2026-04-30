@@ -1635,6 +1635,7 @@ fn workflow_definition_to_view_for_list(
             provider.clone(),
             Some(secret.clone()),
         ),
+        WorkflowTrigger::Cron { schedule, .. } => (format!("cron ({schedule})"), None, None),
     };
     // The list view never surfaces the secret — only the detail page does.
     let _ = secret;
@@ -1663,6 +1664,13 @@ fn workflow_definition_to_view_for_detail(
             provider.clone(),
             Some(secret.clone()),
         ),
+        WorkflowTrigger::Cron { schedule, timezone } => {
+            let label = match timezone {
+                Some(tz) => format!("cron ({schedule} {tz})"),
+                None => format!("cron ({schedule})"),
+            };
+            (label, None, None)
+        }
     };
     let webhook_url = secret.as_ref().map(|_| match public_host {
         Some(host) => format!("{host}/webhooks/{}", d.id),

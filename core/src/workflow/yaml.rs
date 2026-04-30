@@ -170,6 +170,11 @@ enum WorkflowTriggerYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
     },
+    Cron {
+        schedule: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+    },
 }
 
 impl WorkflowTriggerYaml {
@@ -178,6 +183,10 @@ impl WorkflowTriggerYaml {
             WorkflowTrigger::Manual => WorkflowTriggerYaml::Manual,
             WorkflowTrigger::Webhook { provider, .. } => WorkflowTriggerYaml::Webhook {
                 provider: provider.clone(),
+            },
+            WorkflowTrigger::Cron { schedule, timezone } => WorkflowTriggerYaml::Cron {
+                schedule: schedule.clone(),
+                timezone: timezone.clone(),
             },
         }
     }
@@ -310,6 +319,9 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
             provider,
             secret: String::new(),
         },
+        WorkflowTriggerYaml::Cron { schedule, timezone } => {
+            WorkflowTrigger::Cron { schedule, timezone }
+        }
     };
 
     let steps: Vec<WorkflowStepDef> = yaml
@@ -515,6 +527,52 @@ steps:
         assert!(parsed.needs_rewrite);
         assert_eq!(parsed.name, "simple-flow");
         assert!(matches!(parsed.trigger, WorkflowTrigger::Manual));
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_cron_trigger() {
+        let id = WorkflowDefinitionId::new();
+        let trigger = WorkflowTrigger::Cron {
+            schedule: "0 */6 * * * *".to_string(),
+            timezone: Some("America/New_York".to_string()),
+        };
+        let content = render(id, "scheduled", None, &trigger, &sample_sandboxes());
+        assert!(content.contains("type: cron"));
+        assert!(content.contains("schedule:"));
+        assert!(content.contains("timezone: America/New_York"));
+
+        let path = canonical_workflow_path(id, "scheduled", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        match parsed.trigger {
+            WorkflowTrigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 */6 * * * *");
+                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+            }
+            _ => panic!("expected cron trigger"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_cron_trigger_default_timezone() {
+        let content = "\
+name: scheduled
+trigger:
+  type: cron
+  schedule: \"0 */6 * * * *\"
+steps:
+  - type: agent_step
+    name: step
+    skill: my-skill
+";
+        let path = "runtime/workflows/scheduled.yml";
+        let parsed = parse_workflow_yaml(content, path).expect("parses");
+        match parsed.trigger {
+            WorkflowTrigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 */6 * * * *");
+                assert!(timezone.is_none());
+            }
+            _ => panic!("expected cron trigger"),
+        }
     }
 
     #[test]

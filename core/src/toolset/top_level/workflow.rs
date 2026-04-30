@@ -251,10 +251,19 @@ struct WorkflowDefinitionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     project_id: String,
-    /// `"manual"` or `"webhook"`.
+    /// `"manual"`, `"webhook"`, or `"cron"`.
     trigger_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_provider: Option<String>,
+    /// Cron expression when `trigger_type == "cron"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cron_schedule: Option<String>,
+    /// IANA timezone when `trigger_type == "cron"`. Defaults to UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cron_timezone: Option<String>,
+    /// RFC3339 timestamp of the next scheduled fire for cron triggers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_run_at: Option<String>,
     steps: Vec<WorkflowStepOutput>,
     sandboxes: Vec<WorkflowSandboxOutput>,
 }
@@ -744,9 +753,25 @@ impl TopLevelTool for WorkflowTool {
 }
 
 fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
+    let mut cron_schedule = None;
+    let mut cron_timezone = None;
+    let mut next_run_at = None;
     let (trigger_type, trigger_provider) = match &d.trigger {
         WorkflowTrigger::Manual => ("manual".to_string(), None),
         WorkflowTrigger::Webhook { provider, .. } => ("webhook".to_string(), provider.clone()),
+        WorkflowTrigger::Cron { schedule, timezone } => {
+            cron_schedule = Some(schedule.clone());
+            cron_timezone = timezone.clone();
+            next_run_at = crate::workflow::next_cron_fire_at(
+                schedule,
+                timezone.as_deref(),
+                chrono::Utc::now(),
+            )
+            .ok()
+            .flatten()
+            .map(|t| t.to_rfc3339());
+            ("cron".to_string(), None)
+        }
     };
     WorkflowDefinitionOutput {
         id: d.id.to_string(),
@@ -755,6 +780,9 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
         project_id: d.project_id.to_string(),
         trigger_type,
         trigger_provider,
+        cron_schedule,
+        cron_timezone,
+        next_run_at,
         steps: d.steps.iter().map(step_to_output).collect(),
         sandboxes: d.sandboxes.iter().map(sandbox_to_output).collect(),
     }
@@ -850,7 +878,7 @@ fn run_state_str(state: WorkflowRunState) -> &'static str {
 impl WorkflowTool {
     fn webhook_url_and_secret(&self, def: &WorkflowDefinition) -> (Option<String>, Option<String>) {
         match &def.trigger {
-            WorkflowTrigger::Manual => (None, None),
+            WorkflowTrigger::Manual | WorkflowTrigger::Cron { .. } => (None, None),
             WorkflowTrigger::Webhook { secret, .. } => {
                 let url = match &self.public_host {
                     Some(host) => format!("{host}/webhooks/{}", def.id),
@@ -872,6 +900,10 @@ impl WorkflowTool {
             WorkflowTrigger::Webhook { provider, .. } => match provider {
                 Some(p) => format!("webhook ({p})"),
                 None => "webhook".to_string(),
+            },
+            WorkflowTrigger::Cron { schedule, timezone } => match timezone {
+                Some(tz) => format!("cron ({schedule} {tz})"),
+                None => format!("cron ({schedule})"),
             },
         };
 
@@ -923,6 +955,7 @@ fn format_list_text(defs: &[WorkflowDefinition]) -> String {
                 Some(p) => format!("webhook:{p}"),
                 None => "webhook".to_string(),
             },
+            WorkflowTrigger::Cron { schedule, .. } => format!("cron:{schedule}"),
         };
         lines.push(format!(
             "{:<38} {:<24} {:<14} {}",
@@ -944,6 +977,19 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                 None => "webhook".to_string(),
             };
             format!("{label}\n  webhook_secret: {secret}")
+        }
+        WorkflowTrigger::Cron { schedule, timezone } => {
+            let mut s = format!("cron\n  schedule:    {schedule}");
+            let tz_label = timezone.as_deref().unwrap_or("UTC");
+            s.push_str(&format!("\n  timezone:    {tz_label}"));
+            if let Ok(Some(next)) = crate::workflow::next_cron_fire_at(
+                schedule,
+                timezone.as_deref(),
+                chrono::Utc::now(),
+            ) {
+                s.push_str(&format!("\n  next_run_at: {}", next.to_rfc3339()));
+            }
+            s
         }
     };
     let mut out = String::new();

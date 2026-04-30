@@ -43,7 +43,7 @@ pub async fn handle_webhook(
 
     let (provider, expected_secret) = match &definition.trigger {
         WorkflowTrigger::Webhook { provider, secret } => (provider.clone(), secret.clone()),
-        WorkflowTrigger::Manual => {
+        WorkflowTrigger::Manual | WorkflowTrigger::Cron { .. } => {
             return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
     };
