@@ -653,6 +653,7 @@ fn cell_symbol(cell: CellKind) -> (char, Color, bool) {
                 'H' => Color::Magenta,
                 'N' => Color::LightYellow,
                 'S' => Color::Green,
+                'K' => Color::LightCyan,
                 _ => Color::White,
             };
             let bold = matches!(cell, CellKind::Summary(_));

@@ -26,6 +26,7 @@ use crate::workflow::Workflows;
 #[derive(Clone)]
 pub struct Projects {
     repo: ProjectRepo,
+    pool: sqlx::PgPool,
     agents: Arc<Agents>,
     sandboxes: Arc<Sandboxes>,
     skills: Arc<Skills>,
@@ -33,6 +34,7 @@ pub struct Projects {
     secrets: ProjectSecrets,
     workflows: Arc<Workflows>,
     library: Library,
+    context_generation: ContextGeneration,
 }
 
 impl Projects {
@@ -46,10 +48,12 @@ impl Projects {
         secrets: ProjectSecrets,
         workflows: Arc<Workflows>,
         library: Library,
+        context_generation: ContextGeneration,
     ) -> Self {
         let repo = ProjectRepo::new(pool);
         Self {
             repo,
+            pool: pool.clone(),
             agents,
             sandboxes,
             skills,
@@ -57,6 +61,23 @@ impl Projects {
             secrets,
             workflows,
             library,
+            context_generation,
+        }
+    }
+
+    /// Bump `<spaces>` (and any other project-keyed cached blocks)
+    /// when this op commits. Called from `mount_space_internal_in_op`
+    /// and `unmount_space`; both mutate `Project.mounted_spaces`.
+    fn register_context_bump<OP: AtomicOperation>(&self, op: &mut OP, project_id: ProjectId) {
+        let hook = ContextBumpHook::new(
+            self.context_generation.clone(),
+            self.pool.clone(),
+            Some(project_id),
+        );
+        if op.add_commit_hook(hook).is_err() {
+            tracing::warn!(
+                "AtomicOperation rejected ContextBumpHook; project context bump skipped"
+            );
         }
     }
 
@@ -306,6 +327,7 @@ impl Projects {
         let mut project = self.repo.find_by_id_in_op(&mut *op, project_id).await?;
         if project.mount_space(space_id).did_execute() {
             self.repo.update_in_op(&mut *op, &mut project).await?;
+            self.register_context_bump(op, project_id);
         }
         Ok(())
     }
@@ -330,6 +352,7 @@ impl Projects {
         let mut project = self.repo.find_by_id_in_op(&mut op, project_id).await?;
         if project.unmount_space(space_id).did_execute() {
             self.repo.update_in_op(&mut op, &mut project).await?;
+            self.register_context_bump(&mut op, project_id);
         }
         op.commit().await?;
         Ok(())

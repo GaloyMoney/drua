@@ -142,12 +142,15 @@ impl TopLevelTool for SpacesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Every command in this tool acts on the caller's project.
-        // Members can `list` (Read on Project(P)); admins can also
-        // `create` / `mount`. Per-command authz lives on the service.
+        // Project leads only — the tool mutates the project's
+        // `mounted_spaces` set (via create / mount / unmount), and even
+        // the `list` command is conceptually about administering what
+        // the project sees. `Update on Project(P)` matches `ProjectAdmin`
+        // (the lead-agent scope) without granting access to ordinary
+        // task agents (`ProjectMember`).
         subject.project_id().is_some_and(|p| {
             subject
-                .can(AuthVerb::Read, AuthResource::Project(Some(p)))
+                .can(AuthVerb::Update, AuthResource::Project(Some(p)))
                 .is_ok()
         })
     }

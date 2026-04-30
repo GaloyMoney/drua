@@ -228,6 +228,7 @@ impl App {
             project_secrets.clone(),
             Arc::clone(&workflows),
             (*library).clone(),
+            context_generation.clone(),
         ));
         // Late-binding: Agents needs Projects to render the dynamic
         // `<spaces>` system block, but Projects::new takes Arc<Agents>.
