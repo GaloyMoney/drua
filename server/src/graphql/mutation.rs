@@ -4,8 +4,8 @@ use super::agent::*;
 use super::mcp_creds::*;
 use super::sandbox::*;
 
-use super::workspace::*;
-use super::workspace_secret::*;
+use super::project::*;
+use super::project_secret::*;
 
 pub struct Mutation;
 
@@ -15,40 +15,40 @@ impl Mutation {
         "pong"
     }
 
-    async fn workspace_create(
+    async fn project_create(
         &self,
         ctx: &Context<'_>,
-        input: WorkspaceCreateInput,
-    ) -> async_graphql::Result<WorkspaceCreatePayload> {
+        input: ProjectCreateInput,
+    ) -> async_graphql::Result<ProjectCreatePayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let ws = app
-            .workspaces()
+        let project = app
+            .projects()
             .create(sub, input.name, input.description)
             .await?;
-        Ok(WorkspaceCreatePayload::from(Workspace::from(ws)))
+        Ok(ProjectCreatePayload::from(Project::from(project)))
     }
 
-    async fn workspace_update(
+    async fn project_update(
         &self,
         ctx: &Context<'_>,
-        input: WorkspaceUpdateInput,
-    ) -> async_graphql::Result<WorkspaceUpdatePayload> {
+        input: ProjectUpdateInput,
+    ) -> async_graphql::Result<ProjectUpdatePayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let ws = app
-            .workspaces()
+        let project = app
+            .projects()
             .update(sub, input.id, input.description)
             .await?;
-        Ok(WorkspaceUpdatePayload::from(Workspace::from(ws)))
+        Ok(ProjectUpdatePayload::from(Project::from(project)))
     }
 
-    async fn workspace_delete(
+    async fn project_delete(
         &self,
         ctx: &Context<'_>,
-        input: WorkspaceDeleteInput,
-    ) -> async_graphql::Result<WorkspaceDeletePayload> {
+        input: ProjectDeleteInput,
+    ) -> async_graphql::Result<ProjectDeletePayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let ws = app.workspaces().delete(sub, input.id).await?;
-        Ok(WorkspaceDeletePayload::from(Workspace::from(ws)))
+        let project = app.projects().delete(sub, input.id).await?;
+        Ok(ProjectDeletePayload::from(Project::from(project)))
     }
 
     async fn agent_create(
@@ -63,7 +63,7 @@ impl Mutation {
         };
         let agent = app
             .agents()
-            .create_agent(sub, input.workspace_id, input.name, attach)
+            .create_agent(sub, input.project_id, input.name, attach)
             .await?;
         Ok(AgentCreatePayload::from(Agent::from(agent)))
     }
@@ -114,7 +114,7 @@ impl Mutation {
         };
         let sb = app
             .sandboxes()
-            .create(sub, input.workspace_id, input.name, specs, mode)
+            .create(sub, input.project_id, input.name, specs, mode)
             .await?;
         Ok(SandboxCreatePayload::from(Sandbox::from(sb)))
     }
@@ -139,35 +139,35 @@ impl Mutation {
         Ok(SandboxRestartPayload::from(Sandbox::from(sb)))
     }
 
-    async fn workspace_secret_create(
+    async fn project_secret_create(
         &self,
         ctx: &Context<'_>,
-        input: WorkspaceSecretCreateInput,
-    ) -> async_graphql::Result<WorkspaceSecretCreatePayload> {
+        input: ProjectSecretCreateInput,
+    ) -> async_graphql::Result<ProjectSecretCreatePayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         let secret = app
-            .workspace_secrets()
+            .project_secrets()
             .create(
                 sub,
-                input.workspace_id,
+                input.project_id,
                 &input.name,
                 input.secret_type.into(),
                 &input.value,
             )
             .await?;
-        Ok(WorkspaceSecretCreatePayload::from(WorkspaceSecret::from(
+        Ok(ProjectSecretCreatePayload::from(ProjectSecret::from(
             secret,
         )))
     }
 
-    async fn workspace_secret_delete(
+    async fn project_secret_delete(
         &self,
         ctx: &Context<'_>,
-        input: WorkspaceSecretDeleteInput,
-    ) -> async_graphql::Result<WorkspaceSecretDeletePayload> {
+        input: ProjectSecretDeleteInput,
+    ) -> async_graphql::Result<ProjectSecretDeletePayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        app.workspace_secrets().delete(sub, input.id).await?;
-        Ok(WorkspaceSecretDeletePayload {
+        app.project_secrets().delete(sub, input.id).await?;
+        Ok(ProjectSecretDeletePayload {
             deleted_id: input.id,
         })
     }

@@ -12,7 +12,7 @@ use drua_core::sandbox::SandboxAgentMode;
 #[graphql(complex)]
 pub struct Agent {
     id: AgentId,
-    workspace_id: WorkspaceId,
+    project_id: ProjectId,
     name: String,
     role: AgentRole,
 
@@ -53,7 +53,7 @@ impl From<DomainAgent> for Agent {
     fn from(entity: DomainAgent) -> Self {
         Self {
             id: entity.id,
-            workspace_id: entity.workspace_id,
+            project_id: entity.project_id,
             name: entity.name.clone(),
             role: AgentRole::from(entity.agent_role),
             entity: Arc::new(entity),
@@ -85,14 +85,14 @@ impl From<SandboxAgentMode> for SandboxAttachmentMode {
 
 #[derive(Enum, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRole {
-    WorkspaceLead,
+    ProjectLead,
     Agent,
 }
 
 impl From<DomainAgentRole> for AgentRole {
     fn from(role: DomainAgentRole) -> Self {
         match role {
-            DomainAgentRole::WorkspaceLead => Self::WorkspaceLead,
+            DomainAgentRole::ProjectLead => Self::ProjectLead,
             DomainAgentRole::Agent => Self::Agent,
         }
     }
@@ -109,7 +109,7 @@ impl From<SandboxAttachmentMode> for SandboxAgentMode {
 
 #[derive(InputObject)]
 pub struct AgentCreateInput {
-    pub workspace_id: WorkspaceId,
+    pub project_id: ProjectId,
     pub name: String,
     pub sandbox_id: Option<SandboxId>,
     pub sandbox_mode: Option<SandboxAttachmentMode>,

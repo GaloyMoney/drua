@@ -17,8 +17,8 @@ use crate::config::Config;
 use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
-    AgentItem, BlockDetail, CellKind, Focus, GridSection, SandboxInfo, ScreenState,
-    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkspaceItem,
+    AgentItem, BlockDetail, CellKind, Focus, GridSection, ProjectItem, SandboxInfo, ScreenState,
+    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail,
 };
 use crate::tui::{handlers, ui};
 
@@ -36,23 +36,23 @@ struct MeUser {
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkspacesResponse {
-    workspaces: WorkspaceConnection,
+struct ProjectsResponse {
+    projects: ProjectConnection,
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkspaceConnection {
-    edges: Vec<WorkspaceEdge>,
+struct ProjectConnection {
+    edges: Vec<ProjectEdge>,
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkspaceEdge {
-    node: WorkspaceNode,
+struct ProjectEdge {
+    node: ProjectNode,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkspaceNode {
+struct ProjectNode {
     id: String,
     name: String,
     description: Option<String>,
@@ -83,9 +83,9 @@ struct SandboxAttachmentNode {
     mode: String,
 }
 
-const WORKSPACES_QUERY: &str = r#"
+const PROJECTS_QUERY: &str = r#"
     query {
-        workspaces(first: 50) {
+        projects(first: 50) {
             edges {
                 node {
                     id
@@ -112,10 +112,10 @@ const WORKSPACES_QUERY: &str = r#"
     }
 "#;
 
-const WORKSPACE_CREATE_MUTATION: &str = r#"
-    mutation WorkspaceCreate($input: WorkspaceCreateInput!) {
-        workspaceCreate(input: $input) {
-            workspace {
+const PROJECT_CREATE_MUTATION: &str = r#"
+    mutation ProjectCreate($input: ProjectCreateInput!) {
+        projectCreate(input: $input) {
+            project {
                 id
                 name
             }
@@ -124,18 +124,18 @@ const WORKSPACE_CREATE_MUTATION: &str = r#"
 "#;
 
 #[derive(Debug, Deserialize)]
-struct WorkspaceCreateResponse {
-    #[serde(rename = "workspaceCreate")]
-    workspace_create: WorkspaceCreatePayload,
+struct ProjectCreateResponse {
+    #[serde(rename = "projectCreate")]
+    project_create: ProjectCreatePayload,
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkspaceCreatePayload {
-    workspace: CreatedWorkspace,
+struct ProjectCreatePayload {
+    project: CreatedProject,
 }
 
 #[derive(Debug, Deserialize)]
-struct CreatedWorkspace {
+struct CreatedProject {
     name: String,
 }
 
@@ -429,18 +429,18 @@ fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
     }
 }
 
-async fn create_workspace(client: &GraphqlClient, name: &str, description: &str) -> Result<String> {
+async fn create_project(client: &GraphqlClient, name: &str, description: &str) -> Result<String> {
     let mut input = serde_json::json!({ "name": name });
     if !description.is_empty() {
         input["description"] = serde_json::json!(description);
     }
-    let resp: WorkspaceCreateResponse = client
+    let resp: ProjectCreateResponse = client
         .query(
-            WORKSPACE_CREATE_MUTATION,
+            PROJECT_CREATE_MUTATION,
             serde_json::json!({ "input": input }),
         )
         .await?;
-    Ok(resp.workspace_create.workspace.name)
+    Ok(resp.project_create.project.name)
 }
 
 fn agent_node_to_item(a: AgentNode) -> AgentItem {
@@ -456,18 +456,16 @@ fn agent_node_to_item(a: AgentNode) -> AgentItem {
     }
 }
 
-async fn fetch_workspaces(client: &GraphqlClient) -> Result<Vec<WorkspaceItem>> {
-    let resp: WorkspacesResponse = client
-        .query(WORKSPACES_QUERY, serde_json::json!({}))
-        .await?;
+async fn fetch_projects(client: &GraphqlClient) -> Result<Vec<ProjectItem>> {
+    let resp: ProjectsResponse = client.query(PROJECTS_QUERY, serde_json::json!({})).await?;
 
     let items = resp
-        .workspaces
+        .projects
         .edges
         .into_iter()
         .map(|edge| {
             let node = edge.node;
-            WorkspaceItem {
+            ProjectItem {
                 id: node.id,
                 name: node.name,
                 description: node.description,
@@ -1009,9 +1007,9 @@ async fn ensure_authenticated(server: Option<String>) -> Result<(Config, Graphql
 
 pub async fn run(server: Option<String>) -> Result<()> {
     let (config, client, user_name) = ensure_authenticated(server).await?;
-    let workspaces = fetch_workspaces(&client).await?;
+    let projects = fetch_projects(&client).await?;
 
-    let mut state = ScreenState::new(workspaces, config.server_url.clone(), user_name);
+    let mut state = ScreenState::new(projects, config.server_url.clone(), user_name);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1065,19 +1063,19 @@ async fn run_event_loop(
                                 terminal.clear()?;
                             }
                             handlers::Action::Refresh => {
-                                if let Ok(workspaces) = fetch_workspaces(client).await {
-                                    state.replace_workspaces(workspaces);
+                                if let Ok(projects) = fetch_projects(client).await {
+                                    state.replace_projects(projects);
                                 }
                             }
-                            handlers::Action::CreateWorkspace { name, description } => {
-                                match create_workspace(client, &name, &description).await {
+                            handlers::Action::CreateProject { name, description } => {
+                                match create_project(client, &name, &description).await {
                                     Ok(ws_name) => {
                                         state.exit_create_mode();
-                                        if let Ok(workspaces) = fetch_workspaces(client).await {
-                                            state.replace_workspaces(workspaces);
+                                        if let Ok(projects) = fetch_projects(client).await {
+                                            state.replace_projects(projects);
                                         }
                                         state.status_message =
-                                            Some(format!("Created workspace: {ws_name}"));
+                                            Some(format!("Created project: {ws_name}"));
                                     }
                                     Err(e) => {
                                         state.status_message = Some(format!("Error: {e}"));

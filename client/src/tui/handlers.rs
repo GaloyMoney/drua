@@ -8,7 +8,7 @@ pub enum Action {
     Quit,
     Suspend,
     Refresh,
-    CreateWorkspace { name: String, description: String },
+    CreateProject { name: String, description: String },
     SendChat { agent_id: String, prompt: String },
     ToggleThreads,
     ExportThread { agent_id: String, path: String },
@@ -46,7 +46,7 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Focus::Chat => handle_chat_key(state, key),
             Focus::Threads => handle_threads_key(state, key),
         },
-        Mode::CreateWorkspace => handle_create_key(state, key),
+        Mode::CreateProject => handle_create_key(state, key),
         Mode::ExportThread => handle_export_key(state, key),
     }
 }
@@ -229,7 +229,7 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             }
             let name = state.input_name.trim().to_string();
             let description = state.input_description.trim().to_string();
-            Action::CreateWorkspace { name, description }
+            Action::CreateProject { name, description }
         }
         _ => Action::None,
     }

@@ -110,7 +110,7 @@ impl TopLevelTool for Grep {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs.
-        subject.is_agent() && !subject.is_workspace_admin()
+        subject.is_agent() && !subject.is_project_admin()
     }
 
     async fn call(

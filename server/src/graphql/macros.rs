@@ -3,14 +3,14 @@
 ///
 /// Instead of:
 /// ```ignore
-/// async fn workspaces(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Workspace>> {
+/// async fn projects(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Project>> {
 ///     let app = ctx.data_unchecked::<App>();
 ///     let sub: &AuthSubject = ctx.data()?;
 /// ```
 ///
 /// Use:
 /// ```ignore
-/// async fn workspaces(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Workspace>> {
+/// async fn projects(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Project>> {
 ///     let (app, sub) = app_and_sub_from_ctx!(ctx);
 /// ```
 #[macro_export]
@@ -26,26 +26,26 @@ macro_rules! app_and_sub_from_ctx {
 /// GraphQL entity plus a `From` impl for ergonomic conversion.
 ///
 /// ```ignore
-/// mutation_payload! { WorkspaceCreatePayload, workspace: Workspace }
+/// mutation_payload! { ProjectCreatePayload, project: Project }
 /// ```
 ///
 /// Expands to:
 /// ```ignore
 /// #[derive(SimpleObject)]
-/// pub struct WorkspaceCreatePayload {
-///     workspace: Workspace,
+/// pub struct ProjectCreatePayload {
+///     project: Project,
 /// }
-/// impl From<Workspace> for WorkspaceCreatePayload { .. }
+/// impl From<Project> for ProjectCreatePayload { .. }
 /// ```
 /// Cursor-based list query following the Relay connection spec.
 ///
 /// ```ignore
 /// list_with_cursor!(
-///     WorkspaceByCreatedAtCursor,
-///     Workspace,
+///     ProjectByCreatedAtCursor,
+///     Project,
 ///     after,
 ///     first,
-///     |query| app.workspaces().list(sub, query, direction)
+///     |query| app.projects().list(sub, query, direction)
 /// )
 /// ```
 #[macro_export]

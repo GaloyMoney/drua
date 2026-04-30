@@ -184,9 +184,9 @@ async fn apply_upsert(
             &SearchableFields {
                 doc_id,
                 doc_type: DocType::SpaceFile,
-                // Space files aren't workspace-scoped — `nil()` reflects
+                // Space files aren't project-scoped — `nil()` reflects
                 // "library-global" in the FTS index.
-                workspace_id: uuid::Uuid::nil(),
+                project_id: uuid::Uuid::nil(),
                 title: title.clone(),
                 body: body.clone(),
                 tags: Vec::new(),

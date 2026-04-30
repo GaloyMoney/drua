@@ -8,7 +8,7 @@ use super::AgentRole;
 
 /// Roles that must be present in `builtin_roles`. New variants must be
 /// added here too — `validate` fails fast at startup if missing.
-const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::WorkspaceLead, AgentRole::Agent];
+const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::ProjectLead, AgentRole::Agent];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleConfig {

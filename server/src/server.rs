@@ -10,7 +10,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use drua_core::audit::primitives::{InteractionOutcome, InteractionType};
 use drua_core::audit::Audit;
 use drua_core::auth::AuthSubject;
-use drua_core::primitives::WorkspaceId;
+use drua_core::primitives::ProjectId;
 
 use crate::AppState;
 
@@ -59,8 +59,8 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
         if let Some(ref auth) = auth {
             Audit::record_subject(auth);
         }
-        if let Some(ws_id) = extract_workspace_id_from_path(&path) {
-            Audit::record_workspace_id(ws_id);
+        if let Some(project_id) = extract_project_id_from_path(&path) {
+            Audit::record_project_id(project_id);
         }
 
         let start = std::time::Instant::now();
@@ -126,13 +126,13 @@ where
         .with_state(app_state)
 }
 
-/// Matches `/workspaces/{uuid}/…` or `/api/v1/workspaces/{uuid}/…`.
-fn extract_workspace_id_from_path(path: &str) -> Option<WorkspaceId> {
+/// Matches `/projects/{uuid}/…` or `/api/v1/projects/{uuid}/…`.
+fn extract_project_id_from_path(path: &str) -> Option<ProjectId> {
     let segments: Vec<&str> = path.split('/').collect();
     segments
         .iter()
-        .position(|s| *s == "workspaces")
+        .position(|s| *s == "projects")
         .and_then(|i| segments.get(i + 1))
         .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .map(WorkspaceId::from)
+        .map(ProjectId::from)
 }

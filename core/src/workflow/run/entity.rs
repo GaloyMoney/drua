@@ -31,7 +31,7 @@ pub enum WorkflowRunEvent {
     Initialized {
         id: WorkflowRunId,
         definition_id: WorkflowDefinitionId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         trigger_context: serde_json::Value,
         steps_snapshot: Vec<WorkflowStepDef>,
     },
@@ -60,7 +60,7 @@ pub enum WorkflowRunEvent {
 pub struct WorkflowRun {
     pub id: WorkflowRunId,
     pub definition_id: WorkflowDefinitionId,
-    pub workspace_id: WorkspaceId,
+    pub project_id: ProjectId,
     pub trigger_context: serde_json::Value,
     pub steps_snapshot: Vec<WorkflowStepDef>,
     #[builder(default = "WorkflowRunState::Pending")]
@@ -223,14 +223,14 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                 WorkflowRunEvent::Initialized {
                     id,
                     definition_id,
-                    workspace_id,
+                    project_id,
                     trigger_context,
                     steps_snapshot,
                 } => {
                     builder = builder
                         .id(*id)
                         .definition_id(*definition_id)
-                        .workspace_id(*workspace_id)
+                        .project_id(*project_id)
                         .trigger_context(trigger_context.clone())
                         .steps_snapshot(steps_snapshot.clone());
                 }
@@ -304,7 +304,7 @@ pub struct NewWorkflowRun {
     #[builder(setter(into))]
     pub(crate) definition_id: WorkflowDefinitionId,
     #[builder(setter(into))]
-    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) project_id: ProjectId,
     pub(crate) trigger_context: serde_json::Value,
     pub(crate) steps_snapshot: Vec<WorkflowStepDef>,
 }
@@ -322,7 +322,7 @@ impl IntoEvents<WorkflowRunEvent> for NewWorkflowRun {
             [WorkflowRunEvent::Initialized {
                 id: self.id,
                 definition_id: self.definition_id,
-                workspace_id: self.workspace_id,
+                project_id: self.project_id,
                 trigger_context: self.trigger_context,
                 steps_snapshot: self.steps_snapshot,
             }],

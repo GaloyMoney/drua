@@ -48,13 +48,12 @@ impl Skills {
     fn register_context_bump<OP: AtomicOperation>(
         &self,
         op: &mut OP,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
     ) {
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
-        let hook =
-            ContextBumpHook::new(self.context_generation.clone(), pool.clone(), workspace_id);
+        let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), project_id);
         if op.add_commit_hook(hook).is_err() {
             tracing::warn!("AtomicOperation rejected ContextBumpHook; context bump skipped");
         }
@@ -69,24 +68,24 @@ impl Skills {
         &self,
         sub: &AuthSubject,
         id: SkillId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Skill, SkillError> {
-        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, Some(id)))?;
+        sub.can(AuthVerb::Read, AuthResource::Skill(project_id, Some(id)))?;
         let skill = self.repo.find_by_id(id).await?;
         Ok(skill)
     }
 
-    /// Lookup order (workspace shadows global):
-    /// 1. Workspace-scoped, 2. Global, 3. Sandbox-exported.
+    /// Lookup order (project shadows global):
+    /// 1. Project-scoped, 2. Global, 3. Sandbox-exported.
     /// `Ok(None)` when no source matches.
     #[instrument(name = "skill.find_by_name", skip_all, fields(name = %name, sandbox_id))]
     pub async fn find_by_name(
         &self,
         name: &str,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<SkillBody>, SkillError> {
-        // Single query fetches workspace-scoped + global; workspace wins.
+        // Single query fetches project-scoped + global; project wins.
         let query = es_entity::PaginatedQueryArgs {
             first: 10,
             after: None,
@@ -100,9 +99,9 @@ impl Skills {
             )
             .await?;
         let candidates = result.entities;
-        let best = workspace_id
-            .and_then(|ws_id| candidates.iter().find(|s| s.workspace_id == Some(ws_id)))
-            .or_else(|| candidates.iter().find(|s| s.workspace_id.is_none()));
+        let best = project_id
+            .and_then(|project_id| candidates.iter().find(|s| s.project_id == Some(project_id)))
+            .or_else(|| candidates.iter().find(|s| s.project_id.is_none()));
         if let Some(skill) = best {
             return Ok(Some(SkillBody::new(skill.body.clone())));
         }
@@ -128,29 +127,29 @@ impl Skills {
     pub async fn interpolate_skill(
         &self,
         name: &str,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
         sandbox_id: Option<SandboxId>,
         arguments: Option<&str>,
     ) -> Result<Option<String>, SkillError> {
-        let body = self.find_by_name(name, workspace_id, sandbox_id).await?;
+        let body = self.find_by_name(name, project_id, sandbox_id).await?;
         Ok(body.map(|b| b.interpolate(arguments)))
     }
 
-    #[instrument(name = "skill.list_by_workspace_id", skip_all)]
-    pub async fn list_by_workspace_id(
+    #[instrument(name = "skill.list_by_project_id", skip_all)]
+    pub async fn list_by_project_id(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<Skill>, SkillError> {
-        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                Some(workspace_id),
+            .list_for_project_id_by_created_at(
+                Some(project_id),
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -158,20 +157,20 @@ impl Skills {
         Ok(result.entities)
     }
 
-    /// Workspace-scoped + global, with auth check.
-    #[instrument(name = "skill.list_for_workspace", skip(self, sub))]
-    pub async fn list_for_workspace(
+    /// Project-scoped + global, with auth check.
+    #[instrument(name = "skill.list_for_project", skip(self, sub))]
+    pub async fn list_for_project(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<Skill>, SkillError> {
-        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
-        self.list_for_workspace_inner(workspace_id).await
+        sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
+        self.list_for_project_inner(project_id).await
     }
 
-    async fn list_for_workspace_inner(
+    async fn list_for_project_inner(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<Skill>, SkillError> {
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
@@ -179,8 +178,8 @@ impl Skills {
         };
         let ws_result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                Some(workspace_id),
+            .list_for_project_id_by_created_at(
+                Some(project_id),
                 query,
                 es_entity::ListDirection::Ascending,
             )
@@ -191,7 +190,7 @@ impl Skills {
         };
         let global_result = self
             .repo
-            .list_for_workspace_id_by_created_at(
+            .list_for_project_id_by_created_at(
                 None,
                 global_query,
                 es_entity::ListDirection::Ascending,
@@ -199,7 +198,7 @@ impl Skills {
             .await?;
         let global_skills = global_result.entities;
 
-        // Workspace first, dedup by name; workspace wins over global.
+        // Project first, dedup by name; project wins over global.
         let mut seen_names = std::collections::HashSet::new();
         let mut merged = Vec::new();
         for skill in ws_result.entities {
@@ -218,11 +217,11 @@ impl Skills {
     pub async fn search(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, SkillError> {
-        sub.can(AuthVerb::Read, AuthResource::Skill(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
         let library = self
             .library
             .as_ref()
@@ -230,7 +229,7 @@ impl Skills {
         // SearchStore::search() includes globals (sentinel nil UUID).
         library
             .search(
-                uuid::Uuid::from(workspace_id),
+                uuid::Uuid::from(project_id),
                 query,
                 Some(DocType::Skill),
                 limit,
@@ -241,23 +240,19 @@ impl Skills {
 
     /// Build skills context for system prompt injection.
     ///
-    /// Returns an `<available_skills>` block listing workspace + global +
+    /// Returns an `<available_skills>` block listing project + global +
     /// sandbox-exported skills with their descriptions, truncated to fit the
     /// character budget. DB skills shadow sandbox skills of the same name.
     /// Returns `None` if there are no skills.
-    #[instrument(name = "skill.skills_context_for_workspace", skip(self))]
-    pub async fn skills_context_for_workspace(
+    #[instrument(name = "skill.skills_context_for_project", skip(self))]
+    pub async fn skills_context_for_project(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Option<String>, SkillError> {
-        let db_skills = self.list_for_workspace_inner(workspace_id).await?;
+        let db_skills = self.list_for_project_inner(project_id).await?;
 
         // Collect sandbox-exported skills, dedup against DB skills.
-        let sandbox_skills = match self
-            .sandboxes
-            .exported_skills_for_workspace(workspace_id)
-            .await
-        {
+        let sandbox_skills = match self.sandboxes.exported_skills_for_project(project_id).await {
             Ok(skills) => skills,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to fetch sandbox exported skills");
@@ -271,7 +266,7 @@ impl Skills {
 
         for skill in &db_skills {
             seen_names.insert(skill.name.as_str());
-            let scope = if skill.workspace_id.is_some() {
+            let scope = if skill.project_id.is_some() {
                 ""
             } else {
                 " [global]"
@@ -329,21 +324,21 @@ impl Skills {
     pub async fn create(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
-        workspace_name: &str,
+        project_id: ProjectId,
+        project_name: &str,
         name: String,
         description: String,
         body: String,
     ) -> Result<Skill, SkillError> {
-        sub.can(AuthVerb::Create, AuthResource::Skill(workspace_id, None))?;
+        sub.can(AuthVerb::Create, AuthResource::Skill(project_id, None))?;
         if name.trim().is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
 
         let new = NewSkill::builder()
             .id(SkillId::new())
-            .workspace_id(workspace_id)
-            .workspace_name(workspace_name)
+            .project_id(project_id)
+            .project_name(project_name)
             .name(name)
             .description(description)
             .body(body)
@@ -359,20 +354,17 @@ impl Skills {
         &self,
         sub: &AuthSubject,
         id: SkillId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: Option<String>,
         description: Option<String>,
         body: Option<String>,
     ) -> Result<Skill, SkillError> {
-        sub.can(
-            AuthVerb::Update,
-            AuthResource::Skill(workspace_id, Some(id)),
-        )?;
+        sub.can(AuthVerb::Update, AuthResource::Skill(project_id, Some(id)))?;
         let mut skill = self.repo.find_by_id(id).await?;
-        if skill.workspace_id != Some(workspace_id) {
+        if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
-                resource: AuthResource::Skill(workspace_id, Some(id)),
+                resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
         if skill.update_content(name, description, body).did_execute() {
@@ -382,24 +374,21 @@ impl Skills {
     }
 
     /// Soft-delete only — the on-disk file is left in the library
-    /// until the owning workspace is deleted (single-file removal
+    /// until the owning project is deleted (single-file removal
     /// isn't plumbed through `WriteToRuntime` yet).
     #[instrument(name = "skill.delete", skip(self))]
     pub async fn delete(
         &self,
         sub: &AuthSubject,
         id: SkillId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), SkillError> {
-        sub.can(
-            AuthVerb::Delete,
-            AuthResource::Skill(workspace_id, Some(id)),
-        )?;
+        sub.can(AuthVerb::Delete, AuthResource::Skill(project_id, Some(id)))?;
         let skill = self.repo.find_by_id(id).await?;
-        if skill.workspace_id != Some(workspace_id) {
+        if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Delete,
-                resource: AuthResource::Skill(workspace_id, Some(id)),
+                resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
         let mut op = self.repo.begin_op().await?;
@@ -441,7 +430,7 @@ impl crate::library::LibraryImporter for Skills {
         &self,
         op: &mut es_entity::DbOp<'_>,
         file: &crate::library::SyncedFile,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
         file_hash: GitFileHash,
     ) -> Result<(), crate::library::UpsertError> {
         if file.doc_type != DocType::Skill {
@@ -451,7 +440,7 @@ impl crate::library::LibraryImporter for Skills {
         let name = &file.title;
         let description = &file.body;
         let body = extract_skill_body(&file.rendered).unwrap_or_default();
-        let workspace_name = file.workspace_name.clone();
+        let project_name = file.project_name.clone();
         let original_path = file.original_path.clone();
 
         if let Some(mut existing) = self.repo.maybe_find_by_id_in_op(&mut *op, doc_id).await? {
@@ -473,11 +462,11 @@ impl crate::library::LibraryImporter for Skills {
                 .name(name.clone())
                 .description(description.clone())
                 .body(body);
-            if let Some(ws_id) = workspace_id {
-                builder = builder.workspace_id(ws_id);
+            if let Some(project_id) = project_id {
+                builder = builder.project_id(project_id);
             }
-            if let Some(ws_name) = workspace_name {
-                builder = builder.workspace_name(ws_name);
+            if let Some(ws_name) = project_name {
+                builder = builder.project_name(ws_name);
             }
             builder = builder.original_path(original_path.ok_or_else(|| {
                 SkillError::BuildEntity("original_path required for library import".into())
@@ -488,22 +477,22 @@ impl crate::library::LibraryImporter for Skills {
             self.repo.create_in_op(op, new).await?;
             tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
-        self.register_context_bump(op, workspace_id);
+        self.register_context_bump(op, project_id);
         Ok(())
     }
 }
 
 impl Skills {
-    /// Bulk soft-delete all workspace-scoped skills within a transaction.
-    /// Used during workspace cascade deletion.
-    #[instrument(name = "skill.delete_for_workspace_in_op", skip_all)]
-    pub(crate) async fn delete_for_workspace_in_op(
+    /// Bulk soft-delete all project-scoped skills within a transaction.
+    /// Used during project cascade deletion.
+    #[instrument(name = "skill.delete_for_project_in_op", skip_all)]
+    pub(crate) async fn delete_for_project_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), SkillError> {
         self.repo
-            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
     }

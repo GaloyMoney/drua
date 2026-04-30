@@ -456,6 +456,10 @@
             pkgs.minikube
             pkgs.kubectl
             pkgs.vendir
+            pkgs.sd
+            pkgs.fd
+            pkgs.ripgrep
+            pkgs.gnused
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             fly
             pkgs.libiconv

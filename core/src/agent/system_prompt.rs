@@ -7,7 +7,7 @@ use super::entity::AgentRole;
 use super::session::message::SystemBlock;
 
 const BASE_PROMPT_PREFIX: &str = "You are an AI agent operating inside the \
-Galoy Agents platform, in workspace";
+Galoy Agents platform, in project";
 
 const BEHAVIORAL_GUIDELINES: &str = "\
 <investigate_before_answering>
@@ -40,10 +40,10 @@ Before writing the script, fetch typed signatures via \
 never guess tool or parameter names.
 </use_compose_for_efficiency>
 
-<workspace_notes>
-The workspace has a shared notes system (the `notes` tool). Notes are \
+<project_notes>
+The project has a shared notes system (the `notes` tool). Notes are \
 concise knowledge snippets that persist across agent sessions. They are \
-the workspace's lived memory — use them so future agents do not repeat \
+the project's lived memory — use them so future agents do not repeat \
 discoveries or mistakes.
 
 Before starting work: read any pinned notes in your system prompt, then \
@@ -71,13 +71,13 @@ must see immediately — ongoing incidents, active conventions, critical \
 warnings. Pinned notes appear in every agent's system prompt, so pin \
 sparingly. Unpin when the context is no longer urgent; the note remains \
 searchable.
-</workspace_notes>";
+</project_notes>";
 
-const WORKSPACE_LEAD_ROLE: &str = "\
-You are the workspace lead. You coordinate work across the workspace, \
+const PROJECT_LEAD_ROLE: &str = "\
+You are the project lead. You coordinate work across the project, \
 delegate tasks to other agents, and answer user questions directly. \
 You cannot attach to sandboxes, but you can inspect any sandbox in \
-the workspace using the sandbox tool (command: inspect). For code \
+the project using the sandbox tool (command: inspect). For code \
 changes and command execution, delegate to other agents.";
 
 const AGENT_ROLE: &str = "\
@@ -101,12 +101,12 @@ pub fn system_blocks_for_role(
     role: AgentRole,
     toolsets: &Arc<ToolSets>,
     subject: &AuthSubject,
-    workspace_name: &str,
+    project_name: &str,
 ) -> Vec<SystemBlock> {
-    let base_text = format!("{BASE_PROMPT_PREFIX} \"{workspace_name}\".");
+    let base_text = format!("{BASE_PROMPT_PREFIX} \"{project_name}\".");
     let tools_text = build_tools_section(role, toolsets, subject);
     let role_text = match role {
-        AgentRole::WorkspaceLead => WORKSPACE_LEAD_ROLE,
+        AgentRole::ProjectLead => PROJECT_LEAD_ROLE,
         AgentRole::Agent => AGENT_ROLE,
     };
 
@@ -153,7 +153,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_lead_returns_four_blocks() {
+    fn project_lead_returns_four_blocks() {
         let toolsets = Arc::new(
             tokio::runtime::Runtime::new()
                 .unwrap()
@@ -162,7 +162,7 @@ mod tests {
         );
         let subject = AuthSubject::Anonymous;
         let blocks =
-            system_blocks_for_role(AgentRole::WorkspaceLead, &toolsets, &subject, "acme-corp");
+            system_blocks_for_role(AgentRole::ProjectLead, &toolsets, &subject, "acme-corp");
         assert_eq!(blocks.len(), 4);
         assert!(matches!(&blocks[0], SystemBlock::Base { .. }));
         assert!(blocks[0].text().contains("Galoy Agents platform"));
@@ -176,7 +176,7 @@ mod tests {
         assert!(blocks[2].text().contains("compose_types"));
         assert!(blocks[2].text().contains("describe_tool"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
-        assert!(blocks[3].text().contains("workspace lead"));
+        assert!(blocks[3].text().contains("project lead"));
     }
 
     #[test]
@@ -188,8 +188,7 @@ mod tests {
                 .unwrap(),
         );
         let subject = AuthSubject::Anonymous;
-        let blocks =
-            system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-workspace");
+        let blocks = system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project");
         assert_eq!(blocks.len(), 4);
         assert!(matches!(&blocks[1], SystemBlock::Tools { .. }));
         assert!(blocks[1].text().contains("Sandbox tools"));

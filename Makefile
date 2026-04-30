@@ -22,7 +22,7 @@ setup-db:
 reset-deps: clean-deps start-deps setup-db
 
 sqlx-prepare:
-	DATABASE_URL=$(PG_CON) cargo sqlx prepare --workspace -- --all-targets
+	DATABASE_URL=$(PG_CON) cargo sqlx prepare --project -- --all-targets
 
 build-sandbox:
 	cargo build -p sandbox-tool-server
@@ -54,9 +54,9 @@ reset-test-library:
 	mkdir -p $(TEST_LIBRARY_DIR)
 	cd $(TEST_LIBRARY_DIR) && git init && git remote add origin $(TEST_LIBRARY_REPO)
 	mkdir -p $(TEST_LIBRARY_DIR)/runtime/skills
-	mkdir -p $(TEST_LIBRARY_DIR)/runtime/workspaces
+	mkdir -p $(TEST_LIBRARY_DIR)/runtime/projects
 	touch $(TEST_LIBRARY_DIR)/runtime/skills/.gitkeep
-	touch $(TEST_LIBRARY_DIR)/runtime/workspaces/.gitkeep
+	touch $(TEST_LIBRARY_DIR)/runtime/projects/.gitkeep
 	cd $(TEST_LIBRARY_DIR) && git add -A && \
 		git -c user.name=drua -c user.email=drua@galoy.io commit -m "init: empty library scaffold" && \
 		git push --force origin HEAD:main

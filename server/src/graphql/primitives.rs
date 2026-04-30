@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
 pub use drua_core::primitives::{
-    AgentId, McpCredsId, SandboxId, SkillId, UserId, WorkspaceId, WorkspaceSecretId,
+    AgentId, McpCredsId, ProjectId, ProjectSecretId, SandboxId, SkillId, UserId,
 };
 
 #[allow(unused_imports)]

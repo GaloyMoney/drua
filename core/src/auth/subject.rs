@@ -1,5 +1,5 @@
 use super::{error::AuthorizationError, AuthResource, AuthScope, AuthVerb};
-use crate::primitives::{AgentId, McpCredsId, SandboxId, UserId, UserMessageSource, WorkspaceId};
+use crate::primitives::{AgentId, McpCredsId, ProjectId, SandboxId, UserId, UserMessageSource};
 
 /// Authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
@@ -7,10 +7,10 @@ pub enum AuthSubject {
     User(UserId),
     /// Bearer token issued to a user (exported agent credential).
     ExportedAgent(UserId, McpCredsId, Vec<AuthScope>),
-    Agent(WorkspaceId, AgentId, Vec<AuthScope>),
+    Agent(ProjectId, AgentId, Vec<AuthScope>),
     /// Agent acting on behalf of a `User` or `ExportedAgent` originator,
     /// so downstream actions are attributable back to the user.
-    AgentOnBehalfOfUser(UserId, WorkspaceId, AgentId, Vec<AuthScope>),
+    AgentOnBehalfOfUser(UserId, ProjectId, AgentId, Vec<AuthScope>),
     Anonymous,
 }
 
@@ -51,10 +51,10 @@ impl AuthSubject {
         }
     }
 
-    pub fn workspace_id(&self) -> Option<WorkspaceId> {
+    pub fn project_id(&self) -> Option<ProjectId> {
         match self {
-            AuthSubject::Agent(workspace_id, _, _) => Some(*workspace_id),
-            AuthSubject::AgentOnBehalfOfUser(_, workspace_id, _, _) => Some(*workspace_id),
+            AuthSubject::Agent(project_id, _, _) => Some(*project_id),
+            AuthSubject::AgentOnBehalfOfUser(_, project_id, _, _) => Some(*project_id),
             _ => None,
         }
     }
@@ -100,10 +100,10 @@ impl AuthSubject {
 
     /// Used by sandbox-backed tools to hide themselves from admins
     /// (admins orchestrate; they don't run inside sandboxes).
-    pub fn is_workspace_admin(&self) -> bool {
+    pub fn is_project_admin(&self) -> bool {
         self.scopes()
             .iter()
-            .any(|s| matches!(s, AuthScope::WorkspaceAdmin(_)))
+            .any(|s| matches!(s, AuthScope::ProjectAdmin(_)))
     }
 
     /// `SandboxUse` implies read; first match wins.
@@ -135,97 +135,109 @@ impl AuthSubject {
 mod tests {
     use super::*;
 
-    fn ws() -> WorkspaceId {
-        WorkspaceId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
+    fn project() -> ProjectId {
+        ProjectId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
     }
 
-    fn other_ws() -> WorkspaceId {
-        WorkspaceId::from(uuid::Uuid::parse_str("b1b2b3b4-c1c2-d1d2-e1e2-e3e4e5e6e7e8").unwrap())
+    fn other_ws() -> ProjectId {
+        ProjectId::from(uuid::Uuid::parse_str("b1b2b3b4-c1c2-d1d2-e1e2-e3e4e5e6e7e8").unwrap())
     }
 
-    fn member(ws: WorkspaceId) -> AuthSubject {
-        AuthSubject::Agent(ws, AgentId::new(), vec![AuthScope::WorkspaceMember(ws)])
+    fn member(project: ProjectId) -> AuthSubject {
+        AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectMember(project)],
+        )
     }
 
-    fn admin(ws: WorkspaceId) -> AuthSubject {
-        AuthSubject::Agent(ws, AgentId::new(), vec![AuthScope::WorkspaceAdmin(ws)])
+    fn admin(project: ProjectId) -> AuthSubject {
+        AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectAdmin(project)],
+        )
     }
 
     #[test]
     fn user_is_omnipotent() {
         let user = AuthSubject::User(UserId::new());
         assert!(user
-            .can(AuthVerb::Delete, AuthResource::Sandbox(ws(), None))
+            .can(AuthVerb::Delete, AuthResource::Sandbox(project(), None))
             .is_ok());
     }
 
     #[test]
     fn anonymous_authentication_required() {
         let err = AuthSubject::Anonymous
-            .can(AuthVerb::Read, AuthResource::Workspace(None))
+            .can(AuthVerb::Read, AuthResource::Project(None))
             .unwrap_err();
         assert!(matches!(err, AuthorizationError::AuthenticationRequired));
     }
 
     #[test]
-    fn workspace_admin_permits_management_resources() {
-        let s = admin(ws());
+    fn project_admin_permits_management_resources() {
+        let s = admin(project());
         for verb in [
             AuthVerb::Read,
             AuthVerb::Create,
             AuthVerb::Update,
             AuthVerb::Delete,
         ] {
-            assert!(s.can(verb, AuthResource::Sandbox(ws(), None)).is_ok());
-            assert!(s.can(verb, AuthResource::Agent(ws(), None)).is_ok());
-            assert!(s.can(verb, AuthResource::Workflow(ws(), None)).is_ok());
-            assert!(s.can(verb, AuthResource::Skill(ws(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Sandbox(project(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Agent(project(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Workflow(project(), None)).is_ok());
+            assert!(s.can(verb, AuthResource::Skill(project(), None)).is_ok());
         }
-        assert!(s.can(AuthVerb::Read, AuthResource::AuditLog(ws())).is_ok());
+        assert!(s
+            .can(AuthVerb::Read, AuthResource::AuditLog(project()))
+            .is_ok());
     }
 
-    /// Negative case: a `WorkspaceMember` cannot manage skills (or any
+    /// Negative case: a `ProjectMember` cannot manage skills (or any
     /// admin-only resource) — the privileged tool would be hidden via
     /// visibility AND rejected at service entry. This is the consolidation
     /// invariant the refactor guarantees.
     #[test]
-    fn workspace_member_cannot_manage_admin_resources() {
-        let s = member(ws());
+    fn project_member_cannot_manage_admin_resources() {
+        let s = member(project());
         assert!(s
-            .can(AuthVerb::Update, AuthResource::Skill(ws(), None))
+            .can(AuthVerb::Update, AuthResource::Skill(project(), None))
             .is_err());
         assert!(s
-            .can(AuthVerb::Create, AuthResource::Sandbox(ws(), None))
+            .can(AuthVerb::Create, AuthResource::Sandbox(project(), None))
             .is_err());
         assert!(s
-            .can(AuthVerb::Read, AuthResource::Agent(ws(), None))
+            .can(AuthVerb::Read, AuthResource::Agent(project(), None))
             .is_err());
         assert!(s
-            .can(AuthVerb::Read, AuthResource::Workflow(ws(), None))
+            .can(AuthVerb::Read, AuthResource::Workflow(project(), None))
             .is_err());
-        assert!(s.can(AuthVerb::Read, AuthResource::AuditLog(ws())).is_err());
+        assert!(s
+            .can(AuthVerb::Read, AuthResource::AuditLog(project()))
+            .is_err());
     }
 
     #[test]
-    fn workspace_member_can_use_skills_and_notes() {
-        let s = member(ws());
+    fn project_member_can_use_skills_and_notes() {
+        let s = member(project());
         assert!(s
-            .can(AuthVerb::Use, AuthResource::Skill(ws(), None))
+            .can(AuthVerb::Use, AuthResource::Skill(project(), None))
             .is_ok());
         assert!(s
-            .can(AuthVerb::Read, AuthResource::Skill(ws(), None))
+            .can(AuthVerb::Read, AuthResource::Skill(project(), None))
             .is_ok());
         assert!(s
-            .can(AuthVerb::Create, AuthResource::Note(ws(), None))
+            .can(AuthVerb::Create, AuthResource::Note(project(), None))
             .is_ok());
         assert!(s
-            .can(AuthVerb::Update, AuthResource::Note(ws(), None))
+            .can(AuthVerb::Update, AuthResource::Note(project(), None))
             .is_ok());
     }
 
     #[test]
-    fn cross_workspace_admin_cannot_access_other_workspace() {
-        let s = admin(ws());
+    fn cross_project_admin_cannot_access_other_project() {
+        let s = admin(project());
         assert!(s
             .can(AuthVerb::Read, AuthResource::Sandbox(other_ws(), None))
             .is_err());

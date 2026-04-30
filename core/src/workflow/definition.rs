@@ -49,7 +49,7 @@ impl WorkflowStepDef {
 /// reuse handled by the sandbox repo) and suspends them after.
 ///
 /// `Preexisting` decls reference an existing sandbox in the workflow's
-/// workspace by its name (workspace-unique via the `(workspace_id,
+/// project by its name (project-unique via the `(project_id,
 /// name)` constraint on `sandboxes`). The executor only attaches and
 /// detaches; it never creates, restarts, or suspends. The user owns
 /// the sandbox lifecycle.

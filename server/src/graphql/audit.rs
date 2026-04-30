@@ -41,7 +41,7 @@ impl From<DomainAuditEntry> for AuditEntry {
 
 #[derive(InputObject)]
 pub struct AuditLogQueryInput {
-    pub workspace_id: Option<WorkspaceId>,
+    pub project_id: Option<ProjectId>,
     pub acting_agent_id: Option<AgentId>,
     pub action: Option<String>,
     pub outcome: Option<String>,

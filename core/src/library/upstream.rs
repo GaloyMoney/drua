@@ -311,7 +311,7 @@ impl Upstream {
     }
 
     /// Returns `(relative_path, content)` tuples for changed files under
-    /// `runtime/{subdir}/` and `runtime/workspaces/*/{subdir}/` whose
+    /// `runtime/{subdir}/` and `runtime/projects/*/{subdir}/` whose
     /// extension matches `ext`. `last_commit = None` lists all tracked
     /// files at HEAD.
     pub async fn changed_files(
@@ -334,7 +334,7 @@ impl Upstream {
                         &format!("{commit}..HEAD"),
                         "--",
                         &format!("runtime/{subdir}/"),
-                        "runtime/workspaces/",
+                        "runtime/projects/",
                     ])
                     .current_dir(&self.repo_path)
                     .output()
@@ -354,7 +354,7 @@ impl Upstream {
             }
             None => {
                 let global_glob = format!("runtime/{subdir}/*.{ext}");
-                let scoped_glob = format!("runtime/workspaces/*/{subdir}/*.{ext}");
+                let scoped_glob = format!("runtime/projects/*/{subdir}/*.{ext}");
                 let output = tokio::process::Command::new("git")
                     .args(["ls-files", "--", &global_glob, &scoped_glob])
                     .current_dir(&self.repo_path)

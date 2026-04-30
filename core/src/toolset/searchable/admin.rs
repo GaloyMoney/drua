@@ -2,7 +2,7 @@
 //! searchable catalog (`search_tools` → `describe_tool` → `call_tool`).
 //!
 //! Consolidated into 5 tools with command discriminators:
-//! `agent`, `sandbox`, `log`, `workspace`, `spaces`.
+//! `agent`, `sandbox`, `log`, `project`, `spaces`.
 //! Prefixed as `drua_admin_agent`, `drua_admin_sandbox`, etc.
 
 use std::sync::{Arc, LazyLock};
@@ -15,9 +15,9 @@ use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
 use crate::library::{Library, Space};
-use crate::primitives::{AgentId, SandboxId, UserId, WorkspaceId};
+use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
+use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
-use crate::workspace::{Workspace, Workspaces};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
@@ -77,9 +77,9 @@ enum AgentCommand {
 struct AgentParams {
     /// Which agent operation to perform.
     command: AgentCommand,
-    /// Workspace ID (required for `create` and `list`).
+    /// Project ID (required for `create` and `list`).
     #[schemars(with = "Option<uuid::Uuid>")]
-    workspace_id: Option<WorkspaceId>,
+    project_id: Option<ProjectId>,
     /// Display name for the new agent (required for `create`).
     name: Option<String>,
     /// ID of the agent (required for `attach_sandbox` and `detach_sandbox`).
@@ -122,7 +122,7 @@ struct SandboxParams {
     command: SandboxCommand,
 
     #[schemars(with = "Option<uuid::Uuid>")]
-    workspace_id: Option<WorkspaceId>,
+    project_id: Option<ProjectId>,
     name: Option<String>,
     mode: Option<SandboxCreateMode>,
     repo_url: Option<String>,
@@ -194,15 +194,15 @@ impl LogParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum WorkspaceCommand {
-    /// Create a new workspace (also seeds a WorkspaceLead agent named 'lead').
+enum ProjectCommand {
+    /// Create a new project (also seeds a ProjectLead agent named 'lead').
     Create,
     List,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct WorkspaceParams {
-    command: WorkspaceCommand,
+struct ProjectParams {
+    command: ProjectCommand,
     name: Option<String>,
     description: Option<String>,
 }
@@ -228,7 +228,7 @@ struct SpacesParams {
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
 static SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SandboxParams>);
 static LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LogParams>);
-static WORKSPACE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkspaceParams>);
+static PROJECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ProjectParams>);
 static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SpacesParams>);
 
 struct ToolDef {
@@ -240,40 +240,40 @@ struct ToolDef {
 static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "agent",
-        description: "Manage agents. Commands: `create` (requires `workspace_id`, `name`), \
-                       `list` (requires `workspace_id`), \
+        description: "Manage agents. Commands: `create` (requires `project_id`, `name`), \
+                       `list` (requires `project_id`), \
                        `attach_sandbox` (requires `agent_id`, `sandbox_id`, optional `mode`), \
                        `detach_sandbox` (requires `agent_id`, `sandbox_id`).",
         schema: &AGENT_SCHEMA,
     },
     ToolDef {
         name: "sandbox",
-        description: "Manage sandboxes. Commands: `create` (requires `workspace_id`, `name`, \
+        description: "Manage sandboxes. Commands: `create` (requires `project_id`, `name`, \
                        `mode`, optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
-                       `list` (requires `workspace_id`), \
+                       `list` (requires `project_id`), \
                        `get` (requires `sandbox_id`), \
                        `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`).",
         schema: &SANDBOX_SCHEMA,
     },
     ToolDef {
         name: "log",
-        description: "Query audit log entries across all workspaces.",
+        description: "Query audit log entries across all projects.",
         schema: &LOG_SCHEMA,
     },
     ToolDef {
-        name: "workspace",
-        description: "Manage workspaces. Commands: `create` (requires `name`, optional \
-                       `description`; also seeds a WorkspaceLead agent), `list`.",
-        schema: &WORKSPACE_SCHEMA,
+        name: "project",
+        description: "Manage projects. Commands: `create` (requires `name`, optional \
+                       `description`; also seeds a ProjectLead agent), `list`.",
+        schema: &PROJECT_SCHEMA,
     },
     ToolDef {
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
                        `spaces/<slug>/` in the knowledge-base repo. Commands: \
                        `create` (requires `slug`, optional `description`; the calling \
-                       subject's workspace is auto-added to the authorized list), \
+                       subject's project is auto-added to the authorized list), \
                        `list` (no args), \
-                       `get` (requires `slug`; bypasses workspace ACL for admins).",
+                       `get` (requires `slug`; bypasses project ACL for admins).",
         schema: &SPACES_SCHEMA,
     },
 ];
@@ -283,7 +283,7 @@ pub struct AdminToolSet {
     agents: Arc<Agents>,
     sandboxes: Arc<Sandboxes>,
     audit: Arc<Audit>,
-    workspaces: Arc<Workspaces>,
+    projects: Arc<Projects>,
     library: Arc<Library>,
 }
 
@@ -292,7 +292,7 @@ impl AdminToolSet {
         agents: Arc<Agents>,
         sandboxes: Arc<Sandboxes>,
         audit: Arc<Audit>,
-        workspaces: Arc<Workspaces>,
+        projects: Arc<Projects>,
         library: Arc<Library>,
     ) -> Self {
         let entries = TOOLS
@@ -313,7 +313,7 @@ impl AdminToolSet {
             agents,
             sandboxes,
             audit,
-            workspaces,
+            projects,
             library,
         }
     }
@@ -330,7 +330,7 @@ impl SearchableToolSet for AdminToolSet {
     }
 
     fn category_description(&self) -> &str {
-        "Workspace, agent, and sandbox management (admin)"
+        "Project, agent, and sandbox management (admin)"
     }
 
     fn tools(&self) -> &[ToolSetEntry] {
@@ -351,7 +351,7 @@ impl SearchableToolSet for AdminToolSet {
             "agent" => self.agent(subject, arguments).await,
             "sandbox" => self.sandbox(subject, arguments).await,
             "log" => self.log(arguments).await,
-            "workspace" => self.workspace(subject, arguments).await,
+            "project" => self.project(subject, arguments).await,
             "spaces" => self.spaces(subject, arguments).await,
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
@@ -368,17 +368,15 @@ impl AdminToolSet {
 
         match params.command {
             AgentCommand::Create => {
-                let workspace_id = params.workspace_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument(
-                        "workspace_id is required for create".to_string(),
-                    )
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for create".to_string())
                 })?;
                 let name = params.name.ok_or_else(|| {
                     ToolSetsError::MissingArgument("name is required for create".to_string())
                 })?;
                 let agent = self
                     .agents
-                    .create_agent(subject, workspace_id, &name, None)
+                    .create_agent(subject, project_id, &name, None)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agent(
@@ -387,12 +385,12 @@ impl AdminToolSet {
             }
 
             AgentCommand::List => {
-                let workspace_id = params.workspace_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("workspace_id is required for list".to_string())
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
                 let agents = self
                     .agents
-                    .list_for_workspace(subject, workspace_id)
+                    .list_for_project(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agents(
@@ -454,10 +452,8 @@ impl AdminToolSet {
 
         match params.command {
             SandboxCommand::Create => {
-                let workspace_id = params.workspace_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument(
-                        "workspace_id is required for create".to_string(),
-                    )
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for create".to_string())
                 })?;
                 let name = params.name.ok_or_else(|| {
                     ToolSetsError::MissingArgument("name is required for create".to_string())
@@ -489,7 +485,7 @@ impl AdminToolSet {
 
                 let sandbox = self
                     .sandboxes
-                    .create(subject, workspace_id, name, specs, sandbox_mode)
+                    .create(subject, project_id, name, specs, sandbox_mode)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(
@@ -498,12 +494,12 @@ impl AdminToolSet {
             }
 
             SandboxCommand::List => {
-                let workspace_id = params.workspace_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("workspace_id is required for list".to_string())
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
                 let sandboxes = self
                     .sandboxes
-                    .list_for_workspace(subject, workspace_id)
+                    .list_for_project(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(
@@ -549,15 +545,15 @@ impl AdminToolSet {
         )]))
     }
 
-    async fn workspace(
+    async fn project(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let params: WorkspaceParams = parse_params(arguments)?;
+        let params: ProjectParams = parse_params(arguments)?;
 
         match params.command {
-            WorkspaceCommand::Create => {
+            ProjectCommand::Create => {
                 let name = params.name.ok_or_else(|| {
                     ToolSetsError::MissingArgument("name is required for create".to_string())
                 })?;
@@ -566,24 +562,24 @@ impl AdminToolSet {
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .map(String::from);
-                let workspace = self
-                    .workspaces
+                let project = self
+                    .projects
                     .create(subject, &name, description)
                     .await
-                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(
-                    format_workspace_created(&workspace),
+                    format_project_created(&project),
                 )]))
             }
 
-            WorkspaceCommand::List => {
+            ProjectCommand::List => {
                 let all = self
-                    .workspaces
+                    .projects
                     .list_all(subject)
                     .await
-                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(
-                    format_workspaces(&all),
+                    format_projects(&all),
                 )]))
             }
         }
@@ -762,7 +758,7 @@ fn truncate(s: &str, max: usize) -> &str {
 
 fn format_agent(a: &Agent) -> String {
     let role = match a.agent_role {
-        AgentRole::WorkspaceLead => "workspace_lead",
+        AgentRole::ProjectLead => "project_lead",
         AgentRole::Agent => "agent",
     };
     let sandbox = match &a.attached_sandbox {
@@ -770,8 +766,8 @@ fn format_agent(a: &Agent) -> String {
         None => "none".to_string(),
     };
     format!(
-        "Agent created.\n  id: {}\n  name: {}\n  role: {}\n  workspace: {}\n  sandbox: {}",
-        a.id, a.name, role, a.workspace_id, sandbox
+        "Agent created.\n  id: {}\n  name: {}\n  role: {}\n  project: {}\n  sandbox: {}",
+        a.id, a.name, role, a.project_id, sandbox
     )
 }
 
@@ -793,7 +789,7 @@ fn format_agents(agents: &[Agent]) -> String {
             None => "\u{2014}".to_string(),
         };
         let role = match a.agent_role {
-            AgentRole::WorkspaceLead => "workspace_lead",
+            AgentRole::ProjectLead => "project_lead",
             AgentRole::Agent => "agent",
         };
         lines.push(format!(
@@ -825,8 +821,8 @@ fn format_sandbox(s: &Sandbox) -> String {
         .map(|e| format!("\n  last_error: {e}"))
         .unwrap_or_default();
     format!(
-        "Sandbox:\n  id: {}\n  name: {}\n  workspace: {}\n  state: {}\n  mode: {:?}\n  specs: cpu={}, mem={}, disk={}{}\n  attached_agents:\n{}",
-        s.id, s.name, s.workspace_id, s.state, s.mode,
+        "Sandbox:\n  id: {}\n  name: {}\n  project: {}\n  state: {}\n  mode: {:?}\n  specs: cpu={}, mem={}, disk={}{}\n  attached_agents:\n{}",
+        s.id, s.name, s.project_id, s.state, s.mode,
         s.specs.cpu, s.specs.memory, s.specs.disk_size,
         error_str, agents_str,
     )
@@ -890,23 +886,23 @@ fn format_audit_entries(entries: &[AuditEntry]) -> String {
     lines.join("\n")
 }
 
-fn format_workspace_created(w: &Workspace) -> String {
+fn format_project_created(w: &Project) -> String {
     let description = w.description.as_deref().unwrap_or("\u{2014}");
     format!(
-        "Workspace created.\n  id: {}\n  name: {}\n  description: {}",
+        "Project created.\n  id: {}\n  name: {}\n  description: {}",
         w.id, w.name, description
     )
 }
 
-fn format_workspaces(ws: &[Workspace]) -> String {
-    if ws.is_empty() {
-        return "No workspaces found.".to_string();
+fn format_projects(project: &[Project]) -> String {
+    if project.is_empty() {
+        return "No projects found.".to_string();
     }
 
-    let mut lines = Vec::with_capacity(ws.len() + 2);
+    let mut lines = Vec::with_capacity(project.len() + 2);
     lines.push(format!("{:<38} {:<30} {}", "ID", "NAME", "DESCRIPTION"));
     lines.push("-".repeat(100));
-    for w in ws {
+    for w in project {
         let description = w.description.as_deref().unwrap_or("\u{2014}");
         lines.push(format!("{:<38} {:<30} {}", w.id, w.name, description));
     }
@@ -915,7 +911,7 @@ fn format_workspaces(ws: &[Workspace]) -> String {
 
 fn format_space(s: &Space, created: bool) -> String {
     let authorized: Vec<String> = s
-        .authorized_workspaces
+        .authorized_projects
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -927,7 +923,7 @@ fn format_space(s: &Space, created: bool) -> String {
     let description = s.description.as_deref().unwrap_or("\u{2014}");
     let header = if created { "Space created." } else { "Space:" };
     format!(
-        "{header}\n  id: {}\n  slug: {}\n  description: {}\n  authorized_workspaces: {}",
+        "{header}\n  id: {}\n  slug: {}\n  description: {}\n  authorized_projects: {}",
         s.id, s.slug, description, auth_str,
     )
 }
@@ -940,7 +936,7 @@ fn format_spaces(spaces: &[Space]) -> String {
     let mut lines = Vec::with_capacity(spaces.len() + 2);
     lines.push(format!(
         "{:<38} {:<24} {:<6} {}",
-        "ID", "SLUG", "WS#", "DESCRIPTION"
+        "ID", "SLUG", "PROJ#", "DESCRIPTION"
     ));
     lines.push("-".repeat(100));
 
@@ -950,7 +946,7 @@ fn format_spaces(spaces: &[Space]) -> String {
             "{:<38} {:<24} {:<6} {}",
             s.id,
             truncate(&s.slug, 24),
-            s.authorized_workspaces.len(),
+            s.authorized_projects.len(),
             description,
         ));
     }

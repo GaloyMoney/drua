@@ -28,7 +28,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
     let model_name = "test-model".to_string();
     let mut builtin_roles = HashMap::new();
     for role in [
-        drua_core::agent::AgentRole::WorkspaceLead,
+        drua_core::agent::AgentRole::ProjectLead,
         drua_core::agent::AgentRole::Agent,
     ] {
         builtin_roles.insert(
@@ -122,134 +122,134 @@ async fn ping_mutation_works() {
     assert_eq!(json["data"]["ping"], "pong");
 }
 
-// ─── Workspace mutation tests ───────────────────────────────────────────────
+// ─── Project mutation tests ───────────────────────────────────────────────
 
 #[tokio::test]
-async fn workspace_create_update_delete_via_graphql() {
+async fn project_create_update_delete_via_graphql() {
     let pool = pool().await;
     let app = test_app(&pool).await;
     let schema = drua_server::graphql::schema(Some(app.clone()));
     let sub = test_sub();
 
     // Create
-    let ws_name = format!("gql-ws-test-{}", uuid::Uuid::new_v4());
+    let ws_name = format!("gql-project-test-{}", uuid::Uuid::new_v4());
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"mutation($input: WorkspaceCreateInput!) {
-            workspaceCreate(input: $input) { workspace { id name description } }
+        r#"mutation($input: ProjectCreateInput!) {
+            projectCreate(input: $input) { project { id name description } }
         }"#,
-        serde_json::json!({ "input": { "name": ws_name, "description": "test workspace" } }),
+        serde_json::json!({ "input": { "name": ws_name, "description": "test project" } }),
     )
     .await;
     let data = assert_no_errors(&result);
-    let ws = &data["workspaceCreate"]["workspace"];
-    assert_eq!(ws["name"], ws_name);
-    assert_eq!(ws["description"], "test workspace");
-    let ws_id = ws["id"].as_str().unwrap().to_string();
+    let project = &data["projectCreate"]["project"];
+    assert_eq!(project["name"], ws_name);
+    assert_eq!(project["description"], "test project");
+    let project_id = project["id"].as_str().unwrap().to_string();
 
     // Update
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"mutation($input: WorkspaceUpdateInput!) {
-            workspaceUpdate(input: $input) { workspace { id name description } }
+        r#"mutation($input: ProjectUpdateInput!) {
+            projectUpdate(input: $input) { project { id name description } }
         }"#,
-        serde_json::json!({ "input": { "id": ws_id, "description": "updated" } }),
+        serde_json::json!({ "input": { "id": project_id, "description": "updated" } }),
     )
     .await;
     let data = assert_no_errors(&result);
-    assert_eq!(
-        data["workspaceUpdate"]["workspace"]["description"],
-        "updated"
-    );
+    assert_eq!(data["projectUpdate"]["project"]["description"], "updated");
 
     // Delete
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"mutation($input: WorkspaceDeleteInput!) {
-            workspaceDelete(input: $input) { workspace { id } }
+        r#"mutation($input: ProjectDeleteInput!) {
+            projectDelete(input: $input) { project { id } }
         }"#,
-        serde_json::json!({ "input": { "id": ws_id } }),
+        serde_json::json!({ "input": { "id": project_id } }),
     )
     .await;
     assert_no_errors(&result);
 
-    // Verify workspace is gone
+    // Verify project is gone
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"query($id: WorkspaceId!) { workspace(id: $id) { id } }"#,
-        serde_json::json!({ "id": ws_id }),
+        r#"query($id: ProjectId!) { project(id: $id) { id } }"#,
+        serde_json::json!({ "id": project_id }),
     )
     .await;
     let data = assert_no_errors(&result);
     assert!(
-        data["workspace"].is_null(),
-        "deleted workspace should return null"
+        data["project"].is_null(),
+        "deleted project should return null"
     );
 }
 
-// ─── Workspace Secret mutation tests ────────────────────────────────────────
+// ─── Project Secret mutation tests ────────────────────────────────────────
 
 #[tokio::test]
-async fn workspace_secret_create_delete_via_graphql() {
+async fn project_secret_create_delete_via_graphql() {
     let pool = pool().await;
     let app = test_app(&pool).await;
     let schema = drua_server::graphql::schema(Some(app.clone()));
     let sub = test_sub();
 
-    // Create workspace
+    // Create project
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"mutation($input: WorkspaceCreateInput!) {
-            workspaceCreate(input: $input) { workspace { id } }
+        r#"mutation($input: ProjectCreateInput!) {
+            projectCreate(input: $input) { project { id } }
         }"#,
-        serde_json::json!({ "input": { "name": format!("secret-test-ws-{}", uuid::Uuid::new_v4()) } }),
+        serde_json::json!({ "input": { "name": format!("secret-test-project-{}", uuid::Uuid::new_v4()) } }),
     )
     .await;
-    let ws_id = assert_no_errors(&result)["workspaceCreate"]["workspace"]["id"]
+    let project_id = assert_no_errors(&result)["projectCreate"]["project"]["id"]
         .as_str()
         .unwrap()
         .to_string();
 
     // Create secret
     let result = execute_graphql(
-        &schema, &app, &sub,
-        r#"mutation($input: WorkspaceSecretCreateInput!) {
-            workspaceSecretCreate(input: $input) { workspaceSecret { id name secretType workspaceId } }
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: ProjectSecretCreateInput!) {
+            projectSecretCreate(input: $input) { projectSecret { id name secretType projectId } }
         }"#,
         serde_json::json!({ "input": {
-            "workspaceId": ws_id,
+            "projectId": project_id,
             "name": "TEST_API_KEY",
             "secretType": "ENV_VAR",
             "value": "sk-secret-123"
         }}),
-    ).await;
+    )
+    .await;
     let data = assert_no_errors(&result);
-    let secret = &data["workspaceSecretCreate"]["workspaceSecret"];
+    let secret = &data["projectSecretCreate"]["projectSecret"];
     assert_eq!(secret["name"], "TEST_API_KEY");
     assert_eq!(secret["secretType"], "ENV_VAR");
     let secret_id = secret["id"].as_str().unwrap().to_string();
 
-    // Verify secret appears in workspace secrets list
+    // Verify secret appears in project secrets list
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"query($id: WorkspaceId!) { workspace(id: $id) { secrets { id name secretType } } }"#,
-        serde_json::json!({ "id": ws_id }),
+        r#"query($id: ProjectId!) { project(id: $id) { secrets { id name secretType } } }"#,
+        serde_json::json!({ "id": project_id }),
     )
     .await;
     let data = assert_no_errors(&result);
-    let secrets = data["workspace"]["secrets"].as_array().unwrap();
+    let secrets = data["project"]["secrets"].as_array().unwrap();
     assert!(secrets.iter().any(|s| s["name"] == "TEST_API_KEY"));
     // Ensure no 'value' field is exposed
     assert!(secrets.iter().all(|s| s.get("value").is_none()));
@@ -259,8 +259,8 @@ async fn workspace_secret_create_delete_via_graphql() {
         &schema,
         &app,
         &sub,
-        r#"mutation($input: WorkspaceSecretDeleteInput!) {
-            workspaceSecretDelete(input: $input) { deletedId }
+        r#"mutation($input: ProjectSecretDeleteInput!) {
+            projectSecretDelete(input: $input) { deletedId }
         }"#,
         serde_json::json!({ "input": { "id": secret_id } }),
     )
@@ -272,19 +272,19 @@ async fn workspace_secret_create_delete_via_graphql() {
         &schema,
         &app,
         &sub,
-        r#"query($id: WorkspaceId!) { workspace(id: $id) { secrets { id } } }"#,
-        serde_json::json!({ "id": ws_id }),
+        r#"query($id: ProjectId!) { project(id: $id) { secrets { id } } }"#,
+        serde_json::json!({ "id": project_id }),
     )
     .await;
     let data = assert_no_errors(&result);
-    let secrets = data["workspace"]["secrets"].as_array().unwrap();
+    let secrets = data["project"]["secrets"].as_array().unwrap();
     assert!(!secrets.iter().any(|s| s["id"].as_str() == Some(&secret_id)));
 
     // Cleanup
     let _ = execute_graphql(
         &schema, &app, &sub,
-        r#"mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"#,
-        serde_json::json!({ "input": { "id": ws_id } }),
+        r#"mutation($input: ProjectDeleteInput!) { projectDelete(input: $input) { project { id } } }"#,
+        serde_json::json!({ "input": { "id": project_id } }),
     ).await;
 }
 
@@ -347,18 +347,18 @@ async fn agent_create_via_graphql() {
     let schema = drua_server::graphql::schema(Some(app.clone()));
     let sub = test_sub();
 
-    // Create workspace
+    // Create project
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"mutation($input: WorkspaceCreateInput!) {
-            workspaceCreate(input: $input) { workspace { id } }
+        r#"mutation($input: ProjectCreateInput!) {
+            projectCreate(input: $input) { project { id } }
         }"#,
-        serde_json::json!({ "input": { "name": format!("agent-test-ws-{}", uuid::Uuid::new_v4()) } }),
+        serde_json::json!({ "input": { "name": format!("agent-test-project-{}", uuid::Uuid::new_v4()) } }),
     )
     .await;
-    let ws_id = assert_no_errors(&result)["workspaceCreate"]["workspace"]["id"]
+    let project_id = assert_no_errors(&result)["projectCreate"]["project"]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -369,37 +369,37 @@ async fn agent_create_via_graphql() {
         &app,
         &sub,
         r#"mutation($input: AgentCreateInput!) {
-            agentCreate(input: $input) { agent { id name role workspaceId } }
+            agentCreate(input: $input) { agent { id name role projectId } }
         }"#,
-        serde_json::json!({ "input": { "workspaceId": ws_id, "name": "research" } }),
+        serde_json::json!({ "input": { "projectId": project_id, "name": "research" } }),
     )
     .await;
     let data = assert_no_errors(&result);
     let agent = &data["agentCreate"]["agent"];
     assert_eq!(agent["name"], "research");
     assert_eq!(agent["role"], "AGENT");
-    assert_eq!(agent["workspaceId"], ws_id);
+    assert_eq!(agent["projectId"], project_id);
 
-    // Verify agent appears in workspace agents list
+    // Verify agent appears in project agents list
     let result = execute_graphql(
         &schema,
         &app,
         &sub,
-        r#"query($id: WorkspaceId!) { workspace(id: $id) { agents { id name role } } }"#,
-        serde_json::json!({ "id": ws_id }),
+        r#"query($id: ProjectId!) { project(id: $id) { agents { id name role } } }"#,
+        serde_json::json!({ "id": project_id }),
     )
     .await;
     let data = assert_no_errors(&result);
-    let agents = data["workspace"]["agents"].as_array().unwrap();
+    let agents = data["project"]["agents"].as_array().unwrap();
     assert!(agents.iter().any(|a| a["name"] == "research"));
     // Lead should be first
-    assert_eq!(agents[0]["role"], "WORKSPACE_LEAD");
+    assert_eq!(agents[0]["role"], "PROJECT_LEAD");
 
     // Cleanup
     let _ = execute_graphql(
         &schema, &app, &sub,
-        r#"mutation($input: WorkspaceDeleteInput!) { workspaceDelete(input: $input) { workspace { id } } }"#,
-        serde_json::json!({ "input": { "id": ws_id } }),
+        r#"mutation($input: ProjectDeleteInput!) { projectDelete(input: $input) { project { id } } }"#,
+        serde_json::json!({ "input": { "id": project_id } }),
     ).await;
 }
 
@@ -441,7 +441,7 @@ async fn library_search_returns_empty_for_empty_query_state() {
         &app,
         &sub,
         r#"query($input: LibrarySearchInput!) {
-            librarySearch(input: $input) { id title type workspaceId snippet score }
+            librarySearch(input: $input) { id title type projectId snippet score }
         }"#,
         serde_json::json!({ "input": { "query": "anything", "limit": 10 } }),
     )
@@ -462,7 +462,7 @@ async fn library_search_returns_empty_for_empty_query_state() {
     .await;
     assert_no_errors(&result);
 
-    // Workspace filter — non-existent workspace fails service-layer
+    // Project filter — non-existent project fails service-layer
     // find_by_id (this is a 404, not a silent empty result).
     let bogus_ws = "00000000-0000-0000-0000-000000000000";
     let result = execute_graphql(
@@ -472,15 +472,15 @@ async fn library_search_returns_empty_for_empty_query_state() {
         r#"query($input: LibrarySearchInput!) {
             librarySearch(input: $input) { id }
         }"#,
-        serde_json::json!({ "input": { "query": "x", "workspaceId": bogus_ws, "limit": 10 } }),
+        serde_json::json!({ "input": { "query": "x", "projectId": bogus_ws, "limit": 10 } }),
     )
     .await;
     assert!(
         result.get("errors").is_some(),
-        "non-existent workspace_id should error: {result:#}"
+        "non-existent project_id should error: {result:#}"
     );
 
-    // Both filters combined — same non-existent workspace, same error.
+    // Both filters combined — same non-existent project, same error.
     let result = execute_graphql(
         &schema,
         &app,
@@ -491,38 +491,38 @@ async fn library_search_returns_empty_for_empty_query_state() {
         serde_json::json!({ "input": {
             "query": "x",
             "types": ["SKILL"],
-            "workspaceId": bogus_ws,
+            "projectId": bogus_ws,
             "limit": 10
         }}),
     )
     .await;
     assert!(
         result.get("errors").is_some(),
-        "non-existent workspace_id should error: {result:#}"
+        "non-existent project_id should error: {result:#}"
     );
 }
 
 #[tokio::test]
-async fn library_search_workspace_scoped_agent_no_filter() {
+async fn library_search_project_scoped_agent_no_filter() {
     // Library content is openly discoverable: any non-anonymous subject
-    // — including a workspace-scoped agent without the collection-level
-    // Workspace(None) scope — can search globally and receive results
-    // spanning every workspace plus global content.
+    // — including a project-scoped agent without the collection-level
+    // Project(None) scope — can search globally and receive results
+    // spanning every project plus global content.
     let pool = pool().await;
     let app = test_app(&pool).await;
     let schema = drua_server::graphql::schema(Some(app.clone()));
 
     let user = test_sub();
-    let ws = app
-        .workspaces()
+    let project = app
+        .projects()
         .create(&user, "library-search-scope-test", None)
         .await
-        .expect("create workspace");
+        .expect("create project");
 
     let agent_sub = drua_core::auth::AuthSubject::Agent(
-        ws.id,
+        project.id,
         drua_core::primitives::AgentId::new(),
-        vec![drua_core::auth::AuthScope::WorkspaceMember(ws.id)],
+        vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
     );
 
     let result = execute_graphql(
@@ -587,13 +587,13 @@ async fn schema_has_expected_mutations() {
         "sandboxCreate",
         "sandboxSuspend",
         "sandboxRestart",
-        "workspaceSecretCreate",
-        "workspaceSecretDelete",
+        "projectSecretCreate",
+        "projectSecretDelete",
         "mcpCredentialsCreate",
         "mcpCredentialsRevoke",
-        "workspaceCreate",
-        "workspaceUpdate",
-        "workspaceDelete",
+        "projectCreate",
+        "projectUpdate",
+        "projectDelete",
     ];
 
     for name in expected {
@@ -624,8 +624,8 @@ async fn schema_has_expected_queries() {
         "sandbox",
         "auditLog",
         "agent",
-        "workspace",
-        "workspaces",
+        "project",
+        "projects",
         "librarySearch",
     ];
     for name in expected {
@@ -637,11 +637,11 @@ async fn schema_has_expected_queries() {
 }
 
 #[tokio::test]
-async fn schema_workspace_has_new_fields() {
+async fn schema_project_has_new_fields() {
     let schema = drua_server::graphql::schema(None);
     let response = schema
         .execute(async_graphql::Request::new(
-            r#"{ __type(name: "Workspace") { fields { name } } }"#,
+            r#"{ __type(name: "Project") { fields { name } } }"#,
         ))
         .await;
     let json = serde_json::to_value(&response).unwrap();
@@ -656,7 +656,7 @@ async fn schema_workspace_has_new_fields() {
     for name in expected {
         assert!(
             fields.contains(&name.to_string()),
-            "Missing workspace field: {name}. Available: {fields:?}"
+            "Missing project field: {name}. Available: {fields:?}"
         );
     }
 }
@@ -679,7 +679,7 @@ async fn schema_sandbox_type_has_expected_fields() {
 
     let expected = [
         "id",
-        "workspaceId",
+        "projectId",
         "name",
         "state",
         "lastError",
@@ -716,7 +716,7 @@ async fn schema_skill_type_has_expected_fields() {
 
     let expected = [
         "id",
-        "workspaceId",
+        "projectId",
         "name",
         "description",
         "body",
@@ -731,11 +731,11 @@ async fn schema_skill_type_has_expected_fields() {
 }
 
 #[tokio::test]
-async fn schema_workspace_secret_type_has_expected_fields() {
+async fn schema_project_secret_type_has_expected_fields() {
     let schema = drua_server::graphql::schema(None);
     let response = schema
         .execute(async_graphql::Request::new(
-            r#"{ __type(name: "WorkspaceSecret") { fields { name } } }"#,
+            r#"{ __type(name: "ProjectSecret") { fields { name } } }"#,
         ))
         .await;
     let json = serde_json::to_value(&response).unwrap();
@@ -746,11 +746,11 @@ async fn schema_workspace_secret_type_has_expected_fields() {
         .map(|f| f["name"].as_str().unwrap().to_string())
         .collect();
 
-    let expected = ["id", "workspaceId", "name", "secretType", "createdAt"];
+    let expected = ["id", "projectId", "name", "secretType", "createdAt"];
     for name in expected {
         assert!(
             fields.contains(&name.to_string()),
-            "Missing workspace secret field: {name}. Available: {fields:?}"
+            "Missing project secret field: {name}. Available: {fields:?}"
         );
     }
     assert!(

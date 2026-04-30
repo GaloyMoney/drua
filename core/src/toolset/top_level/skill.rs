@@ -9,8 +9,8 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SkillId;
+use crate::project::Projects;
 use crate::skill::{Skill, Skills};
-use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -69,10 +69,10 @@ struct SkillSummary {
     id: String,
     name: String,
     description: String,
-    /// `"workspace"` or `"global"`.
+    /// `"project"` or `"global"`.
     scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
+    project_id: Option<String>,
     /// Set on `get` / `create` / `update`; omitted from `list`.
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
@@ -80,12 +80,12 @@ struct SkillSummary {
 
 pub struct SkillTool {
     skills: Arc<Skills>,
-    workspaces: Arc<Workspaces>,
+    projects: Arc<Projects>,
 }
 
 impl SkillTool {
-    pub fn new(skills: Arc<Skills>, workspaces: Arc<Workspaces>) -> Self {
-        Self { skills, workspaces }
+    pub fn new(skills: Arc<Skills>, projects: Arc<Projects>) -> Self {
+        Self { skills, projects }
     }
 }
 
@@ -130,7 +130,7 @@ impl TopLevelTool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Manage workspace-scoped skills. A skill BODY is the natural-language \
+        "Manage project-scoped skills. A skill BODY is the natural-language \
          prompt fed to the agent that runs the step / `use_skill` call — \
          describe the GOAL, not shell scripts. The agent that runs a skill \
          has these tools: `bash`, `text_editor` (write/read/replace), `ls`, \
@@ -153,9 +153,9 @@ impl TopLevelTool for SkillTool {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // Management surface: visible iff subject can mutate skills (admin scope).
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Update, AuthResource::Skill(ws, None))
+                .can(AuthVerb::Update, AuthResource::Skill(project, None))
                 .is_ok()
         })
     }
@@ -169,7 +169,7 @@ impl TopLevelTool for SkillTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: SkillParams = parse_params(arguments)?;
 
         Audit::record_action(params.audit_action());
@@ -180,23 +180,16 @@ impl TopLevelTool for SkillTool {
                 description,
                 body,
             } => {
-                let workspace_name = self
-                    .workspaces
-                    .find_by_id(subject, workspace_id)
+                let project_name = self
+                    .projects
+                    .find_by_id(subject, project_id)
                     .await
                     .map(|w| w.name)
-                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
 
                 let skill = self
                     .skills
-                    .create(
-                        subject,
-                        workspace_id,
-                        &workspace_name,
-                        name,
-                        description,
-                        body,
-                    )
+                    .create(subject, project_id, &project_name, name, description, body)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 
@@ -220,7 +213,7 @@ impl TopLevelTool for SkillTool {
             } => {
                 let skill = self
                     .skills
-                    .update(subject, skill_id, workspace_id, name, description, body)
+                    .update(subject, skill_id, project_id, name, description, body)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 
@@ -238,7 +231,7 @@ impl TopLevelTool for SkillTool {
 
             SkillParams::Delete { skill_id } => {
                 self.skills
-                    .delete(subject, skill_id, workspace_id)
+                    .delete(subject, skill_id, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 
@@ -253,7 +246,7 @@ impl TopLevelTool for SkillTool {
             SkillParams::List => {
                 let skills = self
                     .skills
-                    .list_for_workspace(subject, workspace_id)
+                    .list_for_project(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
                 let text = format_list_text(&skills);
@@ -268,7 +261,7 @@ impl TopLevelTool for SkillTool {
             SkillParams::Get { skill_id } => {
                 let skill = self
                     .skills
-                    .find_by_id(subject, skill_id, workspace_id)
+                    .find_by_id(subject, skill_id, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
                 let text = format_get_text(&skill);
@@ -289,8 +282,8 @@ impl TopLevelTool for SkillTool {
 }
 
 fn skill_to_summary(s: &Skill, include_body: bool) -> SkillSummary {
-    let scope = if s.workspace_id.is_some() {
-        "workspace"
+    let scope = if s.project_id.is_some() {
+        "project"
     } else {
         "global"
     };
@@ -299,7 +292,7 @@ fn skill_to_summary(s: &Skill, include_body: bool) -> SkillSummary {
         name: s.name.clone(),
         description: s.description.clone(),
         scope: scope.to_string(),
-        workspace_id: s.workspace_id.map(|w| w.to_string()),
+        project_id: s.project_id.map(|w| w.to_string()),
         body: include_body.then(|| s.body.clone()),
     }
 }
@@ -315,8 +308,8 @@ fn format_list_text(skills: &[Skill]) -> String {
     ));
     lines.push("-".repeat(110));
     for s in skills {
-        let scope = if s.workspace_id.is_some() {
-            "workspace"
+        let scope = if s.project_id.is_some() {
+            "project"
         } else {
             "global"
         };
@@ -332,8 +325,8 @@ fn format_list_text(skills: &[Skill]) -> String {
 }
 
 fn format_get_text(s: &Skill) -> String {
-    let scope = if s.workspace_id.is_some() {
-        "workspace"
+    let scope = if s.project_id.is_some() {
+        "project"
     } else {
         "global"
     };

@@ -43,11 +43,11 @@ galoyAgents:
             maxTokensPerResponse: 4096
             contextWindowTokens: 200000
     ## Per-role defaults applied when an agent with that role is created.
-    ## Both `workspaceLead` and `agent` are REQUIRED — the binary refuses
-    ## to start if either `agents.builtin_roles.workspace_lead` or
+    ## Both `projectLead` and `agent` are REQUIRED — the binary refuses
+    ## to start if either `agents.builtin_roles.project_lead` or
     ## `agents.builtin_roles.agent` is missing.
     agents:
-      workspaceLead:
+      projectLead:
         model: "claude-haiku-4-5-20251001"
         compaction:
           ## When a user message arrives more than this many seconds after
@@ -60,20 +60,11 @@ galoyAgents:
           ## unset to disable the time-based path entirely (token-budget
           ## pruning still applies).
           pruneAfterSeconds: 300
-        systemPrompt: |
-          You are the lead agent of your workspace. You investigate / coordinate
-          and delegate. You answer questions, and use the available tools to help the
-          user accomplish their goals. Be concise and action-oriented.
       agent:
         model: "claude-haiku-4-5-20251001"
         compaction:
           resetTimeDeltaSeconds: 600
           pruneAfterSeconds: 300
-        systemPrompt: |
-          You are an agent operating inside a Galoy Agents workspace.
-          You work on the tasks assigned to you and, when attached to
-          a sandbox, you run commands and edit files inside it. Be
-          concise and action-oriented.
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"
     concourse:

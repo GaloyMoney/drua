@@ -19,14 +19,14 @@ pub struct SearchResult {
 pub struct GlobalSearchHit {
     pub doc_id: uuid::Uuid,
     pub doc_type: DocType,
-    pub workspace_id: uuid::Uuid,
+    pub project_id: uuid::Uuid,
     pub title: String,
     pub content: String,
     pub tags: Vec<String>,
     pub score: f64,
     /// Populated only for `doc_type = SpaceFile`. Lets callers cite a
     /// hit as `<space_slug>/<relative_path>` instead of the meaningless
-    /// nil workspace id space-file rows carry in `library_search_data`.
+    /// nil project id space-file rows carry in `library_search_data`.
     pub space_slug: Option<String>,
     pub relative_path: Option<String>,
 }
@@ -35,7 +35,7 @@ pub struct GlobalSearchHit {
 pub struct LibraryFile {
     pub doc_id: uuid::Uuid,
     pub doc_type: DocType,
-    pub workspace_id: uuid::Uuid,
+    pub project_id: uuid::Uuid,
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
@@ -78,7 +78,7 @@ impl SearchStore {
         let tags_json = serde_json::to_value(&fields.tags).unwrap_or_default();
         let doc_type = fields.doc_type.as_str();
         sqlx::query!(
-            r#"INSERT INTO library_search_data (doc_id, doc_type, workspace_id, title_text, content_text, tags)
+            r#"INSERT INTO library_search_data (doc_id, doc_type, project_id, title_text, content_text, tags)
                VALUES ($1, $2, $3, $4, $5, $6)
                ON CONFLICT (doc_id, doc_type) DO UPDATE SET
                    title_text = EXCLUDED.title_text,
@@ -86,7 +86,7 @@ impl SearchStore {
                    tags = EXCLUDED.tags"#,
             fields.doc_id,
             doc_type,
-            fields.workspace_id,
+            fields.project_id,
             &fields.title,
             &fields.body,
             tags_json,
@@ -126,7 +126,7 @@ impl SearchStore {
             return Ok(Vec::new());
         }
         let rows = sqlx::query!(
-            r#"SELECT lsd.doc_id, lsd.doc_type, lsd.workspace_id,
+            r#"SELECT lsd.doc_id, lsd.doc_type, lsd.project_id,
                       lsd.title_text, lsd.content_text, lsd.tags,
                       s.slug AS "space_slug?",
                       ssd.relative_path AS "relative_path?"
@@ -143,7 +143,7 @@ impl SearchStore {
             .map(|r| LibraryFile {
                 doc_id: r.doc_id,
                 doc_type: parse_doc_type(&r.doc_type),
-                workspace_id: r.workspace_id,
+                project_id: r.project_id,
                 title: r.title_text,
                 body: r.content_text,
                 tags: parse_tags(&r.tags),
@@ -153,15 +153,15 @@ impl SearchStore {
             .collect())
     }
 
-    /// Called during workspace cascade deletion.
-    #[tracing::instrument(name = "library.search_store.delete_for_workspace_in_op", skip_all)]
-    pub async fn delete_for_workspace_in_op(
+    /// Called during project cascade deletion.
+    #[tracing::instrument(name = "library.search_store.delete_for_project_in_op", skip_all)]
+    pub async fn delete_for_project_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
-        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
     ) -> Result<(), LibraryError> {
-        sqlx::query("DELETE FROM library_search_data WHERE workspace_id = $1")
-            .bind(workspace_id)
+        sqlx::query("DELETE FROM library_search_data WHERE project_id = $1")
+            .bind(project_id)
             .execute(op.as_executor())
             .await?;
         Ok(())
@@ -235,21 +235,21 @@ impl SearchStore {
     }
 
     /// FTS + vector similarity fused via Reciprocal Rank Fusion. Includes
-    /// `workspace_id` plus the nil UUID so global-scoped library files
-    /// surface alongside workspace-scoped ones.
+    /// `project_id` plus the nil UUID so global-scoped library files
+    /// surface alongside project-scoped ones.
     #[tracing::instrument(name = "library.search_store.search", skip_all)]
     pub async fn search(
         &self,
-        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
         query: &str,
         query_embedding: Option<Vec<f32>>,
         doc_type: Option<DocType>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, LibraryError> {
-        let ids = [workspace_id, uuid::Uuid::nil()];
+        let ids = [project_id, uuid::Uuid::nil()];
         let doc_types: Vec<DocType> = doc_type.into_iter().collect();
         let hits = self
-            .search_in_workspaces(Some(&ids), query, query_embedding, &doc_types, limit)
+            .search_in_projects(Some(&ids), query, query_embedding, &doc_types, limit)
             .await?;
         Ok(hits
             .into_iter()
@@ -264,30 +264,30 @@ impl SearchStore {
             .collect())
     }
 
-    /// Cross-workspace variant of [`Self::search`]. Empty `workspace_ids`
-    /// = no filter (every workspace plus global). Otherwise the caller's
+    /// Cross-project variant of [`Self::search`]. Empty `project_ids`
+    /// = no filter (every project plus global). Otherwise the caller's
     /// list is used as-is, with the nil UUID appended so global-scoped
     /// files always surface alongside.
     #[tracing::instrument(name = "library.search_store.search_global", skip_all)]
     pub async fn search_global(
         &self,
-        workspace_ids: &[uuid::Uuid],
+        project_ids: &[uuid::Uuid],
         query: &str,
         query_embedding: Option<Vec<f32>>,
         doc_types: &[DocType],
         limit: usize,
     ) -> Result<Vec<GlobalSearchHit>, LibraryError> {
-        let workspace_filter: Option<Vec<uuid::Uuid>> = if workspace_ids.is_empty() {
+        let project_filter: Option<Vec<uuid::Uuid>> = if project_ids.is_empty() {
             None
         } else {
-            let mut ids: Vec<uuid::Uuid> = workspace_ids.to_vec();
+            let mut ids: Vec<uuid::Uuid> = project_ids.to_vec();
             if !ids.contains(&uuid::Uuid::nil()) {
                 ids.push(uuid::Uuid::nil());
             }
             Some(ids)
         };
-        self.search_in_workspaces(
-            workspace_filter.as_deref(),
+        self.search_in_projects(
+            project_filter.as_deref(),
             query,
             query_embedding,
             doc_types,
@@ -296,11 +296,11 @@ impl SearchStore {
         .await
     }
 
-    /// Shared FTS + vector search. `workspace_filter = None` = no
-    /// workspace clause; `Some(&[..])` filters to those ids.
-    async fn search_in_workspaces(
+    /// Shared FTS + vector search. `project_filter = None` = no
+    /// project clause; `Some(&[..])` filters to those ids.
+    async fn search_in_projects(
         &self,
-        workspace_filter: Option<&[uuid::Uuid]>,
+        project_filter: Option<&[uuid::Uuid]>,
         query: &str,
         query_embedding: Option<Vec<f32>>,
         doc_types: &[DocType],
@@ -315,16 +315,16 @@ impl SearchStore {
 
         let fts_rows: Vec<GlobalFtsRow> = sqlx::query_as!(
             GlobalFtsRow,
-            r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,
+            r#"SELECT doc_id, doc_type, project_id, title_text, content_text, tags,
                       ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
                FROM library_search_data
-               WHERE ($2::uuid[] IS NULL OR workspace_id = ANY($2))
+               WHERE ($2::uuid[] IS NULL OR project_id = ANY($2))
                  AND search_tsv @@ plainto_tsquery('english', $1)
                  AND ($3::text[] IS NULL OR doc_type = ANY($3))
                ORDER BY rank DESC
                LIMIT $4"#,
             query,
-            workspace_filter,
+            project_filter,
             doc_type_filter.as_deref(),
             over_fetch,
         )
@@ -335,16 +335,16 @@ impl SearchStore {
             let vec = Vector::from(emb);
             sqlx::query_as!(
                 GlobalVecRow,
-                r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags,
+                r#"SELECT doc_id, doc_type, project_id, title_text, content_text, tags,
                           embedding <=> $1 AS distance
                    FROM library_search_data
-                   WHERE ($2::uuid[] IS NULL OR workspace_id = ANY($2))
+                   WHERE ($2::uuid[] IS NULL OR project_id = ANY($2))
                      AND embedding IS NOT NULL
                      AND ($3::text[] IS NULL OR doc_type = ANY($3))
                    ORDER BY distance ASC
                    LIMIT $4"#,
                 vec as Vector,
-                workspace_filter,
+                project_filter,
                 doc_type_filter.as_deref(),
                 over_fetch,
             )
@@ -359,7 +359,7 @@ impl SearchStore {
         Ok(hits)
     }
 
-    /// SpaceFile rows in `library_search_data` carry a nil `workspace_id`
+    /// SpaceFile rows in `library_search_data` carry a nil `project_id`
     /// — the meaningful citation is `(space_slug, relative_path)`,
     /// which lives in `space_search_data` + `spaces`. Single batched
     /// query keyed by the SpaceFile doc_ids in the result set.
@@ -400,7 +400,7 @@ impl SearchStore {
 struct GlobalFtsRow {
     doc_id: uuid::Uuid,
     doc_type: String,
-    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
     title_text: String,
     content_text: String,
     tags: serde_json::Value,
@@ -411,7 +411,7 @@ struct GlobalFtsRow {
 struct GlobalVecRow {
     doc_id: uuid::Uuid,
     doc_type: String,
-    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
     title_text: String,
     content_text: String,
     tags: serde_json::Value,
@@ -435,7 +435,7 @@ fn rrf_fuse(
 
     struct Candidate {
         doc_type: DocType,
-        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
         title: String,
         content: String,
         tags: Vec<String>,
@@ -448,7 +448,7 @@ fn rrf_fuse(
         let key = (row.doc_id, row.doc_type.clone());
         let entry = map.entry(key).or_insert_with(|| Candidate {
             doc_type: parse_doc_type(&row.doc_type),
-            workspace_id: row.workspace_id,
+            project_id: row.project_id,
             title: row.title_text.clone(),
             content: row.content_text.clone(),
             tags: parse_tags(&row.tags),
@@ -461,7 +461,7 @@ fn rrf_fuse(
         let key = (row.doc_id, row.doc_type.clone());
         let entry = map.entry(key).or_insert_with(|| Candidate {
             doc_type: parse_doc_type(&row.doc_type),
-            workspace_id: row.workspace_id,
+            project_id: row.project_id,
             title: row.title_text.clone(),
             content: row.content_text.clone(),
             tags: parse_tags(&row.tags),
@@ -475,7 +475,7 @@ fn rrf_fuse(
         .map(|((doc_id, _), c)| GlobalSearchHit {
             doc_id,
             doc_type: c.doc_type,
-            workspace_id: c.workspace_id,
+            project_id: c.project_id,
             title: c.title,
             content: c.content,
             tags: c.tags,

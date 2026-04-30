@@ -39,15 +39,12 @@ impl Notes {
     /// Registers a `ContextBumpHook` so committing the op bumps the local
     /// `ContextGeneration` and fires a `context_changed` PG NOTIFY. All
     /// mutations go through this helper rather than `repo.begin_op()`.
-    async fn begin_op(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<es_entity::DbOp<'static>, NoteError> {
+    async fn begin_op(&self, project_id: ProjectId) -> Result<es_entity::DbOp<'static>, NoteError> {
         let mut op = self.repo.begin_op().await?;
         let hook = ContextBumpHook::new(
             self.context_generation.clone(),
             self.pool.clone(),
-            Some(workspace_id),
+            Some(project_id),
         );
         op.add_commit_hook(hook)
             .expect("DbOp supports commit hooks");
@@ -58,8 +55,8 @@ impl Notes {
     pub async fn store(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
-        workspace_name: &str,
+        project_id: ProjectId,
+        project_name: &str,
         title: String,
         content: String,
         tags: Vec<String>,
@@ -67,16 +64,16 @@ impl Notes {
         if content.len() > MAX_NOTE_CONTENT_LEN {
             return Err(NoteError::ContentTooLarge(content.len()));
         }
-        sub.can(AuthVerb::Create, AuthResource::Note(workspace_id, None))?;
+        sub.can(AuthVerb::Create, AuthResource::Note(project_id, None))?;
 
-        let mut op = self.begin_op(workspace_id).await?.with_db_time().await?;
+        let mut op = self.begin_op(project_id).await?.with_db_time().await?;
 
         let note_id = NoteId::new();
         let created_at = op.now().to_rfc3339();
         let runtime_file = UpstreamOp::for_note(
             note_id,
-            workspace_id,
-            workspace_name,
+            project_id,
+            project_name,
             &title,
             &content,
             &tags,
@@ -87,8 +84,8 @@ impl Notes {
 
         let new_note = NewNote::builder()
             .id(note_id)
-            .workspace_id(workspace_id)
-            .workspace_name(workspace_name)
+            .project_id(project_id)
+            .project_name(project_name)
             .title(&title)
             .content(&content)
             .tags(tags)
@@ -105,7 +102,7 @@ impl Notes {
     pub async fn update(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         note_id: NoteId,
         title: String,
         content: String,
@@ -116,15 +113,15 @@ impl Notes {
         }
         sub.can(
             AuthVerb::Update,
-            AuthResource::Note(workspace_id, Some(note_id)),
+            AuthResource::Note(project_id, Some(note_id)),
         )?;
 
-        let mut op = self.begin_op(workspace_id).await?.with_db_time().await?;
+        let mut op = self.begin_op(project_id).await?.with_db_time().await?;
         let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
-        if note.workspace_id != workspace_id {
+        if note.project_id != project_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Read,
-                resource: AuthResource::Workspace(Some(workspace_id)),
+                resource: AuthResource::Project(Some(project_id)),
             }));
         }
         let updated_at = op.now().to_rfc3339();
@@ -132,8 +129,8 @@ impl Notes {
         let created_at = note.created_at();
         let runtime_file = UpstreamOp::for_note(
             note.id,
-            note.workspace_id,
-            &note.workspace_name,
+            note.project_id,
+            &note.project_name,
             &title,
             &content,
             &tags,
@@ -155,20 +152,17 @@ impl Notes {
     pub async fn store_or_update(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
-        workspace_name: &str,
+        project_id: ProjectId,
+        project_name: &str,
         note_id: Option<NoteId>,
         title: String,
         content: String,
         tags: Vec<String>,
     ) -> Result<Note, NoteError> {
         match note_id {
-            Some(id) => {
-                self.update(sub, workspace_id, id, title, content, tags)
-                    .await
-            }
+            Some(id) => self.update(sub, project_id, id, title, content, tags).await,
             None => {
-                self.store(sub, workspace_id, workspace_name, title, content, tags)
+                self.store(sub, project_id, project_name, title, content, tags)
                     .await
             }
         }
@@ -178,19 +172,19 @@ impl Notes {
     pub async fn pin(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         note_id: NoteId,
     ) -> Result<Note, NoteError> {
         sub.can(
             AuthVerb::Update,
-            AuthResource::Note(workspace_id, Some(note_id)),
+            AuthResource::Note(project_id, Some(note_id)),
         )?;
-        let mut op = self.begin_op(workspace_id).await?;
+        let mut op = self.begin_op(project_id).await?;
         let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
-        if note.workspace_id != workspace_id {
+        if note.project_id != project_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
-                resource: AuthResource::Workspace(Some(workspace_id)),
+                resource: AuthResource::Project(Some(project_id)),
             }));
         }
         if note.pin().did_execute() {
@@ -204,19 +198,19 @@ impl Notes {
     pub async fn unpin(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         note_id: NoteId,
     ) -> Result<Note, NoteError> {
         sub.can(
             AuthVerb::Update,
-            AuthResource::Note(workspace_id, Some(note_id)),
+            AuthResource::Note(project_id, Some(note_id)),
         )?;
-        let mut op = self.begin_op(workspace_id).await?;
+        let mut op = self.begin_op(project_id).await?;
         let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
-        if note.workspace_id != workspace_id {
+        if note.project_id != project_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
-                resource: AuthResource::Workspace(Some(workspace_id)),
+                resource: AuthResource::Project(Some(project_id)),
             }));
         }
         if note.unpin().did_execute() {
@@ -230,17 +224,17 @@ impl Notes {
     pub async fn list_pinned(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<Note>, NoteError> {
-        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Note(project_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
+            .list_for_project_id_by_created_at(
+                project_id,
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -252,18 +246,18 @@ impl Notes {
     pub async fn find_by_id(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         note_id: NoteId,
     ) -> Result<Note, NoteError> {
         sub.can(
             AuthVerb::Read,
-            AuthResource::Note(workspace_id, Some(note_id)),
+            AuthResource::Note(project_id, Some(note_id)),
         )?;
         let note = self.repo.find_by_id(note_id).await?;
-        if note.workspace_id != workspace_id {
+        if note.project_id != project_id {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Read,
-                resource: AuthResource::Workspace(Some(workspace_id)),
+                resource: AuthResource::Project(Some(project_id)),
             }));
         }
         Ok(note)
@@ -273,14 +267,14 @@ impl Notes {
     pub async fn search(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, NoteError> {
-        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Note(project_id, None))?;
         self.library
             .search(
-                uuid::Uuid::from(workspace_id),
+                uuid::Uuid::from(project_id),
                 query,
                 Some(DocType::Note),
                 limit,
@@ -293,18 +287,18 @@ impl Notes {
     pub async fn list(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         limit: usize,
     ) -> Result<Vec<Note>, NoteError> {
-        sub.can(AuthVerb::Read, AuthResource::Note(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Note(project_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: limit,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
+            .list_for_project_id_by_created_at(
+                project_id,
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -312,15 +306,15 @@ impl Notes {
         Ok(result.entities)
     }
 
-    /// Used during workspace cascade deletion.
-    #[instrument(name = "note.delete_for_workspace_in_op", skip_all)]
-    pub(crate) async fn delete_for_workspace_in_op(
+    /// Used during project cascade deletion.
+    #[instrument(name = "note.delete_for_project_in_op", skip_all)]
+    pub(crate) async fn delete_for_project_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), NoteError> {
         self.repo
-            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
     }
@@ -333,12 +327,12 @@ impl Notes {
     const NOTE_INDEX_LIMIT: usize = 20;
 
     /// Two sections: pinned notes (full content within budget) and a recent
-    /// notes index (title+tags only). `None` if the workspace has no notes.
+    /// notes index (title+tags only). `None` if the project has no notes.
     /// Internal — no auth check, called at agent creation.
-    #[instrument(name = "note.pinned_context_for_workspace", skip(self))]
-    pub async fn pinned_context_for_workspace(
+    #[instrument(name = "note.pinned_context_for_project", skip(self))]
+    pub async fn pinned_context_for_project(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Option<String>, NoteError> {
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
@@ -346,8 +340,8 @@ impl Notes {
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
+            .list_for_project_id_by_created_at(
+                project_id,
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -360,7 +354,7 @@ impl Notes {
         let mut pinned: Vec<&Note> = result.entities.iter().filter(|n| n.pinned).collect();
         let non_pinned: Vec<&Note> = result.entities.iter().filter(|n| !n.pinned).collect();
 
-        let header = "# Workspace Notes\n\n\
+        let header = "# Project Notes\n\n\
              Use the `notes` tool with command `search` to retrieve full content.\n";
         let mut buf = String::from(header);
         let mut remaining = Self::PINNED_INJECTION_BUDGET.saturating_sub(header.len());

@@ -169,16 +169,16 @@ impl Library {
         Ok(())
     }
 
-    /// Queues a single `WorkspaceInit` op — `notes/`, `skills/`,
+    /// Queues a single `ProjectInit` op — `notes/`, `skills/`,
     /// `workflows/` `.gitkeep` markers all land in one commit + push.
-    #[tracing::instrument(name = "library.sync_workspace_folder_in_op", skip_all)]
-    pub async fn sync_workspace_folder_in_op(
+    #[tracing::instrument(name = "library.sync_project_folder_in_op", skip_all)]
+    pub async fn sync_project_folder_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
-        workspace_name: &str,
+        project_name: &str,
     ) -> Result<(), LibraryError> {
-        let file = UpstreamOp::WorkspaceInit {
-            workspace_name: workspace_name.to_string(),
+        let file = UpstreamOp::ProjectInit {
+            project_name: project_name.to_string(),
         };
         self.enqueue_write(op, file).await?;
         Ok(())
@@ -186,7 +186,7 @@ impl Library {
 
     /// Persists a new `Space` and queues `spaces/<slug>/.gitkeep` for
     /// upstream commit in the same transaction. The creating subject's
-    /// workspace is auto-seeded into `authorized_workspaces`; non-agent
+    /// project is auto-seeded into `authorized_projects`; non-agent
     /// subjects (e.g. plain `User`) produce a space with an empty
     /// authorized list.
     #[tracing::instrument(name = "library.create_space", skip(self, sub))]
@@ -241,12 +241,12 @@ impl Library {
         slug: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<(Space, ::job::JobId), LibraryError> {
-        let initial_workspaces: Vec<crate::primitives::WorkspaceId> =
-            sub.workspace_id().into_iter().collect();
+        let initial_projects: Vec<crate::primitives::ProjectId> =
+            sub.project_id().into_iter().collect();
 
         let mut builder = NewSpace::builder()
             .slug(slug.into())
-            .authorized_workspaces(initial_workspaces);
+            .authorized_projects(initial_projects);
         if let Some(desc) = description {
             builder = builder.description(desc);
         }
@@ -281,8 +281,8 @@ impl Library {
 
     /// Resolves a slug to a `Space` after enforcing two checks:
     /// 1. The subject can read `AuthResource::Space(Some(space.id))`
-    ///    (workspace admins are blanket-allowed by the scope layer).
-    /// 2. The subject's workspace is in `space.authorized_workspaces`.
+    ///    (project admins are blanket-allowed by the scope layer).
+    /// 2. The subject's project is in `space.authorized_projects`.
     ///
     /// Used by sandbox-creation flows that need to honor space ACLs.
     #[tracing::instrument(name = "library.find_space_by_slug_authorized", skip(self, sub))]
@@ -305,13 +305,13 @@ impl Library {
         )?;
         crate::audit::Audit::record_action_if_unset("space.find_by_slug");
 
-        let workspace_id = sub
-            .workspace_id()
+        let project_id = sub
+            .project_id()
             .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
-        if !space.is_workspace_authorized(workspace_id) {
-            return Err(SpaceError::WorkspaceNotAuthorized {
+        if !space.is_project_authorized(project_id) {
+            return Err(SpaceError::ProjectNotAuthorized {
                 slug: space.slug.clone(),
-                workspace_id,
+                project_id,
             }
             .into());
         }
@@ -319,8 +319,8 @@ impl Library {
         Ok(space)
     }
 
-    /// Lists every space, paginated. Authorized for admin / workspace-admin
-    /// subjects; the workspace-membership ACL on `Space` is intentionally
+    /// Lists every space, paginated. Authorized for admin / project-admin
+    /// subjects; the project-membership ACL on `Space` is intentionally
     /// bypassed so admins can audit the full set.
     #[tracing::instrument(name = "library.list_all_spaces", skip(self, sub))]
     pub async fn list_all_spaces(
@@ -336,8 +336,8 @@ impl Library {
     }
 
     /// Slug → `Space` lookup that enforces `Read` on the resolved space
-    /// but skips the workspace-membership check. Intended for admin tools
-    /// that need to inspect any space regardless of `authorized_workspaces`.
+    /// but skips the project-membership check. Intended for admin tools
+    /// that need to inspect any space regardless of `authorized_projects`.
     #[tracing::instrument(name = "library.find_space_by_slug_admin", skip(self, sub))]
     pub async fn find_space_by_slug_admin(
         &self,
@@ -384,21 +384,19 @@ impl Library {
     }
 
     /// Removes search data and queues a job to delete
-    /// `runtime/workspaces/<name>/` from the library repo. Call inside the
-    /// workspace delete transaction for atomicity.
-    #[tracing::instrument(name = "library.cleanup_workspace_in_op", skip_all)]
-    pub async fn cleanup_workspace_in_op(
+    /// `runtime/projects/<name>/` from the library repo. Call inside the
+    /// project delete transaction for atomicity.
+    #[tracing::instrument(name = "library.cleanup_project_in_op", skip_all)]
+    pub async fn cleanup_project_in_op(
         &self,
         op: &mut impl es_entity::AtomicOperation,
-        workspace_id: uuid::Uuid,
-        workspace_name: &str,
+        project_id: uuid::Uuid,
+        project_name: &str,
     ) -> Result<(), LibraryError> {
-        self.search
-            .delete_for_workspace_in_op(op, workspace_id)
-            .await?;
+        self.search.delete_for_project_in_op(op, project_id).await?;
 
-        let file = UpstreamOp::WorkspaceCleanup {
-            workspace_name: workspace_name.to_string(),
+        let file = UpstreamOp::ProjectCleanup {
+            project_name: project_name.to_string(),
         };
         self.enqueue_write(op, file).await?;
         Ok(())
@@ -463,7 +461,7 @@ impl Library {
     #[tracing::instrument(name = "library.search", skip(self))]
     pub async fn search(
         &self,
-        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
         query: &str,
         doc_type: Option<DocType>,
         limit: usize,
@@ -476,24 +474,24 @@ impl Library {
             }
         };
         self.search
-            .search(workspace_id, query, query_embedding, doc_type, limit)
+            .search(project_id, query, query_embedding, doc_type, limit)
             .await
     }
 
-    /// Cross-workspace search. Open to any non-anonymous subject;
-    /// library content is globally discoverable. Empty `workspace_ids`
-    /// = no workspace filter (every workspace plus global content);
+    /// Cross-project search. Open to any non-anonymous subject;
+    /// library content is globally discoverable. Empty `project_ids`
+    /// = no project filter (every project plus global content);
     /// otherwise hits are restricted to the supplied ids (plus the nil
     /// UUID for global, auto-appended).
     ///
     /// Workflows are hosted in the library repo but excluded from search:
     /// passing an empty `doc_types` defaults to `[Skill, Note]`, and any
     /// `Workflow` entry in `doc_types` is silently dropped.
-    #[tracing::instrument(name = "library.search_global", skip(self, sub, workspace_ids))]
+    #[tracing::instrument(name = "library.search_global", skip(self, sub, project_ids))]
     pub async fn search_global(
         &self,
         sub: &crate::auth::AuthSubject,
-        workspace_ids: &[uuid::Uuid],
+        project_ids: &[uuid::Uuid],
         query: &str,
         doc_types: &[DocType],
         limit: usize,
@@ -522,13 +520,7 @@ impl Library {
             }
         };
         self.search
-            .search_global(
-                workspace_ids,
-                query,
-                query_embedding,
-                &effective_types,
-                limit,
-            )
+            .search_global(project_ids, query, query_embedding, &effective_types, limit)
             .await
     }
 

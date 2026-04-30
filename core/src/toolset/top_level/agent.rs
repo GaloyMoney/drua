@@ -1,4 +1,4 @@
-//! `workspace_agent` — consolidated workspace-scoped agent management.
+//! `project_agent` — consolidated project-scoped agent management.
 //!
 //! Single tool with a `command` discriminator (like `text_editor`):
 //! `create`, `list`, `attach_sandbox`, `detach_sandbox`.
@@ -23,8 +23,8 @@ use super::super::traits::TopLevelTool;
 use super::parse_params;
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct WorkspaceAgentParams {
-    command: WorkspaceAgentCommand,
+struct ProjectAgentParams {
+    command: ProjectAgentCommand,
     name: Option<String>,
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
@@ -35,14 +35,14 @@ struct WorkspaceAgentParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum WorkspaceAgentCommand {
+enum ProjectAgentCommand {
     Create,
     List,
     AttachSandbox,
     DetachSandbox,
 }
 
-impl WorkspaceAgentCommand {
+impl ProjectAgentCommand {
     fn audit_action(&self) -> &'static str {
         match self {
             Self::Create => "agent.create",
@@ -53,11 +53,11 @@ impl WorkspaceAgentCommand {
     }
 }
 
-pub struct WorkspaceAgent {
+pub struct ProjectAgent {
     agents: Arc<Agents>,
 }
 
-impl WorkspaceAgent {
+impl ProjectAgent {
     pub fn new(agents: Arc<Agents>) -> Self {
         Self { agents }
     }
@@ -69,7 +69,7 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         s.meta_schema = None;
     });
     let generator = settings.into_generator();
-    let schema = generator.into_root_schema_for::<WorkspaceAgentParams>();
+    let schema = generator.into_root_schema_for::<ProjectAgentParams>();
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
@@ -83,7 +83,7 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for WorkspaceAgent {
+impl TopLevelTool for ProjectAgent {
     fn name(&self) -> &str {
         "agent"
     }
@@ -99,9 +99,9 @@ impl TopLevelTool for WorkspaceAgent {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Read, AuthResource::Agent(ws, None))
+                .can(AuthVerb::Read, AuthResource::Agent(project, None))
                 .is_ok()
         })
     }
@@ -115,19 +115,19 @@ impl TopLevelTool for WorkspaceAgent {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let params: WorkspaceAgentParams = parse_params(arguments)?;
+        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
+        let params: ProjectAgentParams = parse_params(arguments)?;
 
         Audit::record_action(params.command.audit_action());
 
         match params.command {
-            WorkspaceAgentCommand::Create => {
+            ProjectAgentCommand::Create => {
                 let name = params.name.ok_or_else(|| {
                     ToolSetsError::MissingArgument("name is required for create".to_string())
                 })?;
                 let agent = self
                     .agents
-                    .create_agent(subject, workspace_id, &name, None)
+                    .create_agent(subject, project_id, &name, None)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agent(
@@ -135,10 +135,10 @@ impl TopLevelTool for WorkspaceAgent {
                 ))]))
             }
 
-            WorkspaceAgentCommand::List => {
+            ProjectAgentCommand::List => {
                 let agents = self
                     .agents
-                    .list_for_workspace(subject, workspace_id)
+                    .list_for_project(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agents(
@@ -146,7 +146,7 @@ impl TopLevelTool for WorkspaceAgent {
                 ))]))
             }
 
-            WorkspaceAgentCommand::AttachSandbox => {
+            ProjectAgentCommand::AttachSandbox => {
                 let agent_id = params.agent_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument(
                         "agent_id is required for attach_sandbox".to_string(),
@@ -169,7 +169,7 @@ impl TopLevelTool for WorkspaceAgent {
                 ))]))
             }
 
-            WorkspaceAgentCommand::DetachSandbox => {
+            ProjectAgentCommand::DetachSandbox => {
                 let agent_id = params.agent_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument(
                         "agent_id is required for detach_sandbox".to_string(),
@@ -196,7 +196,7 @@ impl TopLevelTool for WorkspaceAgent {
 
 fn format_agent(a: &Agent) -> String {
     let role = match a.agent_role {
-        AgentRole::WorkspaceLead => "workspace_lead",
+        AgentRole::ProjectLead => "project_lead",
         AgentRole::Agent => "agent",
     };
     let sandbox = match &a.attached_sandbox {
@@ -204,8 +204,8 @@ fn format_agent(a: &Agent) -> String {
         None => "none".to_string(),
     };
     format!(
-        "Agent created.\n  id: {}\n  name: {}\n  role: {}\n  workspace: {}\n  sandbox: {}",
-        a.id, a.name, role, a.workspace_id, sandbox
+        "Agent created.\n  id: {}\n  name: {}\n  role: {}\n  project: {}\n  sandbox: {}",
+        a.id, a.name, role, a.project_id, sandbox
     )
 }
 
@@ -227,7 +227,7 @@ fn format_agents(agents: &[Agent]) -> String {
             None => "—".to_string(),
         };
         let role = match a.agent_role {
-            AgentRole::WorkspaceLead => "workspace_lead",
+            AgentRole::ProjectLead => "project_lead",
             AgentRole::Agent => "agent",
         };
         lines.push(format!(

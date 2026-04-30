@@ -6,12 +6,12 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
+use crate::project::Projects;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
     StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
     WorkflowStepDef, WorkflowTrigger, Workflows,
 };
-use crate::workspace::Workspaces;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -84,7 +84,7 @@ enum WorkflowSandboxParam {
         name: String,
         config: RepoParamConfig,
     },
-    /// Reference an existing sandbox in the workflow's workspace by
+    /// Reference an existing sandbox in the workflow's project by
     /// name. The executor attaches but never provisions, restarts, or
     /// suspends it; the user owns the lifecycle.
     Preexisting { name: String },
@@ -131,7 +131,7 @@ fn specs_from_parts(
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WorkflowStepParam {
     name: String,
-    /// NAME of an existing skill in this workspace (created via the
+    /// NAME of an existing skill in this project (created via the
     /// `skill` tool). NOT an inline body — the runtime looks up the
     /// skill by this name at trigger time.
     skill: String,
@@ -222,7 +222,7 @@ struct WorkflowDefinitionOutput {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    workspace_id: String,
+    project_id: String,
     /// `"manual"` or `"webhook"`.
     trigger_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,7 +264,7 @@ struct WorkflowStepOutput {
 struct WorkflowRunOutput {
     id: String,
     definition_id: String,
-    workspace_id: String,
+    project_id: String,
     /// `pending` / `running` / `succeeded` / `failed`.
     state: String,
     started_at: String,
@@ -286,7 +286,7 @@ struct StepResultOutput {
 
 pub struct WorkflowTool {
     workflows: Arc<Workflows>,
-    workspaces: Arc<Workspaces>,
+    projects: Arc<Projects>,
     /// `None` renders the webhook URL as a path only.
     public_host: Option<String>,
 }
@@ -294,12 +294,12 @@ pub struct WorkflowTool {
 impl WorkflowTool {
     pub fn new(
         workflows: Arc<Workflows>,
-        workspaces: Arc<Workspaces>,
+        projects: Arc<Projects>,
         public_host: Option<String>,
     ) -> Self {
         Self {
             workflows,
-            workspaces,
+            projects,
             public_host,
         }
     }
@@ -356,7 +356,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "skill": {
                 "type": "string",
-                "description": "Single-step shorthand: NAME of an existing skill in this workspace (create skill first via the `skill` tool). Used only when `steps` is omitted/empty."
+                "description": "Single-step shorthand: NAME of an existing skill in this project (create skill first via the `skill` tool). Used only when `steps` is omitted/empty."
             },
             "steps": {
                 "type": "array",
@@ -428,9 +428,9 @@ impl TopLevelTool for WorkflowTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Read, AuthResource::Workflow(ws, None))
+                .can(AuthVerb::Read, AuthResource::Workflow(project, None))
                 .is_ok()
         })
     }
@@ -444,7 +444,7 @@ impl TopLevelTool for WorkflowTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: WorkflowParams = parse_params(arguments)?;
 
         Audit::record_action(params.audit_action());
@@ -492,12 +492,12 @@ impl TopLevelTool for WorkflowTool {
                     }]
                 };
 
-                let workspace_name = self
-                    .workspaces
-                    .find_by_id(subject, workspace_id)
+                let project_name = self
+                    .projects
+                    .find_by_id(subject, project_id)
                     .await
                     .map(|w| w.name)
-                    .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
 
                 let sandbox_decls: Vec<WorkflowSandboxDecl> =
                     sandboxes.into_iter().map(|s| s.into_decl()).collect();
@@ -506,8 +506,8 @@ impl TopLevelTool for WorkflowTool {
                     .workflows
                     .create(
                         subject,
-                        workspace_id,
-                        &workspace_name,
+                        project_id,
+                        &project_name,
                         name,
                         description,
                         trigger,
@@ -532,7 +532,7 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::List => {
                 let definitions = self
                     .workflows
-                    .list_for_workspace(subject, workspace_id)
+                    .list_for_project(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
                 let text = format_list_text(&definitions);
@@ -645,7 +645,7 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
         id: d.id.to_string(),
         name: d.name.clone(),
         description: d.description.clone(),
-        workspace_id: d.workspace_id.to_string(),
+        project_id: d.project_id.to_string(),
         trigger_type,
         trigger_provider,
         steps: d.steps.iter().map(step_to_output).collect(),
@@ -717,7 +717,7 @@ fn run_to_output(r: &WorkflowRun) -> WorkflowRunOutput {
     WorkflowRunOutput {
         id: r.id.to_string(),
         definition_id: r.definition_id.to_string(),
-        workspace_id: r.workspace_id.to_string(),
+        project_id: r.project_id.to_string(),
         state: run_state_str(r.state).to_string(),
         started_at: r.started_at().to_rfc3339(),
         completed_at: r.completed_at.map(|t| t.to_rfc3339()),

@@ -12,11 +12,11 @@ pub use context_generation::{ContextBumpHook, ContextGeneration};
 es_entity::entity_id! {
     UserId,
     AgentId,
-    WorkspaceId,
+    ProjectId,
     McpCredsId,
     McpCredsOwnerId,
     SandboxId,
-    WorkspaceSecretId,
+    ProjectSecretId,
     SkillId,
     NoteId,
     SpaceId,

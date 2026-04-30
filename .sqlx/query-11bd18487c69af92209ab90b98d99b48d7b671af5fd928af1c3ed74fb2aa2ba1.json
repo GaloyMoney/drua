@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workflow_definitions (id, project_id, name, created_at) VALUES ($1, $2, $3, COALESCE($4, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "11bd18487c69af92209ab90b98d99b48d7b671af5fd928af1c3ed74fb2aa2ba1"
+}

@@ -26,8 +26,8 @@ pub enum ToolSetsError {
     Agent(String),
     #[error("ToolSetsError - Sandbox: {0}")]
     Sandbox(String),
-    #[error("ToolSetsError - Workspace: {0}")]
-    Workspace(String),
+    #[error("ToolSetsError - Project: {0}")]
+    Project(String),
     #[error("ToolSetsError - Tunnel: {0}")]
     Tunnel(String),
     #[error("ToolSetsError - Note: {0}")]

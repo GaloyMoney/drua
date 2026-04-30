@@ -11,7 +11,7 @@ use super::entity::*;
 #[es_repo(
     entity = "Skill",
     columns(
-        workspace_id(ty = "Option<WorkspaceId>", list_for(by(created_at))),
+        project_id(ty = "Option<ProjectId>", list_for(by(created_at))),
         name(ty = "String", list_for(by(created_at)))
     ),
     delete = "soft_without_queries",
@@ -56,16 +56,16 @@ impl SkillRepo {
         }
     }
 
-    /// Bulk soft-delete all workspace-scoped skills. No event is generated
+    /// Bulk soft-delete all project-scoped skills. No event is generated
     /// because the repo uses `soft_without_queries`, making a column update
     /// equivalent to iterating each entity through `delete_in_op`.
-    pub async fn cascade_delete_for_workspace_in_op(
+    pub async fn cascade_delete_for_project_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE skills SET deleted = TRUE WHERE workspace_id = $1")
-            .bind(workspace_id)
+        sqlx::query("UPDATE skills SET deleted = TRUE WHERE project_id = $1")
+            .bind(project_id)
             .execute(op.as_executor())
             .await?;
         Ok(())

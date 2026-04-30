@@ -49,21 +49,21 @@ impl Audit {
             AuthSubject::ExportedAgent(user_id, _, _) => {
                 ctx.acting_user_id = Some(*user_id);
             }
-            AuthSubject::Agent(workspace_id, agent_id, _) => {
-                Self::set_resource_id(ctx, "workspace_id", *workspace_id);
+            AuthSubject::Agent(project_id, agent_id, _) => {
+                Self::set_resource_id(ctx, "project_id", *project_id);
                 ctx.acting_agent_id = Some(*agent_id);
             }
-            AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, _) => {
+            AuthSubject::AgentOnBehalfOfUser(user_id, project_id, agent_id, _) => {
                 ctx.acting_agent_id = Some(*agent_id);
-                Self::set_resource_id(ctx, "workspace_id", *workspace_id);
+                Self::set_resource_id(ctx, "project_id", *project_id);
                 ctx.on_behalf_of_user_id = Some(*user_id);
             }
             AuthSubject::Anonymous => {}
         });
     }
 
-    pub fn record_workspace_id(workspace_id: WorkspaceId) {
-        Self::update_context(|ctx| Self::set_resource_id(ctx, "workspace_id", workspace_id));
+    pub fn record_project_id(project_id: ProjectId) {
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "project_id", project_id));
     }
 
     pub fn record_sandbox_id(sandbox_id: SandboxId) {
@@ -81,7 +81,7 @@ impl Audit {
         Self::update_context(|ctx| ctx.interaction_type = Some(itype));
     }
 
-    /// Record entrypoint (e.g. `"api: POST /workspaces"`, `"mcp: bash"`).
+    /// Record entrypoint (e.g. `"api: POST /projects"`, `"mcp: bash"`).
     /// Called once per request at the boundary layer.
     pub fn record_entrypoint(entrypoint: impl Into<String>) {
         let entrypoint = entrypoint.into();
@@ -220,9 +220,7 @@ impl Audit {
     /// Strings use `ILIKE`; resource IDs are extracted from `resource_ids` JSONB via `->>`.
     #[instrument(name = "audit.find", skip_all)]
     pub async fn find(&self, query: &AuditLogQuery) -> Result<Vec<AuditEntry>, AuditError> {
-        let workspace_id = query
-            .workspace_id
-            .map(|id| uuid::Uuid::from(id).to_string());
+        let project_id = query.project_id.map(|id| uuid::Uuid::from(id).to_string());
         let acting_user_id = query.acting_user_id.map(uuid::Uuid::from);
         let acting_agent_id = query.acting_agent_id.map(uuid::Uuid::from);
         let exclude_agent_id = query.exclude_agent_id.map(uuid::Uuid::from);
@@ -252,7 +250,7 @@ impl Audit {
                 tokens_returned,
                 recorded_at
             FROM audit_entries
-            WHERE ($1::text IS NULL OR resource_ids->>'workspace_id' = $1)
+            WHERE ($1::text IS NULL OR resource_ids->>'project_id' = $1)
               AND ($2::uuid IS NULL OR acting_user_id = $2)
               AND ($3::uuid IS NULL OR acting_agent_id = $3)
               AND ($4::uuid IS NULL OR acting_agent_id IS NULL OR acting_agent_id != $4)
@@ -263,7 +261,7 @@ impl Audit {
               AND ($9::bool IS NULL OR error = $9)
             ORDER BY id DESC
             LIMIT $10"#,
-            workspace_id.as_deref(),
+            project_id.as_deref(),
             acting_user_id,
             acting_agent_id,
             exclude_agent_id,

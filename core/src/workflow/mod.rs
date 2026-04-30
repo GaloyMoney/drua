@@ -42,7 +42,7 @@ pub struct Workflows {
 impl crate::library::LibraryImporter for Workflows {
     type Entity = WorkflowDefinition;
     const JOB_TYPE: &'static str = "workflow.sync-from-library";
-    const WORKSPACE_REQUIRED: bool = true;
+    const PROJECT_REQUIRED: bool = true;
 
     fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
         yaml::parse_workflow_yaml(content, path).map(|p| p.parsed)
@@ -57,11 +57,11 @@ impl crate::library::LibraryImporter for Workflows {
         &self,
         op: &mut es_entity::DbOp<'_>,
         file: &crate::library::SyncedFile,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
         file_hash: GitFileHash,
     ) -> Result<(), crate::library::UpsertError> {
-        let workspace_id = workspace_id.ok_or_else(|| -> crate::library::UpsertError {
-            "workflow upsert requires a workspace id".into()
+        let project_id = project_id.ok_or_else(|| -> crate::library::UpsertError {
+            "workflow upsert requires a project id".into()
         })?;
 
         if file.doc_type != crate::library::DocType::Workflow {
@@ -83,7 +83,7 @@ impl crate::library::LibraryImporter for Workflows {
         let trigger = parsed.trigger;
         let steps = parsed.steps;
         let sandboxes = parsed.sandboxes;
-        let workspace_name = file.workspace_name.clone();
+        let project_name = file.project_name.clone();
         let original_path = file.original_path.clone();
 
         // Soft check: a multi-file library push can legitimately land
@@ -93,7 +93,7 @@ impl crate::library::LibraryImporter for Workflows {
                 WorkflowStepDef::AgentStep { skill, .. } => {
                     if let Ok(None) = self
                         .skills
-                        .find_by_name(skill, Some(workspace_id), None)
+                        .find_by_name(skill, Some(project_id), None)
                         .await
                     {
                         tracing::warn!(
@@ -134,13 +134,13 @@ impl crate::library::LibraryImporter for Workflows {
 
             let mut builder = NewWorkflowDefinition::builder()
                 .id(doc_id)
-                .workspace_id(workspace_id)
+                .project_id(project_id)
                 .name(name.clone())
                 .trigger(trigger)
                 .steps(steps)
                 .sandboxes(sandboxes);
-            if let Some(ws) = workspace_name {
-                builder = builder.workspace_name(ws);
+            if let Some(project) = project_name {
+                builder = builder.project_name(project);
             }
             if let Some(desc) = description {
                 builder = builder.description(desc);
@@ -213,14 +213,14 @@ impl Workflows {
     }
 
     /// Resolve `skill:` references and validate sandbox references
-    /// against the workflow's own declarations. Workspace skills win
+    /// against the workflow's own declarations. Project skills win
     /// over sandbox-exported skills; an agent step backed by a
     /// `Preexisting` sandbox may also resolve its skill from that
     /// sandbox's exported set.
     async fn validate_steps(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         steps: &[WorkflowStepDef],
         sandboxes: &[WorkflowSandboxDecl],
     ) -> Result<(), WorkflowError> {
@@ -232,11 +232,11 @@ impl Workflows {
         }
 
         // Resolve every Preexisting decl up-front: look up the named
-        // sandbox in the workspace + auth-check Read. The map is
+        // sandbox in the project + auth-check Read. The map is
         // consulted per-step so a sandbox-only skill counts as
         // resolved when its step targets a Preexisting sandbox.
         let preexisting_ids = self
-            .resolve_preexisting_sandboxes(sub, workspace_id, sandboxes)
+            .resolve_preexisting_sandboxes(sub, project_id, sandboxes)
             .await?;
 
         // Collect every bad reference in a single pass so the operator
@@ -257,7 +257,7 @@ impl Workflows {
                         .and_then(|n| preexisting_ids.get(n).copied());
                     let found = self
                         .skills
-                        .find_by_name(skill, Some(workspace_id), preexisting_sandbox_id)
+                        .find_by_name(skill, Some(project_id), preexisting_sandbox_id)
                         .await
                         .map_err(|e| WorkflowError::Skill(e.to_string()))?;
                     if found.is_none() {
@@ -280,7 +280,7 @@ impl Workflows {
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(WorkflowError::SkillNotFound(format!(
-                "{listed}. The `skill` field expects the NAME of a skill in this workspace; create skills first via the `skill` tool"
+                "{listed}. The `skill` field expects the NAME of a skill in this project; create skills first via the `skill` tool"
             )));
         }
         if !undeclared_sandboxes.is_empty() {
@@ -297,13 +297,13 @@ impl Workflows {
     }
 
     /// For every `Preexisting` decl, look the sandbox up by name in
-    /// the workflow's workspace (workspace-unique) and verify `sub`
+    /// the workflow's project (project-unique) and verify `sub`
     /// can `Read` it. Returns a map from decl name to resolved
     /// `SandboxId` so the skill lookup can fall back to its exports.
     async fn resolve_preexisting_sandboxes(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         sandboxes: &[WorkflowSandboxDecl],
     ) -> Result<std::collections::HashMap<String, SandboxId>, WorkflowError> {
         let mut out = std::collections::HashMap::new();
@@ -314,7 +314,7 @@ impl Workflows {
             let sb = self
                 .skills
                 .sandboxes()
-                .find_by_name_in_workspace(sub, workspace_id, name)
+                .find_by_name_in_project(sub, project_id, name)
                 .await
                 .map_err(|e| {
                     WorkflowError::SandboxNotFound(format!("preexisting sandbox '{name}': {e}"))
@@ -324,22 +324,22 @@ impl Workflows {
         Ok(out)
     }
 
-    /// `workspace_name` is cached on the entity so the forward-sync
+    /// `project_name` is cached on the entity so the forward-sync
     /// hook can render the library path without an extra lookup.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "core.workflow.create", skip_all)]
     pub async fn create(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
-        workspace_name: &str,
+        project_id: ProjectId,
+        project_name: &str,
         name: String,
         description: Option<String>,
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
         sandboxes: Vec<WorkflowSandboxDecl>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
-        sub.can(AuthVerb::Create, AuthResource::Workflow(workspace_id, None))?;
+        sub.can(AuthVerb::Create, AuthResource::Workflow(project_id, None))?;
 
         if steps.is_empty() {
             return Err(WorkflowError::InvalidDefinition(
@@ -347,7 +347,7 @@ impl Workflows {
             ));
         }
 
-        self.validate_steps(sub, workspace_id, &steps, &sandboxes)
+        self.validate_steps(sub, project_id, &steps, &sandboxes)
             .await?;
 
         let trigger = match trigger {
@@ -361,13 +361,13 @@ impl Workflows {
         };
 
         let mut builder = NewWorkflowDefinition::builder()
-            .workspace_id(workspace_id)
+            .project_id(project_id)
             .name(name)
             .trigger(trigger)
             .steps(steps)
             .sandboxes(sandboxes);
-        if !workspace_name.is_empty() {
-            builder = builder.workspace_name(workspace_name);
+        if !project_name.is_empty() {
+            builder = builder.project_name(project_name);
         }
         if let Some(desc) = description {
             builder = builder.description(desc);
@@ -389,7 +389,7 @@ impl Workflows {
         let workflow = self.repo.find_by_id(id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Workflow(workflow.workspace_id, Some(workflow.id)),
+            AuthResource::Workflow(workflow.project_id, Some(workflow.id)),
         )?;
         Ok(workflow)
     }
@@ -404,21 +404,21 @@ impl Workflows {
         Ok(self.repo.find_by_id(id).await?)
     }
 
-    #[instrument(name = "core.workflow.list_for_workspace", skip_all)]
-    pub async fn list_for_workspace(
+    #[instrument(name = "core.workflow.list_for_project", skip_all)]
+    pub async fn list_for_project(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowError> {
-        sub.can(AuthVerb::Read, AuthResource::Workflow(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Workflow(project_id, None))?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
+            .list_for_project_id_by_created_at(
+                project_id,
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -437,7 +437,7 @@ impl Workflows {
         let definition = self.repo.find_by_id(definition_id).await?;
         sub.can(
             AuthVerb::Use,
-            AuthResource::Workflow(definition.workspace_id, Some(definition.id)),
+            AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
         self.spawn_run(definition, trigger_context).await
     }
@@ -460,7 +460,7 @@ impl Workflows {
     ) -> Result<WorkflowRun, WorkflowError> {
         let new = NewWorkflowRun::builder()
             .definition_id(definition.id)
-            .workspace_id(definition.workspace_id)
+            .project_id(definition.project_id)
             .trigger_context(trigger_context)
             .steps_snapshot(definition.steps.clone())
             .build()
@@ -486,7 +486,7 @@ impl Workflows {
         let definition = self.repo.find_by_id(definition_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Workflow(definition.workspace_id, Some(definition.id)),
+            AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
@@ -512,7 +512,7 @@ impl Workflows {
         let run = self.run_repo.find_by_id(run_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Workflow(run.workspace_id, Some(run.definition_id)),
+            AuthResource::Workflow(run.project_id, Some(run.definition_id)),
         )?;
         Ok(run)
     }
@@ -531,7 +531,7 @@ impl Workflows {
         let run = self.run_repo.find_by_id(run_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Workflow(run.workspace_id, Some(run.definition_id)),
+            AuthResource::Workflow(run.project_id, Some(run.definition_id)),
         )?;
         if matches!(
             run.state,
@@ -546,18 +546,18 @@ impl Workflows {
         Ok(self.run_repo.find_by_id(run_id).await?)
     }
 
-    #[instrument(name = "core.workflow.delete_for_workspace_in_op", skip_all)]
-    pub(crate) async fn delete_for_workspace_in_op(
+    #[instrument(name = "core.workflow.delete_for_project_in_op", skip_all)]
+    pub(crate) async fn delete_for_project_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), WorkflowError> {
         // Runs FK-reference definitions, so delete runs first.
         self.run_repo
-            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         self.repo
-            .cascade_delete_for_workspace_in_op(op, workspace_id)
+            .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
     }

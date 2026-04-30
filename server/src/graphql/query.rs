@@ -7,11 +7,11 @@ use super::agent::Agent;
 use super::audit::{AuditEntry, AuditLogQueryInput};
 use super::library::{LibrarySearchHit, LibrarySearchInput};
 use super::primitives::*;
+use super::project::Project;
 use super::sandbox::Sandbox;
-use super::workspace::Workspace;
 use super::AppConfigYaml;
 
-use drua_core::workspace::WorkspaceByCreatedAtCursor;
+use drua_core::project::ProjectByCreatedAtCursor;
 
 #[derive(SimpleObject)]
 pub struct Me {
@@ -58,37 +58,31 @@ impl Query {
         }
     }
 
-    async fn workspace(
+    async fn project(
         &self,
         ctx: &Context<'_>,
-        id: WorkspaceId,
-    ) -> async_graphql::Result<Option<Workspace>> {
+        id: ProjectId,
+    ) -> async_graphql::Result<Option<Project>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        match app.workspaces().find_by_id(sub, id).await {
-            Ok(ws) => Ok(Some(Workspace::from(ws))),
-            Err(drua_core::workspace::WorkspaceError::Find(_)) => Ok(None),
+        match app.projects().find_by_id(sub, id).await {
+            Ok(project) => Ok(Some(Project::from(project))),
+            Err(drua_core::project::ProjectError::Find(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
-    async fn workspaces(
+    async fn projects(
         &self,
         ctx: &Context<'_>,
         first: i32,
         after: Option<String>,
     ) -> async_graphql::Result<
-        Connection<WorkspaceByCreatedAtCursor, Workspace, EmptyFields, EmptyFields>,
+        Connection<ProjectByCreatedAtCursor, Project, EmptyFields, EmptyFields>,
     > {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        list_with_cursor!(
-            WorkspaceByCreatedAtCursor,
-            Workspace,
-            after,
-            first,
-            |query| app
-                .workspaces()
-                .list(sub, query, es_entity::ListDirection::Descending)
-        )
+        list_with_cursor!(ProjectByCreatedAtCursor, Project, after, first, |query| app
+            .projects()
+            .list(sub, query, es_entity::ListDirection::Descending))
     }
 
     /// Pi-compatible JSONL (v3). When `thread_id` is omitted the current
@@ -124,7 +118,7 @@ impl Query {
     ) -> async_graphql::Result<Vec<AuditEntry>> {
         let (app, _sub) = app_and_sub_from_ctx!(ctx);
         let query = drua_core::audit::AuditLogQuery {
-            workspace_id: input.workspace_id,
+            project_id: input.project_id,
             acting_agent_id: input.acting_agent_id,
             action: input.action,
             outcome: input.outcome,
@@ -136,10 +130,10 @@ impl Query {
         Ok(entries.into_iter().map(AuditEntry::from).collect())
     }
 
-    /// Cross-type, cross-workspace library search. Open to any
+    /// Cross-type, cross-project library search. Open to any
     /// authenticated subject; library content is globally discoverable.
-    /// `workspaceId` is optional — when set the workspace is validated
-    /// via `find_by_id`; when omitted no workspace filter is applied.
+    /// `projectId` is optional — when set the project is validated
+    /// via `find_by_id`; when omitted no project filter is applied.
     async fn library_search(
         &self,
         ctx: &Context<'_>,
@@ -155,9 +149,9 @@ impl Query {
             .collect();
         let limit = input.limit.clamp(1, 200) as usize;
 
-        let workspace_ids: Vec<uuid::Uuid> = match input.workspace_id {
+        let project_ids: Vec<uuid::Uuid> = match input.project_id {
             Some(id) => {
-                app.workspaces().find_by_id(sub, id).await?;
+                app.projects().find_by_id(sub, id).await?;
                 vec![uuid::Uuid::from(id)]
             }
             None => Vec::new(),
@@ -165,7 +159,7 @@ impl Query {
 
         let hits = app
             .library()
-            .search_global(sub, &workspace_ids, &input.query, &doc_types, limit)
+            .search_global(sub, &project_ids, &input.query, &doc_types, limit)
             .await?;
 
         Ok(hits

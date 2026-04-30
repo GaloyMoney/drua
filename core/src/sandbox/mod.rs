@@ -77,18 +77,18 @@ impl Sandboxes {
     pub async fn create(
         &self,
         sub: &AuthSubject,
-        workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
+        project_id: impl Into<ProjectId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
-        let workspace_id = workspace_id.into();
-        sub.can(AuthVerb::Create, AuthResource::Sandbox(workspace_id, None))?;
+        let project_id = project_id.into();
+        sub.can(AuthVerb::Create, AuthResource::Sandbox(project_id, None))?;
         Audit::record_action_if_unset("sandbox.create");
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         let mut op = self.repo.begin_op().await?;
         let sandbox = self
-            .create_in_op(&mut op, workspace_id, name, specs, mode)
+            .create_in_op(&mut op, project_id, name, specs, mode)
             .await?;
         op.commit().await?;
         // Background task so callers get a Provisioning sandbox immediately.
@@ -102,7 +102,7 @@ impl Sandboxes {
     pub async fn create_in_op(
         &self,
         op: &mut DbOp<'_>,
-        workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
+        project_id: impl Into<ProjectId> + std::fmt::Debug,
         name: impl Into<String> + std::fmt::Debug,
         specs: SandboxSpecs,
         mode: SandboxMode,
@@ -111,7 +111,7 @@ impl Sandboxes {
         let mount_path = self.admin.mount_path(&format!("sb-{id}"));
         let new_sandbox = NewSandbox::builder()
             .id(id)
-            .workspace_id(workspace_id.into())
+            .project_id(project_id.into())
             .name(name.into())
             .specs(specs)
             .mode(mode)
@@ -287,10 +287,10 @@ impl Sandboxes {
         let sandbox = self.repo.find_by_id(id.into()).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
         )?;
         Audit::record_action_if_unset("sandbox.find_by_id");
-        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_project_id(sandbox.project_id);
         Audit::record_sandbox_id(sandbox.id);
         Ok(sandbox)
     }
@@ -304,47 +304,41 @@ impl Sandboxes {
         Ok(self.repo.maybe_find_by_id(id.into()).await?)
     }
 
-    /// Resolve a workspace-scoped sandbox by its (workspace-unique)
+    /// Resolve a project-scoped sandbox by its (project-unique)
     /// name. Workflow-scoped sandboxes are excluded — those embed a
     /// per-workflow suffix in `name` and aren't user-addressable.
-    #[instrument(name = "domain.sandbox.find_by_name_in_workspace", skip(self, sub))]
-    pub async fn find_by_name_in_workspace(
+    #[instrument(name = "domain.sandbox.find_by_name_in_project", skip(self, sub))]
+    pub async fn find_by_name_in_project(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: &str,
     ) -> Result<Sandbox, SandboxError> {
-        let sandbox = self
-            .find_by_name_in_workspace_inner(workspace_id, name)
-            .await?;
+        let sandbox = self.find_by_name_in_project_inner(project_id, name).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
         )?;
-        Audit::record_action_if_unset("sandbox.find_by_name_in_workspace");
-        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_action_if_unset("sandbox.find_by_name_in_project");
+        Audit::record_project_id(sandbox.project_id);
         Audit::record_sandbox_id(sandbox.id);
         Ok(sandbox)
     }
 
     /// Auth-free counterpart used by the workflow executor at run time.
     /// The run was authorised when triggered.
-    #[instrument(
-        name = "domain.sandbox.find_by_name_in_workspace_unchecked",
-        skip(self)
-    )]
-    pub(crate) async fn find_by_name_in_workspace_unchecked(
+    #[instrument(name = "domain.sandbox.find_by_name_in_project_unchecked", skip(self))]
+    pub(crate) async fn find_by_name_in_project_unchecked(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: &str,
     ) -> Result<Sandbox, SandboxError> {
-        self.find_by_name_in_workspace_inner(workspace_id, name)
-            .await
+        self.find_by_name_in_project_inner(project_id, name).await
     }
 
-    async fn find_by_name_in_workspace_inner(
+    async fn find_by_name_in_project_inner(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: &str,
     ) -> Result<Sandbox, SandboxError> {
         let query = PaginatedQueryArgs {
@@ -358,9 +352,9 @@ impl Sandboxes {
         result
             .entities
             .into_iter()
-            .find(|s| s.workspace_id == workspace_id && s.workflow_id.is_none())
+            .find(|s| s.project_id == project_id && s.workflow_id.is_none())
             .ok_or_else(|| SandboxError::NameNotFound {
-                workspace_id,
+                project_id,
                 name: name.to_string(),
             })
     }
@@ -369,7 +363,7 @@ impl Sandboxes {
         Ok(self.repo.begin_op().await?)
     }
 
-    /// `(workspace_id, name)` is unique at the DB level, so workflow-
+    /// `(project_id, name)` is unique at the DB level, so workflow-
     /// scoped sandboxes embed the workflow short-id in their stored
     /// name. The user's decl name stays the canonical reference inside
     /// the workflow YAML; the storage name is an implementation detail.
@@ -384,7 +378,7 @@ impl Sandboxes {
     #[instrument(name = "domain.sandbox.find_for_workflow", skip(self))]
     pub async fn find_for_workflow(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         name: &str,
     ) -> Result<Option<Sandbox>, SandboxError> {
@@ -395,7 +389,7 @@ impl Sandboxes {
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .list_for_project_id_by_created_at(project_id, query, ListDirection::Descending)
             .await?;
         Ok(result
             .entities
@@ -408,12 +402,12 @@ impl Sandboxes {
     /// run was authorised when triggered). The stored name is the
     /// decl name plus a workflow short-id suffix so two workflows can
     /// declare the same sandbox name without violating the unique
-    /// `(workspace_id, name)` index.
+    /// `(project_id, name)` index.
     #[instrument(name = "domain.sandbox.create_for_workflow_in_op", skip(self, op))]
     pub async fn create_for_workflow_in_op(
         &self,
         op: &mut DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         name: impl Into<String> + std::fmt::Debug,
         specs: SandboxSpecs,
@@ -424,7 +418,7 @@ impl Sandboxes {
         let mount_path = self.admin.mount_path(&format!("sb-{id}"));
         let new_sandbox = NewSandbox::builder()
             .id(id)
-            .workspace_id(workspace_id)
+            .project_id(project_id)
             .name(storage_name)
             .specs(specs)
             .mode(mode)
@@ -477,10 +471,10 @@ impl Sandboxes {
     }
 
     /// `pub(crate)` helper used by the skills context builder; no auth check.
-    #[instrument(name = "domain.sandbox.exported_skills_for_workspace", skip(self))]
-    pub(crate) async fn exported_skills_for_workspace(
+    #[instrument(name = "domain.sandbox.exported_skills_for_project", skip(self))]
+    pub(crate) async fn exported_skills_for_project(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<sandbox::instance_client::ExportedSkill>, SandboxError> {
         let query = PaginatedQueryArgs {
             first: 100,
@@ -488,7 +482,7 @@ impl Sandboxes {
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+            .list_for_project_id_by_created_at(project_id, query, ListDirection::Descending)
             .await?;
         let mut skills = Vec::new();
         for sandbox in &result.entities {
@@ -531,10 +525,10 @@ impl Sandboxes {
         let sandbox = self.repo.find_by_id(id).await?;
         sub.can(
             verb,
-            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
         )?;
         Audit::record_action_if_unset("sandbox.instance_client_for");
-        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_project_id(sandbox.project_id);
         Audit::record_sandbox_id(sandbox.id);
         if sandbox.state != SandboxState::Ready {
             return Err(SandboxError::NotReady {
@@ -547,17 +541,17 @@ impl Sandboxes {
         })
     }
 
-    #[instrument(name = "domain.sandbox.list_for_workspace", skip(self, sub))]
-    pub async fn list_for_workspace(
+    #[instrument(name = "domain.sandbox.list_for_project", skip(self, sub))]
+    pub async fn list_for_project(
         &self,
         sub: &AuthSubject,
-        workspace_id: impl Into<WorkspaceId> + std::fmt::Debug,
+        project_id: impl Into<ProjectId> + std::fmt::Debug,
     ) -> Result<Vec<Sandbox>, SandboxError> {
         const PAGE_SIZE: usize = 100;
-        let workspace_id = workspace_id.into();
-        sub.can(AuthVerb::Read, AuthResource::Sandbox(workspace_id, None))?;
-        Audit::record_action_if_unset("sandbox.list_for_workspace");
-        Audit::record_workspace_id(workspace_id);
+        let project_id = project_id.into();
+        sub.can(AuthVerb::Read, AuthResource::Sandbox(project_id, None))?;
+        Audit::record_action_if_unset("sandbox.list_for_project");
+        Audit::record_project_id(project_id);
         let mut all = Vec::new();
         let mut query = PaginatedQueryArgs {
             first: PAGE_SIZE,
@@ -567,7 +561,7 @@ impl Sandboxes {
         loop {
             let mut result = self
                 .repo
-                .list_for_workspace_id_by_created_at(workspace_id, query, ListDirection::Descending)
+                .list_for_project_id_by_created_at(project_id, query, ListDirection::Descending)
                 .await?;
             all.append(&mut result.entities);
             match result.into_next_query() {
@@ -590,10 +584,10 @@ impl Sandboxes {
         let pre = self.repo.find_by_id(id).await?;
         sub.can(
             AuthVerb::Update,
-            AuthResource::Sandbox(pre.workspace_id, Some(pre.id)),
+            AuthResource::Sandbox(pre.project_id, Some(pre.id)),
         )?;
         Audit::record_action_if_unset("sandbox.restart");
-        Audit::record_workspace_id(pre.workspace_id);
+        Audit::record_project_id(pre.project_id);
         Audit::record_sandbox_id(id);
         self.restart_inner(id).await
     }
@@ -636,27 +630,27 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Verifies workspace match (`WrongWorkspace` else); delegates to
+    /// Verifies project match (`WrongProject` else); delegates to
     /// `Sandbox::attach_agent` which enforces single-writer.
     #[instrument(
         name = "domain.sandbox.attach_to_agent_in_op",
         skip(self, op),
-        fields(%workspace_id, %sandbox_id, %agent_id, ?mode)
+        fields(%project_id, %sandbox_id, %agent_id, ?mode)
     )]
     pub async fn attach_to_agent_in_op(
         &self,
         op: &mut DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         sandbox_id: SandboxId,
         agent_id: AgentId,
         mode: SandboxAgentMode,
     ) -> Result<Sandbox, SandboxError> {
         Audit::record_sandbox_id(sandbox_id);
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         Audit::record_agent_id(agent_id);
         let mut sandbox = self.repo.find_by_id_in_op(&mut *op, sandbox_id).await?;
         let did_attach = sandbox
-            .attach_agent(agent_id, workspace_id, mode)?
+            .attach_agent(agent_id, project_id, mode)?
             .did_execute();
         if did_attach {
             self.repo.update_in_op(op, &mut sandbox).await?;
@@ -712,11 +706,11 @@ impl Sandboxes {
     }
 
     /// Best-effort: per-sandbox failures are logged and skipped.
-    #[instrument(name = "domain.sandbox.suspend_for_workspace_in_op", skip(self, op))]
-    pub async fn suspend_for_workspace_in_op(
+    #[instrument(name = "domain.sandbox.suspend_for_project_in_op", skip(self, op))]
+    pub async fn suspend_for_project_in_op(
         &self,
         op: &mut DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), SandboxError> {
         let query = PaginatedQueryArgs {
             first: 100,
@@ -724,9 +718,9 @@ impl Sandboxes {
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at_in_op(
+            .list_for_project_id_by_created_at_in_op(
                 &mut *op,
-                workspace_id,
+                project_id,
                 query,
                 ListDirection::Descending,
             )
@@ -739,7 +733,7 @@ impl Sandboxes {
                 tracing::warn!(
                     sandbox_id = %sandbox.id,
                     error = %e,
-                    "failed to suspend sandbox during workspace delete"
+                    "failed to suspend sandbox during project delete"
                 );
             }
         }
@@ -756,10 +750,10 @@ impl Sandboxes {
         let sandbox = self.repo.find_by_id(id).await?;
         sub.can(
             AuthVerb::Update,
-            AuthResource::Sandbox(sandbox.workspace_id, Some(sandbox.id)),
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
         )?;
         Audit::record_action_if_unset("sandbox.suspend");
-        Audit::record_workspace_id(sandbox.workspace_id);
+        Audit::record_project_id(sandbox.project_id);
         let mut op = self.repo.begin_op().await?;
         let sandbox = self.suspend_in_op(&mut op, id).await?;
         op.commit().await?;

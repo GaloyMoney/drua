@@ -3,7 +3,7 @@ use thiserror::Error;
 use sandbox::{AdminError, InstanceError};
 
 use crate::auth::error::AuthorizationError;
-use crate::primitives::{AgentId, WorkspaceId};
+use crate::primitives::{AgentId, ProjectId};
 
 use super::repo::{SandboxCreateError, SandboxFindError, SandboxModifyError, SandboxQueryError};
 
@@ -25,20 +25,17 @@ pub enum SandboxError {
     Instance(#[from] InstanceError),
     #[error("SandboxError - Hydration: {0}")]
     Hydration(#[from] es_entity::EntityHydrationError),
-    #[error("SandboxError - sandbox does not belong to workspace {expected} (actual: {actual})")]
-    WrongWorkspace {
-        expected: WorkspaceId,
-        actual: WorkspaceId,
+    #[error("SandboxError - sandbox does not belong to project {expected} (actual: {actual})")]
+    WrongProject {
+        expected: ProjectId,
+        actual: ProjectId,
     },
     #[error("SandboxError - write slot already taken by agent {current_writer}")]
     WriteSlotTaken { current_writer: AgentId },
     #[error("SandboxError - sandbox is in {state} state and has no live instance (must be Ready)")]
     NotReady { state: String },
-    #[error("SandboxError - no sandbox named '{name}' in workspace {workspace_id}")]
-    NameNotFound {
-        workspace_id: WorkspaceId,
-        name: String,
-    },
+    #[error("SandboxError - no sandbox named '{name}' in project {project_id}")]
+    NameNotFound { project_id: ProjectId, name: String },
     #[error("SandboxError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
 }

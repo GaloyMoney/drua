@@ -57,13 +57,13 @@ impl JobRunner for WriteToRuntimeRunner {
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         self.upstream.pull().await?;
 
-        // Workspace/space init/cleanup: always execute, no hash comparison.
+        // Project/space init/cleanup: always execute, no hash comparison.
         match &self.file {
-            UpstreamOp::WorkspaceInit { workspace_name } => {
-                return self.workspace_init(workspace_name).await;
+            UpstreamOp::ProjectInit { project_name } => {
+                return self.project_init(project_name).await;
             }
-            UpstreamOp::WorkspaceCleanup { workspace_name } => {
-                return self.workspace_cleanup(workspace_name).await;
+            UpstreamOp::ProjectCleanup { project_name } => {
+                return self.project_cleanup(project_name).await;
             }
             UpstreamOp::SpaceInit { slug } => {
                 return self.space_init(slug).await;
@@ -97,17 +97,17 @@ impl JobRunner for WriteToRuntimeRunner {
 }
 
 impl WriteToRuntimeRunner {
-    async fn workspace_init(
+    async fn project_init(
         &self,
-        workspace_name: &str,
+        project_name: &str,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         let subdirs = ["notes", "skills", "workflows"];
         let paths: Vec<String> = subdirs
             .iter()
-            .map(|s| format!("runtime/workspaces/{workspace_name}/{s}/.gitkeep"))
+            .map(|s| format!("runtime/projects/{project_name}/{s}/.gitkeep"))
             .collect();
-        let message = format!("workspace: init {workspace_name}");
-        self.scaffold_or_reset(&paths, &message, "workspace init")
+        let message = format!("project: init {project_name}");
+        self.scaffold_or_reset(&paths, &message, "project init")
             .await
     }
 
@@ -153,12 +153,12 @@ impl WriteToRuntimeRunner {
         Ok(())
     }
 
-    async fn workspace_cleanup(
+    async fn project_cleanup(
         &self,
-        workspace_name: &str,
+        project_name: &str,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        let dir_path = format!("runtime/workspaces/{workspace_name}");
-        let message = format!("workspace: delete {workspace_name}");
+        let dir_path = format!("runtime/projects/{project_name}");
+        let message = format!("project: delete {project_name}");
 
         let err_msg = match self
             .upstream
@@ -172,7 +172,7 @@ impl WriteToRuntimeRunner {
             Err(e) => e.to_string(),
         };
 
-        tracing::warn!(error = %err_msg, "workspace cleanup failed, resetting working tree");
+        tracing::warn!(error = %err_msg, "project cleanup failed, resetting working tree");
         if let Err(reset_err) = self.upstream.reset_dirty_state().await {
             tracing::error!(error = %reset_err, "reset after failed cleanup also failed");
         }

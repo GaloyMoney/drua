@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "drua", about = "Drua — AI agent workspaces")]
+#[command(name = "drua", about = "Drua — AI agent projects")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -69,10 +69,10 @@ enum Command {
         agent_id: String,
     },
 
-    /// Workspace management
-    Workspace {
+    /// Project management
+    Project {
         #[command(subcommand)]
-        action: WorkspaceAction,
+        action: ProjectAction,
     },
 }
 
@@ -83,20 +83,20 @@ enum ServerAction {
 }
 
 #[derive(Subcommand)]
-enum WorkspaceAction {
-    /// List all workspaces
+enum ProjectAction {
+    /// List all projects
     List,
-    /// Create a new workspace
+    /// Create a new project
     Create {
-        /// Workspace name
+        /// Project name
         name: String,
         /// Optional description
         #[arg(long)]
         description: Option<String>,
     },
-    /// Show workspace details
+    /// Show project details
     Show {
-        /// Workspace ID (UUID)
+        /// Project ID (UUID)
         id: String,
     },
 }
@@ -136,12 +136,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Status => drua_client::commands::status::run().await,
         Command::Logout => drua_client::commands::logout::run(),
         Command::Export { agent_id } => drua_client::commands::export::run(&agent_id).await,
-        Command::Workspace { action } => match action {
-            WorkspaceAction::List => drua_client::commands::workspace::list().await,
-            WorkspaceAction::Create { name, description } => {
-                drua_client::commands::workspace::create(&name, description.as_deref()).await
+        Command::Project { action } => match action {
+            ProjectAction::List => drua_client::commands::project::list().await,
+            ProjectAction::Create { name, description } => {
+                drua_client::commands::project::create(&name, description.as_deref()).await
             }
-            WorkspaceAction::Show { id } => drua_client::commands::workspace::show(&id).await,
+            ProjectAction::Show { id } => drua_client::commands::project::show(&id).await,
         },
     }
 }

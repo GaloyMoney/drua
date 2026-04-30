@@ -121,8 +121,8 @@ impl TopLevelTool for TextEditor {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from workspace admins — see bash.rs.
-        subject.is_agent() && !subject.is_workspace_admin()
+        // Hidden from project admins — see bash.rs.
+        subject.is_agent() && !subject.is_project_admin()
     }
 
     async fn call(

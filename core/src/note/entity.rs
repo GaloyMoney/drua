@@ -12,8 +12,8 @@ use crate::primitives::*;
 pub enum NoteEvent {
     Initialized {
         id: NoteId,
-        workspace_id: WorkspaceId,
-        workspace_name: String,
+        project_id: ProjectId,
+        project_name: String,
         title: String,
         content: String,
         tags: Vec<String>,
@@ -33,8 +33,8 @@ pub enum NoteEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Note {
     pub id: NoteId,
-    pub(crate) workspace_id: WorkspaceId,
-    pub(crate) workspace_name: String,
+    pub(crate) project_id: ProjectId,
+    pub(crate) project_name: String,
     pub(crate) title: String,
     pub(crate) content: String,
     pub(crate) tags: Vec<String>,
@@ -64,7 +64,7 @@ impl Note {
         &self.tags
     }
 
-    /// Whether the note is pinned (injected into the workspace's
+    /// Whether the note is pinned (injected into the project's
     /// shared agent context).
     pub fn is_pinned(&self) -> bool {
         self.pinned
@@ -140,8 +140,8 @@ impl crate::library::LibrarySynced for Note {
         )
     }
 
-    fn workspace(&self) -> Option<(WorkspaceId, &str)> {
-        Some((self.workspace_id, &self.workspace_name))
+    fn project(&self) -> Option<(ProjectId, &str)> {
+        Some((self.project_id, &self.project_name))
     }
 
     fn id(&self) -> uuid::Uuid {
@@ -219,8 +219,8 @@ impl TryFromEvents<NoteEvent> for Note {
             match event {
                 NoteEvent::Initialized {
                     id,
-                    workspace_id,
-                    workspace_name,
+                    project_id,
+                    project_name,
                     title,
                     content,
                     tags,
@@ -228,8 +228,8 @@ impl TryFromEvents<NoteEvent> for Note {
                 } => {
                     builder = builder
                         .id(*id)
-                        .workspace_id(*workspace_id)
-                        .workspace_name(workspace_name.clone())
+                        .project_id(*project_id)
+                        .project_name(project_name.clone())
                         .title(title.clone())
                         .content(content.clone())
                         .tags(tags.clone())
@@ -266,9 +266,9 @@ pub struct NewNote {
     #[builder(setter(into))]
     pub(super) id: NoteId,
     #[builder(setter(into))]
-    pub(super) workspace_id: WorkspaceId,
+    pub(super) project_id: ProjectId,
     #[builder(setter(into))]
-    pub(super) workspace_name: String,
+    pub(super) project_name: String,
     #[builder(setter(into))]
     pub(super) title: String,
     #[builder(setter(into))]
@@ -294,8 +294,8 @@ impl IntoEvents<NoteEvent> for NewNote {
             self.id,
             [NoteEvent::Initialized {
                 id: self.id,
-                workspace_id: self.workspace_id,
-                workspace_name: self.workspace_name,
+                project_id: self.project_id,
+                project_name: self.project_name,
                 title: self.title,
                 content: self.content,
                 tags: self.tags,
@@ -310,14 +310,14 @@ mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
     use crate::library::GitFileHash;
-    use crate::primitives::{NoteId, WorkspaceId};
+    use crate::primitives::{NoteId, ProjectId};
 
     use super::{NewNote, Note};
 
     fn test_hash() -> GitFileHash {
         let rf = crate::library::UpstreamOp::for_note(
             NoteId::new(),
-            WorkspaceId::new(),
+            ProjectId::new(),
             "test",
             "Test Note",
             "Some content here",
@@ -332,8 +332,8 @@ mod tests {
         let id = NoteId::new();
         let new = NewNote::builder()
             .id(id)
-            .workspace_id(WorkspaceId::new())
-            .workspace_name("test")
+            .project_id(ProjectId::new())
+            .project_name("test")
             .title("Test Note")
             .content("Some content here")
             .tags(vec!["tag1".into(), "tag2".into()])
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(note.title, "Test Note");
         assert_eq!(note.content, "Some content here");
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
-        assert_eq!(note.workspace_name, "test");
+        assert_eq!(note.project_name, "test");
         assert!(note.file_hash.is_some());
     }
 

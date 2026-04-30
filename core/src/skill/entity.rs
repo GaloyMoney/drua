@@ -12,8 +12,8 @@ use crate::primitives::*;
 pub enum SkillEvent {
     Initialized {
         id: SkillId,
-        workspace_id: Option<WorkspaceId>,
-        workspace_name: Option<String>,
+        project_id: Option<ProjectId>,
+        project_name: Option<String>,
         name: String,
         description: String,
         body: String,
@@ -35,9 +35,9 @@ pub enum SkillEvent {
 pub struct Skill {
     pub id: SkillId,
     #[builder(default)]
-    pub workspace_id: Option<WorkspaceId>,
+    pub project_id: Option<ProjectId>,
     #[builder(default)]
-    pub workspace_name: Option<String>,
+    pub project_name: Option<String>,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -140,8 +140,8 @@ impl crate::library::LibrarySynced for Skill {
         )
     }
 
-    fn workspace(&self) -> Option<(WorkspaceId, &str)> {
-        match (self.workspace_id, self.workspace_name.as_deref()) {
+    fn project(&self) -> Option<(ProjectId, &str)> {
+        match (self.project_id, self.project_name.as_deref()) {
             (Some(id), Some(name)) => Some((id, name)),
             _ => None,
         }
@@ -401,8 +401,8 @@ impl TryFromEvents<SkillEvent> for Skill {
             match event {
                 SkillEvent::Initialized {
                     id,
-                    workspace_id,
-                    workspace_name,
+                    project_id,
+                    project_name,
                     name,
                     description,
                     body,
@@ -411,8 +411,8 @@ impl TryFromEvents<SkillEvent> for Skill {
                 } => {
                     builder = builder
                         .id(*id)
-                        .workspace_id(*workspace_id)
-                        .workspace_name(workspace_name.clone())
+                        .project_id(*project_id)
+                        .project_name(project_name.clone())
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
@@ -448,9 +448,9 @@ pub struct NewSkill {
     #[builder(setter(into))]
     pub(super) id: SkillId,
     #[builder(default, setter(into, strip_option))]
-    pub(super) workspace_id: Option<WorkspaceId>,
+    pub(super) project_id: Option<ProjectId>,
     #[builder(default, setter(into, strip_option))]
-    pub(super) workspace_name: Option<String>,
+    pub(super) project_name: Option<String>,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
@@ -473,8 +473,8 @@ impl IntoEvents<SkillEvent> for NewSkill {
             self.id,
             [SkillEvent::Initialized {
                 id: self.id,
-                workspace_id: self.workspace_id,
-                workspace_name: self.workspace_name.clone(),
+                project_id: self.project_id,
+                project_name: self.project_name.clone(),
                 name: self.name,
                 description: self.description,
                 body: self.body,

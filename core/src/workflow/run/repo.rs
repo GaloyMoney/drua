@@ -10,7 +10,7 @@ use super::entity::*;
 #[es_repo(
     entity = "WorkflowRun",
     columns(
-        workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
+        project_id(ty = "ProjectId", list_for(by(created_at))),
         definition_id(ty = "WorkflowDefinitionId", list_for(by(created_at))),
     ),
     delete = "soft_without_queries"
@@ -25,13 +25,13 @@ impl WorkflowRunRepo {
         Self { pool: pool.clone() }
     }
 
-    pub async fn cascade_delete_for_workspace_in_op(
+    pub async fn cascade_delete_for_project_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE workflow_runs SET deleted = TRUE WHERE workspace_id = $1")
-            .bind(workspace_id)
+        sqlx::query("UPDATE workflow_runs SET deleted = TRUE WHERE project_id = $1")
+            .bind(project_id)
             .execute(op.as_executor())
             .await?;
         Ok(())

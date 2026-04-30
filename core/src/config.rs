@@ -30,7 +30,7 @@ pub struct AppConfig {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct EncryptionConfig {
-    /// Hex-encoded 32-byte encryption key for workspace secrets.
+    /// Hex-encoded 32-byte encryption key for project secrets.
     /// If not provided, a zeroed key is used (development only).
     #[serde(default)]
     pub secret_key_hex: Option<String>,

@@ -13,12 +13,12 @@ use crate::note::Notes;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
-/// Lead → `WorkspaceAdmin`; Agent → `WorkspaceMember` (read-only). Sandbox
+/// Lead → `ProjectAdmin`; Agent → `ProjectMember` (read-only). Sandbox
 /// scopes are added later via [`Agent::sandbox_attached`].
-fn default_authz_scopes(role: AgentRole, workspace_id: WorkspaceId) -> Vec<AuthScope> {
+fn default_authz_scopes(role: AgentRole, project_id: ProjectId) -> Vec<AuthScope> {
     match role {
-        AgentRole::WorkspaceLead => vec![AuthScope::WorkspaceAdmin(workspace_id)],
-        AgentRole::Agent => vec![AuthScope::WorkspaceMember(workspace_id)],
+        AgentRole::ProjectLead => vec![AuthScope::ProjectAdmin(project_id)],
+        AgentRole::Agent => vec![AuthScope::ProjectMember(project_id)],
     }
 }
 
@@ -26,7 +26,7 @@ use tracing::instrument;
 
 use crate::primitives::{
     AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, ContextGeneration,
-    SandboxId, WorkflowDefinitionId, WorkflowRunId, WorkspaceId,
+    ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::sandbox::{SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ModelDefaults, RoleConfig};
@@ -38,13 +38,13 @@ use session::Sessions;
 /// Snapshot of dynamic system blocks (notes + skills), keyed by
 /// `ContextGeneration` at fetch time. Skips DB round-trips on the hot path.
 #[derive(Clone)]
-struct CachedWorkspaceContext {
+struct CachedProjectContext {
     generation: u64,
     notes_block: Option<session::message::SystemBlock>,
     skills_block: Option<session::message::SystemBlock>,
 }
 
-impl CachedWorkspaceContext {
+impl CachedProjectContext {
     fn to_blocks(&self) -> Vec<session::message::SystemBlock> {
         let mut out = Vec::with_capacity(2);
         if let Some(b) = &self.notes_block {
@@ -69,7 +69,7 @@ pub struct Agents {
     prompt_requests: llm::PromptRequestChannel,
     context_generation: ContextGeneration,
     context_cache:
-        Arc<std::sync::RwLock<std::collections::HashMap<WorkspaceId, CachedWorkspaceContext>>>,
+        Arc<std::sync::RwLock<std::collections::HashMap<ProjectId, CachedProjectContext>>>,
 }
 
 impl Agents {
@@ -102,13 +102,13 @@ impl Agents {
     /// atomically; only hits DB when the generation has bumped.
     async fn cached_dynamic_blocks(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Vec<session::message::SystemBlock> {
         let current_gen = self.context_generation.current();
 
         {
             let cache = self.context_cache.read().expect("context_cache poisoned");
-            if let Some(cached) = cache.get(&workspace_id) {
+            if let Some(cached) = cache.get(&project_id) {
                 if cached.generation == current_gen {
                     return cached.to_blocks();
                 }
@@ -117,7 +117,7 @@ impl Agents {
 
         let notes_block = match &self.notes {
             Some(notes) => notes
-                .pinned_context_for_workspace(workspace_id)
+                .pinned_context_for_project(project_id)
                 .await
                 .ok()
                 .flatten()
@@ -126,20 +126,20 @@ impl Agents {
         };
         let skills_block = self
             .skills
-            .skills_context_for_workspace(workspace_id)
+            .skills_context_for_project(project_id)
             .await
             .ok()
             .flatten()
             .map(|text| session::message::SystemBlock::Skills { text });
 
-        let entry = CachedWorkspaceContext {
+        let entry = CachedProjectContext {
             generation: current_gen,
             notes_block: notes_block.clone(),
             skills_block: skills_block.clone(),
         };
         let result = entry.to_blocks();
         if let Ok(mut cache) = self.context_cache.write() {
-            cache.insert(workspace_id, entry);
+            cache.insert(project_id, entry);
         }
         result
     }
@@ -153,17 +153,17 @@ impl Agents {
         self.repo.begin_op().await
     }
 
-    #[instrument(name = "domain.agent.create_workspace_lead", skip(self, sub))]
-    pub async fn create_workspace_lead(
+    #[instrument(name = "domain.agent.create_project_lead", skip(self, sub))]
+    pub async fn create_project_lead(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: impl Into<String> + std::fmt::Debug,
-        workspace_name: &str,
+        project_name: &str,
     ) -> Result<Agent, AgentError> {
-        sub.can(AuthVerb::Create, AuthResource::Agent(workspace_id, None))?;
-        Audit::record_action_if_unset("agent.create_workspace_lead");
-        Audit::record_workspace_id(workspace_id);
+        sub.can(AuthVerb::Create, AuthResource::Agent(project_id, None))?;
+        Audit::record_action_if_unset("agent.create_project_lead");
+        Audit::record_project_id(project_id);
         let id = AgentId::new();
         Audit::record_agent_id(id);
         let mut op = self.repo.begin_op().await?;
@@ -171,11 +171,11 @@ impl Agents {
             .create_in_op(
                 &mut op,
                 id,
-                workspace_id,
-                AgentRole::WorkspaceLead,
+                project_id,
+                AgentRole::ProjectLead,
                 name,
                 None,
-                workspace_name,
+                project_name,
                 None,
                 None,
             )
@@ -184,19 +184,19 @@ impl Agents {
         Ok(agent)
     }
 
-    /// Workspace name is resolved from the existing lead agent.
+    /// Project name is resolved from the existing lead agent.
     #[instrument(name = "domain.agent.create_agent", skip(self, sub))]
     pub async fn create_agent(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
-        sub.can(AuthVerb::Create, AuthResource::Agent(workspace_id, None))?;
+        sub.can(AuthVerb::Create, AuthResource::Agent(project_id, None))?;
         Audit::record_action_if_unset("agent.create_agent");
-        Audit::record_workspace_id(workspace_id);
-        let workspace_name = self.resolve_workspace_name(workspace_id).await?;
+        Audit::record_project_id(project_id);
+        let project_name = self.resolve_project_name(project_id).await?;
         let id = AgentId::new();
         Audit::record_agent_id(id);
         let mut op = self.repo.begin_op().await?;
@@ -204,11 +204,11 @@ impl Agents {
             .create_in_op(
                 &mut op,
                 id,
-                workspace_id,
+                project_id,
                 AgentRole::Agent,
                 name,
                 attach_sandbox,
-                &workspace_name,
+                &project_name,
                 None,
                 None,
             )
@@ -218,51 +218,48 @@ impl Agents {
     }
 
     /// Caller commits the op. Stamping `(workflow_id, workflow_run_id)`
-    /// is what excludes the agent from [`Self::list_for_workspace`].
+    /// is what excludes the agent from [`Self::list_for_project`].
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         workflow_run_id: WorkflowRunId,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         Audit::record_workflow_id(workflow_id);
         Audit::record_workflow_run_id(workflow_run_id);
-        let workspace_name = self.resolve_workspace_name(workspace_id).await?;
+        let project_name = self.resolve_project_name(project_id).await?;
         let id = AgentId::new();
         Audit::record_agent_id(id);
         self.create_in_op(
             op,
             id,
-            workspace_id,
+            project_id,
             AgentRole::Agent,
             name,
             attach_sandbox,
-            &workspace_name,
+            &project_name,
             Some(workflow_id),
             Some(workflow_run_id),
         )
         .await
     }
 
-    async fn resolve_workspace_name(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<String, AgentError> {
+    async fn resolve_project_name(&self, project_id: ProjectId) -> Result<String, AgentError> {
         let query = es_entity::PaginatedQueryArgs {
             first: 1,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
+            .list_for_project_id_by_created_at(
+                project_id,
                 query,
                 es_entity::ListDirection::Ascending,
             )
@@ -271,29 +268,29 @@ impl Agents {
             .entities
             .into_iter()
             .next()
-            .map(|a| a.workspace_name)
-            .ok_or(AgentError::NoLeadAgent(workspace_id))
+            .map(|a| a.project_name)
+            .ok_or(AgentError::NoLeadAgent(project_id))
     }
 
-    #[instrument(name = "domain.agent.create_workspace_lead_in_op", skip(self, op))]
-    pub async fn create_workspace_lead_in_op(
+    #[instrument(name = "domain.agent.create_project_lead_in_op", skip(self, op))]
+    pub async fn create_project_lead_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         id: AgentId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         name: impl Into<String> + std::fmt::Debug,
-        workspace_name: &str,
+        project_name: &str,
     ) -> Result<Agent, AgentError> {
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         Audit::record_agent_id(id);
         self.create_in_op(
             op,
             id,
-            workspace_id,
-            AgentRole::WorkspaceLead,
+            project_id,
+            AgentRole::ProjectLead,
             name,
             None,
-            workspace_name,
+            project_name,
             None,
             None,
         )
@@ -306,11 +303,11 @@ impl Agents {
         &self,
         op: &mut es_entity::DbOp<'_>,
         id: AgentId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         agent_role: AgentRole,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
-        workspace_name: &str,
+        project_name: &str,
         workflow_id: Option<WorkflowDefinitionId>,
         workflow_run_id: Option<WorkflowRunId>,
     ) -> Result<Agent, AgentError> {
@@ -327,16 +324,16 @@ impl Agents {
             .get(&role_config.model)
             .ok_or_else(|| AgentError::ModelNotConfigured(role_config.model.clone()))?;
 
-        let authz_scopes = default_authz_scopes(agent_role, workspace_id);
+        let authz_scopes = default_authz_scopes(agent_role, project_id);
 
         let mut new_agent_builder = NewAgent::builder();
         new_agent_builder
             .id(id)
-            .workspace_id(workspace_id)
+            .project_id(project_id)
             .agent_role(agent_role)
             .name(name)
             .authz_scopes(authz_scopes)
-            .workspace_name(workspace_name);
+            .project_name(project_name);
         if let Some(wf_id) = workflow_id {
             new_agent_builder.workflow_id(wf_id);
         }
@@ -357,21 +354,18 @@ impl Agents {
             agent_role,
             &self.toolsets,
             &agent_subject,
-            &agent.workspace_name,
+            &agent.project_name,
         );
 
         if let Some(notes) = &self.notes {
-            if let Ok(Some(pinned_content)) = notes.pinned_context_for_workspace(workspace_id).await
-            {
+            if let Ok(Some(pinned_content)) = notes.pinned_context_for_project(project_id).await {
                 system_blocks.push(session::message::SystemBlock::Notes {
                     text: pinned_content,
                 });
             }
         }
 
-        if let Ok(Some(skills_content)) =
-            self.skills.skills_context_for_workspace(workspace_id).await
-        {
+        if let Ok(Some(skills_content)) = self.skills.skills_context_for_project(project_id).await {
             system_blocks.push(session::message::SystemBlock::Skills {
                 text: skills_content,
             });
@@ -394,13 +388,13 @@ impl Agents {
             .await?;
 
         if let Some((sandbox_id, mode)) = attach_sandbox {
-            // Agent side first: rejects WorkspaceLead before the sandbox round-trip.
+            // Agent side first: rejects ProjectLead before the sandbox round-trip.
             if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
                 self.repo.update_in_op(op, &mut agent).await?;
             }
             let sandbox = self
                 .sandboxes
-                .attach_to_agent_in_op(op, workspace_id, sandbox_id, agent.id, mode)
+                .attach_to_agent_in_op(op, project_id, sandbox_id, agent.id, mode)
                 .await?;
 
             let (kind, scope) = sandbox.kind_and_scope();
@@ -431,38 +425,38 @@ impl Agents {
         let agent = self.repo.find_by_id(id.into()).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.find_by_id");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent.id);
         Ok(agent)
     }
 
     /// Workflow-spawned agents are filtered out; see
     /// [`Self::list_for_workflow_run`] for those.
-    #[instrument(name = "domain.agent.list_for_workspace", skip(self, sub))]
-    pub async fn list_for_workspace(
+    #[instrument(name = "domain.agent.list_for_project", skip(self, sub))]
+    pub async fn list_for_project(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<Agent>, AgentError> {
-        sub.can(AuthVerb::Read, AuthResource::Agent(workspace_id, None))?;
-        Audit::record_action_if_unset("agent.list_for_workspace");
-        Audit::record_workspace_id(workspace_id);
+        sub.can(AuthVerb::Read, AuthResource::Agent(project_id, None))?;
+        Audit::record_action_if_unset("agent.list_for_project");
+        Audit::record_project_id(project_id);
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at(
-                workspace_id,
+            .list_for_project_id_by_created_at(
+                project_id,
                 query,
                 es_entity::ListDirection::Descending,
             )
             .await?;
-        // Covered by the `idx_agents_workspace_id_user_owned` partial index.
+        // Covered by the `idx_agents_project_id_user_owned` partial index.
         Ok(result
             .entities
             .into_iter()
@@ -474,12 +468,12 @@ impl Agents {
     pub async fn list_for_workflow_run(
         &self,
         sub: &AuthSubject,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         run_id: WorkflowRunId,
     ) -> Result<Vec<Agent>, AgentError> {
-        sub.can(AuthVerb::Read, AuthResource::Agent(workspace_id, None))?;
+        sub.can(AuthVerb::Read, AuthResource::Agent(project_id, None))?;
         Audit::record_action_if_unset("agent.list_for_workflow_run");
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
@@ -495,22 +489,22 @@ impl Agents {
         Ok(result.entities)
     }
 
-    #[instrument(name = "domain.agent.list_for_workspace_in_op", skip(self, op))]
-    pub(crate) async fn list_for_workspace_in_op(
+    #[instrument(name = "domain.agent.list_for_project_in_op", skip(self, op))]
+    pub(crate) async fn list_for_project_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
     ) -> Result<Vec<Agent>, AgentError> {
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         let query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
         let result = self
             .repo
-            .list_for_workspace_id_by_created_at_in_op(
+            .list_for_project_id_by_created_at_in_op(
                 &mut *op,
-                workspace_id,
+                project_id,
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -526,9 +520,9 @@ impl Agents {
     ) -> Result<(), AgentError> {
         let id = id.into();
         let agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(id);
-        // Cascade soft-delete sessions before agent (mirrors workspace → agents).
+        // Cascade soft-delete sessions before agent (mirrors project → agents).
         self.sessions.delete_for_agent_in_op(op, id).await?;
         self.repo.delete_in_op(op, agent).await?;
         Ok(())
@@ -547,13 +541,13 @@ impl Agents {
         mode: SandboxAgentMode,
     ) -> Result<Agent, AgentError> {
         let agent = self.repo.find_by_id(agent_id).await?;
-        let workspace_id = agent.workspace_id;
+        let project_id = agent.project_id;
         subject.can(
             AuthVerb::Update,
-            AuthResource::Agent(workspace_id, Some(agent.id)),
+            AuthResource::Agent(project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.attach_sandbox");
-        Audit::record_workspace_id(workspace_id);
+        Audit::record_project_id(project_id);
         Audit::record_agent_id(agent_id);
 
         let mut op = self.repo.begin_op().await?;
@@ -568,7 +562,7 @@ impl Agents {
 
         let sandbox = self
             .sandboxes
-            .attach_to_agent_in_op(&mut op, workspace_id, sandbox_id, agent_id, mode)
+            .attach_to_agent_in_op(&mut op, project_id, sandbox_id, agent_id, mode)
             .await?;
 
         let (kind, scope) = sandbox.kind_and_scope();
@@ -602,10 +596,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         subject.can(
             AuthVerb::Update,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.detach_sandbox");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
 
         let mut op = self.repo.begin_op().await?;
@@ -644,10 +638,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.chat_history");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
         Ok(self.sessions.chat_history(agent_id, last_n).await?)
     }
@@ -661,10 +655,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.find_session");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
         Ok(self.sessions.find_for_agent(agent_id).await?)
     }
@@ -678,10 +672,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.thread_infos");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
         Ok(self.sessions.thread_infos(agent_id).await?)
     }
@@ -696,10 +690,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.thread_messages");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
         Ok(self.sessions.thread_messages(agent_id, thread_id).await?)
     }
@@ -714,10 +708,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.thread_system_view");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
         Ok(self
             .sessions
@@ -736,10 +730,10 @@ impl Agents {
         let agent = self.repo.find_by_id(agent_id).await?;
         sub.can(
             AuthVerb::Read,
-            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
         Audit::record_action_if_unset("agent.export_thread");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent_id);
         let target = thread_id
             .map(session::TargetThread::Id)
@@ -757,16 +751,17 @@ impl Agents {
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
-        // Agents may only message peers in their own workspace; anonymous rejected.
+        // Agents may only message peers in their own project; anonymous rejected.
         match &subject {
             AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
-            AuthSubject::Agent(ws, _, _) | AuthSubject::AgentOnBehalfOfUser(_, ws, _, _)
-                if *ws == agent.workspace_id => {}
+            AuthSubject::Agent(project, _, _)
+            | AuthSubject::AgentOnBehalfOfUser(_, project, _, _)
+                if *project == agent.project_id => {}
             _ => return Err(AgentError::Unauthorized),
         }
 
         Audit::record_action_if_unset("agent.send_message");
-        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(id);
         if let Some(wf) = agent.workflow_id {
             Audit::record_workflow_id(wf);
@@ -786,12 +781,12 @@ impl Agents {
 
         // Pass blocks into `add_user_input` so diff + user-input share a single
         // repo round-trip; `next_prompt` later spawns a new thread if changed.
-        let dynamic_blocks = self.cached_dynamic_blocks(agent.workspace_id).await;
+        let dynamic_blocks = self.cached_dynamic_blocks(agent.project_id).await;
         let mut proposed_system_blocks = system_prompt::system_blocks_for_role(
             agent.agent_role,
             &self.toolsets,
             &agent_subject,
-            &agent.workspace_name,
+            &agent.project_name,
         );
         proposed_system_blocks.extend(dynamic_blocks);
 
@@ -813,7 +808,7 @@ impl Agents {
                 // so the caller doesn't see an empty stream.
                 let msg = match other {
                     session::AgentSessionResponse::AwaitingToolUsageComplete => {
-                        "Message queued — session is waiting for tool results that will never arrive. Consider creating a new workspace."
+                        "Message queued — session is waiting for tool results that will never arrive. Consider creating a new project."
                     }
                     session::AgentSessionResponse::AwaitingAssistantResponse => {
                         "Message queued — session is waiting for an assistant response. Try again shortly."

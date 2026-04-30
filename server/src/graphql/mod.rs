@@ -6,14 +6,14 @@ mod library;
 mod mcp_creds;
 mod mutation;
 pub(crate) mod primitives;
+mod project;
+mod project_secret;
 mod query;
 mod sandbox;
 mod session;
 mod skill;
 mod subscription;
 mod types;
-mod workspace;
-mod workspace_secret;
 
 use std::convert::Infallible;
 

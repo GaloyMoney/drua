@@ -14,13 +14,13 @@ pub enum SpaceEvent {
         id: SpaceId,
         slug: String,
         description: Option<String>,
-        /// Seeded with `sub.workspace_id()` when the creator is an
+        /// Seeded with `sub.project_id()` when the creator is an
         /// agent; empty when created by a `User` subject. Mutated later
-        /// via `WorkspaceAuthorized`.
-        authorized_workspaces: Vec<WorkspaceId>,
+        /// via `ProjectAuthorized`.
+        authorized_projects: Vec<ProjectId>,
     },
-    /// Adds a workspace to `authorized_workspaces` (idempotent).
-    WorkspaceAuthorized { workspace_id: WorkspaceId },
+    /// Adds a project to `authorized_projects` (idempotent).
+    ProjectAuthorized { project_id: ProjectId },
 }
 
 #[derive(EsEntity, Builder)]
@@ -30,7 +30,7 @@ pub struct Space {
     pub slug: String,
     #[builder(setter(strip_option), default)]
     pub description: Option<String>,
-    pub authorized_workspaces: Vec<WorkspaceId>,
+    pub authorized_projects: Vec<ProjectId>,
     events: EntityEvents<SpaceEvent>,
 }
 
@@ -41,21 +41,21 @@ impl Space {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub fn is_workspace_authorized(&self, workspace_id: WorkspaceId) -> bool {
-        self.authorized_workspaces.contains(&workspace_id)
+    pub fn is_project_authorized(&self, project_id: ProjectId) -> bool {
+        self.authorized_projects.contains(&project_id)
     }
 
     /// Used by future `spaces.authorize` MCP command; the
-    /// `WorkspaceAuthorized` event is already part of the wire schema so
+    /// `ProjectAuthorized` event is already part of the wire schema so
     /// emitting it later is non-breaking.
     #[allow(dead_code)]
-    pub(super) fn authorize_workspace(&mut self, workspace_id: WorkspaceId) -> Idempotent<()> {
-        if self.is_workspace_authorized(workspace_id) {
+    pub(super) fn authorize_project(&mut self, project_id: ProjectId) -> Idempotent<()> {
+        if self.is_project_authorized(project_id) {
             return Idempotent::AlreadyApplied;
         }
-        self.authorized_workspaces.push(workspace_id);
+        self.authorized_projects.push(project_id);
         self.events
-            .push(SpaceEvent::WorkspaceAuthorized { workspace_id });
+            .push(SpaceEvent::ProjectAuthorized { project_id });
         Idempotent::Executed(())
     }
 }
@@ -69,7 +69,7 @@ impl core::fmt::Display for Space {
 impl TryFromEvents<SpaceEvent> for Space {
     fn try_from_events(events: EntityEvents<SpaceEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = SpaceBuilder::default();
-        let mut authorized_workspaces: Vec<WorkspaceId> = Vec::new();
+        let mut authorized_projects: Vec<ProjectId> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -77,24 +77,24 @@ impl TryFromEvents<SpaceEvent> for Space {
                     id,
                     slug,
                     description,
-                    authorized_workspaces: initial,
+                    authorized_projects: initial,
                 } => {
                     builder = builder.id(*id).slug(slug.clone());
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
                     }
-                    authorized_workspaces.extend(initial.iter().copied());
+                    authorized_projects.extend(initial.iter().copied());
                 }
-                SpaceEvent::WorkspaceAuthorized { workspace_id } => {
-                    if !authorized_workspaces.contains(workspace_id) {
-                        authorized_workspaces.push(*workspace_id);
+                SpaceEvent::ProjectAuthorized { project_id } => {
+                    if !authorized_projects.contains(project_id) {
+                        authorized_projects.push(*project_id);
                     }
                 }
             }
         }
 
         builder
-            .authorized_workspaces(authorized_workspaces)
+            .authorized_projects(authorized_projects)
             .events(events)
             .build()
     }
@@ -112,10 +112,10 @@ pub struct NewSpace {
     pub(super) slug: String,
     #[builder(setter(into, strip_option), default)]
     pub(super) description: Option<String>,
-    /// Seeded into `authorized_workspaces` on the `Initialized` event.
-    /// Empty by default; callers should add the creating workspace.
+    /// Seeded into `authorized_projects` on the `Initialized` event.
+    /// Empty by default; callers should add the creating project.
     #[builder(default)]
-    pub(super) authorized_workspaces: Vec<WorkspaceId>,
+    pub(super) authorized_projects: Vec<ProjectId>,
 }
 
 impl NewSpaceBuilder {
@@ -161,7 +161,7 @@ impl IntoEvents<SpaceEvent> for NewSpace {
                 id: self.id,
                 slug: self.slug,
                 description: self.description,
-                authorized_workspaces: self.authorized_workspaces,
+                authorized_projects: self.authorized_projects,
             }],
         )
     }
@@ -172,31 +172,31 @@ mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
     use super::{NewSpace, Space};
-    use crate::primitives::{SpaceId, WorkspaceId};
+    use crate::primitives::{ProjectId, SpaceId};
 
-    fn new_space(workspaces: Vec<WorkspaceId>) -> Space {
+    fn new_space(projects: Vec<ProjectId>) -> Space {
         let new = NewSpace::builder()
             .id(SpaceId::new())
             .slug("oncall")
             .description("On-call rotation".to_string())
-            .authorized_workspaces(workspaces)
+            .authorized_projects(projects)
             .build()
             .unwrap();
         Space::try_from_events(new.into_events()).unwrap()
     }
 
     #[test]
-    fn space_hydration_with_initial_workspace() {
-        let ws = WorkspaceId::new();
-        let s = new_space(vec![ws]);
+    fn space_hydration_with_initial_project() {
+        let project = ProjectId::new();
+        let s = new_space(vec![project]);
         assert_eq!(s.slug, "oncall");
         assert_eq!(s.description.as_deref(), Some("On-call rotation"));
-        assert_eq!(s.authorized_workspaces, vec![ws]);
-        assert!(s.is_workspace_authorized(ws));
+        assert_eq!(s.authorized_projects, vec![project]);
+        assert!(s.is_project_authorized(project));
     }
 
     #[test]
-    fn space_hydration_without_workspaces() {
+    fn space_hydration_without_projects() {
         let new = NewSpace::builder()
             .id(SpaceId::new())
             .slug("incidents")
@@ -204,29 +204,29 @@ mod tests {
             .unwrap();
         let s = Space::try_from_events(new.into_events()).unwrap();
         assert_eq!(s.slug, "incidents");
-        assert_eq!(s.authorized_workspaces, Vec::<WorkspaceId>::new());
+        assert_eq!(s.authorized_projects, Vec::<ProjectId>::new());
     }
 
     #[test]
-    fn authorize_workspace_appends_and_is_idempotent() {
-        let creator = WorkspaceId::new();
+    fn authorize_project_appends_and_is_idempotent() {
+        let creator = ProjectId::new();
         let mut s = new_space(vec![creator]);
 
-        let other = WorkspaceId::new();
-        let res = s.authorize_workspace(other);
+        let other = ProjectId::new();
+        let res = s.authorize_project(other);
         assert!(res.did_execute());
-        assert_eq!(s.authorized_workspaces, vec![creator, other]);
+        assert_eq!(s.authorized_projects, vec![creator, other]);
 
-        let again = s.authorize_workspace(other);
+        let again = s.authorize_project(other);
         assert!(!again.did_execute());
-        assert_eq!(s.authorized_workspaces, vec![creator, other]);
+        assert_eq!(s.authorized_projects, vec![creator, other]);
     }
 
     #[test]
-    fn authorize_workspace_idempotent_for_creator() {
-        let creator = WorkspaceId::new();
+    fn authorize_project_idempotent_for_creator() {
+        let creator = ProjectId::new();
         let mut s = new_space(vec![creator]);
-        let res = s.authorize_workspace(creator);
+        let res = s.authorize_project(creator);
         assert!(!res.did_execute());
     }
 
@@ -290,8 +290,8 @@ mod tests {
     #[test]
     fn hydration_replays_authorize_events() {
         let id = SpaceId::new();
-        let creator = WorkspaceId::new();
-        let other = WorkspaceId::new();
+        let creator = ProjectId::new();
+        let other = ProjectId::new();
 
         let events = es_entity::EntityEvents::init(
             id,
@@ -300,14 +300,12 @@ mod tests {
                     id,
                     slug: "oncall".to_string(),
                     description: None,
-                    authorized_workspaces: vec![creator],
+                    authorized_projects: vec![creator],
                 },
-                super::SpaceEvent::WorkspaceAuthorized {
-                    workspace_id: other,
-                },
+                super::SpaceEvent::ProjectAuthorized { project_id: other },
             ],
         );
         let s = Space::try_from_events(events).unwrap();
-        assert_eq!(s.authorized_workspaces, vec![creator, other]);
+        assert_eq!(s.authorized_projects, vec![creator, other]);
     }
 }

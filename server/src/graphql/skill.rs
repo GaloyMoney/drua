@@ -10,7 +10,7 @@ use drua_core::skill::Skill as DomainSkill;
 #[graphql(complex)]
 pub struct Skill {
     id: SkillId,
-    workspace_id: Option<WorkspaceId>,
+    project_id: Option<ProjectId>,
     name: String,
     description: String,
     body: String,
@@ -30,7 +30,7 @@ impl From<DomainSkill> for Skill {
     fn from(entity: DomainSkill) -> Self {
         Self {
             id: entity.id,
-            workspace_id: entity.workspace_id,
+            project_id: entity.project_id,
             name: entity.name.clone(),
             description: entity.description.clone(),
             body: entity.body.clone(),

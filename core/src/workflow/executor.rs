@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::agent::{Agent, Agents};
 use crate::primitives::{
-    AgentId, ChatOutputEvent, SandboxId, WorkflowDefinitionId, WorkflowRunId, WorkspaceId,
+    AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::sandbox::{SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
@@ -58,14 +58,14 @@ impl Executor {
             return Ok(());
         }
 
-        let workspace_id = run.workspace_id;
+        let project_id = run.project_id;
         let workflow_id = run.definition_id;
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
 
         // Stamp every audit row recorded during this run so they can be
         // queried by `resource_ids->>'workflow_run_id'`.
-        crate::audit::Audit::record_workspace_id(workspace_id);
+        crate::audit::Audit::record_project_id(project_id);
         crate::audit::Audit::record_workflow_id(workflow_id);
         crate::audit::Audit::record_workflow_run_id(run_id);
 
@@ -79,7 +79,7 @@ impl Executor {
         // The synthetic `<pre-flight>` step keeps the diagnostic visible
         // in `runs` listings.
         let sandbox_ids = match self
-            .ensure_sandboxes_ready(workspace_id, workflow_id, &sandbox_decls)
+            .ensure_sandboxes_ready(project_id, workflow_id, &sandbox_decls)
             .await
         {
             Ok(map) => map,
@@ -94,7 +94,7 @@ impl Executor {
                 if run.run_completed(WorkflowRunState::Failed).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
-                self.suspend_workflow_sandboxes(workspace_id, workflow_id)
+                self.suspend_workflow_sandboxes(project_id, workflow_id)
                     .await;
                 return Ok(());
             }
@@ -115,7 +115,7 @@ impl Executor {
 
             let outcome = self
                 .execute_step(
-                    workspace_id,
+                    project_id,
                     workflow_id,
                     run_id,
                     step,
@@ -151,7 +151,7 @@ impl Executor {
 
         // Post-flight: suspend every workflow-scoped sandbox. Always
         // runs (even when a step failed). Best-effort.
-        self.suspend_workflow_sandboxes(workspace_id, workflow_id)
+        self.suspend_workflow_sandboxes(project_id, workflow_id)
             .await;
 
         Ok(())
@@ -162,7 +162,7 @@ impl Executor {
     /// map the step loop uses to resolve `sandbox: Some(name)` references.
     async fn ensure_sandboxes_ready(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         decls: &[WorkflowSandboxDecl],
     ) -> Result<HashMap<String, SandboxId>, WorkflowError> {
@@ -170,11 +170,11 @@ impl Executor {
         for decl in decls {
             let (decl_name, sandbox) = match decl {
                 // Reference an already-existing sandbox in the
-                // workspace by its (unique) name; attach only.
+                // project by its (unique) name; attach only.
                 WorkflowSandboxDecl::Preexisting { name } => {
                     let sb = self
                         .sandboxes
-                        .find_by_name_in_workspace_unchecked(workspace_id, name)
+                        .find_by_name_in_project_unchecked(project_id, name)
                         .await
                         .map_err(|e| {
                             WorkflowError::SandboxNotFound(format!(
@@ -187,7 +187,7 @@ impl Executor {
                 WorkflowSandboxDecl::Provisioned { name, mode, specs } => {
                     let existing = self
                         .sandboxes
-                        .find_for_workflow(workspace_id, workflow_id, name)
+                        .find_for_workflow(project_id, workflow_id, name)
                         .await
                         .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
 
@@ -207,7 +207,7 @@ impl Executor {
                                 .sandboxes
                                 .create_for_workflow_in_op(
                                     &mut op,
-                                    workspace_id,
+                                    project_id,
                                     workflow_id,
                                     name.clone(),
                                     specs,
@@ -260,7 +260,7 @@ impl Executor {
 
     async fn suspend_workflow_sandboxes(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
     ) {
         let definition = match self.definitions.find_by_id(workflow_id).await {
@@ -284,7 +284,7 @@ impl Executor {
             };
             let sandbox = match self
                 .sandboxes
-                .find_for_workflow(workspace_id, workflow_id, name)
+                .find_for_workflow(project_id, workflow_id, name)
                 .await
             {
                 Ok(Some(sb)) => sb,
@@ -308,7 +308,7 @@ impl Executor {
 
     async fn execute_step(
         &self,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         run_id: WorkflowRunId,
         step: &WorkflowStepDef,
@@ -338,7 +338,7 @@ impl Executor {
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
                 let prompt = self
                     .skills
-                    .interpolate_skill(skill, Some(workspace_id), sandbox_id, Some(&arguments))
+                    .interpolate_skill(skill, Some(project_id), sandbox_id, Some(&arguments))
                     .await
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?
                     .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
@@ -357,7 +357,7 @@ impl Executor {
                     .agents
                     .create_for_workflow_run_in_op(
                         &mut op,
-                        workspace_id,
+                        project_id,
                         workflow_id,
                         run_id,
                         &agent_name,

@@ -149,9 +149,9 @@ pub fn verify_handshake(
     }
 }
 
-#[instrument(name = "web.tunnel.ws", skip_all)]
+#[instrument(name = "web.tunnel.project", skip_all)]
 pub async fn tunnel_ws_handler(
-    ws: WebSocketUpgrade,
+    project: WebSocketUpgrade,
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
@@ -163,7 +163,7 @@ pub async fn tunnel_ws_handler(
         }
     };
 
-    ws.on_upgrade(move |socket| handle_tunnel(socket, state, deployment_id))
+    project.on_upgrade(move |socket| handle_tunnel(socket, state, deployment_id))
 }
 
 /// `deployment_id` comes from the already-verified handshake; any

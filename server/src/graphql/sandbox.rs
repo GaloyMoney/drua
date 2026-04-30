@@ -12,7 +12,7 @@ use drua_core::sandbox::SandboxState as DomainSandboxState;
 #[graphql(complex)]
 pub struct Sandbox {
     id: SandboxId,
-    workspace_id: WorkspaceId,
+    project_id: ProjectId,
     name: String,
     state: SandboxStateEnum,
     last_error: Option<String>,
@@ -56,7 +56,7 @@ impl From<DomainSandbox> for Sandbox {
     fn from(entity: DomainSandbox) -> Self {
         Self {
             id: entity.id,
-            workspace_id: entity.workspace_id,
+            project_id: entity.project_id,
             name: entity.name.clone(),
             state: SandboxStateEnum::from(entity.state),
             last_error: entity.last_error.clone(),
@@ -101,7 +101,7 @@ pub enum SandboxCreateMode {
 
 #[derive(InputObject)]
 pub struct SandboxCreateInput {
-    pub workspace_id: WorkspaceId,
+    pub project_id: ProjectId,
     pub name: String,
     pub mode: SandboxCreateMode,
     pub repo_url: Option<String>,

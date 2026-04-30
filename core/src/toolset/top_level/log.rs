@@ -1,7 +1,7 @@
-//! `workspace_log` — audit log query tool.
+//! `project_log` — audit log query tool.
 //!
-//! Returns entries scoped to the caller's workspace and requires the
-//! `WorkspaceAdmin` scope.  Automatically excludes the calling agent's
+//! Returns entries scoped to the caller's project and requires the
+//! `ProjectAdmin` scope.  Automatically excludes the calling agent's
 //! own entries so an agent doesn't see its own tool calls.
 //!
 //! The admin variant (`all_logs`) lives in [`super::super::searchable::admin`].
@@ -71,17 +71,17 @@ impl AuditLogParams {
     }
 }
 
-pub struct WorkspaceLog {
+pub struct ProjectLog {
     audit: Arc<Audit>,
 }
 
-impl WorkspaceLog {
+impl ProjectLog {
     pub fn new(audit: Arc<Audit>) -> Self {
         Self { audit }
     }
 }
 
-static WORKSPACE_LOG_SCHEMA: LazyLock<serde_json::Value> =
+static PROJECT_LOG_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<AuditLogParams>);
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -141,32 +141,32 @@ impl From<&AuditEntry> for AuditEntryOutput {
     }
 }
 
-static WORKSPACE_LOG_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+static PROJECT_LOG_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<AuditLogOutput>);
 
 #[async_trait::async_trait]
-impl TopLevelTool for WorkspaceLog {
+impl TopLevelTool for ProjectLog {
     fn name(&self) -> &str {
         "log"
     }
 
     fn description(&self) -> &str {
-        "Query audit log entries for the caller's workspace. \
+        "Query audit log entries for the caller's project. \
          Automatically excludes the calling agent's own entries."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
-        &WORKSPACE_LOG_SCHEMA
+        &PROJECT_LOG_SCHEMA
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&WORKSPACE_LOG_OUTPUT_SCHEMA)
+        Some(&PROJECT_LOG_OUTPUT_SCHEMA)
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Read, AuthResource::AuditLog(ws))
+                .can(AuthVerb::Read, AuthResource::AuditLog(project))
                 .is_ok()
         })
     }
@@ -176,16 +176,16 @@ impl TopLevelTool for WorkspaceLog {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
         // `Audit` has no per-subject service API, so authz lives here.
         subject
-            .can(AuthVerb::Read, AuthResource::AuditLog(workspace_id))
+            .can(AuthVerb::Read, AuthResource::AuditLog(project_id))
             .map_err(|_| ToolSetsError::Unauthorized)?;
         Audit::record_action("audit.query");
         let params: AuditLogParams = parse_params(arguments)?;
 
         let mut query = params.into_query();
-        query.workspace_id = Some(workspace_id);
+        query.project_id = Some(project_id);
         query.exclude_agent_id = subject.acting_agent_id();
 
         let entries = self.audit.find(&query).await?;

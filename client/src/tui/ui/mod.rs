@@ -36,14 +36,14 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(panels[2]);
 
-    sidebar::draw_workspace_list(frame, state, panels[0]);
+    sidebar::draw_project_list(frame, state, panels[0]);
     chat_pane::draw_chat_pane(frame, state, panels[1]);
     agents::draw_agents_list(frame, state, right_col[0]);
     agents::draw_agent_details(frame, state, right_col[1]);
     draw_status_bar(frame, state, status_area);
 
     match state.mode {
-        Mode::CreateWorkspace => draw_create_modal(frame, state),
+        Mode::CreateProject => draw_create_modal(frame, state),
         Mode::ExportThread => draw_export_modal(frame, state),
         Mode::Browse => {}
     }
@@ -89,7 +89,7 @@ fn draw_create_modal(frame: &mut Frame, state: &ScreenState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Create Workspace ")
+        .title(" Create Project ")
         .border_style(Style::default().fg(Color::Yellow));
 
     let name_style = if state.input_field == 0 {

@@ -14,7 +14,7 @@
     <tbody>
       {% for entry in entries %}
       <tr>
-        <td class="subject-cell">{% match entry.acting_agent %}{% when Some with (agent) %}<strong>{{ agent }}</strong>{% when None %}{% endmatch %}{% match entry.acting_user %}{% when Some with (user) %}<strong>{{ user }}</strong>{% when None %}{% endmatch %}{% match entry.workspace %}{% when Some with (ws) %}<br><span class="subject-owner">ws: {{ ws }}</span>{% when None %}{% endmatch %}{% match entry.on_behalf_of %}{% when Some with (obo) %}<br><span class="subject-owner">↳ on behalf of {{ obo }}</span>{% when None %}{% endmatch %}</td>
+        <td class="subject-cell">{% match entry.acting_agent %}{% when Some with (agent) %}<strong>{{ agent }}</strong>{% when None %}{% endmatch %}{% match entry.acting_user %}{% when Some with (user) %}<strong>{{ user }}</strong>{% when None %}{% endmatch %}{% match entry.project %}{% when Some with (project) %}<br><span class="subject-owner">project: {{ project }}</span>{% when None %}{% endmatch %}{% match entry.on_behalf_of %}{% when Some with (obo) %}<br><span class="subject-owner">↳ on behalf of {{ obo }}</span>{% when None %}{% endmatch %}</td>
         <td>{% match entry.entrypoint %}{% when Some with (ep) %}{{ ep }}{% when None %}—{% endmatch %}</td>
         <td>{{ entry.action }}</td>
         <td><span class="outcome-{{ entry.outcome }}">{{ entry.outcome }}</span></td>

@@ -84,7 +84,7 @@ pub struct CodeAssistantSearchResultsTemplate {
 #[template(path = "audit.html")]
 pub struct AuditTemplate {}
 
-pub struct LibraryWorkspaceOption {
+pub struct LibraryProjectOption {
     pub id: String,
     pub name: String,
 }
@@ -92,14 +92,14 @@ pub struct LibraryWorkspaceOption {
 #[derive(Template, WebTemplate)]
 #[template(path = "library.html")]
 pub struct LibraryTemplate {
-    pub workspaces: Vec<LibraryWorkspaceOption>,
+    pub projects: Vec<LibraryProjectOption>,
 }
 
 #[allow(dead_code)]
 pub struct LibraryHitView {
     pub id: String,
-    /// Already-formatted scope line — e.g. `workspace: oncall` for
-    /// workspace-scoped hits, `space: my-runbooks` for space files,
+    /// Already-formatted scope line — e.g. `project: oncall` for
+    /// project-scoped hits, `space: my-runbooks` for space files,
     /// or `global` for global skills. The template renders this
     /// verbatim.
     pub scope_label: String,
@@ -111,7 +111,7 @@ pub struct LibraryHitView {
     pub snippet: String,
     pub score: String,
     pub tags: Vec<String>,
-    /// `Some` when a workspace-scoped detail page exists for this type.
+    /// `Some` when a project-scoped detail page exists for this type.
     pub detail_url: Option<String>,
 }
 
@@ -126,7 +126,7 @@ pub struct LibrarySearchResultsTemplate {
 #[allow(dead_code)]
 pub struct AuditEntryView {
     pub acting_user: Option<String>,
-    pub workspace: Option<String>,
+    pub project: Option<String>,
     pub acting_agent: Option<String>,
     pub on_behalf_of: Option<String>,
     pub entrypoint: Option<String>,
@@ -145,7 +145,7 @@ pub struct AuditEntriesTemplate {
     pub entries: Vec<AuditEntryView>,
 }
 
-pub struct WorkspaceView {
+pub struct ProjectView {
     pub id: String,
     pub name: String,
     pub description: String,
@@ -153,13 +153,13 @@ pub struct WorkspaceView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_new.html")]
-pub struct WorkspaceNewTemplate {}
+#[template(path = "project_new.html")]
+pub struct ProjectNewTemplate {}
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_detail.html")]
-pub struct WorkspaceDetailTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_detail.html")]
+pub struct ProjectDetailTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
 }
@@ -167,7 +167,7 @@ pub struct WorkspaceDetailTemplate {
 #[allow(dead_code)]
 pub struct SkillView {
     pub id: String,
-    pub workspace_id: String,
+    pub project_id: String,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -176,9 +176,9 @@ pub struct SkillView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_skills.html")]
-pub struct WorkspaceSkillsPageTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_skills.html")]
+pub struct ProjectSkillsPageTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub skills: Vec<SkillView>,
@@ -186,9 +186,9 @@ pub struct WorkspaceSkillsPageTemplate {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_skill_detail.html")]
-pub struct WorkspaceSkillDetailTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_skill_detail.html")]
+pub struct ProjectSkillDetailTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub skill: SkillView,
@@ -252,18 +252,18 @@ pub struct StepResultView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_workflows.html")]
-pub struct WorkspaceWorkflowsPageTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_workflows.html")]
+pub struct ProjectWorkflowsPageTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub workflows: Vec<WorkflowDefinitionView>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_workflow_detail.html")]
-pub struct WorkspaceWorkflowDetailTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_workflow_detail.html")]
+pub struct ProjectWorkflowDetailTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub workflow: WorkflowDefinitionView,
@@ -272,9 +272,9 @@ pub struct WorkspaceWorkflowDetailTemplate {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_workflow_run_detail.html")]
-pub struct WorkspaceWorkflowRunDetailTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_workflow_run_detail.html")]
+pub struct ProjectWorkflowRunDetailTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub workflow_id: String,
@@ -302,7 +302,7 @@ pub struct ExportedSkillView {
 #[allow(dead_code)]
 pub struct SandboxView {
     pub id: String,
-    pub workspace_id: String,
+    pub project_id: String,
     pub name: String,
     pub state: String,
     /// Set when the sandbox is in the `errored` state.
@@ -321,26 +321,26 @@ pub struct SandboxView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_sandboxes.html")]
-pub struct WorkspaceSandboxesPageTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_sandboxes.html")]
+pub struct ProjectSandboxesPageTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub sandboxes: Vec<SandboxView>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_sandbox_new.html")]
-pub struct WorkspaceSandboxNewTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_sandbox_new.html")]
+pub struct ProjectSandboxNewTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_sandbox_detail.html")]
-pub struct WorkspaceSandboxDetailTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_sandbox_detail.html")]
+pub struct ProjectSandboxDetailTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub sandbox: SandboxView,
@@ -354,9 +354,9 @@ pub struct SandboxOptionView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_agent_new.html")]
-pub struct WorkspaceAgentNewTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_agent_new.html")]
+pub struct ProjectAgentNewTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub sandbox_options: Vec<SandboxOptionView>,
@@ -373,7 +373,7 @@ pub struct AttachedSandboxView {
 #[allow(dead_code)]
 pub struct AgentDetailView {
     pub id: String,
-    pub workspace_id: String,
+    pub project_id: String,
     pub name: String,
     pub role: String,
     /// Lead never runs in a sandbox, so the attach form is hidden.
@@ -382,9 +382,9 @@ pub struct AgentDetailView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_agent_detail.html")]
-pub struct WorkspaceAgentDetailTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_agent_detail.html")]
+pub struct ProjectAgentDetailTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub agent: AgentDetailView,
@@ -414,9 +414,9 @@ pub struct ChatHistoryMessageView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_agent_history.html")]
-pub struct WorkspaceAgentHistoryTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_agent_history.html")]
+pub struct ProjectAgentHistoryTemplate {
+    pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub agent: AgentDetailView,
@@ -426,24 +426,24 @@ pub struct WorkspaceAgentHistoryTemplate {
     pub workflow_run: Option<(String, String)>,
 }
 
-pub struct WorkspaceSecretView {
+pub struct ProjectSecretView {
     pub id: String,
-    pub workspace_id: String,
+    pub project_id: String,
     pub name: String,
     pub secret_type: String,
     pub updated_at: String,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_secrets_list.html")]
-pub struct WorkspaceSecretsListTemplate {
-    pub secrets: Vec<WorkspaceSecretView>,
+#[template(path = "project_secrets_list.html")]
+pub struct ProjectSecretsListTemplate {
+    pub secrets: Vec<ProjectSecretView>,
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_sidebar_list.html")]
-pub struct WorkspaceSidebarListTemplate {
-    pub workspaces: Vec<WorkspaceView>,
+#[template(path = "project_sidebar_list.html")]
+pub struct ProjectSidebarListTemplate {
+    pub projects: Vec<ProjectView>,
 }
 
 pub struct AgentView {
@@ -452,12 +452,12 @@ pub struct AgentView {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_hub.html")]
-pub struct WorkspaceHubTemplate {
-    pub workspaces: Vec<WorkspaceView>,
-    pub selected_workspace: Option<WorkspaceView>,
+#[template(path = "project_hub.html")]
+pub struct ProjectHubTemplate {
+    pub projects: Vec<ProjectView>,
+    pub selected_project: Option<ProjectView>,
     /// Flat ID string for dropdown comparison (avoids Askama ref issues).
-    pub selected_workspace_id: String,
+    pub selected_project_id: String,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
     pub selected_agent_id: String,
@@ -469,9 +469,9 @@ pub struct WorkspaceHubTemplate {
 }
 
 #[derive(Template, WebTemplate)]
-#[template(path = "workspace_chat.html")]
-pub struct WorkspaceChatTemplate {
-    pub workspace: WorkspaceView,
+#[template(path = "project_chat.html")]
+pub struct ProjectChatTemplate {
+    pub project: ProjectView,
     pub agent_id: String,
 }
 
