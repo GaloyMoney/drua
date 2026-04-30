@@ -170,35 +170,17 @@ async fn apply_upsert(
     relative_path: String,
     content: String,
 ) -> Result<(), LibraryError> {
-    let space = match library.find_space_by_slug(&slug).await? {
-        Some(s) => s,
-        None => {
-            tracing::warn!(%slug, "no space matches slug, skipping file");
-            return Ok(());
-        }
+    let Some(space) = library.find_space_by_slug(&slug).await? else {
+        tracing::warn!(%slug, "no space matches slug, skipping file");
+        return Ok(());
     };
     let doc_id = doc_id_for(space.id, &relative_path);
     let content_hash = GitFileHash::from_blob_bytes(content.as_bytes());
-
-    let pool = library.pool();
-    let existing_hash: Option<String> = sqlx::query_scalar!(
-        "SELECT content_hash FROM space_search_data WHERE doc_id = $1",
-        doc_id
-    )
-    .fetch_optional(pool)
-    .await?;
-    if existing_hash.as_deref() == Some(content_hash.as_str()) {
-        tracing::debug!(%slug, %relative_path, "space file unchanged, skipping");
-        return Ok(());
-    }
-
     let (title, body) = extract_title_and_body(&content, &relative_path);
 
-    let mut tx = pool.begin().await?;
-    library
+    let upserted = library
         .search_store()
-        .upsert_in_op(
-            &mut tx,
+        .upsert_space_file_if_changed(
             &SearchableFields {
                 doc_id,
                 doc_type: DocType::SpaceFile,
@@ -209,27 +191,15 @@ async fn apply_upsert(
                 body: body.clone(),
                 tags: Vec::new(),
             },
+            space.id,
+            &relative_path,
+            &content_hash,
         )
         .await?;
-
-    let space_uuid = uuid::Uuid::from(space.id);
-    let hash_str = content_hash.as_str().to_string();
-    sqlx::query!(
-        r#"INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (doc_id) DO UPDATE SET
-               relative_path = EXCLUDED.relative_path,
-               content_hash = EXCLUDED.content_hash,
-               title = EXCLUDED.title"#,
-        doc_id,
-        space_uuid,
-        relative_path,
-        hash_str,
-        title,
-    )
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    if !upserted {
+        tracing::debug!(%slug, %relative_path, "space file unchanged, skipping");
+        return Ok(());
+    }
 
     // Embedding is best-effort; FTS index works without it.
     let text = format!("{title}\n\n{body}");
@@ -255,23 +225,11 @@ async fn apply_delete(
     slug: String,
     relative_path: String,
 ) -> Result<(), LibraryError> {
-    let space = match library.find_space_by_slug(&slug).await? {
-        Some(s) => s,
-        None => return Ok(()),
+    let Some(space) = library.find_space_by_slug(&slug).await? else {
+        return Ok(());
     };
     let doc_id = doc_id_for(space.id, &relative_path);
-    let pool = library.pool();
-    let mut tx = pool.begin().await?;
-    sqlx::query!("DELETE FROM space_search_data WHERE doc_id = $1", doc_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query!(
-        "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
-        doc_id
-    )
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    library.search_store().delete_space_file(doc_id).await?;
     Ok(())
 }
 

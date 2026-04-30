@@ -76,7 +76,6 @@ impl LibraryConfig {
 
 #[derive(Clone)]
 pub struct Library {
-    pool: sqlx::PgPool,
     search: SearchStore,
     inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
@@ -114,7 +113,6 @@ impl Library {
         let inbox = obix::Inbox::new(pool, jobs, inbox_config, handler);
 
         Ok(Self {
-            pool: pool.clone(),
             search,
             inbox,
             embedder,
@@ -324,10 +322,6 @@ impl Library {
     /// Internal access to the search/upstream/embedder primitives so
     /// `space::file_sync` can drive its index job without leaking
     /// `Library`'s privates to the rest of the crate.
-    pub(in crate::library) fn pool(&self) -> &sqlx::PgPool {
-        &self.pool
-    }
-
     pub(in crate::library) fn search_store(&self) -> &SearchStore {
         &self.search
     }

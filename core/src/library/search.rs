@@ -2,7 +2,8 @@ use pgvector::Vector;
 use sqlx::PgPool;
 
 use super::error::LibraryError;
-use super::file::{DocType, SearchableFields};
+use super::file::{DocType, GitFileHash, SearchableFields};
+use crate::primitives::SpaceId;
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -163,6 +164,73 @@ impl SearchStore {
             .bind(workspace_id)
             .execute(op.as_executor())
             .await?;
+        Ok(())
+    }
+
+    /// Atomic upsert of a space file across `library_search_data` (FTS
+    /// index) and `space_search_data` (slug + relative_path citation).
+    /// Compares the recorded `content_hash` first and returns `false`
+    /// when nothing has changed, so the caller can skip embedding work.
+    #[tracing::instrument(
+        name = "library.search_store.upsert_space_file_if_changed",
+        skip(self, fields, content_hash),
+        fields(doc_id = %fields.doc_id, %relative_path)
+    )]
+    pub async fn upsert_space_file_if_changed(
+        &self,
+        fields: &SearchableFields,
+        space_id: SpaceId,
+        relative_path: &str,
+        content_hash: &GitFileHash,
+    ) -> Result<bool, LibraryError> {
+        let mut tx = self.pool.begin().await?;
+        let existing: Option<String> = sqlx::query_scalar!(
+            "SELECT content_hash FROM space_search_data WHERE doc_id = $1",
+            fields.doc_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.as_deref() == Some(content_hash.as_str()) {
+            return Ok(false);
+        }
+        self.upsert_in_op(&mut tx, fields).await?;
+        let space_uuid = uuid::Uuid::from(space_id);
+        let hash = content_hash.as_str();
+        sqlx::query!(
+            r#"INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (doc_id) DO UPDATE SET
+                   relative_path = EXCLUDED.relative_path,
+                   content_hash = EXCLUDED.content_hash,
+                   title = EXCLUDED.title"#,
+            fields.doc_id,
+            space_uuid,
+            relative_path,
+            hash,
+            &fields.title,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Atomic delete of a space file from both `space_search_data`
+    /// and `library_search_data`. Idempotent — no-op if `doc_id`
+    /// wasn't previously indexed.
+    #[tracing::instrument(name = "library.search_store.delete_space_file", skip(self))]
+    pub async fn delete_space_file(&self, doc_id: uuid::Uuid) -> Result<(), LibraryError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!("DELETE FROM space_search_data WHERE doc_id = $1", doc_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!(
+            "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
+            doc_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
