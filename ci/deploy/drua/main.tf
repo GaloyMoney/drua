@@ -109,11 +109,11 @@ resource "google_container_node_pool" "gvisor" {
   }
 
   node_config {
-    # 4 vCPU / 16 GiB to fit a single largeish sandbox per node with
-    # headroom; gvisor adds ~10-15% overhead. Was e2-standard-2 (2 vCPU /
-    # 8 GiB) which couldn't fit non-trivial sandboxes alongside system
-    # daemons.
-    machine_type = "e2-standard-4"
+    # 8 vCPU / 32 GiB to fit a 4 vCPU / 8 GiB sandbox (e.g. full lana-bank
+    # dev stack) with headroom for system daemons and gvisor overhead
+    # (~10-15%). Was e2-standard-4, but a 4-CPU pod cannot schedule on a
+    # 4-CPU node — system daemonsets reserve ~80m before any workload.
+    machine_type = "e2-standard-8"
 
     sandbox_config {
       sandbox_type = "gvisor"
