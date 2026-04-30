@@ -106,7 +106,7 @@ fn command_is_mutating(command: &str) -> bool {
 #[async_trait::async_trait]
 impl TopLevelTool for TextEditor {
     fn name(&self) -> &str {
-        "str_replace_based_edit_tool"
+        "Edit"
     }
 
     fn description(&self) -> &str {
