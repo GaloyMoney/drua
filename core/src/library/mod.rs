@@ -29,8 +29,7 @@ pub use file::{
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
-pub use space_fs::SpaceFs;
-pub use space_path::{parse as parse_space_path, SpaceRef};
+pub use space_fs::{FileView, SpaceFs};
 pub(crate) use synced::slugify;
 pub use synced::{
     Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,

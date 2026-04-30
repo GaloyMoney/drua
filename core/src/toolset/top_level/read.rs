@@ -1,7 +1,9 @@
-//! `Read` — read a file with optional line range inside the agent's attached
-//! sandbox. Thin alias for the text editor's `view` command: translates
-//! `{path, offset, limit}` into `{command: "view", path, view_range}` and
-//! forwards to the same `/execute` handler.
+//! `Read` — read a file with optional line range. Two backends:
+//!
+//! - `space:<slug>/...` paths route through `SpaceFs` (no sandbox needed).
+//! - Anything else translates `{path, offset, limit}` into the text
+//!   editor's `view` command and forwards to the agent's attached
+//!   sandbox via `/execute`.
 //!
 //! Read-only: executable with either `SandboxUse` or `SandboxRead`.
 
@@ -13,12 +15,12 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{parse_space_path, SpaceFs};
+use crate::library::{FileView, SpaceFs};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{parse_params, schema_for, ContentOutput};
+use super::{parse_params, schema_for, ContentOutput, OutputSchema};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ReadParams {
@@ -44,8 +46,7 @@ impl Read {
 }
 
 static READ_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ReadParams>);
-
-static READ_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ContentOutput>);
+static READ_OUTPUT: LazyLock<OutputSchema<ContentOutput>> = LazyLock::new(OutputSchema::new);
 
 #[async_trait::async_trait]
 impl TopLevelTool for Read {
@@ -54,8 +55,8 @@ impl TopLevelTool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read a file with optional line range inside the agent's attached sandbox. \
-         Read-only — works with both full and read-only sandbox attachments."
+        "Read a file with optional line range. Accepts either an in-sandbox path \
+         or a `space:<slug>/...` path that reads from the project's mounted spaces."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -63,7 +64,7 @@ impl TopLevelTool for Read {
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&READ_OUTPUT_SCHEMA)
+        Some(READ_OUTPUT.schema())
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -79,10 +80,22 @@ impl TopLevelTool for Read {
         let params: ReadParams = parse_params(arguments)?;
         Audit::record_action("read");
 
-        // `space:<slug>/...` paths bypass the sandbox entirely.
-        if let Some(sref) = parse_space_path(&params.path) {
-            let view_range = view_range_from_offset_limit(params.offset, params.limit);
-            return space_view_to_result(self.space_fs.view_file(subject, sref, view_range).await);
+        let view_range = view_range_from_offset_limit(params.offset, params.limit);
+        let space_view = self
+            .space_fs
+            .view_file(subject, &params.path, view_range)
+            .await
+            .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+
+        if let Some(view) = space_view {
+            let content = match view {
+                FileView::File(text) => text,
+                FileView::Dir(entries) => entries.join("\n"),
+            };
+            let out = ContentOutput {
+                content: content.clone(),
+            };
+            return Ok(READ_OUTPUT.success(content, &out));
         }
 
         let sandbox_id = subject
@@ -96,7 +109,7 @@ impl TopLevelTool for Read {
             "path": params.path,
         });
 
-        if let Some((start, end)) = view_range_from_offset_limit(params.offset, params.limit) {
+        if let Some((start, end)) = view_range {
             editor_input["view_range"] = serde_json::json!([start, end]);
         }
 
@@ -114,17 +127,13 @@ impl TopLevelTool for Read {
         match client.execute(&req).await {
             Ok(resp) => {
                 let out = ContentOutput {
-                    content: resp.output,
+                    content: resp.output.clone(),
                 };
-                let structured = serde_json::to_value(&out).expect("ContentOutput serialization");
-                let content = vec![Content::text(&out.content)];
-                let mut result = if resp.is_error {
-                    CallToolResult::error(content)
+                Ok(if resp.is_error {
+                    READ_OUTPUT.error(resp.output, &out)
                 } else {
-                    CallToolResult::success(content)
-                };
-                result.structured_content = Some(structured);
-                Ok(result)
+                    READ_OUTPUT.success(resp.output, &out)
+                })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"
@@ -145,21 +154,4 @@ fn view_range_from_offset_limit(offset: Option<i64>, limit: Option<i64>) -> Opti
         None => -1,
     };
     Some((start, end))
-}
-
-fn space_view_to_result(
-    res: Result<String, crate::project::ProjectError>,
-) -> Result<CallToolResult, ToolSetsError> {
-    match res {
-        Ok(content) => {
-            let out = ContentOutput {
-                content: content.clone(),
-            };
-            let structured = serde_json::to_value(&out).expect("ContentOutput serialization");
-            let mut result = CallToolResult::success(vec![Content::text(content)]);
-            result.structured_content = Some(structured);
-            Ok(result)
-        }
-        Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-    }
 }

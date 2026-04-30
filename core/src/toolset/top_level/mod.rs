@@ -101,6 +101,13 @@ impl<T: serde::Serialize + schemars::JsonSchema> OutputSchema<T> {
         result.structured_content = Some(structured);
         result
     }
+
+    pub fn error(&self, text: impl Into<String>, value: &T) -> CallToolResult {
+        let structured = serde_json::to_value(value).expect("structured output serialization");
+        let mut result = CallToolResult::error(vec![Content::text(text.into())]);
+        result.structured_content = Some(structured);
+        result
+    }
 }
 
 // Shared output structs: schemars derives `output_schema()`, serde::Serialize

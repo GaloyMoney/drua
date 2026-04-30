@@ -1,8 +1,11 @@
-//! `str_replace_based_edit_tool` — the in-sandbox file editor. Wire-compatible
-//! with Anthropic's built-in `text_editor_20250728`: same name, same
-//! `command` discriminator (`view` / `create` / `str_replace` / `insert`),
-//! same field names. Forwards the request body verbatim to the
-//! sandbox-tool-server's `/execute` endpoint.
+//! `str_replace_based_edit_tool` — Anthropic-compatible text editor.
+//! Two backends:
+//!
+//! - `space:<slug>/...` paths: `view` runs through `SpaceFs::view_file`
+//!   (no sandbox needed); mutating commands return a clean
+//!   "not yet supported" error.
+//! - Anything else: forwards verbatim to the agent's attached
+//!   sandbox via the `/execute` endpoint.
 //!
 //! Visibility / authz mirrors [`super::Bash`]:
 //! - Visible only to [`AuthSubject::Agent`] / [`AuthSubject::AgentOnBehalfOfUser`].
@@ -10,9 +13,7 @@
 //!   `SandboxRead`.
 //! - `create` / `str_replace` / `insert` mutate state → require
 //!   `SandboxUse`. Enforced inside [`TextEditor::call`] after parsing
-//!   the command, so the tool is visible-but-unauthorized for read-only
-//!   attachments calling a write command (clear error, model can ask to
-//!   upgrade the attachment).
+//!   the command.
 
 use std::sync::{Arc, LazyLock};
 
@@ -21,13 +22,13 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{parse_space_path, SpaceFs};
+use crate::library::{FileView, SpaceFs};
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{schema_for, TextOutput};
+use super::{OutputSchema, TextOutput};
 
 pub struct TextEditor {
     sandboxes: Arc<Sandboxes>,
@@ -43,8 +44,7 @@ impl TextEditor {
     }
 }
 
-static TEXT_EDITOR_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<TextOutput>);
+static TEXT_EDITOR_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
 
 static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     // Union of fields across all commands; `command` discriminates and
@@ -59,7 +59,7 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "path": {
                 "type": "string",
-                "description": "Absolute path to the file or directory inside the sandbox workspace."
+                "description": "Path to the file or directory. In-sandbox absolute path, or `space:<slug>/...` for a mounted space (view-only)."
             },
             "view_range": {
                 "type": "array",
@@ -110,11 +110,9 @@ impl TopLevelTool for TextEditor {
     }
 
     fn description(&self) -> &str {
-        "Anthropic-compatible text editor for the agent's attached sandbox. \
-         Commands: `view` (read file or list directory), `create` (write a \
-         new file), `str_replace` (replace a unique substring), `insert` \
-         (insert text at a line). `view` works with read-only attachments; \
-         the other commands require write access."
+        "Anthropic-compatible text editor. Commands: `view` (read file or list \
+         directory; supports `space:<slug>/...` paths from mounted spaces), \
+         `create` / `str_replace` / `insert` (sandbox-only writes)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -122,7 +120,7 @@ impl TopLevelTool for TextEditor {
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&TEXT_EDITOR_OUTPUT_SCHEMA)
+        Some(TEXT_EDITOR_OUTPUT.schema())
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -143,18 +141,22 @@ impl TopLevelTool for TextEditor {
             .to_string();
         Audit::record_action("text_editor");
 
-        // `space:<slug>/...` paths bypass the sandbox. `view` runs
-        // through `SpaceFs`; mutating commands surface a clean
-        // "not yet supported" error rather than crashing.
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(sref) = parse_space_path(path) {
-            if command_is_mutating(&command) {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "write commands on space paths are not yet supported. \
-                     For now, use the spaces tool to create files in spaces."
-                        .to_string(),
-                )]));
-            }
+
+        // Mutating commands on `space:` paths short-circuit before
+        // hitting `SpaceFs` so we don't run the auth gate just to
+        // return a "not supported" message.
+        if command_is_mutating(&command) && SpaceFs::is_space_path(path) {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "write commands on space paths are not yet supported. \
+                 For now, use the spaces tool to create files in spaces."
+                    .to_string(),
+            )]));
+        }
+
+        // `view` against `space:<slug>/...` runs through SpaceFs. For
+        // any other path SpaceFs returns Ok(None) and we fall through.
+        if !command_is_mutating(&command) {
             let view_range = args
                 .get("view_range")
                 .and_then(|v| v.as_array())
@@ -163,19 +165,21 @@ impl TopLevelTool for TextEditor {
                     let e = arr.get(1)?.as_i64()?;
                     Some((s, e))
                 });
-            let res = self.space_fs.view_file(subject, sref, view_range).await;
-            return match res {
-                Ok(output) => {
-                    let out = TextOutput {
-                        output: output.clone(),
-                    };
-                    let structured = serde_json::to_value(&out).expect("TextOutput serialization");
-                    let mut result = CallToolResult::success(vec![Content::text(output)]);
-                    result.structured_content = Some(structured);
-                    Ok(result)
-                }
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-            };
+            let space_view = self
+                .space_fs
+                .view_file(subject, path, view_range)
+                .await
+                .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+            if let Some(view) = space_view {
+                let output = match view {
+                    FileView::File(text) => text,
+                    FileView::Dir(entries) => entries.join("\n"),
+                };
+                let out = TextOutput {
+                    output: output.clone(),
+                };
+                return Ok(TEXT_EDITOR_OUTPUT.success(output, &out));
+            }
         }
 
         // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
@@ -207,17 +211,13 @@ impl TopLevelTool for TextEditor {
         match client.execute(&req).await {
             Ok(resp) => {
                 let out = TextOutput {
-                    output: resp.output,
+                    output: resp.output.clone(),
                 };
-                let structured = serde_json::to_value(&out).expect("TextOutput serialization");
-                let content = vec![Content::text(&out.output)];
-                let mut result = if resp.is_error {
-                    CallToolResult::error(content)
+                Ok(if resp.is_error {
+                    TEXT_EDITOR_OUTPUT.error(resp.output, &out)
                 } else {
-                    CallToolResult::success(content)
-                };
-                result.structured_content = Some(structured);
-                Ok(result)
+                    TEXT_EDITOR_OUTPUT.success(resp.output, &out)
+                })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

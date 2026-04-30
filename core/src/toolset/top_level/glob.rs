@@ -1,8 +1,10 @@
-//! `Glob` — file pattern matching inside the agent's attached sandbox.
-//! Returns matching file paths sorted by modification time (most recent first).
+//! `Glob` — file pattern matching. Two backends:
+//!
+//! - `space:<slug>/...` paths route through `SpaceFs::glob`.
+//! - Anything else forwards to the sandbox-server's `Glob` handler
+//!   via `/execute`. Both ultimately shell out to `rg --files -g`.
 //!
 //! Read-only: executable with either `SandboxUse` or `SandboxRead`.
-//! Server-side handler uses `rg --files -g <pattern>`.
 
 use std::sync::{Arc, LazyLock};
 
@@ -11,12 +13,12 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{parse_space_path, SpaceFs};
+use crate::library::SpaceFs;
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{schema_for, FilesOutput};
+use super::{FilesOutput, OutputSchema};
 
 pub struct GlobTool {
     sandboxes: Arc<Sandboxes>,
@@ -32,7 +34,7 @@ impl GlobTool {
     }
 }
 
-static GLOB_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<FilesOutput>);
+static GLOB_OUTPUT: LazyLock<OutputSchema<FilesOutput>> = LazyLock::new(OutputSchema::new);
 
 static GLOB_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -44,7 +46,7 @@ static GLOB_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "path": {
                 "type": "string",
-                "description": "Directory to search in. Defaults to workspace root."
+                "description": "Directory to search in. Defaults to workspace root, or use `space:<slug>/...` to read from a mounted space."
             }
         },
         "required": ["pattern"],
@@ -59,9 +61,8 @@ impl TopLevelTool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files matching a glob pattern inside the agent's attached sandbox. \
-         Returns matching file paths. Read-only — works with both full and \
-         read-only sandbox attachments."
+        "Find files matching a glob pattern. Accepts either an in-sandbox path \
+         or a `space:<slug>/...` path that reads from the project's mounted spaces."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -69,7 +70,7 @@ impl TopLevelTool for GlobTool {
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&GLOB_OUTPUT_SCHEMA)
+        Some(GLOB_OUTPUT.schema())
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -85,30 +86,27 @@ impl TopLevelTool for GlobTool {
         Audit::record_action("glob");
 
         let args = arguments.unwrap_or_default();
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let pattern = args
             .get("pattern")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
+            .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?
+            .to_string();
 
-        if let Some(sref) = parse_space_path(path) {
-            let res = self.space_fs.glob(subject, sref, pattern).await;
-            return match res {
-                Ok(output) => {
-                    let out = FilesOutput {
-                        files: output
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(String::from)
-                            .collect(),
-                    };
-                    let structured = serde_json::to_value(&out).expect("FilesOutput serialization");
-                    let mut result = CallToolResult::success(vec![Content::text(output)]);
-                    result.structured_content = Some(structured);
-                    Ok(result)
-                }
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-            };
+        let space_files = self
+            .space_fs
+            .glob(subject, &path, &pattern)
+            .await
+            .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+
+        if let Some(files) = space_files {
+            let text = files.join("\n");
+            let out = FilesOutput { files };
+            return Ok(GLOB_OUTPUT.success(text, &out));
         }
 
         let sandbox_id = subject
@@ -129,23 +127,19 @@ impl TopLevelTool for GlobTool {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let out = FilesOutput {
-                    files: resp
-                        .output
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(String::from)
-                        .collect(),
-                };
-                let structured = serde_json::to_value(&out).expect("FilesOutput serialization");
-                let content = vec![Content::text(resp.output)];
-                let mut result = if resp.is_error {
-                    CallToolResult::error(content)
+                let files: Vec<String> = resp
+                    .output
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect();
+                let text = files.join("\n");
+                let out = FilesOutput { files };
+                Ok(if resp.is_error {
+                    GLOB_OUTPUT.error(text, &out)
                 } else {
-                    CallToolResult::success(content)
-                };
-                result.structured_content = Some(structured);
-                Ok(result)
+                    GLOB_OUTPUT.success(text, &out)
+                })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"
