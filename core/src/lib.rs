@@ -257,6 +257,7 @@ impl App {
             Arc::clone(&sandboxes),
             Arc::clone(&audit),
             Arc::clone(&workspaces),
+            Arc::clone(&library),
         ));
 
         // Reverse-sync (file → entity) for every service that implements
