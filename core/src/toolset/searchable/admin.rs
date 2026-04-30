@@ -214,16 +214,27 @@ enum SpacesCommand {
     Create,
     List,
     Get,
+    /// Attach an existing space to any project. Admin variant —
+    /// project_id is explicit (the tool isn't bound to a project).
+    Mount,
+    /// Detach a space from any project. Project-scoped admins use the
+    /// top-level `spaces` tool instead; this admin variant lets you
+    /// reach into any project.
+    Unmount,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SpacesParams {
     command: SpacesCommand,
-    /// Slug for `create` and `get`. Must match `[a-z0-9-]+` with no
-    /// leading / trailing / double hyphens.
+    /// Slug for `create`, `get`, `mount`, `unmount`. Must match
+    /// `[a-z0-9-]+` with no leading / trailing / double hyphens.
     slug: Option<String>,
     /// Optional human-readable summary, used by `create`.
     description: Option<String>,
+    /// Required for `mount` and `unmount`. The project to attach the
+    /// space to (or detach from).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    project_id: Option<ProjectId>,
 }
 
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
@@ -271,10 +282,12 @@ static TOOLS: &[ToolDef] = &[
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
                        `spaces/<slug>/` in the knowledge-base repo. Commands: \
-                       `create` (requires `slug`, optional `description`; the calling \
-                       subject's project is auto-added to the authorized list), \
-                       `list` (no args), \
-                       `get` (requires `slug`; bypasses project ACL for admins).",
+                       `create` (requires `slug`, optional `description`; the space \
+                       is created unmounted — pair with `mount` to attach), \
+                       `list` (no args; every space in the library), \
+                       `get` (requires `slug`), \
+                       `mount` (requires `slug` and `project_id`; idempotent), \
+                       `unmount` (requires `slug` and `project_id`; idempotent).",
         schema: &SPACES_SCHEMA,
     },
 ];
@@ -632,6 +645,48 @@ impl AdminToolSet {
                     .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_space(
                     &space, false,
+                ))]))
+            }
+
+            SpacesCommand::Mount => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for mount".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for mount".to_string())
+                })?;
+                Audit::record_action("spaces.mount");
+                let space = self
+                    .projects
+                    .mount_space(subject, project_id, &slug)
+                    .await
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Space mounted onto project {project_id}.\n  slug: {}\n  id: {}",
+                    space.slug, space.id,
+                ))]))
+            }
+
+            SpacesCommand::Unmount => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for unmount".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for unmount".to_string())
+                })?;
+                Audit::record_action("spaces.unmount");
+                let space = self
+                    .library
+                    .find_space_by_slug(&slug)
+                    .await?
+                    .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
+                self.projects
+                    .unmount_space(subject, project_id, space.id)
+                    .await
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Space unmounted from project {project_id}.\n  slug: {}\n  id: {}",
+                    space.slug, space.id,
                 ))]))
             }
         }
@@ -1012,12 +1067,41 @@ mod tests {
     }
 
     #[test]
+    fn spaces_mount_parses_slug_and_project_id() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "mount",
+            "slug": "oncall",
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Mount));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+    }
+
+    #[test]
+    fn spaces_unmount_parses_slug_and_project_id() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "unmount",
+            "slug": "oncall",
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Unmount));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+    }
+
+    #[test]
     fn spaces_schema_includes_command_enum() {
         let schema = &*SPACES_SCHEMA;
         let s = serde_json::to_string(schema).unwrap();
         assert!(s.contains("\"create\""));
         assert!(s.contains("\"list\""));
         assert!(s.contains("\"get\""));
+        assert!(s.contains("\"mount\""));
+        assert!(s.contains("\"unmount\""));
     }
 
     #[test]
