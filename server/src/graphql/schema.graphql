@@ -1,7 +1,6 @@
 type Agent {
 	attachedSandbox: SandboxAttachment
 	id: AgentId!
-	model: String!
 	name: String!
 	role: AgentRole!
 	session: AgentSession!
@@ -51,6 +50,10 @@ type AgentSession {
 	Returns the last `last` messages in chronological order.
 	"""
 	chatHistory(last: Int! = 20): [ChatMessage!]!
+	"""
+	Model used by the LLM for this session's prompts.
+	"""
+	model: String!
 	"""
 	All threads in this session.
 	"""

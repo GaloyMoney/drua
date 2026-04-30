@@ -1327,7 +1327,10 @@ async fn workspace_chat(
         id: a.id.to_string(),
         name: a.name.clone(),
     });
-    let selected_agent_model = selected_agent.map(|a| a.model.clone());
+    let selected_agent_model = match selected_agent {
+        Some(a) => state.app.agents().current_model(&sub, a.id).await.ok(),
+        None => None,
+    };
     let selected_agent_id = selected_agent_view
         .as_ref()
         .map(|v| v.id.clone())

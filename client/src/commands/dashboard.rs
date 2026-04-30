@@ -68,8 +68,13 @@ struct AgentNode {
     id: String,
     name: String,
     role: String,
-    model: String,
+    session: AgentSessionNode,
     attached_sandbox: Option<SandboxAttachmentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentSessionNode {
+    model: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,14 +96,14 @@ const WORKSPACES_QUERY: &str = r#"
                         id
                         name
                         role
-                        model
+                        session { model }
                         attachedSandbox { name mode }
                     }
                     agents {
                         id
                         name
                         role
-                        model
+                        session { model }
                         attachedSandbox { name mode }
                     }
                 }
@@ -443,7 +448,7 @@ fn agent_node_to_item(a: AgentNode) -> AgentItem {
         id: a.id,
         name: a.name,
         role: a.role,
-        model: a.model,
+        model: a.session.model,
         sandbox: a.attached_sandbox.map(|s| SandboxInfo {
             name: s.name,
             mode: s.mode,

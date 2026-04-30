@@ -334,7 +334,6 @@ impl Agents {
             .id(id)
             .workspace_id(workspace_id)
             .agent_role(agent_role)
-            .model(role_config.model.clone())
             .name(name)
             .authz_scopes(authz_scopes)
             .workspace_name(workspace_name);
@@ -645,6 +644,23 @@ impl Agents {
         Audit::record_workspace_id(agent.workspace_id);
         Audit::record_agent_id(agent_id);
         Ok(self.sessions.chat_history(agent_id, last_n).await?)
+    }
+
+    #[instrument(name = "domain.agent.current_model", skip(self, sub))]
+    pub async fn current_model(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+    ) -> Result<String, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.current_model");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        Ok(self.sessions.current_model(agent_id).await?)
     }
 
     #[instrument(name = "domain.agent.thread_infos", skip(self, sub))]

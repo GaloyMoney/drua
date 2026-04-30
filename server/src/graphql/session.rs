@@ -190,6 +190,12 @@ pub struct AgentSession {
 
 #[Object]
 impl AgentSession {
+    /// Model used by the LLM for this session's prompts.
+    async fn model(&self, ctx: &Context<'_>) -> async_graphql::Result<String> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        Ok(app.agents().current_model(sub, self.agent_id).await?)
+    }
+
     /// Flat chat history: recent user messages and assistant responses.
     /// Returns the last `last` messages in chronological order.
     async fn chat_history(
