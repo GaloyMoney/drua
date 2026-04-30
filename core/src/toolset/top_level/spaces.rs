@@ -1,6 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
-use rmcp::model::{CallToolResult, Content, JsonObject};
+use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
 
 use crate::audit::Audit;
@@ -10,7 +10,7 @@ use crate::project::Projects;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{parse_params, schema_for};
+use super::{parse_params, OutputSchema};
 
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -70,8 +70,7 @@ struct SpacesOutput {
     spaces: Option<Vec<SpaceSummary>>,
 }
 
-static SPACES_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<SpacesOutput>);
+static SPACES_OUTPUT: LazyLock<OutputSchema<SpacesOutput>> = LazyLock::new(OutputSchema::new);
 
 static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -133,7 +132,7 @@ impl TopLevelTool for SpacesTool {
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&SPACES_OUTPUT_SCHEMA)
+        Some(SPACES_OUTPUT.schema())
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
@@ -231,9 +230,6 @@ impl TopLevelTool for SpacesTool {
             }
         };
 
-        let structured = serde_json::to_value(&out).expect("SpacesOutput serialization");
-        let mut result = CallToolResult::success(vec![Content::text(text)]);
-        result.structured_content = Some(structured);
-        Ok(result)
+        Ok(SPACES_OUTPUT.success(text, &out))
     }
 }

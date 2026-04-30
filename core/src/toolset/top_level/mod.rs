@@ -1,6 +1,8 @@
 //! Built-in [`TopLevelTool`](super::traits::TopLevelTool) implementations.
 
-use rmcp::model::JsonObject;
+use std::marker::PhantomData;
+
+use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use super::error::ToolSetsError;
 
@@ -70,6 +72,35 @@ pub(super) fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
         );
     }
     value
+}
+
+/// Pairs a tool's declared output schema with the type used to construct
+/// `CallToolResult.structured_content`, so both come from the same `T`.
+/// Eliminates the class of bugs where a hand-rolled schema drifts from
+/// the actual output struct.
+pub(super) struct OutputSchema<T: serde::Serialize + schemars::JsonSchema> {
+    schema: serde_json::Value,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T: serde::Serialize + schemars::JsonSchema> OutputSchema<T> {
+    pub fn new() -> Self {
+        Self {
+            schema: schema_for::<T>(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+
+    pub fn success(&self, text: impl Into<String>, value: &T) -> CallToolResult {
+        let structured = serde_json::to_value(value).expect("structured output serialization");
+        let mut result = CallToolResult::success(vec![Content::text(text.into())]);
+        result.structured_content = Some(structured);
+        result
+    }
 }
 
 // Shared output structs: schemars derives `output_schema()`, serde::Serialize

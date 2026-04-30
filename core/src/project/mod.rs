@@ -266,9 +266,9 @@ impl Projects {
         Ok(space)
     }
 
-    /// Creates a new library space and mounts it onto `project_id`
-    /// in one call. The space row + upstream `.gitkeep` push are
-    /// atomic on the `Library` side; the mount runs in a separate
+    /// Creates a new library space and mounts it onto `project_id`.
+    /// The space (including the upstream `.gitkeep` push) is atomic
+    /// inside `Library::create_space`; the mount runs in a separate
     /// transaction. If the mount fails the space exists library-wide
     /// and the caller can retry via `mount_space` — no dangling state.
     #[instrument(name = "domain.project.create_and_mount_space", skip(self, sub))]
@@ -279,10 +279,13 @@ impl Projects {
         slug: impl Into<String> + std::fmt::Debug,
         description: Option<String>,
     ) -> Result<Space, ProjectError> {
-        let space = self.library.create_space(sub, slug, description).await?;
-
         sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.create_and_mount_space");
         Audit::record_project_id(project_id);
+
+        let space = self.library.create_space(sub, slug, description).await?;
+        Audit::record_space_id(space.id);
+
         let mut op = self.repo.begin_op().await?;
         self.mount_space_internal_in_op(&mut op, project_id, space.id)
             .await?;

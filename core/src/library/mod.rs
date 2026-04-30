@@ -194,8 +194,25 @@ impl Library {
         crate::audit::Audit::record_action_if_unset("space.create");
 
         let mut op = self.space_repo.begin_op().await?;
-        let (space, job_id) = self
-            .create_space_in_op(&mut op, sub, slug, description)
+        let mut builder = NewSpace::builder().slug(slug.into());
+        if let Some(desc) = description {
+            builder = builder.description(desc);
+        }
+        let new_space = builder.build()?;
+        let space = self.space_repo.create_in_op(&mut op, new_space).await?;
+
+        // Spawn the upstream `.gitkeep` commit with a known `JobId`.
+        // Persisted in the same `op`, so the spawn is durable: a crash
+        // before commit drops both the entity and the job; a crash
+        // after picks the job up from the persisted queue.
+        let job_id = ::job::JobId::new();
+        let config = WriteToRuntimeConfig {
+            file: UpstreamOp::SpaceInit {
+                slug: space.slug.clone(),
+            },
+        };
+        self.write_spawner
+            .spawn_with_queue_id_in_op(&mut op, job_id, config, LIBRARY_LOCK_QUEUE)
             .await?;
         op.commit().await?;
 
@@ -213,55 +230,8 @@ impl Library {
             });
         }
 
-        Ok(space)
-    }
-
-    /// Composable variant — caller owns the `op`. Skips the auth check
-    /// (caller is expected to have authorised the broader transaction).
-    /// Returns both the persisted `Space` and the `JobId` of the
-    /// `WriteToRuntime` job that will commit `spaces/<slug>/.gitkeep`
-    /// upstream. After committing the outer op, callers that need
-    /// upstream synchrony should
-    /// `library.jobs().await_completions(&[job_id], …)`.
-    #[tracing::instrument(name = "library.create_space_in_op", skip(self, op, _sub))]
-    pub async fn create_space_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        _sub: &crate::auth::AuthSubject,
-        slug: impl Into<String> + std::fmt::Debug,
-        description: Option<String>,
-    ) -> Result<(Space, ::job::JobId), LibraryError> {
-        let mut builder = NewSpace::builder().slug(slug.into());
-        if let Some(desc) = description {
-            builder = builder.description(desc);
-        }
-        let new_space = builder.build()?;
-
-        let space = self.space_repo.create_in_op(op, new_space).await?;
-
-        // Spawn the upstream `.gitkeep` commit with a known `JobId` so
-        // the standalone `create_space` can await this exact job.
-        // Persisted in the same `op`, so the spawn is durable: a crash
-        // before the outer commit drops both the entity and the job;
-        // a crash after picks the job up from the persisted queue.
-        let job_id = ::job::JobId::new();
-        let config = WriteToRuntimeConfig {
-            file: UpstreamOp::SpaceInit {
-                slug: space.slug.clone(),
-            },
-        };
-        self.write_spawner
-            .spawn_with_queue_id_in_op(op, job_id, config, LIBRARY_LOCK_QUEUE)
-            .await?;
-
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
-        Ok((space, job_id))
-    }
-
-    /// Cloned `Jobs` handle. Composable callers of `create_space_in_op`
-    /// use this to `await_completions` after their outer op commits.
-    pub fn jobs(&self) -> &::job::Jobs {
-        &self.jobs
+        Ok(space)
     }
 
     /// Lists every space, paginated. Soft-deleted spaces drop out
