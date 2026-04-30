@@ -107,7 +107,7 @@ impl TopLevelTool for WorkspaceAgent {
     }
 
     fn composable(&self) -> bool {
-        false
+        true
     }
 
     async fn call(

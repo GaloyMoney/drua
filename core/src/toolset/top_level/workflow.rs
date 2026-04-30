@@ -436,7 +436,7 @@ impl TopLevelTool for WorkflowTool {
     }
 
     fn composable(&self) -> bool {
-        false
+        true
     }
 
     async fn call(
