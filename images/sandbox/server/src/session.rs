@@ -124,6 +124,26 @@ fn try_spawn(
         }
     };
 
+    // Detach the spawned shell from the parent's controlling terminal.
+    // Without this, `bash -i` calls `tcsetpgrp` and steals the user's TTY
+    // foreground pgroup, causing Ctrl-C on the dev server to be delivered
+    // to bash (which ignores SIGINT) instead of the server. The Bwrap layer
+    // already gets this via `--new-session`; the UidOnly/Plain fallbacks
+    // need an explicit `setsid()`.
+    #[cfg(unix)]
+    if !matches!(layer, IsolationLayer::Bwrap) {
+        // SAFETY: setsid(2) is async-signal-safe and only mutates the
+        // child's session/pgroup state. No allocations, no locks.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -709,5 +729,43 @@ mod tests {
         assert!(r.unwrap().output.contains("still-alive"));
 
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    /// Regression test for the Ctrl-C-swallowed bug: the persistent
+    /// `bash -i` must NOT inherit the parent's session. Without
+    /// `setsid()` in `try_spawn`'s pre_exec, interactive bash takes over
+    /// the controlling TTY's foreground pgroup and Ctrl-C on the dev
+    /// server stops being delivered.
+    ///
+    /// Asserts the spawned shell is in its own session
+    /// (`getsid(child) != getsid(self)`) — Plain/UidOnly layers run
+    /// `setsid()`, Bwrap uses `--new-session`, so this invariant holds
+    /// for whichever layer was selected.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_shell_is_in_a_separate_session() {
+        init_test_workspace();
+        let session = BashSession::new();
+
+        let _ = session
+            .execute("echo trigger-spawn", DEFAULT_TIMEOUT_MS)
+            .await
+            .expect("spawn shell");
+
+        let inner = session.inner.lock().await;
+        let inner = inner.as_ref().expect("session should be live");
+        let child_pid = inner.child.id().expect("child has pid") as libc::pid_t;
+
+        // SAFETY: getsid is a pure read of kernel state for a known PID.
+        let child_sid = unsafe { libc::getsid(child_pid) };
+        let self_sid = unsafe { libc::getsid(0) };
+
+        assert!(child_sid > 0, "getsid(child) failed: {child_sid}");
+        assert_ne!(
+            child_sid, self_sid,
+            "shell session must be detached from the parent's session, \
+             otherwise interactive bash steals the controlling TTY's \
+             foreground pgroup and Ctrl-C is swallowed"
+        );
     }
 }
