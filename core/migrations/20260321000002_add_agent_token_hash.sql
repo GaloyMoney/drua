@@ -1,7 +1,0 @@
-ALTER TABLE agents ADD COLUMN token_hash VARCHAR NOT NULL DEFAULT '';
-
-CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
-    data JSONB NOT NULL DEFAULT '{}',
-    expiry_date BIGINT NOT NULL
-);
