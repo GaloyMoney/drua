@@ -3,7 +3,7 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{AuthResource, AuthVerb};
-use crate::primitives::{SandboxId, WorkspaceId};
+use crate::primitives::{ProjectId, SandboxId};
 
 /// Typed authorization scope. Serializes as a plain string for backward
 /// compatibility with event-store JSON storing `["read","write"]`.
@@ -11,13 +11,13 @@ use crate::primitives::{SandboxId, WorkspaceId};
 #[non_exhaustive]
 pub enum AuthScope {
     Admin,
-    /// Workspace admin (granted to `WorkspaceLead` role). Gates workspace
+    /// Project admin (granted to `ProjectLead` role). Gates project
     /// management tools and hides sandbox-backed filesystem tools (admins
     /// orchestrate; they don't run inside a sandbox themselves).
-    WorkspaceAdmin(WorkspaceId),
-    /// Workspace membership. Distinction from `WorkspaceAdmin` is in tool
+    ProjectAdmin(ProjectId),
+    /// Project membership. Distinction from `ProjectAdmin` is in tool
     /// *visibility*, not in what the agent is *authorized* to do.
-    WorkspaceMember(WorkspaceId),
+    ProjectMember(ProjectId),
     /// May invoke sandbox tools including state-mutating ones. Granted on `Write` attach.
     SandboxUse(SandboxId),
     /// Read-only sandbox access. Granted on `Read` attach.
@@ -31,25 +31,29 @@ impl AuthScope {
         match self {
             AuthScope::Admin => true,
 
-            AuthScope::WorkspaceAdmin(ws) => {
-                // Library-wide spaces are managed by any workspace admin;
-                // membership scoping happens via `authorized_workspaces` on
+            AuthScope::ProjectAdmin(project) => {
+                // Library-wide spaces are managed by any project admin;
+                // membership scoping happens via `authorized_projects` on
                 // the entity itself.
                 if matches!(resource, AuthResource::Space(_)) {
                     return true;
                 }
-                resource.workspace_id().is_some_and(|res_ws| res_ws == *ws)
+                resource
+                    .project_id()
+                    .is_some_and(|res_ws| res_ws == *project)
             }
 
-            // Limited set within workspace; expand as new tools need it.
-            AuthScope::WorkspaceMember(ws) => {
-                let in_ws = resource.workspace_id().is_some_and(|res_ws| res_ws == *ws);
+            // Limited set within project; expand as new tools need it.
+            AuthScope::ProjectMember(project) => {
+                let in_ws = resource
+                    .project_id()
+                    .is_some_and(|res_ws| res_ws == *project);
                 if !in_ws {
                     return false;
                 }
                 matches!(
                     (verb, resource),
-                    (AuthVerb::Read, AuthResource::Workspace(_))
+                    (AuthVerb::Read, AuthResource::Project(_))
                         | (AuthVerb::Create, AuthResource::Note(..))
                         | (AuthVerb::Read, AuthResource::Note(..))
                         | (AuthVerb::Update, AuthResource::Note(..))
@@ -87,8 +91,8 @@ impl fmt::Display for AuthScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthScope::Admin => f.write_str("admin"),
-            AuthScope::WorkspaceAdmin(id) => write!(f, "ws:{id}:admin"),
-            AuthScope::WorkspaceMember(id) => write!(f, "ws:{id}:member"),
+            AuthScope::ProjectAdmin(id) => write!(f, "project:{id}:admin"),
+            AuthScope::ProjectMember(id) => write!(f, "project:{id}:member"),
             AuthScope::SandboxUse(id) => write!(f, "sandbox:{id}:use"),
             AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
             AuthScope::External(s) => f.write_str(s),
@@ -104,15 +108,15 @@ impl FromStr for AuthScope {
             return Ok(AuthScope::Admin);
         }
 
-        if let Some(rest) = s.strip_prefix("ws:") {
+        if let Some(rest) = s.strip_prefix("project:") {
             if let Some(uuid_str) = rest.strip_suffix(":admin") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
-                    return Ok(AuthScope::WorkspaceAdmin(WorkspaceId::from(uuid)));
+                    return Ok(AuthScope::ProjectAdmin(ProjectId::from(uuid)));
                 }
             }
             if let Some(uuid_str) = rest.strip_suffix(":member") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
-                    return Ok(AuthScope::WorkspaceMember(WorkspaceId::from(uuid)));
+                    return Ok(AuthScope::ProjectMember(ProjectId::from(uuid)));
                 }
             }
         }
@@ -170,8 +174,8 @@ impl<'de> Deserialize<'de> for AuthScope {
 mod tests {
     use super::*;
 
-    fn test_workspace_id() -> WorkspaceId {
-        WorkspaceId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
+    fn test_project_id() -> ProjectId {
+        ProjectId::from(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap())
     }
 
     fn test_sandbox_id() -> SandboxId {
@@ -183,12 +187,12 @@ mod tests {
     /// mismatch immediately.
     #[test]
     fn round_trip_all_variants() {
-        let ws_id = test_workspace_id();
+        let project_id = test_project_id();
         let sb_id = test_sandbox_id();
         let variants = vec![
             AuthScope::Admin,
-            AuthScope::WorkspaceAdmin(ws_id),
-            AuthScope::WorkspaceMember(ws_id),
+            AuthScope::ProjectAdmin(project_id),
+            AuthScope::ProjectMember(project_id),
             AuthScope::SandboxUse(sb_id),
             AuthScope::SandboxRead(sb_id),
             AuthScope::External("custom:thing".to_owned()),
@@ -249,15 +253,15 @@ mod tests {
     }
 
     #[test]
-    fn display_workspace_scopes() {
-        let ws_id = test_workspace_id();
+    fn display_project_scopes() {
+        let project_id = test_project_id();
         assert_eq!(
-            AuthScope::WorkspaceAdmin(ws_id).to_string(),
-            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
+            AuthScope::ProjectAdmin(project_id).to_string(),
+            "project:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
         );
         assert_eq!(
-            AuthScope::WorkspaceMember(ws_id).to_string(),
-            "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
+            AuthScope::ProjectMember(project_id).to_string(),
+            "project:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
         );
     }
 
@@ -268,17 +272,17 @@ mod tests {
     }
 
     #[test]
-    fn from_str_workspace() {
-        let ws_id = test_workspace_id();
-        let admin: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
+    fn from_str_project() {
+        let project_id = test_project_id();
+        let admin: AuthScope = "project:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin"
             .parse()
             .unwrap();
-        assert_eq!(admin, AuthScope::WorkspaceAdmin(ws_id));
+        assert_eq!(admin, AuthScope::ProjectAdmin(project_id));
 
-        let member: AuthScope = "ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
+        let member: AuthScope = "project:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:member"
             .parse()
             .unwrap();
-        assert_eq!(member, AuthScope::WorkspaceMember(ws_id));
+        assert_eq!(member, AuthScope::ProjectMember(project_id));
     }
 
     #[test]
@@ -290,15 +294,15 @@ mod tests {
     /// Eq-based comparison works across all variants.
     #[test]
     fn eq_all_variants() {
-        let ws_id = test_workspace_id();
+        let project_id = test_project_id();
         assert_eq!(AuthScope::Admin, AuthScope::Admin);
         assert_ne!(AuthScope::Admin, AuthScope::External("admin".to_owned()));
 
         assert_eq!(
-            AuthScope::WorkspaceAdmin(ws_id),
-            AuthScope::WorkspaceAdmin(ws_id)
+            AuthScope::ProjectAdmin(project_id),
+            AuthScope::ProjectAdmin(project_id)
         );
-        assert_ne!(AuthScope::WorkspaceAdmin(ws_id), AuthScope::Admin);
+        assert_ne!(AuthScope::ProjectAdmin(project_id), AuthScope::Admin);
 
         assert_eq!(
             AuthScope::External("custom".to_owned()),
@@ -314,12 +318,12 @@ mod tests {
     /// existing event-store payloads and config files remain compatible.
     #[test]
     fn serde_round_trip_plain_string() {
-        let ws_id = test_workspace_id();
+        let project_id = test_project_id();
         let variants = vec![
             (AuthScope::Admin, r#""admin""#),
             (
-                AuthScope::WorkspaceAdmin(ws_id),
-                r#""ws:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin""#,
+                AuthScope::ProjectAdmin(project_id),
+                r#""project:a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8:admin""#,
             ),
             (AuthScope::External("custom".to_owned()), r#""custom""#),
         ];

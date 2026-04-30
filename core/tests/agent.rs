@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfig};
-use drua_core::primitives::{AuthSubject, ChatOutputEvent, ContextGeneration, UserId, WorkspaceId};
+use drua_core::primitives::{AuthSubject, ChatOutputEvent, ContextGeneration, ProjectId, UserId};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
@@ -27,7 +27,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     let model_name = "claude-haiku-4-5-20251001".to_string();
     let mut builtin_roles = HashMap::new();
     builtin_roles.insert(
-        AgentRole::WorkspaceLead,
+        AgentRole::ProjectLead,
         RoleConfig {
             model: model_name.clone(),
             compaction: Default::default(),
@@ -75,7 +75,7 @@ async fn send_message_round_trip_via_prompt_channel() {
 
     let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create_workspace_lead(&sub, WorkspaceId::new(), "lead", "test-workspace")
+        .create_project_lead(&sub, ProjectId::new(), "lead", "test-project")
         .await
         .expect("create agent");
 
@@ -185,7 +185,7 @@ async fn send_message_dispatches_registered_tool_call() {
     let model_name = "claude-haiku-4-5-20251001".to_string();
     let mut builtin_roles = HashMap::new();
     builtin_roles.insert(
-        AgentRole::WorkspaceLead,
+        AgentRole::ProjectLead,
         RoleConfig {
             model: model_name.clone(),
             compaction: Default::default(),
@@ -234,7 +234,7 @@ async fn send_message_dispatches_registered_tool_call() {
 
     let sub = AuthSubject::User(UserId::new());
     let agent = agents
-        .create_workspace_lead(&sub, WorkspaceId::new(), "lead", "test-workspace")
+        .create_project_lead(&sub, ProjectId::new(), "lead", "test-project")
         .await
         .expect("create agent");
 

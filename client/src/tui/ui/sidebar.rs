@@ -8,22 +8,22 @@ use ratatui::{
 
 use super::super::state::{Focus, ScreenState};
 
-pub fn draw_workspace_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
+pub fn draw_project_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let title = format!(
-        " Workspaces ({}/{}) ",
-        if state.workspaces.is_empty() {
+        " Projects ({}/{}) ",
+        if state.projects.is_empty() {
             0
         } else {
             state.cursor + 1
         },
-        state.workspaces.len()
+        state.projects.len()
     );
 
     let items: Vec<ListItem> = state
-        .workspaces
+        .projects
         .iter()
         .enumerate()
-        .map(|(i, ws)| {
+        .map(|(i, project)| {
             let prefix = if i == state.cursor { ">" } else { " " };
             let style = if i == state.cursor {
                 Style::default()
@@ -33,7 +33,7 @@ pub fn draw_workspace_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
                 Style::default().fg(Color::White)
             };
             ListItem::new(Line::from(Span::styled(
-                format!("{prefix} {}", ws.name),
+                format!("{prefix} {}", project.name),
                 style,
             )))
         })

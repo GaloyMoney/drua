@@ -1,4 +1,4 @@
-//! `workspace_sandbox` — consolidated workspace-scoped sandbox management.
+//! `project_sandbox` — consolidated project-scoped sandbox management.
 //!
 //! Single tool with a `command` discriminator (like `text_editor`):
 //! `create`, `list`, `get`, `inspect`.
@@ -53,8 +53,8 @@ enum SandboxCreateMode {
     Scratch,
     Repo,
     /// Sparse-checkout of `spaces/<space_slug>/` from the library repo.
-    /// Requires `space_slug` and that the caller's workspace is in
-    /// `Space.authorized_workspaces`.
+    /// Requires `space_slug` and that the caller's project is in
+    /// `Space.authorized_projects`.
     LibrarySpace,
 }
 
@@ -68,7 +68,7 @@ enum InspectTool {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct WorkspaceSandboxParams {
+struct ProjectSandboxParams {
     command: SandboxCommand,
 
     name: Option<String>,
@@ -104,7 +104,7 @@ struct WorkspaceSandboxParams {
     wait: Option<bool>,
 }
 
-pub struct WorkspaceSandbox {
+pub struct ProjectSandbox {
     sandboxes: Arc<Sandboxes>,
     /// Library handle for `library_space` mode — supplies both the
     /// space lookup (`find_space_by_slug_authorized`) and the upstream
@@ -112,7 +112,7 @@ pub struct WorkspaceSandbox {
     library: Arc<Library>,
 }
 
-impl WorkspaceSandbox {
+impl ProjectSandbox {
     pub fn new(sandboxes: Arc<Sandboxes>, library: Arc<Library>) -> Self {
         Self { sandboxes, library }
     }
@@ -124,7 +124,7 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         s.meta_schema = None;
     });
     let generator = settings.into_generator();
-    let schema = generator.into_root_schema_for::<WorkspaceSandboxParams>();
+    let schema = generator.into_root_schema_for::<ProjectSandboxParams>();
     let mut value = serde_json::to_value(schema).expect("schema serialization");
     if let Some(obj) = value.as_object_mut() {
         obj.remove("title");
@@ -138,7 +138,7 @@ static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 #[async_trait::async_trait]
-impl TopLevelTool for WorkspaceSandbox {
+impl TopLevelTool for ProjectSandbox {
     fn name(&self) -> &str {
         "sandbox"
     }
@@ -163,9 +163,9 @@ impl TopLevelTool for WorkspaceSandbox {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Read, AuthResource::Sandbox(ws, None))
+                .can(AuthVerb::Read, AuthResource::Sandbox(project, None))
                 .is_ok()
         })
     }
@@ -179,8 +179,8 @@ impl TopLevelTool for WorkspaceSandbox {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-        let params: WorkspaceSandboxParams = parse_params(arguments)?;
+        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
+        let params: ProjectSandboxParams = parse_params(arguments)?;
 
         Audit::record_action(params.command.audit_action());
 
@@ -239,7 +239,7 @@ impl TopLevelTool for WorkspaceSandbox {
 
                 let sandbox = self
                     .sandboxes
-                    .create(subject, workspace_id, name, specs, sandbox_mode)
+                    .create(subject, project_id, name, specs, sandbox_mode)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -264,7 +264,7 @@ impl TopLevelTool for WorkspaceSandbox {
             SandboxCommand::List => {
                 let sandboxes = self
                     .sandboxes
-                    .list_for_workspace(subject, workspace_id)
+                    .list_for_project(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
@@ -488,8 +488,8 @@ fn format_sandbox(s: &Sandbox) -> String {
         .map(|e| format!("\n  last_error: {e}"))
         .unwrap_or_default();
     format!(
-        "Sandbox:\n  id: {}\n  name: {}\n  workspace: {}\n  state: {}\n  mode: {:?}\n  specs: cpu={}, mem={}, disk={}{}\n  attached_agents:\n{}",
-        s.id, s.name, s.workspace_id, s.state, s.mode,
+        "Sandbox:\n  id: {}\n  name: {}\n  project: {}\n  state: {}\n  mode: {:?}\n  specs: cpu={}, mem={}, disk={}{}\n  attached_agents:\n{}",
+        s.id, s.name, s.project_id, s.state, s.mode,
         s.specs.cpu, s.specs.memory, s.specs.disk_size,
         error_str, agents_str,
     )

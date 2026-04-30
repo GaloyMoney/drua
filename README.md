@@ -26,7 +26,7 @@ with `GITHUB_CLIENT_SECRET` set and an
 
 ## CLI (`drua`)
 
-`drua` is a terminal UI for managing workspaces and chatting with agents.
+`drua` is a terminal UI for managing projects and chatting with agents.
 
 ```bash
 # Against the local dev server
@@ -182,7 +182,7 @@ requires no authentication.
 
 ```
 cli/            Unified binary entrypoint (dispatches to server or client)
-client/         TUI client library (login, tui, workspace management)
+client/         TUI client library (login, tui, project management)
 server/         Axum web server library (routes, auth, GraphQL, templates, config)
 core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
 mcp-gateway/    MCP protocol gateway (rmcp-based)

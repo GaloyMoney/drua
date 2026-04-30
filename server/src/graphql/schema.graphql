@@ -2,9 +2,9 @@ type Agent {
 	attachedSandbox: SandboxAttachment
 	id: AgentId!
 	name: String!
+	projectId: ProjectId!
 	role: AgentRole!
 	session: AgentSession!
-	workspaceId: WorkspaceId!
 }
 
 input AgentAttachSandboxInput {
@@ -19,9 +19,9 @@ type AgentAttachSandboxPayload {
 
 input AgentCreateInput {
 	name: String!
+	projectId: ProjectId!
 	sandboxId: SandboxId
 	sandboxMode: SandboxAttachmentMode
-	workspaceId: WorkspaceId!
 }
 
 type AgentCreatePayload {
@@ -41,7 +41,7 @@ scalar AgentId
 
 enum AgentRole {
 	AGENT
-	WORKSPACE_LEAD
+	PROJECT_LEAD
 }
 
 type AgentSession {
@@ -96,7 +96,7 @@ input AuditLogQueryInput {
 	error: Boolean
 	limit: Int! = 20
 	outcome: String
-	workspaceId: WorkspaceId
+	projectId: ProjectId
 }
 
 union ChatContentBlock = TextContent | ToolUseContent | ThinkingContent | ToolResultContent | SandboxNotificationContent
@@ -134,43 +134,43 @@ enum LibraryFileType {
 type LibrarySearchHit {
 	id: UUID!
 	"""
+	`null` for global content (skills with no project) and for
+	space files (which are scoped to a `space_slug` instead).
+	"""
+	projectId: ProjectId
+	"""
 	Set on `SpaceFile` hits: the file's path inside `spaces/<slug>/`.
 	"""
 	relativePath: String
 	score: Float!
 	snippet: String!
 	"""
-	Set on `SpaceFile` hits. Use this — not `workspace_id` — to
+	Set on `SpaceFile` hits. Use this — not `project_id` — to
 	label the result's scope in UIs.
 	"""
 	spaceSlug: String
 	tags: [String!]!
 	title: String!
 	type: LibraryFileType!
-	"""
-	`null` for global content (skills with no workspace) and for
-	space files (which are scoped to a `space_slug` instead).
-	"""
-	workspaceId: WorkspaceId
 }
 
 input LibrarySearchInput {
 	limit: Int! = 50
+	"""
+	Omitted = all projects the subject can read.
+	"""
+	projectId: ProjectId
 	query: String!
 	"""
 	Empty / omitted = all types.
 	"""
 	types: [LibraryFileType!]
-	"""
-	Omitted = all workspaces the subject can read.
-	"""
-	workspaceId: WorkspaceId
 }
 
 input McpCredentialsCreateInput {
 	name: String!
 	"""
-	The scopes to grant, as strings (e.g. "admin", "workspace_admin:<id>").
+	The scopes to grant, as strings (e.g. "admin", "project_admin:<id>").
 	"""
 	scopes: [String!]!
 }
@@ -218,14 +218,14 @@ type Mutation {
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
 	ping: String!
+	projectCreate(input: ProjectCreateInput!): ProjectCreatePayload!
+	projectDelete(input: ProjectDeleteInput!): ProjectDeletePayload!
+	projectSecretCreate(input: ProjectSecretCreateInput!): ProjectSecretCreatePayload!
+	projectSecretDelete(input: ProjectSecretDeleteInput!): ProjectSecretDeletePayload!
+	projectUpdate(input: ProjectUpdateInput!): ProjectUpdatePayload!
 	sandboxCreate(input: SandboxCreateInput!): SandboxCreatePayload!
 	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
-	workspaceCreate(input: WorkspaceCreateInput!): WorkspaceCreatePayload!
-	workspaceDelete(input: WorkspaceDeleteInput!): WorkspaceDeletePayload!
-	workspaceSecretCreate(input: WorkspaceSecretCreateInput!): WorkspaceSecretCreatePayload!
-	workspaceSecretDelete(input: WorkspaceSecretDeleteInput!): WorkspaceSecretDeletePayload!
-	workspaceUpdate(input: WorkspaceUpdateInput!): WorkspaceUpdatePayload!
 }
 
 """
@@ -250,6 +250,111 @@ type PageInfo {
 	startCursor: String
 }
 
+type Project {
+	"""
+	Lead agent first.
+	"""
+	agents: [Agent!]!
+	createdAt: Timestamp!
+	description: String
+	id: ProjectId!
+	lead: Agent!
+	mcpCredentials: [McpCreds!]!
+	name: String!
+	sandboxes: [Sandbox!]!
+	"""
+	Metadata only — values are never exposed via GraphQL.
+	"""
+	secrets: [ProjectSecret!]!
+	skills: [Skill!]!
+}
+
+type ProjectConnection {
+	"""
+	A list of edges.
+	"""
+	edges: [ProjectEdge!]!
+	"""
+	A list of nodes.
+	"""
+	nodes: [Project!]!
+	"""
+	Information to aid in pagination.
+	"""
+	pageInfo: PageInfo!
+}
+
+input ProjectCreateInput {
+	description: String
+	name: String!
+}
+
+type ProjectCreatePayload {
+	project: Project!
+}
+
+input ProjectDeleteInput {
+	id: ProjectId!
+}
+
+type ProjectDeletePayload {
+	project: Project!
+}
+
+"""
+An edge in a connection.
+"""
+type ProjectEdge {
+	"""
+	A cursor for use in pagination
+	"""
+	cursor: String!
+	"""
+	The item at the end of the edge
+	"""
+	node: Project!
+}
+
+scalar ProjectId
+
+type ProjectSecret {
+	createdAt: Timestamp!
+	id: ProjectSecretId!
+	name: String!
+	projectId: ProjectId!
+	secretType: SecretTypeEnum!
+}
+
+input ProjectSecretCreateInput {
+	name: String!
+	projectId: ProjectId!
+	secretType: SecretTypeEnum!
+	value: String!
+}
+
+type ProjectSecretCreatePayload {
+	projectSecret: ProjectSecret!
+}
+
+input ProjectSecretDeleteInput {
+	id: ProjectSecretId!
+}
+
+type ProjectSecretDeletePayload {
+	deletedId: ProjectSecretId!
+}
+
+scalar ProjectSecretId
+
+input ProjectUpdateInput {
+	description: String
+	id: ProjectId!
+}
+
+type ProjectUpdatePayload {
+	project: Project!
+}
+
 type Query {
 	agent(id: AgentId!): Agent
 	appConfig: Yaml!
@@ -260,17 +365,17 @@ type Query {
 	"""
 	exportThread(agentId: AgentId!, threadId: SessionThreadId): String!
 	"""
-	Cross-type, cross-workspace library search. Open to any
+	Cross-type, cross-project library search. Open to any
 	authenticated subject; library content is globally discoverable.
-	`workspaceId` is optional — when set the workspace is validated
-	via `find_by_id`; when omitted no workspace filter is applied.
+	`projectId` is optional — when set the project is validated
+	via `find_by_id`; when omitted no project filter is applied.
 	"""
 	librarySearch(input: LibrarySearchInput!): [LibrarySearchHit!]!
 	me: Me
 	ping: String!
+	project(id: ProjectId!): Project
+	projects(after: String, first: Int!): ProjectConnection!
 	sandbox(id: SandboxId!): Sandbox
-	workspace(id: WorkspaceId!): Workspace
-	workspaces(after: String, first: Int!): WorkspaceConnection!
 }
 
 type Sandbox {
@@ -283,8 +388,8 @@ type Sandbox {
 	memory: String!
 	mountPath: String!
 	name: String!
+	projectId: ProjectId!
 	state: SandboxStateEnum!
-	workspaceId: WorkspaceId!
 }
 
 type SandboxAgentAttachment {
@@ -310,8 +415,8 @@ input SandboxCreateInput {
 	memory: String! = "512Mi"
 	mode: SandboxCreateMode!
 	name: String!
+	projectId: ProjectId!
 	repoUrl: String
-	workspaceId: WorkspaceId!
 }
 
 enum SandboxCreateMode {
@@ -412,7 +517,7 @@ type Skill {
 	description: String!
 	id: SkillId!
 	name: String!
-	workspaceId: WorkspaceId
+	projectId: ProjectId
 }
 
 scalar SkillId
@@ -538,111 +643,6 @@ scalar UUID
 
 type UserMessageEvent {
 	text: String!
-}
-
-type Workspace {
-	"""
-	Lead agent first.
-	"""
-	agents: [Agent!]!
-	createdAt: Timestamp!
-	description: String
-	id: WorkspaceId!
-	lead: Agent!
-	mcpCredentials: [McpCreds!]!
-	name: String!
-	sandboxes: [Sandbox!]!
-	"""
-	Metadata only — values are never exposed via GraphQL.
-	"""
-	secrets: [WorkspaceSecret!]!
-	skills: [Skill!]!
-}
-
-type WorkspaceConnection {
-	"""
-	A list of edges.
-	"""
-	edges: [WorkspaceEdge!]!
-	"""
-	A list of nodes.
-	"""
-	nodes: [Workspace!]!
-	"""
-	Information to aid in pagination.
-	"""
-	pageInfo: PageInfo!
-}
-
-input WorkspaceCreateInput {
-	description: String
-	name: String!
-}
-
-type WorkspaceCreatePayload {
-	workspace: Workspace!
-}
-
-input WorkspaceDeleteInput {
-	id: WorkspaceId!
-}
-
-type WorkspaceDeletePayload {
-	workspace: Workspace!
-}
-
-"""
-An edge in a connection.
-"""
-type WorkspaceEdge {
-	"""
-	A cursor for use in pagination
-	"""
-	cursor: String!
-	"""
-	The item at the end of the edge
-	"""
-	node: Workspace!
-}
-
-scalar WorkspaceId
-
-type WorkspaceSecret {
-	createdAt: Timestamp!
-	id: WorkspaceSecretId!
-	name: String!
-	secretType: SecretTypeEnum!
-	workspaceId: WorkspaceId!
-}
-
-input WorkspaceSecretCreateInput {
-	name: String!
-	secretType: SecretTypeEnum!
-	value: String!
-	workspaceId: WorkspaceId!
-}
-
-type WorkspaceSecretCreatePayload {
-	workspaceSecret: WorkspaceSecret!
-}
-
-input WorkspaceSecretDeleteInput {
-	id: WorkspaceSecretId!
-}
-
-type WorkspaceSecretDeletePayload {
-	deletedId: WorkspaceSecretId!
-}
-
-scalar WorkspaceSecretId
-
-input WorkspaceUpdateInput {
-	description: String
-	id: WorkspaceId!
-}
-
-type WorkspaceUpdatePayload {
-	workspace: Workspace!
 }
 
 scalar Yaml

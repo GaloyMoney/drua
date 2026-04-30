@@ -88,7 +88,7 @@
 
 {% block content %}
 <h2>Library</h2>
-<p><small>Search across all library files (skills, notes, space files) in workspaces you can read.</small></p>
+<p><small>Search across all library files (skills, notes, space files) in projects you can read.</small></p>
 
 <form class="lib-search-form"
       hx-get="/library/search"
@@ -103,11 +103,11 @@
       <input type="text" name="q" placeholder="Search library content + titles..." autofocus>
     </label>
     <label style="min-width: 220px;">
-      Workspace
-      <select name="workspaceId">
-        <option value="">All workspaces</option>
-        {% for ws in workspaces %}
-        <option value="{{ ws.id }}">{{ ws.name }}</option>
+      Project
+      <select name="projectId">
+        <option value="">All projects</option>
+        {% for project in projects %}
+        <option value="{{ project.id }}">{{ project.name }}</option>
         {% endfor %}
       </select>
     </label>
@@ -136,8 +136,8 @@
       const cb = l.querySelector('input');
       if (cb) l.classList.toggle('active', cb.checked);
     });
-    const ws = document.querySelector('select[name=workspaceId]').value;
-    const active = checked.length + (ws ? 1 : 0);
+    const project = document.querySelector('select[name=projectId]').value;
+    const active = checked.length + (project ? 1 : 0);
     const note = document.getElementById('lib-active-count');
     if (note) note.textContent = active > 0 ? `(${active} filter${active === 1 ? '' : 's'} active)` : '';
   }

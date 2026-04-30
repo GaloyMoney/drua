@@ -11,8 +11,8 @@ pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, DescribeCatalogTool, GlobTool, Grep, Ls,
-    NotesTool, Read, SearchCatalog, SkillTool, SpacesTool, TextEditor, UseSkillTool, WhoAmI,
-    WorkflowTool, WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
+    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog, SkillTool,
+    SpacesTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
 };
 pub use traits::*;
 

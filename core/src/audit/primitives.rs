@@ -74,7 +74,7 @@ pub struct AuditContextData {
 /// Unset fields are excluded from the WHERE clause; strings use `ILIKE`.
 #[derive(Debug, Clone, Default)]
 pub struct AuditLogQuery {
-    pub workspace_id: Option<WorkspaceId>,
+    pub project_id: Option<ProjectId>,
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,
     /// Exclude entries by this agent (e.g. to hide the caller's own logs).
@@ -117,10 +117,10 @@ impl AuditEntry {
         self.resource_ids.get(key).and_then(|v| v.as_str())
     }
 
-    pub fn workspace_id(&self) -> Option<WorkspaceId> {
-        self.resource_id("workspace_id")
+    pub fn project_id(&self) -> Option<ProjectId> {
+        self.resource_id("project_id")
             .and_then(|s| s.parse::<uuid::Uuid>().ok())
-            .map(WorkspaceId::from)
+            .map(ProjectId::from)
     }
 
     pub fn sandbox_id(&self) -> Option<SandboxId> {

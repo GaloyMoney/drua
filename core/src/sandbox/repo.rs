@@ -10,7 +10,7 @@ use super::entity::*;
 #[es_repo(
     entity = "Sandbox",
     columns(
-        workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
+        project_id(ty = "ProjectId", list_for(by(created_at))),
         name(ty = "String", list_for(by(created_at))),
         workflow_id(ty = "Option<WorkflowDefinitionId>"),
     )

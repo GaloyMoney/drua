@@ -113,7 +113,7 @@ impl TopLevelTool for UseSkillTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke or search workspace skills. Use action \"invoke\" with a skill \
+        "Invoke or search project skills. Use action \"invoke\" with a skill \
          name to load the full skill body (with optional $ARGUMENTS substitution). \
          Use action \"search\" with a query to discover skills by topic."
     }
@@ -123,9 +123,9 @@ impl TopLevelTool for UseSkillTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Use, AuthResource::Skill(ws, None))
+                .can(AuthVerb::Use, AuthResource::Skill(project, None))
                 .is_ok()
         })
     }
@@ -143,11 +143,11 @@ impl TopLevelTool for UseSkillTool {
 
         match params {
             UseSkillAction::Invoke { name, arguments } => {
-                let workspace_id = subject.workspace_id();
+                let project_id = subject.project_id();
                 let sandbox_id = subject.readable_sandbox_id();
                 let rendered = self
                     .skills
-                    .interpolate_skill(&name, workspace_id, sandbox_id, arguments.as_deref())
+                    .interpolate_skill(&name, project_id, sandbox_id, arguments.as_deref())
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 
@@ -160,10 +160,10 @@ impl TopLevelTool for UseSkillTool {
             }
 
             UseSkillAction::Search { query, limit } => {
-                let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+                let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
                 let results = self
                     .skills
-                    .search(subject, workspace_id, &query, limit)
+                    .search(subject, project_id, &query, limit)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
 

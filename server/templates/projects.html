@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Projects — Galoy Agents{% endblock %}
+
+{% block nav_projects %}class="active"{% endblock %}
+
+{% block content %}
+<h2>Projects</h2>
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+  <p style="margin: 0;">Organizational scopes for projects and tasks.</p>
+  <a href="/projects/new" role="button" style="width: auto;">New Project</a>
+</div>
+
+<div id="project-list"
+     hx-get="/projects/list" hx-trigger="load" hx-swap="innerHTML">
+  <p aria-busy="true">Loading...</p>
+</div>
+{% endblock %}

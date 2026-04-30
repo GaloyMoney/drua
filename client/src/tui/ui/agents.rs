@@ -16,8 +16,8 @@ pub fn draw_agents_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
     };
 
     let agents = state
-        .selected_workspace()
-        .map(|ws| ws.agents.as_slice())
+        .selected_project()
+        .map(|project| project.agents.as_slice())
         .unwrap_or_default();
 
     let title = if agents.is_empty() {
@@ -32,10 +32,10 @@ pub fn draw_agents_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
         .border_style(Style::default().fg(border_color));
 
     if agents.is_empty() {
-        let hint = if state.selected_workspace().is_some() {
+        let hint = if state.selected_project().is_some() {
             "No agents"
         } else {
-            "No workspace"
+            "No project"
         };
         let paragraph = Paragraph::new(Line::from(Span::styled(
             hint,
@@ -63,7 +63,7 @@ pub fn draw_agents_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
 
             let mut spans = vec![Span::styled(format!("{prefix} {}", agent.name), name_style)];
 
-            if agent.role == "WORKSPACE_LEAD" {
+            if agent.role == "PROJECT_LEAD" {
                 spans.push(Span::styled(" lead", Style::default().fg(Color::DarkGray)));
             }
 
@@ -101,7 +101,7 @@ pub fn draw_agent_details(frame: &mut Frame, state: &ScreenState, area: Rect) {
     };
 
     let role_label = match agent.role.as_str() {
-        "WORKSPACE_LEAD" => "Workspace Lead",
+        "PROJECT_LEAD" => "Project Lead",
         "AGENT" => "Agent",
         other => other,
     };

@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// Workspace bootstrap mode for the first `/initialize` call. Mirrors the
+/// Project bootstrap mode for the first `/initialize` call. Mirrors the
 /// wire format expected by `images/sandbox/server/src/main.rs::initialize`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SandboxMode {
     Scratch,
-    /// Clones `repo_url` into `<workspace>/repos/<name>` and scans for
+    /// Clones `repo_url` into `<project>/repos/<name>` and scans for
     /// CLAUDE.md / `.claude/commands/*.md`.
     Repo {
         repo_url: String,

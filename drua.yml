@@ -21,7 +21,7 @@ providers:
         context_window_tokens: 131072
 agents:
   builtin_roles:
-    workspace_lead:
+    project_lead:
       model: moonshotai/kimi-k2
       compaction:
         reset_time_delta_seconds: 18000

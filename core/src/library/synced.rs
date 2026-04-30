@@ -8,8 +8,8 @@ use super::file::{DocType, GitFileHash, SearchableFields, UpstreamOp};
 use super::search::SearchStore;
 use super::{Library, LIBRARY_LOCK_QUEUE};
 
-use crate::primitives::WorkspaceId;
-use crate::workspace::Workspaces;
+use crate::primitives::ProjectId;
+use crate::project::Projects;
 
 /// Type-erased projection of a `LibrarySynced` entity into a serialisable
 /// shape suitable for the obix inbox + git write pipeline.
@@ -22,9 +22,9 @@ pub struct SyncedFile {
     pub doc_id: uuid::Uuid,
     pub doc_type: DocType,
     #[serde(default)]
-    pub workspace_id: Option<WorkspaceId>,
+    pub project_id: Option<ProjectId>,
     #[serde(default)]
-    pub workspace_name: Option<String>,
+    pub project_name: Option<String>,
     pub slug: String,
     pub id_prefix: String,
     pub created_at: String,
@@ -39,15 +39,15 @@ pub struct SyncedFile {
 }
 
 impl SyncedFile {
-    /// `runtime/workspaces/{ws}/{subdir}/{slug}-{id_prefix}.{ext}` when scoped,
+    /// `runtime/projects/{project}/{subdir}/{slug}-{id_prefix}.{ext}` when scoped,
     /// else `runtime/{subdir}/{slug}-{id_prefix}.{ext}` (Skill/Workflow only).
     pub fn relative_path(&self) -> String {
         let subdir = self.doc_type.subdir();
         let ext = self.doc_type.ext();
-        match &self.workspace_name {
-            Some(ws) => format!(
-                "runtime/workspaces/{}/{}/{}-{}.{}",
-                ws, subdir, self.slug, self.id_prefix, ext
+        match &self.project_name {
+            Some(project) => format!(
+                "runtime/projects/{}/{}/{}-{}.{}",
+                project, subdir, self.slug, self.id_prefix, ext
             ),
             None => format!(
                 "runtime/{}/{}-{}.{}",
@@ -69,8 +69,8 @@ impl SyncedFile {
         SearchableFields {
             doc_id: self.doc_id,
             doc_type: self.doc_type,
-            workspace_id: self
-                .workspace_id
+            project_id: self
+                .project_id
                 .map(uuid::Uuid::from)
                 .unwrap_or(uuid::Uuid::nil()),
             title: self.title.clone(),
@@ -94,8 +94,8 @@ pub trait LibrarySynced: Sized + Send + Sync + 'static {
     /// Sync only fires when one of these event variants was just persisted.
     fn is_content_event(ev: &Self::Event) -> bool;
 
-    /// `None` means "global" file (not workspace-scoped).
-    fn workspace(&self) -> Option<(WorkspaceId, &str)>;
+    /// `None` means "global" file (not project-scoped).
+    fn project(&self) -> Option<(ProjectId, &str)>;
 
     fn id(&self) -> uuid::Uuid;
 
@@ -124,15 +124,15 @@ pub trait LibrarySynced: Sized + Send + Sync + 'static {
     fn to_synced_file(&self) -> SyncedFile {
         let id = self.id();
         let id_prefix = id.to_string()[..8].to_string();
-        let (workspace_id, workspace_name) = match self.workspace() {
+        let (project_id, project_name) = match self.project() {
             Some((id, name)) => (Some(id), Some(name.to_string())),
             None => (None, None),
         };
         SyncedFile {
             doc_id: id,
             doc_type: Self::DOC_TYPE,
-            workspace_id,
-            workspace_name,
+            project_id,
+            project_name,
             slug: slugify(self.display_name()),
             id_prefix,
             created_at: self.created_at().to_rfc3339(),
@@ -161,8 +161,8 @@ pub trait LibraryImporter: Send + Sync + 'static {
     const JOB_TYPE: &'static str;
 
     /// `true` rejects parsed files whose folder doesn't resolve to a
-    /// workspace; `false` allows global files.
-    const WORKSPACE_REQUIRED: bool = false;
+    /// project; `false` allows global files.
+    const PROJECT_REQUIRED: bool = false;
 
     /// Parse on-disk bytes into a `SyncedFile`. `None` means "skip"
     /// (logged by the runner). `needs_rewrite` is reflected back to the
@@ -173,7 +173,7 @@ pub trait LibraryImporter: Send + Sync + 'static {
         &self,
         op: &mut es_entity::DbOp<'_>,
         file: &SyncedFile,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
         file_hash: GitFileHash,
     ) -> impl std::future::Future<Output = Result<(), UpsertError>> + Send;
 }
@@ -215,15 +215,15 @@ impl SyncFromLibraryConfig {
 pub struct SyncFromLibraryJobInitializer<S: LibraryImporter> {
     library: Arc<Library>,
     service: Arc<S>,
-    workspaces: Arc<Workspaces>,
+    projects: Arc<Projects>,
 }
 
 impl<S: LibraryImporter> SyncFromLibraryJobInitializer<S> {
-    pub fn new(library: Arc<Library>, service: Arc<S>, workspaces: Arc<Workspaces>) -> Self {
+    pub fn new(library: Arc<Library>, service: Arc<S>, projects: Arc<Projects>) -> Self {
         Self {
             library,
             service,
-            workspaces,
+            projects,
         }
     }
 }
@@ -244,7 +244,7 @@ impl<S: LibraryImporter> JobInitializer for SyncFromLibraryJobInitializer<S> {
         Ok(Box::new(SyncFromLibraryRunner::<S> {
             library: Arc::clone(&self.library),
             service: Arc::clone(&self.service),
-            workspaces: Arc::clone(&self.workspaces),
+            projects: Arc::clone(&self.projects),
             config,
             spawner,
         }))
@@ -254,7 +254,7 @@ impl<S: LibraryImporter> JobInitializer for SyncFromLibraryJobInitializer<S> {
 struct SyncFromLibraryRunner<S: LibraryImporter> {
     library: Arc<Library>,
     service: Arc<S>,
-    workspaces: Arc<Workspaces>,
+    projects: Arc<Projects>,
     config: SyncFromLibraryConfig,
     spawner: JobSpawner<SyncFromLibraryConfig>,
 }
@@ -321,30 +321,30 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
             "processing changed files from library"
         );
 
-        let mut ws_cache: std::collections::HashMap<String, Option<WorkspaceId>> =
+        let mut ws_cache: std::collections::HashMap<String, Option<ProjectId>> =
             std::collections::HashMap::new();
-        let mut resolved: Vec<(ParsedFile, Option<WorkspaceId>)> =
+        let mut resolved: Vec<(ParsedFile, Option<ProjectId>)> =
             Vec::with_capacity(changes.files.len());
 
         for parsed in changes.files {
-            let ws_id = match &parsed.file.workspace_name {
+            let project_id = match &parsed.file.project_name {
                 Some(name) => match ws_cache.get(name).copied() {
                     Some(cached) => cached,
                     None => {
-                        let id = match self.workspaces.find_by_name(name).await {
-                            Ok(Some(ws)) => Some(ws.id),
+                        let id = match self.projects.find_by_name(name).await {
+                            Ok(Some(project)) => Some(project.id),
                             Ok(None) => {
                                 tracing::warn!(
-                                    workspace_name = %name,
-                                    "workspace not found for library file"
+                                    project_name = %name,
+                                    "project not found for library file"
                                 );
                                 None
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    workspace_name = %name,
+                                    project_name = %name,
                                     error = %e,
-                                    "workspace lookup failed"
+                                    "project lookup failed"
                                 );
                                 None
                             }
@@ -356,19 +356,19 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
                 None => None,
             };
 
-            if S::WORKSPACE_REQUIRED && ws_id.is_none() {
-                tracing::warn!(doc_type, "workspace required but unresolved; skipping");
+            if S::PROJECT_REQUIRED && project_id.is_none() {
+                tracing::warn!(doc_type, "project required but unresolved; skipping");
                 continue;
             }
-            resolved.push((parsed, ws_id));
+            resolved.push((parsed, project_id));
         }
 
         let mut op = current_job.begin_op().await?;
-        for (parsed, ws_id) in &resolved {
+        for (parsed, project_id) in &resolved {
             let file_hash = parsed.file.file_hash();
             if let Err(e) = self
                 .service
-                .upsert_in_op(&mut op, &parsed.file, *ws_id, file_hash)
+                .upsert_in_op(&mut op, &parsed.file, *project_id, file_hash)
                 .await
             {
                 tracing::warn!(

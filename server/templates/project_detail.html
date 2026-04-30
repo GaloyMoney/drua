@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }} — Settings — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .proj-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .proj-back:hover { color: var(--pico-primary); }
+  .proj-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .proj-mode-header h4 { margin: 0; font-size: 1rem; }
+  .proj-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .proj-settings-btn.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/projects" class="proj-back">&larr; Projects</a>
+<div class="proj-mode-header">
+  <h4>{{ project.name }}</h4>
+  <a href="/projects/{{ project.id }}" class="proj-settings-btn active" title="Project settings">&#9881;</a>
+</div>
+
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/projects/{{ project.id }}/chat?agent={{ lead.id }}" class="agent-item">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for agent in agents %}
+<a href="/projects/{{ project.id }}/chat?agent={{ agent.id }}" class="agent-item">
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+<a href="/projects/{{ project.id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/projects/{{ project.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/projects/{{ project.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/projects/{{ project.id }}/workflows" class="agent-item">Workflows</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<h2>Project Settings</h2>
+
+<form data-gql-mutation="mutation($input: ProjectUpdateInput!) { projectUpdate(input: $input) { project { id } } }"
+      data-gql-build="buildProjectUpdate"
+      data-gql-reload="true">
+  <label>
+    Name
+    <input type="text" value="{{ project.name }}" disabled>
+  </label>
+  <label>
+    Description
+    <textarea name="description" rows="3">{{ project.description }}</textarea>
+  </label>
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Save Changes</button>
+    <a href="/projects/{{ project.id }}/chat" role="button" class="outline">Back to Chat</a>
+  </div>
+</form>
+<script>
+  function buildProjectUpdate(fd) {
+    const desc = fd.get('description');
+    return { id: "{{ project.id }}", name: "{{ project.name }}", description: desc || null };
+  }
+</script>
+
+<hr>
+
+<h3>Secrets</h3>
+<p><small>Secrets are injected into the agent sandbox as environment variables or files. Values are never displayed after creation.</small></p>
+
+<div id="secrets-list"
+     hx-get="/projects/{{ project.id }}/secrets/list"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  <p aria-busy="true">Loading secrets...</p>
+</div>
+
+<details>
+  <summary>Add Secret</summary>
+  <form data-gql-mutation="mutation($input: ProjectSecretCreateInput!) { projectSecretCreate(input: $input) { projectSecret { id } } }"
+        data-gql-build="buildSecretCreate"
+        data-gql-target="#secrets-list"
+        data-gql-refresh-url="/projects/{{ project.id }}/secrets/list">
+    <label>
+      Name
+      <input type="text" name="name" required placeholder="e.g. GITHUB_TOKEN" pattern="[A-Za-z_][A-Za-z0-9_]*">
+    </label>
+    <label>
+      Type
+      <select name="secret_type" required>
+        <option value="ENV_VAR">Environment Variable</option>
+        <option value="FILE">File (/run/secrets/&lt;name&gt;)</option>
+      </select>
+    </label>
+    <label>
+      Value
+      <input type="password" name="value" required placeholder="Secret value">
+    </label>
+    <button type="submit">Add Secret</button>
+  </form>
+  <script>
+    function buildSecretCreate(fd) {
+      return { projectId: "{{ project.id }}", name: fd.get('name'), secretType: fd.get('secret_type'), value: fd.get('value') };
+    }
+  </script>
+</details>
+
+<hr>
+<details>
+  <summary>Danger Zone</summary>
+  <p>Deleting a project will archive it and revoke MCP credentials for all its agents.</p>
+  <button
+    data-gql-mutation="mutation($input: ProjectDeleteInput!) { projectDelete(input: $input) { project { id } } }"
+    data-gql-input='{"id":"{{ project.id }}"}'
+    data-gql-confirm="Are you sure you want to delete this project? This will revoke all agent credentials."
+    data-gql-redirect="/projects"
+    class="secondary outline"
+    style="color: var(--pico-color-red-500, #c62828);"
+  >
+    Delete Project
+  </button>
+</details>
+
+<footer>
+  <small>Created: {{ project.created_at }} | ID: <code>{{ project.id }}</code></small>
+</footer>
+{% endblock %}

@@ -39,7 +39,7 @@ struct SpacesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    authorized_workspaces: Option<Vec<String>>,
+    authorized_projects: Option<Vec<String>>,
 }
 
 static SPACES_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
@@ -88,7 +88,7 @@ impl TopLevelTool for SpacesTool {
         "Manage library spaces — bounded collaborative folders under \
          `spaces/<slug>/` in the knowledge-base repo. Commands: \
          `create` (requires `slug`, optional `description`). The calling \
-         agent's workspace is auto-added to the space's authorized list."
+         agent's project is auto-added to the space's authorized list."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -121,12 +121,12 @@ impl TopLevelTool for SpacesTool {
                     .await?;
 
                 let authorized: Vec<String> = space
-                    .authorized_workspaces
+                    .authorized_projects
                     .iter()
                     .map(ToString::to_string)
                     .collect();
                 let text = format!(
-                    "Space created.\n  id: {}\n  slug: {}\n  authorized_workspaces: {}",
+                    "Space created.\n  id: {}\n  slug: {}\n  authorized_projects: {}",
                     space.id,
                     space.slug,
                     if authorized.is_empty() {
@@ -140,7 +140,7 @@ impl TopLevelTool for SpacesTool {
                     space_id: Some(space.id.to_string()),
                     slug: Some(space.slug.clone()),
                     description: space.description.clone(),
-                    authorized_workspaces: Some(authorized),
+                    authorized_projects: Some(authorized),
                 };
                 (text, out)
             }

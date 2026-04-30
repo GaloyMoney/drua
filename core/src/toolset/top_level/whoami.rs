@@ -40,7 +40,7 @@ struct WhoAmIOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     creds_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
+    project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,18 +101,18 @@ impl TopLevelTool for WhoAmI {
                 scopes: Some(scopes_list(scopes)),
                 ..Default::default()
             },
-            AuthSubject::Agent(workspace_id, agent_id, scopes) => WhoAmIOutput {
+            AuthSubject::Agent(project_id, agent_id, scopes) => WhoAmIOutput {
                 identity_type: "agent".into(),
-                workspace_id: Some(workspace_id.to_string()),
+                project_id: Some(project_id.to_string()),
                 agent_id: Some(agent_id.to_string()),
                 scopes: Some(scopes_list(scopes)),
                 ..Default::default()
             },
-            AuthSubject::AgentOnBehalfOfUser(user_id, workspace_id, agent_id, scopes) => {
+            AuthSubject::AgentOnBehalfOfUser(user_id, project_id, agent_id, scopes) => {
                 WhoAmIOutput {
                     identity_type: "agent_on_behalf_of_user".into(),
                     user_id: Some(user_id.to_string()),
-                    workspace_id: Some(workspace_id.to_string()),
+                    project_id: Some(project_id.to_string()),
                     agent_id: Some(agent_id.to_string()),
                     scopes: Some(scopes_list(scopes)),
                     ..Default::default()

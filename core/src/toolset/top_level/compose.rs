@@ -488,7 +488,7 @@ mod tests {
         assert!(ts.contains("\"done\""), "{ts}");
     }
 
-    /// Workspace-admin tools (`agent`, `skill`, `workflow`, `sandbox`,
+    /// Project-admin tools (`agent`, `skill`, `workflow`, `sandbox`,
     /// `spaces`, `notes`, `log`) MUST be reachable from compose so admins
     /// can script-automate them. Stub `TopLevelTool` impls mirror the
     /// real tools' names and `composable() == true`; `generate_dts` then

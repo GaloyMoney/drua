@@ -150,9 +150,9 @@ struct LibraryFileOutput {
     title: String,
     body: String,
     tags: Vec<String>,
-    /// `null` for global content (skills with no workspace).
+    /// `null` for global content (skills with no project).
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
+    project_id: Option<String>,
     /// Populated only for `space_file` hits. The space's slug.
     #[serde(skip_serializing_if = "Option::is_none")]
     space_slug: Option<String>,
@@ -164,10 +164,10 @@ struct LibraryFileOutput {
 
 impl From<LibraryFile> for LibraryFileOutput {
     fn from(f: LibraryFile) -> Self {
-        let workspace_id = if f.workspace_id.is_nil() {
+        let project_id = if f.project_id.is_nil() {
             None
         } else {
-            Some(f.workspace_id.to_string())
+            Some(f.project_id.to_string())
         };
         Self {
             id: f.doc_id.to_string(),
@@ -175,7 +175,7 @@ impl From<LibraryFile> for LibraryFileOutput {
             title: f.title,
             body: f.body,
             tags: f.tags,
-            workspace_id,
+            project_id,
             space_slug: f.space_slug,
             relative_path: f.relative_path,
         }
@@ -238,9 +238,9 @@ impl LibraryToolSet {
         let tools = vec![
             tool_entry(
                 "search",
-                "Cross-type, cross-workspace library search across skills and notes. \
+                "Cross-type, cross-project library search across skills and notes. \
                  Hybrid FTS + semantic similarity. Always global — results span every \
-                 workspace the subject can read. Returns ranked snippets; pair with \
+                 project the subject can read. Returns ranked snippets; pair with \
                  `get_files` to load full bodies. Workflows are git-synced but not \
                  search-indexed.",
                 (*SEARCH_INPUT_SCHEMA).clone(),
@@ -370,7 +370,7 @@ impl SearchableToolSet for LibraryToolSet {
     }
 
     fn category_description(&self) -> &str {
-        "Cross-workspace skills + notes — hybrid FTS + semantic search and bulk fetch (read-only)"
+        "Cross-project skills + notes — hybrid FTS + semantic search and bulk fetch (read-only)"
     }
 
     fn tools(&self) -> &[ToolSetEntry] {
@@ -503,11 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn library_file_output_omits_nil_workspace() {
+    fn library_file_output_omits_nil_project() {
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
             doc_type: DocType::Skill,
-            workspace_id: uuid::Uuid::nil(),
+            project_id: uuid::Uuid::nil(),
             title: "global skill".into(),
             body: "body".into(),
             tags: vec![],
@@ -515,18 +515,18 @@ mod tests {
             relative_path: None,
         };
         let out = LibraryFileOutput::from(f);
-        assert!(out.workspace_id.is_none());
+        assert!(out.project_id.is_none());
         let v = serde_json::to_value(&out).unwrap();
-        assert!(!v.as_object().unwrap().contains_key("workspace_id"));
+        assert!(!v.as_object().unwrap().contains_key("project_id"));
     }
 
     #[test]
-    fn library_file_output_keeps_scoped_workspace() {
-        let ws = uuid::Uuid::new_v4();
+    fn library_file_output_keeps_scoped_project() {
+        let project = uuid::Uuid::new_v4();
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
             doc_type: DocType::Note,
-            workspace_id: ws,
+            project_id: project,
             title: "scoped note".into(),
             body: "body".into(),
             tags: vec!["t1".into()],
@@ -534,7 +534,10 @@ mod tests {
             relative_path: None,
         };
         let out = LibraryFileOutput::from(f);
-        assert_eq!(out.workspace_id.as_deref(), Some(ws.to_string().as_str()));
+        assert_eq!(
+            out.project_id.as_deref(),
+            Some(project.to_string().as_str())
+        );
     }
 
     #[test]
@@ -542,7 +545,7 @@ mod tests {
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
             doc_type: DocType::SpaceFile,
-            workspace_id: uuid::Uuid::nil(),
+            project_id: uuid::Uuid::nil(),
             title: "Incident playbook".into(),
             body: "body".into(),
             tags: vec![],
@@ -572,7 +575,7 @@ mod tests {
             title: "huge".into(),
             body: big_body.clone(),
             tags: vec![],
-            workspace_id: None,
+            project_id: None,
             space_slug: None,
             relative_path: None,
         };
@@ -594,7 +597,7 @@ mod tests {
                 title: format!("file {i}"),
                 body: body.clone(),
                 tags: vec![],
-                workspace_id: None,
+                project_id: None,
                 space_slug: None,
                 relative_path: None,
             })
@@ -613,7 +616,7 @@ mod tests {
             title: "huge".into(),
             body: big_body.clone(),
             tags: vec![],
-            workspace_id: None,
+            project_id: None,
             space_slug: None,
             relative_path: None,
         }];

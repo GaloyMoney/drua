@@ -14,9 +14,9 @@ use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 pub enum WorkflowDefinitionEvent {
     Initialized {
         id: WorkflowDefinitionId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         #[serde(default)]
-        workspace_name: Option<String>,
+        project_name: Option<String>,
         name: String,
         description: Option<String>,
         trigger: WorkflowTrigger,
@@ -42,9 +42,9 @@ pub enum WorkflowDefinitionEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct WorkflowDefinition {
     pub id: WorkflowDefinitionId,
-    pub workspace_id: WorkspaceId,
+    pub project_id: ProjectId,
     #[builder(default)]
-    pub workspace_name: Option<String>,
+    pub project_name: Option<String>,
     pub name: String,
     #[builder(default)]
     pub description: Option<String>,
@@ -155,10 +155,8 @@ impl crate::library::LibrarySynced for WorkflowDefinition {
         )
     }
 
-    fn workspace(&self) -> Option<(WorkspaceId, &str)> {
-        self.workspace_name
-            .as_deref()
-            .map(|n| (self.workspace_id, n))
+    fn project(&self) -> Option<(ProjectId, &str)> {
+        self.project_name.as_deref().map(|n| (self.project_id, n))
     }
 
     fn id(&self) -> uuid::Uuid {
@@ -214,8 +212,8 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
             match event {
                 WorkflowDefinitionEvent::Initialized {
                     id,
-                    workspace_id,
-                    workspace_name,
+                    project_id,
+                    project_name,
                     name,
                     description,
                     trigger,
@@ -226,8 +224,8 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                 } => {
                     builder = builder
                         .id(*id)
-                        .workspace_id(*workspace_id)
-                        .workspace_name(workspace_name.clone())
+                        .project_id(*project_id)
+                        .project_name(project_name.clone())
                         .name(name.clone())
                         .description(description.clone())
                         .trigger(trigger.clone())
@@ -272,9 +270,9 @@ pub struct NewWorkflowDefinition {
     #[builder(setter(into))]
     pub(super) id: WorkflowDefinitionId,
     #[builder(setter(into))]
-    pub(super) workspace_id: WorkspaceId,
+    pub(super) project_id: ProjectId,
     #[builder(default, setter(into, strip_option))]
-    pub(super) workspace_name: Option<String>,
+    pub(super) project_name: Option<String>,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(default, setter(into, strip_option))]
@@ -299,8 +297,8 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
             self.id,
             [WorkflowDefinitionEvent::Initialized {
                 id: self.id,
-                workspace_id: self.workspace_id,
-                workspace_name: self.workspace_name,
+                project_id: self.project_id,
+                project_name: self.project_name,
                 name: self.name,
                 description: self.description,
                 trigger: self.trigger,
@@ -330,7 +328,7 @@ mod tests {
 
     fn build() -> WorkflowDefinition {
         let new = NewWorkflowDefinition::builder()
-            .workspace_id(WorkspaceId::new())
+            .project_id(ProjectId::new())
             .name("test-flow")
             .trigger(WorkflowTrigger::Webhook {
                 provider: Some("honeycomb".into()),
@@ -353,7 +351,7 @@ mod tests {
     #[test]
     fn workflow_definition_hydrates_preexisting_sandbox_decl() {
         let new = NewWorkflowDefinition::builder()
-            .workspace_id(WorkspaceId::new())
+            .project_id(ProjectId::new())
             .name("uses-existing")
             .trigger(WorkflowTrigger::Manual)
             .steps(vec![sample_step()])

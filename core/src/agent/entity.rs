@@ -4,8 +4,8 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::{
-    AgentId, AuthScope, AuthSubject, SandboxId, UserId, WorkflowDefinitionId, WorkflowRunId,
-    WorkspaceId,
+    AgentId, AuthScope, AuthSubject, ProjectId, SandboxId, UserId, WorkflowDefinitionId,
+    WorkflowRunId,
 };
 use crate::sandbox::SandboxAgentMode;
 use es_entity::*;
@@ -14,7 +14,7 @@ use es_entity::*;
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum AgentRole {
-    WorkspaceLead,
+    ProjectLead,
     Agent,
 }
 
@@ -24,11 +24,11 @@ pub enum AgentRole {
 pub enum AgentEvent {
     Initialized {
         id: AgentId,
-        workspace_id: WorkspaceId,
+        project_id: ProjectId,
         agent_role: AgentRole,
         name: String,
         authz_scopes: Vec<AuthScope>,
-        workspace_name: String,
+        project_name: String,
         #[serde(default)]
         workflow_id: Option<WorkflowDefinitionId>,
         #[serde(default)]
@@ -53,11 +53,11 @@ pub enum AgentEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Agent {
     pub id: AgentId,
-    pub workspace_id: WorkspaceId,
+    pub project_id: ProjectId,
     pub agent_role: AgentRole,
     pub name: String,
     /// Set at creation; never updated (rename does not propagate).
-    pub workspace_name: String,
+    pub project_name: String,
     /// `HashSet` enforces no-duplicates; wire format stays `Vec<AuthScope>`
     /// for backward-compatible JSON serialization.
     pub authz_scopes: HashSet<AuthScope>,
@@ -65,7 +65,7 @@ pub struct Agent {
     #[builder(default)]
     pub attached_sandbox: Option<(SandboxId, SandboxAgentMode)>,
     /// `Some` for agents spawned by a workflow run — hidden from
-    /// `Agents::list_for_workspace`. Set together with `workflow_run_id`.
+    /// `Agents::list_for_project`. Set together with `workflow_run_id`.
     #[builder(default)]
     pub workflow_id: Option<WorkflowDefinitionId>,
     #[builder(default)]
@@ -84,13 +84,13 @@ impl Agent {
 
     /// Use when no originating user can be attributed.
     pub fn auth_subject(&self) -> AuthSubject {
-        AuthSubject::Agent(self.workspace_id, self.id, self.scopes_vec())
+        AuthSubject::Agent(self.project_id, self.id, self.scopes_vec())
     }
 
     /// Tagged with the originating user so downstream actions can be
     /// attributed back.
     pub fn auth_subject_for_user(&self, user_id: UserId) -> AuthSubject {
-        AuthSubject::AgentOnBehalfOfUser(user_id, self.workspace_id, self.id, self.scopes_vec())
+        AuthSubject::AgentOnBehalfOfUser(user_id, self.project_id, self.id, self.scopes_vec())
     }
 
     /// Records only the effective delta; returns `AlreadyApplied` when empty.
@@ -127,7 +127,7 @@ impl Agent {
         sandbox_id: SandboxId,
         mode: SandboxAgentMode,
     ) -> Result<Idempotent<()>, super::error::AgentError> {
-        if matches!(self.agent_role, AgentRole::WorkspaceLead) {
+        if matches!(self.agent_role, AgentRole::ProjectLead) {
             return Err(super::error::AgentError::LeadCannotAttachSandbox);
         }
 
@@ -201,20 +201,20 @@ impl TryFromEvents<AgentEvent> for Agent {
             match event {
                 AgentEvent::Initialized {
                     id,
-                    workspace_id,
+                    project_id,
                     agent_role,
                     name,
                     authz_scopes,
-                    workspace_name,
+                    project_name,
                     workflow_id,
                     workflow_run_id,
                 } => {
                     builder = builder
                         .id(*id)
-                        .workspace_id(*workspace_id)
+                        .project_id(*project_id)
                         .agent_role(*agent_role)
                         .name(name.clone())
-                        .workspace_name(workspace_name.clone())
+                        .project_name(project_name.clone())
                         .workflow_id(*workflow_id)
                         .workflow_run_id(*workflow_run_id);
                     scopes = authz_scopes.iter().cloned().collect();
@@ -250,13 +250,13 @@ impl TryFromEvents<AgentEvent> for Agent {
 pub struct NewAgent {
     #[builder(setter(into))]
     pub(super) id: AgentId,
-    pub(super) workspace_id: WorkspaceId,
+    pub(super) project_id: ProjectId,
     pub(super) agent_role: AgentRole,
     #[builder(setter(into))]
     pub(super) name: String,
     pub(super) authz_scopes: Vec<AuthScope>,
     #[builder(setter(into))]
-    pub(super) workspace_name: String,
+    pub(super) project_name: String,
     #[builder(default, setter(into, strip_option))]
     pub(super) workflow_id: Option<WorkflowDefinitionId>,
     #[builder(default, setter(into, strip_option))]
@@ -275,11 +275,11 @@ impl IntoEvents<AgentEvent> for NewAgent {
             self.id,
             [AgentEvent::Initialized {
                 id: self.id,
-                workspace_id: self.workspace_id,
+                project_id: self.project_id,
                 agent_role: self.agent_role,
                 name: self.name,
                 authz_scopes: self.authz_scopes,
-                workspace_name: self.workspace_name,
+                project_name: self.project_name,
                 workflow_id: self.workflow_id,
                 workflow_run_id: self.workflow_run_id,
             }],
@@ -297,11 +297,11 @@ mod tests {
         let mut builder = NewAgent::builder();
         builder
             .id(AgentId::new())
-            .workspace_id(WorkspaceId::new())
+            .project_id(ProjectId::new())
             .agent_role(AgentRole::Agent)
             .name("test")
             .authz_scopes(Vec::new())
-            .workspace_name("ws");
+            .project_name("project");
         if let Some(wf) = workflow_id {
             builder.workflow_id(wf);
         }

@@ -23,21 +23,21 @@ If you're already logged in, it skips straight to the tui.
 | `drua login` | Authenticate with a drua server |
 | `drua logout` | Remove stored credentials |
 | `drua status` | Show current connection status |
-| `drua workspace list` | List all workspaces |
-| `drua workspace create <name>` | Create a new workspace |
-| `drua workspace show <id>` | Show workspace details |
+| `drua project list` | List all projects |
+| `drua project create <name>` | Create a new project |
+| `drua project show <id>` | Show project details |
 
 ## Dashboard keys
 
 ### Sidebar (default focus)
-- `↑/↓` or `j/k` — navigate workspaces
-- `n` — create new workspace
-- `r` — refresh workspace list
+- `↑/↓` or `j/k` — navigate projects
+- `n` — create new project
+- `r` — refresh project list
 - `Tab` — switch to chat pane
 - `q` — quit
 
 ### Chat pane
-- Type to compose a message to the workspace lead agent
+- Type to compose a message to the project lead agent
 - `Enter` — send message
 - `↑/↓` — scroll chat history
 - `Esc` or `Tab` — return to sidebar

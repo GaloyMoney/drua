@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+
+{% block title %}Sandboxes — {{ project.name }} — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .proj-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .proj-back:hover { color: var(--pico-primary); }
+  .proj-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .proj-mode-header h4 { margin: 0; font-size: 1rem; }
+  .proj-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .proj-settings-btn:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover,
+  .agent-item.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/projects" class="proj-back">&larr; Projects</a>
+<div class="proj-mode-header">
+  <h4>{{ project.name }}</h4>
+  <a href="/projects/{{ project.id }}" class="proj-settings-btn" title="Project settings">&#9881;</a>
+</div>
+
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/projects/{{ project.id }}/chat?agent={{ lead.id }}" class="agent-item">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for agent in agents %}
+<a href="/projects/{{ project.id }}/chat?agent={{ agent.id }}" class="agent-item">
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+<a href="/projects/{{ project.id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/projects/{{ project.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/projects/{{ project.id }}/sandboxes" class="agent-item active">Sandboxes</a></li>
+    <li><a href="/projects/{{ project.id }}/workflows" class="agent-item">Workflows</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<h2>Sandboxes</h2>
+<p><small>Isolated projects where agents run tools and edit files.</small></p>
+
+{% if sandboxes.is_empty() %}
+<p><em>No sandboxes yet.</em></p>
+{% else %}
+<figure>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>State</th>
+        <th>Mode</th>
+        <th>Exports</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for sandbox in sandboxes %}
+      <tr style="cursor: pointer;" onclick="window.location='/projects/{{ project.id }}/sandboxes/{{ sandbox.id }}'">
+        <td><strong>{{ sandbox.name }}</strong></td>
+        <td><code>{{ sandbox.state }}</code></td>
+        <td>{{ sandbox.mode_label }}</td>
+        <td><small>{{ sandbox.exports_summary }}</small></td>
+        <td><small>{{ sandbox.created_at }}</small></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</figure>
+{% endif %}
+
+<a href="/projects/{{ project.id }}/sandboxes/new" role="button">New Sandbox</a>
+{% endblock %}

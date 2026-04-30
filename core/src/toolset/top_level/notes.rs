@@ -8,7 +8,7 @@ use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::SearchResult;
 use crate::note::Notes;
 use crate::primitives::NoteId;
-use crate::workspace::Workspaces;
+use crate::project::Projects;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -143,26 +143,26 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-async fn resolve_workspace_name(
-    workspaces: &Workspaces,
+async fn resolve_project_name(
+    projects: &Projects,
     subject: &AuthSubject,
 ) -> Result<String, ToolSetsError> {
-    let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
-    let ws = workspaces
-        .find_by_id(subject, workspace_id)
+    let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
+    let project = projects
+        .find_by_id(subject, project_id)
         .await
-        .map_err(|e| ToolSetsError::Workspace(e.to_string()))?;
-    Ok(ws.name)
+        .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+    Ok(project.name)
 }
 
 pub struct NotesTool {
     notes: Arc<Notes>,
-    workspaces: Arc<Workspaces>,
+    projects: Arc<Projects>,
 }
 
 impl NotesTool {
-    pub fn new(notes: Arc<Notes>, workspaces: Arc<Workspaces>) -> Self {
-        Self { notes, workspaces }
+    pub fn new(notes: Arc<Notes>, projects: Arc<Projects>) -> Self {
+        Self { notes, projects }
     }
 }
 
@@ -173,7 +173,7 @@ impl TopLevelTool for NotesTool {
     }
 
     fn description(&self) -> &str {
-        "Workspace knowledge base — persistent memory shared across agents. \
+        "Project knowledge base — persistent memory shared across agents. \
          Store findings, decisions, and task outcomes so future agents benefit. \
          Commands: `store` (create/update), `get` (by ID), \
          `search` (hybrid keyword + semantic), `list` (recent first), \
@@ -189,9 +189,9 @@ impl TopLevelTool for NotesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.workspace_id().is_some_and(|ws| {
+        subject.project_id().is_some_and(|project| {
             subject
-                .can(AuthVerb::Read, AuthResource::Note(ws, None))
+                .can(AuthVerb::Read, AuthResource::Note(project, None))
                 .is_ok()
         })
     }
@@ -201,7 +201,7 @@ impl TopLevelTool for NotesTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let workspace_id = subject.workspace_id().ok_or(ToolSetsError::Unauthorized)?;
+        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
         let params: NotesParams = parse_params(arguments)?;
 
         Audit::record_action(format!("notes.{}", params.command_name()));
@@ -213,13 +213,13 @@ impl TopLevelTool for NotesTool {
                 tags,
                 note_id,
             } => {
-                let workspace_name = resolve_workspace_name(&self.workspaces, subject).await?;
+                let project_name = resolve_project_name(&self.projects, subject).await?;
                 let note = self
                     .notes
                     .store_or_update(
                         subject,
-                        workspace_id,
-                        &workspace_name,
+                        project_id,
+                        &project_name,
                         note_id,
                         title,
                         content,
@@ -247,7 +247,7 @@ impl TopLevelTool for NotesTool {
             NotesParams::Get { note_id } => {
                 let note = self
                     .notes
-                    .find_by_id(subject, workspace_id, note_id)
+                    .find_by_id(subject, project_id, note_id)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
@@ -266,7 +266,7 @@ impl TopLevelTool for NotesTool {
             NotesParams::Search { query, limit } => {
                 let results: Vec<SearchResult> = self
                     .notes
-                    .search(subject, workspace_id, &query, limit)
+                    .search(subject, project_id, &query, limit)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
@@ -302,7 +302,7 @@ impl TopLevelTool for NotesTool {
             NotesParams::Pin { note_id } => {
                 let note = self
                     .notes
-                    .pin(subject, workspace_id, note_id)
+                    .pin(subject, project_id, note_id)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
                 let text = format!("Note pinned.\n{note}");
@@ -319,7 +319,7 @@ impl TopLevelTool for NotesTool {
             NotesParams::Unpin { note_id } => {
                 let note = self
                     .notes
-                    .unpin(subject, workspace_id, note_id)
+                    .unpin(subject, project_id, note_id)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
                 let text = format!("Note unpinned.\n{note}");
@@ -336,7 +336,7 @@ impl TopLevelTool for NotesTool {
             NotesParams::List { limit } => {
                 let notes = self
                     .notes
-                    .list(subject, workspace_id, limit)
+                    .list(subject, project_id, limit)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
@@ -344,7 +344,7 @@ impl TopLevelTool for NotesTool {
                     notes.into_iter().map(SearchResult::from).collect();
 
                 let text = if results.is_empty() {
-                    "No notes in this workspace yet.".to_string()
+                    "No notes in this project yet.".to_string()
                 } else {
                     let body = results
                         .iter()

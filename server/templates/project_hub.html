@@ -1,0 +1,453 @@
+{% extends "base.html" %}
+
+{% block title %}Projects — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  /* ── Sidebar: top-level project list ─────────────────── */
+  .proj-list-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .proj-list-item:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .proj-new-link {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+    text-decoration: none;
+  }
+  .proj-new-link:hover { color: var(--pico-primary); }
+
+  /* ── Sidebar: project-mode header ────────────────────── */
+  .proj-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .proj-back:hover { color: var(--pico-primary); }
+  .proj-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .proj-mode-header h4 { margin: 0; font-size: 1rem; }
+  .proj-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .proj-settings-btn:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+
+  /* ── Sidebar: agent list ───────────────────────────────── */
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover,
+  .agent-item.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+
+  /* ── Main: chat layout ─────────────────────────────────── */
+  .chat-layout {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 4rem);
+  }
+  .chat-header {
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .chat-header h3 { margin: 0; font-size: 1.1rem; }
+  .chat-header small { color: var(--pico-muted-color); }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    font-family: monospace;
+    font-size: 0.85rem;
+    background: var(--pico-code-background-color);
+  }
+  .messages .msg { margin-bottom: 0.5rem; white-space: pre-wrap; word-break: break-word; }
+  .messages .msg-system { color: var(--pico-muted-color); }
+  .messages .msg-assistant { color: var(--pico-color); }
+  .messages .msg-error { color: var(--pico-del-color); }
+  .messages .msg-result { color: var(--pico-ins-color); }
+  .chat-input { display: flex; gap: 0.5rem; }
+  .chat-input textarea { flex: 1; resize: none; margin: 0; }
+  .chat-input button { width: auto; align-self: end; margin: 0; }
+
+  /* ── Main: welcome state ───────────────────────────────── */
+  .hub-welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: calc(100vh - 6rem);
+    text-align: center;
+    color: var(--pico-muted-color);
+  }
+  .hub-welcome h2 { margin-bottom: 0.5rem; }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+{% if !selected_project_id.is_empty() %}
+{# ── Project mode: zoomed-in sidebar ──────────────────── #}
+<a href="/projects" class="proj-back">&larr; Projects</a>
+<div class="proj-mode-header">
+  {% match selected_project %}{% when Some(sel) %}<h4>{{ sel.name }}</h4>{% when None %}<h4>Project</h4>{% endmatch %}
+  <a href="/projects/{{ selected_project_id }}" class="proj-settings-btn" title="Project settings">&#9881;</a>
+</div>
+
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/projects/{{ selected_project_id }}/chat?agent={{ lead.id }}"
+     class="agent-item{% if selected_agent_id == lead.id %} active{% endif %}">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for agent in agents %}
+<a href="/projects/{{ selected_project_id }}/chat?agent={{ agent.id }}"
+   class="agent-item{% if selected_agent_id == agent.id %} active{% endif %}"
+>
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+<a href="/projects/{{ selected_project_id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/projects/{{ selected_project_id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/projects/{{ selected_project_id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/projects/{{ selected_project_id }}/workflows" class="agent-item">Workflows</a></li>
+  </ul>
+</nav>
+
+{% else %}
+{# ── Top-level mode: nav + project list ───────────────── #}
+<h4>Galoy Agents</h4>
+
+<div class="section-label">Projects</div>
+{% for project in projects %}
+<a href="/projects/{{ project.id }}/chat" class="proj-list-item">{{ project.name }}</a>
+{% endfor %}
+<a href="/projects/new" class="proj-new-link">+ New Project</a>
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/dashboard">MCP Credentials</a></li>
+    <li><a href="/library">Library</a></li>
+    <li><a href="/code-assistant">Code Assistant</a></li>
+  </ul>
+  <div class="section-label">Administration</div>
+  <ul>
+    <li><a href="/audit">Audit Log</a></li>
+  </ul>
+</nav>
+{% endif %}
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+{% match selected_project %}
+  {% when Some(sel) %}
+    {% if !selected_agent_id.is_empty() %}
+      <div class="chat-layout">
+        <div class="chat-header">
+          <div>
+            {% match selected_agent %}
+              {% when Some(sa) %}<h3>{{ sa.name }}</h3>
+              {% when None %}<h3>{{ sel.name }}</h3>
+            {% endmatch %}
+            <small>Agent chat{% match selected_agent_model %}{% when Some(m) %} &middot; <code>{{ m }}</code>{% when None %}{% endmatch %}</small>
+          </div>
+          <a href="/projects/{{ selected_project_id }}/agents/{{ selected_agent_id }}"
+             class="proj-settings-btn" title="Agent settings">&#9881;</a>
+        </div>
+        <div class="messages" id="messages"></div>
+        <div class="chat-input">
+          <textarea id="prompt" rows="3" placeholder="Type a message..."></textarea>
+          <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+
+      <script>
+      const agentId = '{{ selected_agent_id }}';
+
+      function appendMsg(cls, text) {
+        const el = document.createElement('div');
+        el.className = 'msg ' + cls;
+        el.textContent = text;
+        const container = document.getElementById('messages');
+        container.appendChild(el);
+        container.scrollTop = container.scrollHeight;
+      }
+
+      function appendOrStream(cls, text) {
+        const container = document.getElementById('messages');
+        const last = container.lastElementChild;
+        if (last && last.classList.contains(cls) && last.dataset.streaming === '1') {
+          last.textContent += text;
+        } else {
+          const el = document.createElement('div');
+          el.className = 'msg ' + cls;
+          el.dataset.streaming = '1';
+          el.textContent = text;
+          container.appendChild(el);
+        }
+        container.scrollTop = container.scrollHeight;
+      }
+
+      const CHAT_HISTORY_QUERY = `query ChatHistory($agentId: AgentId!) {
+        agent(id: $agentId) {
+          session {
+            chatHistory(last: 50) {
+              role
+              content {
+                __typename
+                ... on TextContent { text }
+                ... on ToolUseContent { name input }
+                ... on ThinkingContent { text }
+                ... on ToolResultContent { content isError }
+                ... on SandboxNotificationContent { sandboxName operation mode text }
+              }
+            }
+          }
+        }
+      }`;
+
+      function renderHistoryBlock(role, block) {
+        const t = block.__typename;
+        if (t === 'TextContent') {
+          if (role === 'USER') {
+            appendMsg('msg-system', '> ' + block.text);
+          } else {
+            appendMsg('msg-assistant', block.text);
+          }
+        } else if (t === 'ThinkingContent') {
+          appendMsg('msg-system', '(thinking) ' + block.text);
+        } else if (t === 'ToolUseContent') {
+          appendMsg('msg-system', 'Tool call: ' + block.name);
+        } else if (t === 'ToolResultContent') {
+          const prefix = block.isError ? 'tool error: ' : 'tool ok: ';
+          appendMsg('msg-system', prefix + (block.content || ''));
+        } else if (t === 'SandboxNotificationContent') {
+          appendMsg('msg-system', '[' + block.sandboxName + '] ' + block.operation + ': ' + block.text);
+        }
+      }
+
+      async function loadHistory() {
+        if (!agentId) return;
+        try {
+          const resp = await fetch('/graphql', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: CHAT_HISTORY_QUERY,
+              variables: { agentId: agentId },
+            }),
+          });
+          if (!resp.ok) return;
+          const body = await resp.json();
+          const messages = body && body.data && body.data.agent && body.data.agent.session
+            ? body.data.agent.session.chatHistory
+            : null;
+          if (!messages || !messages.length) return;
+          for (const msg of messages) {
+            for (const block of msg.content) {
+              renderHistoryBlock(msg.role, block);
+            }
+          }
+          appendMsg('msg-result', '— end of history —');
+        } catch (e) {
+          appendMsg('msg-error', 'Failed to load history: ' + e.message);
+        }
+      }
+
+      const AGENT_MESSAGE_SUBSCRIPTION = `subscription ($agentId: AgentId!, $prompt: String!) {
+        agentSendMessage(agentId: $agentId, prompt: $prompt) {
+          __typename
+          ... on AssistantTextDeltaEvent { text }
+          ... on ThinkingDeltaEvent { text }
+          ... on ToolCallStartEvent { name }
+          ... on ToolCallInputDeltaEvent { partialJson }
+          ... on AssistantTextEvent { text }
+          ... on ThinkingEvent { text }
+          ... on UserMessageEvent { text }
+          ... on ToolResultEvent { name isError content }
+          ... on AssistantDoneEvent { turns inputTokens outputTokens durationMs costUsd }
+          ... on ErrorEvent { message }
+          ... on ServiceEvent { message }
+        }
+      }`;
+
+      function handleStreamEvent(event) {
+        const t = event.__typename;
+        if (t === 'AssistantTextDeltaEvent') {
+          appendOrStream('msg-assistant', event.text);
+        } else if (t === 'ThinkingDeltaEvent') {
+          appendOrStream('msg-system', event.text);
+        } else if (t === 'ToolCallStartEvent') {
+          appendMsg('msg-system', 'Calling tool: ' + event.name + '...');
+        } else if (t === 'ToolCallInputDeltaEvent') {
+          // partial JSON — ignore in UI
+        } else if (t === 'AssistantTextEvent') {
+          appendMsg('msg-assistant', event.text);
+        } else if (t === 'ThinkingEvent') {
+          appendMsg('msg-system', '(thinking) ' + event.text);
+        } else if (t === 'UserMessageEvent') {
+          // Already rendered locally
+        } else if (t === 'ToolResultEvent') {
+          appendMsg('msg-system', (event.isError ? 'error: ' : 'ok: ') + event.name);
+        } else if (t === 'AssistantDoneEvent') {
+          const tokens = (event.inputTokens || 0) + (event.outputTokens || 0);
+          const parts = [(event.turns || 0) + ' turns', tokens + ' tokens'];
+          if (event.durationMs) parts.push((event.durationMs / 1000).toFixed(1) + 's');
+          if (event.costUsd) parts.push('$' + event.costUsd.toFixed(4));
+          appendMsg('msg-result', 'Done — ' + parts.join(', '));
+        } else if (t === 'ErrorEvent') {
+          appendMsg('msg-error', event.message || JSON.stringify(event));
+        } else if (t === 'ServiceEvent') {
+          appendMsg('msg-system', event.message);
+        }
+      }
+
+      async function sendMessage() {
+        const textarea = document.getElementById('prompt');
+        const prompt = textarea.value.trim();
+        if (!prompt) return;
+
+        textarea.value = '';
+        document.getElementById('send-btn').disabled = true;
+        appendMsg('msg-system', '> ' + prompt);
+
+        try {
+          const resp = await fetch('/graphql/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: AGENT_MESSAGE_SUBSCRIPTION,
+              variables: { agentId: agentId, prompt: prompt }
+            }),
+          });
+
+          if (!resp.ok) {
+            appendMsg('msg-error', 'Error: ' + resp.status);
+            return;
+          }
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            let eventType = '';
+            for (const line of lines) {
+              if (line.startsWith('event:')) {
+                eventType = line.slice(6).trim();
+              } else if (line.startsWith('data:')) {
+                const data = line.slice(5).trim();
+                if (eventType === 'complete' || !data) continue;
+                try {
+                  const gqlResp = JSON.parse(data);
+                  if (gqlResp.errors && gqlResp.errors.length) {
+                    appendMsg('msg-error', gqlResp.errors[0].message);
+                  } else if (gqlResp.data && gqlResp.data.agentSendMessage) {
+                    handleStreamEvent(gqlResp.data.agentSendMessage);
+                  }
+                } catch { /* ignore parse errors */ }
+              }
+            }
+          }
+        } catch (e) {
+          appendMsg('msg-error', 'Network error: ' + e.message);
+        } finally {
+          document.getElementById('send-btn').disabled = false;
+          textarea.focus();
+        }
+      }
+
+      document.getElementById('prompt').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+
+      loadHistory();
+      </script>
+    {% else %}
+      <div class="hub-welcome">
+        <h2>No agents found</h2>
+        <p>This project doesn't have any agents yet.</p>
+      </div>
+    {% endif %}
+  {% when None %}
+  <div class="hub-welcome">
+    <h2>Projects</h2>
+    <p>Select a project from the sidebar to get started,<br>or <a href="/projects/new">create a new one</a>.</p>
+  </div>
+{% endmatch %}
+{% endblock %}

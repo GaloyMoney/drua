@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::primitives::{AgentId, WorkflowDefinitionId, WorkflowRunId, WorkspaceId};
+use crate::primitives::{AgentId, ProjectId, WorkflowDefinitionId, WorkflowRunId};
 use es_entity::*;
 
 use super::entity::*;
@@ -9,7 +9,7 @@ use super::entity::*;
 #[es_repo(
     entity = "Agent",
     columns(
-        workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
+        project_id(ty = "ProjectId", list_for(by(created_at))),
         workflow_id(ty = "Option<WorkflowDefinitionId>"),
         workflow_run_id(ty = "Option<WorkflowRunId>", list_for(by(created_at))),
     ),

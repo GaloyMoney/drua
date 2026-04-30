@@ -1,6 +1,6 @@
 use sha1::{Digest, Sha1};
 
-use crate::primitives::{NoteId, SkillId, WorkspaceId};
+use crate::primitives::{NoteId, ProjectId, SkillId};
 
 use super::synced::{slugify, ParsedFile, SyncedFile};
 
@@ -77,7 +77,7 @@ impl DocType {
 pub struct SearchableFields {
     pub doc_id: uuid::Uuid,
     pub doc_type: DocType,
-    pub workspace_id: uuid::Uuid,
+    pub project_id: uuid::Uuid,
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
@@ -101,15 +101,15 @@ impl SearchableFields {
 pub enum UpstreamOp {
     WriteFile(Box<SyncedFile>),
     /// Job runner writes `.gitkeep` markers in `notes/`, `skills/`, and
-    /// `workflows/` under `runtime/workspaces/{workspace_name}/` in a
+    /// `workflows/` under `runtime/projects/{project_name}/` in a
     /// single commit + push.
-    WorkspaceInit {
-        workspace_name: String,
+    ProjectInit {
+        project_name: String,
     },
-    /// Job runner removes the entire `runtime/workspaces/{workspace_name}/`
+    /// Job runner removes the entire `runtime/projects/{project_name}/`
     /// directory from the library repo and pushes.
-    WorkspaceCleanup {
-        workspace_name: String,
+    ProjectCleanup {
+        project_name: String,
     },
     /// Job runner writes a `.gitkeep` marker at `spaces/{slug}/.gitkeep`
     /// so the directory is materialized for sparse-checkout sandboxes.
@@ -122,8 +122,8 @@ impl UpstreamOp {
     #[allow(clippy::too_many_arguments)]
     pub fn for_note(
         note_id: NoteId,
-        workspace_id: WorkspaceId,
-        workspace_name: &str,
+        project_id: ProjectId,
+        project_name: &str,
         title: &str,
         body: &str,
         tags: &[String],
@@ -136,8 +136,8 @@ impl UpstreamOp {
         UpstreamOp::WriteFile(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Note,
-            workspace_id: Some(workspace_id),
-            workspace_name: Some(workspace_name.to_string()),
+            project_id: Some(project_id),
+            project_name: Some(project_name.to_string()),
             slug: slugify(title),
             id_prefix,
             created_at: created_at.to_string(),
@@ -153,8 +153,8 @@ impl UpstreamOp {
     #[allow(clippy::too_many_arguments)]
     pub fn for_skill(
         skill_id: SkillId,
-        workspace_id: Option<WorkspaceId>,
-        workspace_name: Option<&str>,
+        project_id: Option<ProjectId>,
+        project_name: Option<&str>,
         name: &str,
         description: &str,
         body: &str,
@@ -163,8 +163,8 @@ impl UpstreamOp {
     ) -> Self {
         Self::for_skill_with_original_path(
             skill_id,
-            workspace_id,
-            workspace_name,
+            project_id,
+            project_name,
             name,
             description,
             body,
@@ -177,8 +177,8 @@ impl UpstreamOp {
     #[allow(clippy::too_many_arguments)]
     pub fn for_skill_with_original_path(
         skill_id: SkillId,
-        workspace_id: Option<WorkspaceId>,
-        workspace_name: Option<&str>,
+        project_id: Option<ProjectId>,
+        project_name: Option<&str>,
         name: &str,
         description: &str,
         body: &str,
@@ -192,8 +192,8 @@ impl UpstreamOp {
         UpstreamOp::WriteFile(Box::new(SyncedFile {
             doc_id: id,
             doc_type: DocType::Skill,
-            workspace_id,
-            workspace_name: workspace_name.map(|s| s.to_string()),
+            project_id,
+            project_name: project_name.map(|s| s.to_string()),
             slug: slugify(name),
             id_prefix,
             created_at: created_at.to_string(),
@@ -214,8 +214,8 @@ impl UpstreamOp {
     pub fn searchable_fields(&self) -> Option<SearchableFields> {
         match self {
             UpstreamOp::WriteFile(s) => Some(s.searchable_fields()),
-            UpstreamOp::WorkspaceInit { .. }
-            | UpstreamOp::WorkspaceCleanup { .. }
+            UpstreamOp::ProjectInit { .. }
+            | UpstreamOp::ProjectCleanup { .. }
             | UpstreamOp::SpaceInit { .. } => None,
         }
     }
@@ -223,9 +223,9 @@ impl UpstreamOp {
     pub(super) fn relative_path(&self) -> String {
         match self {
             UpstreamOp::WriteFile(s) => s.relative_path(),
-            UpstreamOp::WorkspaceInit { workspace_name }
-            | UpstreamOp::WorkspaceCleanup { workspace_name } => {
-                format!("runtime/workspaces/{workspace_name}")
+            UpstreamOp::ProjectInit { project_name }
+            | UpstreamOp::ProjectCleanup { project_name } => {
+                format!("runtime/projects/{project_name}")
             }
             UpstreamOp::SpaceInit { slug } => format!("spaces/{slug}"),
         }
@@ -234,8 +234,8 @@ impl UpstreamOp {
     pub(crate) fn content(&self) -> String {
         match self {
             UpstreamOp::WriteFile(s) => s.rendered.clone(),
-            UpstreamOp::WorkspaceInit { .. }
-            | UpstreamOp::WorkspaceCleanup { .. }
+            UpstreamOp::ProjectInit { .. }
+            | UpstreamOp::ProjectCleanup { .. }
             | UpstreamOp::SpaceInit { .. } => String::new(),
         }
     }
@@ -243,11 +243,11 @@ impl UpstreamOp {
     pub(super) fn commit_message(&self) -> String {
         match self {
             UpstreamOp::WriteFile(s) => s.commit_message(),
-            UpstreamOp::WorkspaceInit { workspace_name } => {
-                format!("workspace: init {workspace_name}")
+            UpstreamOp::ProjectInit { project_name } => {
+                format!("project: init {project_name}")
             }
-            UpstreamOp::WorkspaceCleanup { workspace_name } => {
-                format!("workspace: delete {workspace_name}")
+            UpstreamOp::ProjectCleanup { project_name } => {
+                format!("project: delete {project_name}")
             }
             UpstreamOp::SpaceInit { slug } => format!("space: init {slug}"),
         }
@@ -262,11 +262,11 @@ impl UpstreamOp {
 
     pub(crate) fn idempotency_key(&self) -> String {
         match self {
-            UpstreamOp::WorkspaceInit { workspace_name } => {
-                format!("workspace-init:{workspace_name}")
+            UpstreamOp::ProjectInit { project_name } => {
+                format!("project-init:{project_name}")
             }
-            UpstreamOp::WorkspaceCleanup { workspace_name } => {
-                format!("workspace-cleanup:{workspace_name}")
+            UpstreamOp::ProjectCleanup { project_name } => {
+                format!("project-cleanup:{project_name}")
             }
             UpstreamOp::SpaceInit { slug } => format!("space-init:{slug}"),
             UpstreamOp::WriteFile(s) => s.file_hash().to_string(),
@@ -324,16 +324,16 @@ pub fn render_skill_markdown(
 ///
 /// Returns `None` only if the content has no recognisable form.
 pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedFile> {
-    let workspace_name = workspace_name_from_skill_path(path);
+    let project_name = project_name_from_skill_path(path);
     let content = content.trim();
     if content.is_empty() {
         return None;
     }
 
     let mut parsed = if content.starts_with("---") {
-        parse_skill_with_frontmatter(content, workspace_name, path)?
+        parse_skill_with_frontmatter(content, project_name, path)?
     } else {
-        parse_skill_without_frontmatter(content, workspace_name, path)?
+        parse_skill_without_frontmatter(content, project_name, path)?
     };
 
     parsed.file.original_path = Some(path.to_string());
@@ -360,7 +360,7 @@ struct SkillFrontmatter {
 /// 3. Filename (last resort)
 fn parse_skill_with_frontmatter(
     content: &str,
-    workspace_name: Option<String>,
+    project_name: Option<String>,
     path: &str,
 ) -> Option<ParsedFile> {
     let rest = content.strip_prefix("---")?;
@@ -406,8 +406,8 @@ fn parse_skill_with_frontmatter(
     let file = SyncedFile {
         doc_id: id_uuid,
         doc_type: DocType::Skill,
-        workspace_id: None,
-        workspace_name,
+        project_id: None,
+        project_name,
         slug: slug.clone(),
         id_prefix,
         created_at,
@@ -429,7 +429,7 @@ fn parse_skill_with_frontmatter(
 
 fn parse_skill_without_frontmatter(
     content: &str,
-    workspace_name: Option<String>,
+    project_name: Option<String>,
     path: &str,
 ) -> Option<ParsedFile> {
     let (name, description, body) = if let Some(parsed) = parse_heading_and_body(content) {
@@ -449,8 +449,8 @@ fn parse_skill_without_frontmatter(
         file: SyncedFile {
             doc_id: id_uuid,
             doc_type: DocType::Skill,
-            workspace_id: None,
-            workspace_name,
+            project_id: None,
+            project_name,
             slug,
             id_prefix,
             created_at: String::new(),
@@ -485,12 +485,11 @@ fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
     Some((name, description, body))
 }
 
-/// `runtime/workspaces/{ws}/skills/*.md` → `Some(ws)`;
+/// `runtime/projects/{project}/skills/*.md` → `Some(project)`;
 /// `runtime/skills/*.md` → `None` (global skill).
-pub fn workspace_name_from_skill_path(relative_path: &str) -> Option<String> {
+pub fn project_name_from_skill_path(relative_path: &str) -> Option<String> {
     let parts: Vec<&str> = relative_path.split('/').collect();
-    if parts.len() >= 5 && parts[0] == "runtime" && parts[1] == "workspaces" && parts[3] == "skills"
-    {
+    if parts.len() >= 5 && parts[0] == "runtime" && parts[1] == "projects" && parts[3] == "skills" {
         Some(parts[2].to_string())
     } else {
         None
@@ -555,8 +554,8 @@ mod tests {
         let id_prefix = &skill_id.to_string()[..8];
         let original = UpstreamOp::for_skill(
             skill_id,
-            Some(WorkspaceId::new()),
-            Some("my-workspace"),
+            Some(ProjectId::new()),
+            Some("my-project"),
             "Deploy Script",
             "Deploys the app to production",
             "#!/bin/bash\necho deploy",
@@ -565,14 +564,14 @@ mod tests {
         );
 
         let content = original.content();
-        let path = format!("runtime/workspaces/my-workspace/skills/deploy-script-{id_prefix}.md");
+        let path = format!("runtime/projects/my-project/skills/deploy-script-{id_prefix}.md");
         let parsed = parse_skill_markdown(&content, &path).expect("should parse");
         assert!(!parsed.needs_rewrite);
 
         let s = &parsed.file;
         assert_eq!(s.doc_id, uuid::Uuid::from(skill_id));
         assert_eq!(s.doc_type, DocType::Skill);
-        assert_eq!(s.workspace_name.as_deref(), Some("my-workspace"));
+        assert_eq!(s.project_name.as_deref(), Some("my-project"));
         assert_eq!(s.title, "Deploy Script");
         assert_eq!(s.body, "Deploys the app to production");
         assert_eq!(s.created_at, "2025-01-01T00:00:00Z");
@@ -602,8 +601,8 @@ mod tests {
 
         let s = &parsed.file;
         assert_eq!(s.doc_id, uuid::Uuid::from(skill_id));
-        assert_eq!(s.workspace_id, None);
-        assert_eq!(s.workspace_name, None);
+        assert_eq!(s.project_id, None);
+        assert_eq!(s.project_name, None);
         assert_eq!(s.title, "Global Skill");
     }
 
@@ -680,12 +679,12 @@ mod tests {
     #[test]
     fn parse_skill_markdown_frontmatter_without_id() {
         let content = "---\ncreated: 2025-01-01\nupdated: 2025-06-01\n---\n\n# My Skill\n\nDescription\n\n---\n\nBody";
-        let path = "runtime/workspaces/team/skills/my-skill.md";
+        let path = "runtime/projects/team/skills/my-skill.md";
         let parsed = parse_skill_markdown(content, path).expect("should parse");
         assert!(parsed.needs_rewrite);
         let s = &parsed.file;
         assert_eq!(s.title, "My Skill");
-        assert_eq!(s.workspace_name.as_deref(), Some("team"));
+        assert_eq!(s.project_name.as_deref(), Some("team"));
         assert_eq!(s.original_path.as_deref(), Some(path));
     }
 
@@ -755,18 +754,18 @@ mod tests {
     }
 
     #[test]
-    fn workspace_name_from_skill_path_workspace_scoped() {
-        let path = "runtime/workspaces/my-ws/skills/deploy-script-abc12345.md";
+    fn project_name_from_skill_path_project_scoped() {
+        let path = "runtime/projects/my-project/skills/deploy-script-abc12345.md";
         assert_eq!(
-            workspace_name_from_skill_path(path),
-            Some("my-ws".to_string())
+            project_name_from_skill_path(path),
+            Some("my-project".to_string())
         );
     }
 
     #[test]
-    fn workspace_name_from_skill_path_global() {
+    fn project_name_from_skill_path_global() {
         let path = "runtime/skills/deploy-script-abc12345.md";
-        assert_eq!(workspace_name_from_skill_path(path), None);
+        assert_eq!(project_name_from_skill_path(path), None);
     }
 
     // Workflow YAML round-trip tests live in `crate::workflow::yaml`.

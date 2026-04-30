@@ -25,11 +25,11 @@ pub enum SpaceError {
     #[error("SpaceError - NotFound: slug {slug:?}")]
     NotFound { slug: String },
     #[error(
-        "SpaceError - WorkspaceNotAuthorized: workspace {workspace_id} is not in space {slug:?}'s authorized list"
+        "SpaceError - ProjectNotAuthorized: project {project_id} is not in space {slug:?}'s authorized list"
     )]
-    WorkspaceNotAuthorized {
+    ProjectNotAuthorized {
         slug: String,
-        workspace_id: crate::primitives::WorkspaceId,
+        project_id: crate::primitives::ProjectId,
     },
 }
 

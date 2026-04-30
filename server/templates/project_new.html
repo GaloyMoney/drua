@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}New Project — Galoy Agents{% endblock %}
+
+{% block content %}
+<h2>New Project</h2>
+
+<form data-gql-mutation="mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { project { id } } }"
+      data-gql-build="buildProjectCreate"
+      data-gql-redirect="/projects/{id}/chat">
+  <label>
+    Name
+    <input type="text" name="name" required placeholder="e.g. platform-team">
+  </label>
+  <label>
+    Description
+    <textarea name="description" rows="3" placeholder="What is this project for?"></textarea>
+  </label>
+
+  <div style="display: flex; gap: 1rem;">
+    <button type="submit">Create Project</button>
+    <a href="/projects" role="button" class="outline">Cancel</a>
+  </div>
+</form>
+<script>
+  function buildProjectCreate(fd) {
+    const desc = fd.get('description');
+    return { name: fd.get('name'), description: desc || null };
+  }
+</script>
+{% endblock %}

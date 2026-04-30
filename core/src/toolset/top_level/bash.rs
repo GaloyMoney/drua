@@ -91,9 +91,9 @@ impl TopLevelTool for Bash {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from workspace admins (they don't attach sandboxes).
+        // Hidden from project admins (they don't attach sandboxes).
         // Other agents see it whether attached or not so the model can ask to attach.
-        subject.is_agent() && !subject.is_workspace_admin()
+        subject.is_agent() && !subject.is_project_admin()
     }
 
     async fn call(

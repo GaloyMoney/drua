@@ -4,7 +4,7 @@
 //! `ParsedFile`).
 
 use crate::library::{name_from_filename, slugify, DocType, ParsedFile, SyncedFile, UpstreamOp};
-use crate::primitives::{WorkflowDefinitionId, WorkspaceId};
+use crate::primitives::{ProjectId, WorkflowDefinitionId};
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
@@ -38,8 +38,8 @@ enum WorkflowSandboxYaml {
         name: String,
         config: RepoYamlConfig,
     },
-    /// References an existing sandbox in the workflow's workspace by
-    /// name (workspace-unique). The workflow executor only attaches —
+    /// References an existing sandbox in the workflow's project by
+    /// name (project-unique). The workflow executor only attaches —
     /// no provisioning, no lifecycle management. No `config` block:
     /// the sandbox already has its own.
     Preexisting { name: String },
@@ -282,7 +282,7 @@ pub struct ParsedWorkflowFile {
 
 /// `None` when the YAML is malformed or no name can be derived.
 pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFile> {
-    let workspace_name = workspace_name_from_workflow_path(path);
+    let project_name = project_name_from_workflow_path(path);
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return None;
@@ -339,8 +339,8 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
     let file = SyncedFile {
         doc_id: id_uuid,
         doc_type: DocType::Workflow,
-        workspace_id: None,
-        workspace_name,
+        project_id: None,
+        project_name,
         slug,
         id_prefix,
         created_at: yaml.created,
@@ -366,13 +366,13 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
     })
 }
 
-/// `runtime/workspaces/{ws}/workflows/*.yml` → `Some(ws)`;
+/// `runtime/projects/{project}/workflows/*.yml` → `Some(project)`;
 /// `runtime/workflows/*.yml` → `None` (global).
-pub fn workspace_name_from_workflow_path(relative_path: &str) -> Option<String> {
+pub fn project_name_from_workflow_path(relative_path: &str) -> Option<String> {
     let parts: Vec<&str> = relative_path.split('/').collect();
     if parts.len() >= 5
         && parts[0] == "runtime"
-        && parts[1] == "workspaces"
+        && parts[1] == "projects"
         && parts[3] == "workflows"
     {
         Some(parts[2].to_string())
@@ -388,8 +388,8 @@ pub fn workspace_name_from_workflow_path(relative_path: &str) -> Option<String> 
 #[allow(clippy::too_many_arguments)]
 pub fn upstream_op_for_workflow(
     workflow_id: WorkflowDefinitionId,
-    workspace_id: Option<WorkspaceId>,
-    workspace_name: Option<&str>,
+    project_id: Option<ProjectId>,
+    project_name: Option<&str>,
     name: &str,
     description: Option<&str>,
     trigger: WorkflowTrigger,
@@ -414,8 +414,8 @@ pub fn upstream_op_for_workflow(
     UpstreamOp::WriteFile(Box::new(SyncedFile {
         doc_id: id,
         doc_type: DocType::Workflow,
-        workspace_id,
-        workspace_name: workspace_name.map(|s| s.to_string()),
+        project_id,
+        project_name: project_name.map(|s| s.to_string()),
         slug: slugify(name),
         id_prefix,
         created_at: created_at.to_string(),
@@ -508,8 +508,8 @@ mod tests {
 
         let s = &parsed.parsed.file;
         assert_eq!(s.doc_id, uuid::Uuid::from(id));
-        assert_eq!(s.workspace_id, None);
-        assert_eq!(s.workspace_name, None);
+        assert_eq!(s.project_id, None);
+        assert_eq!(s.project_name, None);
         assert_eq!(s.title, "alert-response");
         assert_eq!(
             parsed.description.as_deref(),
@@ -553,12 +553,12 @@ mod tests {
     }
 
     #[test]
-    fn workflow_yaml_workspace_scoped_path() {
+    fn workflow_yaml_project_scoped_path() {
         let id = WorkflowDefinitionId::new();
         let id_prefix = &id.to_string()[..8];
-        let path = format!("runtime/workspaces/team/workflows/foo-{id_prefix}.yml");
+        let path = format!("runtime/projects/team/workflows/foo-{id_prefix}.yml");
         assert_eq!(
-            workspace_name_from_workflow_path(&path),
+            project_name_from_workflow_path(&path),
             Some("team".to_string())
         );
     }

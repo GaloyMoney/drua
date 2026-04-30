@@ -47,9 +47,9 @@ fn draw_chat_messages(frame: &mut Frame, state: &ScreenState, area: Rect) {
 
     let title = match state.selected_agent() {
         Some(agent) => format!(" Chat — {} ", agent.name),
-        None => match state.selected_workspace() {
+        None => match state.selected_project() {
             Some(_) => " Chat — select an agent ".to_string(),
-            None => " Chat — no workspace ".to_string(),
+            None => " Chat — no project ".to_string(),
         },
     };
 
@@ -211,9 +211,9 @@ fn draw_chat_input(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let focused = state.focus == Focus::Chat;
     let border_color = if focused { Color::Yellow } else { Color::Cyan };
 
-    let prefix = match (state.selected_workspace(), state.selected_agent()) {
-        (Some(ws), Some(agent)) => format!("[{}: {}] > ", ws.name, agent.name),
-        (Some(ws), None) => format!("[{}] > ", ws.name),
+    let prefix = match (state.selected_project(), state.selected_agent()) {
+        (Some(project), Some(agent)) => format!("[{}: {}] > ", project.name, agent.name),
+        (Some(project), None) => format!("[{}] > ", project.name),
         _ => "> ".to_string(),
     };
     let prefix_len = prefix.len() as u16;

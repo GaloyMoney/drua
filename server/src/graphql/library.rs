@@ -42,8 +42,8 @@ pub struct LibrarySearchInput {
     pub query: String,
     /// Empty / omitted = all types.
     pub types: Option<Vec<LibraryFileType>>,
-    /// Omitted = all workspaces the subject can read.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Omitted = all projects the subject can read.
+    pub project_id: Option<ProjectId>,
     #[graphql(default = 50)]
     pub limit: i32,
 }
@@ -51,15 +51,15 @@ pub struct LibrarySearchInput {
 #[derive(SimpleObject, Clone)]
 pub struct LibrarySearchHit {
     pub id: UUID,
-    /// `null` for global content (skills with no workspace) and for
+    /// `null` for global content (skills with no project) and for
     /// space files (which are scoped to a `space_slug` instead).
-    pub workspace_id: Option<WorkspaceId>,
+    pub project_id: Option<ProjectId>,
     pub r#type: LibraryFileType,
     pub title: String,
     pub snippet: String,
     pub score: f64,
     pub tags: Vec<String>,
-    /// Set on `SpaceFile` hits. Use this — not `workspace_id` — to
+    /// Set on `SpaceFile` hits. Use this — not `project_id` — to
     /// label the result's scope in UIs.
     pub space_slug: Option<String>,
     /// Set on `SpaceFile` hits: the file's path inside `spaces/<slug>/`.
@@ -69,14 +69,14 @@ pub struct LibrarySearchHit {
 impl LibrarySearchHit {
     pub fn from_domain(hit: GlobalSearchHit) -> Self {
         let snippet = make_snippet(&hit.content, 240);
-        let workspace_id = if hit.workspace_id.is_nil() {
+        let project_id = if hit.project_id.is_nil() {
             None
         } else {
-            Some(WorkspaceId::from(hit.workspace_id))
+            Some(ProjectId::from(hit.project_id))
         };
         Self {
             id: UUID::from(hit.doc_id),
-            workspace_id,
+            project_id,
             r#type: hit.doc_type.into(),
             title: hit.title,
             snippet,

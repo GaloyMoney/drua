@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::chat::{AssistantChat, ChatRole, ContentBlock};
 
 #[allow(dead_code)]
-pub struct WorkspaceItem {
+pub struct ProjectItem {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
@@ -30,7 +30,7 @@ pub struct AgentItem {
 pub enum Mode {
     #[default]
     Browse,
-    CreateWorkspace,
+    CreateProject,
     ExportThread,
 }
 
@@ -238,7 +238,7 @@ impl ThreadGridState {
 }
 
 pub struct ScreenState {
-    pub workspaces: Vec<WorkspaceItem>,
+    pub projects: Vec<ProjectItem>,
     pub cursor: usize,
     pub selected_lead_id: Option<String>,
 
@@ -267,14 +267,14 @@ pub struct ScreenState {
 }
 
 impl ScreenState {
-    pub fn new(workspaces: Vec<WorkspaceItem>, server_url: String, user_name: String) -> Self {
-        let selected_lead_id = workspaces
+    pub fn new(projects: Vec<ProjectItem>, server_url: String, user_name: String) -> Self {
+        let selected_lead_id = projects
             .first()
-            .and_then(|ws| ws.lead.as_ref())
+            .and_then(|project| project.lead.as_ref())
             .map(|l| l.id.clone());
 
         Self {
-            workspaces,
+            projects,
             cursor: 0,
             server_url,
             user_name,
@@ -302,7 +302,7 @@ impl ScreenState {
     }
 
     pub fn cursor_down(&mut self) {
-        if !self.workspaces.is_empty() && self.cursor < self.workspaces.len() - 1 {
+        if !self.projects.is_empty() && self.cursor < self.projects.len() - 1 {
             self.cursor += 1;
             self.sync_lead_and_clear_chat();
         }
@@ -315,13 +315,13 @@ impl ScreenState {
         }
     }
 
-    pub fn selected_workspace(&self) -> Option<&WorkspaceItem> {
-        self.workspaces.get(self.cursor)
+    pub fn selected_project(&self) -> Option<&ProjectItem> {
+        self.projects.get(self.cursor)
     }
 
     pub fn selected_agent(&self) -> Option<&AgentItem> {
-        self.selected_workspace()
-            .and_then(|ws| ws.agents.get(self.agent_cursor))
+        self.selected_project()
+            .and_then(|project| project.agents.get(self.agent_cursor))
     }
 
     pub fn selected_agent_id(&self) -> Option<String> {
@@ -335,8 +335,8 @@ impl ScreenState {
     }
 
     pub fn agent_cursor_down(&mut self) {
-        if let Some(ws) = self.selected_workspace() {
-            if !ws.agents.is_empty() && self.agent_cursor < ws.agents.len() - 1 {
+        if let Some(project) = self.selected_project() {
+            if !project.agents.is_empty() && self.agent_cursor < project.agents.len() - 1 {
                 self.agent_cursor += 1;
             }
         }
@@ -348,10 +348,10 @@ impl ScreenState {
         }
     }
 
-    pub fn replace_workspaces(&mut self, workspaces: Vec<WorkspaceItem>) {
-        self.workspaces = workspaces;
-        if self.cursor >= self.workspaces.len() {
-            self.cursor = self.workspaces.len().saturating_sub(1);
+    pub fn replace_projects(&mut self, projects: Vec<ProjectItem>) {
+        self.projects = projects;
+        if self.cursor >= self.projects.len() {
+            self.cursor = self.projects.len().saturating_sub(1);
         }
         self.sync_lead_and_clear_chat();
     }
@@ -360,7 +360,7 @@ impl ScreenState {
         self.input_name.clear();
         self.input_description.clear();
         self.input_field = 0;
-        self.mode = Mode::CreateWorkspace;
+        self.mode = Mode::CreateProject;
     }
 
     pub fn exit_create_mode(&mut self) {
@@ -683,8 +683,8 @@ impl ScreenState {
 
     fn sync_lead_and_clear_chat(&mut self) {
         self.selected_lead_id = self
-            .selected_workspace()
-            .and_then(|ws| ws.lead.as_ref())
+            .selected_project()
+            .and_then(|project| project.lead.as_ref())
             .map(|l| l.id.clone());
         self.agent_cursor = 0;
         self.loaded_agent_id = None;

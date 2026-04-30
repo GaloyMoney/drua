@@ -28,7 +28,7 @@ impl From<DomainMcpCreds> for McpCreds {
 #[derive(InputObject)]
 pub struct McpCredentialsCreateInput {
     pub name: String,
-    /// The scopes to grant, as strings (e.g. "admin", "workspace_admin:<id>").
+    /// The scopes to grant, as strings (e.g. "admin", "project_admin:<id>").
     pub scopes: Vec<String>,
 }
 

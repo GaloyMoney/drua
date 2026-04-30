@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT doc_id, doc_type, project_id, title_text, content_text, tags,\n                      ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank\n               FROM library_search_data\n               WHERE ($2::uuid[] IS NULL OR project_id = ANY($2))\n                 AND search_tsv @@ plainto_tsquery('english', $1)\n                 AND ($3::text[] IS NULL OR doc_type = ANY($3))\n               ORDER BY rank DESC\n               LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "doc_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "doc_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "project_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "title_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "content_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "tags",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "rank",
+        "type_info": "Float4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "UuidArray",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "b123c6d4de208f1b4df25f2404ac4df7571ed71556fc833246ae18ce09163e12"
+}

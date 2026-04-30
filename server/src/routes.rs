@@ -43,44 +43,44 @@ pub fn router() -> Router<AppState> {
             get(code_assistant_least_useful),
         )
         .route("/code-assistant/search", get(code_assistant_search))
-        .route("/workspaces/{id}/chat", get(workspace_chat))
-        .route("/workspaces", get(workspaces_page))
-        .route("/workspaces/new", get(workspace_new))
-        .route("/workspaces/sidebar", get(workspace_sidebar_list))
-        .route("/workspaces/{id}", get(workspace_detail))
-        .route("/workspaces/{id}/secrets/list", get(workspace_secrets_list))
-        .route("/workspaces/{id}/skills", get(workspace_skills_page))
+        .route("/projects/{id}/chat", get(project_chat))
+        .route("/projects", get(projects_page))
+        .route("/projects/new", get(project_new))
+        .route("/projects/sidebar", get(project_sidebar_list))
+        .route("/projects/{id}", get(project_detail))
+        .route("/projects/{id}/secrets/list", get(project_secrets_list))
+        .route("/projects/{id}/skills", get(project_skills_page))
         .route(
-            "/workspaces/{id}/skills/{skill_id}",
-            get(workspace_skill_detail),
+            "/projects/{id}/skills/{skill_id}",
+            get(project_skill_detail),
         )
-        .route("/workspaces/{id}/sandboxes", get(workspace_sandboxes_page))
-        .route("/workspaces/{id}/sandboxes/new", get(workspace_sandbox_new))
+        .route("/projects/{id}/sandboxes", get(project_sandboxes_page))
+        .route("/projects/{id}/sandboxes/new", get(project_sandbox_new))
         .route(
-            "/workspaces/{id}/sandboxes/{sandbox_id}",
-            get(workspace_sandbox_detail),
+            "/projects/{id}/sandboxes/{sandbox_id}",
+            get(project_sandbox_detail),
         )
-        .route("/workspaces/{id}/agents/new", get(workspace_agent_new))
+        .route("/projects/{id}/agents/new", get(project_agent_new))
         .route(
-            "/workspaces/{id}/agents/{agent_id}",
-            get(workspace_agent_detail),
-        )
-        .route(
-            "/workspaces/{id}/agents/{agent_id}/history",
-            get(workspace_agent_history),
-        )
-        .route("/workspaces/{id}/workflows", get(workspace_workflows_page))
-        .route(
-            "/workspaces/{id}/workflows/{wf_id}",
-            get(workspace_workflow_detail),
+            "/projects/{id}/agents/{agent_id}",
+            get(project_agent_detail),
         )
         .route(
-            "/workspaces/{id}/workflows/{wf_id}/trigger",
-            post(workspace_workflow_trigger),
+            "/projects/{id}/agents/{agent_id}/history",
+            get(project_agent_history),
+        )
+        .route("/projects/{id}/workflows", get(project_workflows_page))
+        .route(
+            "/projects/{id}/workflows/{wf_id}",
+            get(project_workflow_detail),
         )
         .route(
-            "/workspaces/{id}/workflows/{wf_id}/runs/{run_id}",
-            get(workspace_workflow_run_detail),
+            "/projects/{id}/workflows/{wf_id}/trigger",
+            post(project_workflow_trigger),
+        )
+        .route(
+            "/projects/{id}/workflows/{wf_id}/runs/{run_id}",
+            get(project_workflow_run_detail),
         )
 }
 
@@ -189,8 +189,8 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
                     Some(id) => Some(lookup_user_label(&state.app, id).await),
                     None => None,
                 };
-                let workspace = match entry.workspace_id() {
-                    Some(id) => Some(lookup_workspace_label(&sub, &state.app, id).await),
+                let project = match entry.project_id() {
+                    Some(id) => Some(lookup_project_label(&sub, &state.app, id).await),
                     None => None,
                 };
                 let acting_agent = match entry.acting_agent_id {
@@ -203,7 +203,7 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
                 };
                 views.push(AuditEntryView {
                     acting_user,
-                    workspace,
+                    project,
                     acting_agent,
                     on_behalf_of,
                     entrypoint: entry.entrypoint,
@@ -229,8 +229,8 @@ async fn audit_entries(State(state): State<AppState>, session: Session) -> Respo
 pub struct LibrarySearchParams {
     #[serde(default)]
     q: Option<String>,
-    #[serde(default, rename = "workspaceId")]
-    workspace_id: Option<String>,
+    #[serde(default, rename = "projectId")]
+    project_id: Option<String>,
     /// Repeated `t=skill&t=note` checkboxes from the form.
     #[serde(default)]
     t: Vec<String>,
@@ -244,19 +244,19 @@ async fn library_page(State(state): State<AppState>, session: Session) -> Respon
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspaces = state
+    let projects = state
         .app
-        .workspaces()
+        .projects()
         .list_all(&sub)
         .await
         .unwrap_or_default();
 
     LibraryTemplate {
-        workspaces: workspaces
+        projects: projects
             .iter()
-            .map(|ws| LibraryWorkspaceOption {
-                id: ws.id.to_string(),
-                name: ws.name.clone(),
+            .map(|project| LibraryProjectOption {
+                id: project.id.to_string(),
+                name: project.name.clone(),
             })
             .collect(),
     }
@@ -286,21 +286,20 @@ async fn library_search(
         .into_response();
     }
 
-    let workspace_filter: Option<domain::primitives::WorkspaceId> =
-        match params.workspace_id.as_deref() {
-            Some(s) if !s.is_empty() => match uuid::Uuid::parse_str(s) {
-                Ok(uuid) => Some(domain::primitives::WorkspaceId::from(uuid)),
-                Err(_) => {
-                    return LibrarySearchResultsTemplate {
-                        query: trimmed.to_string(),
-                        hits: vec![],
-                        error: Some("invalid workspace id".to_string()),
-                    }
-                    .into_response();
+    let project_filter: Option<domain::primitives::ProjectId> = match params.project_id.as_deref() {
+        Some(s) if !s.is_empty() => match uuid::Uuid::parse_str(s) {
+            Ok(uuid) => Some(domain::primitives::ProjectId::from(uuid)),
+            Err(_) => {
+                return LibrarySearchResultsTemplate {
+                    query: trimmed.to_string(),
+                    hits: vec![],
+                    error: Some("invalid project id".to_string()),
                 }
-            },
-            _ => None,
-        };
+                .into_response();
+            }
+        },
+        _ => None,
+    };
 
     let doc_types: Vec<drua_core::library::DocType> = params
         .t
@@ -313,15 +312,15 @@ async fn library_search(
         })
         .collect();
 
-    let workspace_ids: Vec<uuid::Uuid> = match workspace_filter {
-        Some(id) => match state.app.workspaces().find_by_id(&sub, id).await {
+    let project_ids: Vec<uuid::Uuid> = match project_filter {
+        Some(id) => match state.app.projects().find_by_id(&sub, id).await {
             Ok(_) => vec![uuid::Uuid::from(id)],
             Err(e) => {
-                tracing::error!(error = %e, "library search workspace lookup failed");
+                tracing::error!(error = %e, "library search project lookup failed");
                 return LibrarySearchResultsTemplate {
                     query: trimmed.to_string(),
                     hits: vec![],
-                    error: Some(format!("workspace not found: {e}")),
+                    error: Some(format!("project not found: {e}")),
                 }
                 .into_response();
             }
@@ -332,7 +331,7 @@ async fn library_search(
     let hits = match state
         .app
         .library()
-        .search_global(&sub, &workspace_ids, trimmed, &doc_types, 50)
+        .search_global(&sub, &project_ids, trimmed, &doc_types, 50)
         .await
     {
         Ok(h) => h,
@@ -347,15 +346,15 @@ async fn library_search(
         }
     };
 
-    // Workspace-name lookup for display only — auth already enforced above.
-    let workspace_lookup: std::collections::HashMap<uuid::Uuid, String> = state
+    // Project-name lookup for display only — auth already enforced above.
+    let project_lookup: std::collections::HashMap<uuid::Uuid, String> = state
         .app
-        .workspaces()
+        .projects()
         .list_all(&sub)
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|ws| (uuid::Uuid::from(ws.id), ws.name))
+        .map(|project| (uuid::Uuid::from(project.id), project.name))
         .collect();
 
     let views: Vec<LibraryHitView> = hits
@@ -365,38 +364,32 @@ async fn library_search(
                 drua_core::library::DocType::Skill => (
                     "Skill".to_string(),
                     "skill".to_string(),
-                    Some(format!(
-                        "/workspaces/{}/skills/{}",
-                        h.workspace_id, h.doc_id
-                    )),
+                    Some(format!("/projects/{}/skills/{}", h.project_id, h.doc_id)),
                 ),
                 drua_core::library::DocType::Workflow => (
                     "Workflow".to_string(),
                     "workflow".to_string(),
-                    Some(format!(
-                        "/workspaces/{}/workflows/{}",
-                        h.workspace_id, h.doc_id
-                    )),
+                    Some(format!("/projects/{}/workflows/{}", h.project_id, h.doc_id)),
                 ),
                 drua_core::library::DocType::Note => ("Note".to_string(), "note".to_string(), None),
-                // No detail page for space files yet — they're not workspace-scoped
+                // No detail page for space files yet — they're not project-scoped
                 // and `library.get_file(id)` is the only lookup path planned.
                 drua_core::library::DocType::SpaceFile => {
                     ("Space File".to_string(), "space_file".to_string(), None)
                 }
             };
-            let scope_label = match (&h.doc_type, &h.space_slug, h.workspace_id.is_nil()) {
+            let scope_label = match (&h.doc_type, &h.space_slug, h.project_id.is_nil()) {
                 (drua_core::library::DocType::SpaceFile, Some(slug), _) => match &h.relative_path {
                     Some(path) => format!("space: {slug}/{path}"),
                     None => format!("space: {slug}"),
                 },
                 (_, _, true) => "global".to_string(),
                 _ => {
-                    let name = workspace_lookup
-                        .get(&h.workspace_id)
+                    let name = project_lookup
+                        .get(&h.project_id)
                         .cloned()
-                        .unwrap_or_else(|| h.workspace_id.to_string());
-                    format!("workspace: {name}")
+                        .unwrap_or_else(|| h.project_id.to_string());
+                    format!("project: {name}")
                 }
             };
             LibraryHitView {
@@ -459,16 +452,16 @@ async fn lookup_agent_label(
         .unwrap_or_else(|_| agent_id.to_string())
 }
 
-async fn lookup_workspace_label(
+async fn lookup_project_label(
     sub: &AuthSubject,
     app: &drua_core::App,
-    workspace_id: drua_core::primitives::WorkspaceId,
+    project_id: drua_core::primitives::ProjectId,
 ) -> String {
-    app.workspaces()
-        .find_by_id(sub, workspace_id)
+    app.projects()
+        .find_by_id(sub, project_id)
         .await
-        .map(|ws| ws.name.clone())
-        .unwrap_or_else(|_| workspace_id.to_string())
+        .map(|project| project.name.clone())
+        .unwrap_or_else(|_| project_id.to_string())
 }
 
 #[instrument(name = "web.code_assistant_dashboard", skip_all)]
@@ -621,34 +614,37 @@ async fn code_assistant_search(
     }
 }
 
-fn workspace_to_view(ws: &domain::workspace::Workspace) -> WorkspaceView {
-    WorkspaceView {
-        id: ws.id.to_string(),
-        name: ws.name.clone(),
-        description: ws.description.clone().unwrap_or_default(),
-        created_at: ws.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
+fn project_to_view(project: &domain::project::Project) -> ProjectView {
+    ProjectView {
+        id: project.id.to_string(),
+        name: project.name.clone(),
+        description: project.description.clone().unwrap_or_default(),
+        created_at: project
+            .created_at()
+            .format("%Y-%m-%d %H:%M UTC")
+            .to_string(),
     }
 }
 
-#[instrument(name = "web.workspaces_page", skip_all)]
-async fn workspaces_page(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.projects_page", skip_all)]
+async fn projects_page(State(state): State<AppState>, session: Session) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return Redirect::to("/").into_response(),
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspaces = state
+    let projects = state
         .app
-        .workspaces()
+        .projects()
         .list_all(&sub)
         .await
         .unwrap_or_default();
 
-    WorkspaceHubTemplate {
-        workspaces: workspaces.iter().map(workspace_to_view).collect(),
-        selected_workspace: None,
-        selected_workspace_id: String::new(),
+    ProjectHubTemplate {
+        projects: projects.iter().map(project_to_view).collect(),
+        selected_project: None,
+        selected_project_id: String::new(),
         lead_agent: None,
         agents: vec![],
         selected_agent_id: String::new(),
@@ -658,36 +654,36 @@ async fn workspaces_page(State(state): State<AppState>, session: Session) -> Res
     .into_response()
 }
 
-#[instrument(name = "web.workspace_sidebar_list", skip_all)]
-async fn workspace_sidebar_list(State(state): State<AppState>, session: Session) -> Response {
+#[instrument(name = "web.project_sidebar_list", skip_all)]
+async fn project_sidebar_list(State(state): State<AppState>, session: Session) -> Response {
     let user_id = match extract_user_id(&session).await {
         Some(id) => id,
         None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
     let sub = AuthSubject::User(user_id);
 
-    match state.app.workspaces().list_all(&sub).await {
-        Ok(workspaces) => WorkspaceSidebarListTemplate {
-            workspaces: workspaces.iter().map(workspace_to_view).collect(),
+    match state.app.projects().list_all(&sub).await {
+        Ok(projects) => ProjectSidebarListTemplate {
+            projects: projects.iter().map(project_to_view).collect(),
         }
         .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to list workspaces for sidebar");
+            tracing::error!(error = %e, "Failed to list projects for sidebar");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
 
-#[instrument(name = "web.workspace_new", skip_all)]
-async fn workspace_new(session: Session) -> Response {
+#[instrument(name = "web.project_new", skip_all)]
+async fn project_new(session: Session) -> Response {
     if extract_user_id(&session).await.is_none() {
         return Redirect::to("/").into_response();
     }
-    WorkspaceNewTemplate {}.into_response()
+    ProjectNewTemplate {}.into_response()
 }
 
-#[instrument(name = "web.workspace_detail", skip_all)]
-async fn workspace_detail(
+#[instrument(name = "web.project_detail", skip_all)]
+async fn project_detail(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -698,34 +694,34 @@ async fn workspace_detail(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    WorkspaceDetailTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectDetailTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
     }
     .into_response()
 }
 
-fn secret_to_view(s: &domain::workspace_secret::WorkspaceSecret) -> WorkspaceSecretView {
-    WorkspaceSecretView {
+fn secret_to_view(s: &domain::project_secret::ProjectSecret) -> ProjectSecretView {
+    ProjectSecretView {
         id: s.id.to_string(),
-        workspace_id: s.workspace_id.to_string(),
+        project_id: s.project_id.to_string(),
         name: s.name.clone(),
         secret_type: s.secret_type.to_string(),
         updated_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
     }
 }
 
-#[instrument(name = "web.workspace_secrets_list", skip_all)]
-async fn workspace_secrets_list(
+#[instrument(name = "web.project_secrets_list", skip_all)]
+async fn project_secrets_list(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -736,19 +732,19 @@ async fn workspace_secrets_list(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
+    let project_id = domain::primitives::ProjectId::from(id);
     match state
         .app
-        .workspace_secrets()
-        .list_by_workspace(&sub, workspace_id)
+        .project_secrets()
+        .list_by_project(&sub, project_id)
         .await
     {
-        Ok(secrets) => WorkspaceSecretsListTemplate {
+        Ok(secrets) => ProjectSecretsListTemplate {
             secrets: secrets.iter().map(secret_to_view).collect(),
         }
         .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to list workspace secrets");
+            tracing::error!(error = %e, "Failed to list project secrets");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -757,17 +753,17 @@ async fn workspace_secrets_list(
 fn skill_to_view(s: &domain::skill::Skill) -> SkillView {
     SkillView {
         id: s.id.to_string(),
-        workspace_id: s.workspace_id.map(|id| id.to_string()).unwrap_or_default(),
+        project_id: s.project_id.map(|id| id.to_string()).unwrap_or_default(),
         name: s.name.clone(),
         description: s.description.clone(),
         body: s.body.clone(),
         created_at: s.created_at().format("%Y-%m-%d %H:%M UTC").to_string(),
-        is_global: s.workspace_id.is_none(),
+        is_global: s.project_id.is_none(),
     }
 }
 
-#[instrument(name = "web.workspace_skills_page", skip_all)]
-async fn workspace_skills_page(
+#[instrument(name = "web.project_skills_page", skip_all)]
+async fn project_skills_page(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -778,23 +774,23 @@ async fn workspace_skills_page(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
     let skills = state
         .app
         .skills()
-        .list_for_workspace(&sub, workspace_id)
+        .list_for_project(&sub, project_id)
         .await
         .unwrap_or_default();
 
-    WorkspaceSkillsPageTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectSkillsPageTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         skills: skills.iter().map(skill_to_view).collect(),
@@ -803,8 +799,8 @@ async fn workspace_skills_page(
     .into_response()
 }
 
-#[instrument(name = "web.workspace_skill_detail", skip_all)]
-async fn workspace_skill_detail(
+#[instrument(name = "web.project_skill_detail", skip_all)]
+async fn project_skill_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, skill_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -815,27 +811,27 @@ async fn workspace_skill_detail(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
     let skill_id = SkillId::from(skill_id);
     let skill = match state
         .app
         .skills()
-        .find_by_id(&sub, skill_id, workspace_id)
+        .find_by_id(&sub, skill_id, project_id)
         .await
     {
         Ok(s) => s,
-        Err(_) => return Redirect::to(&format!("/workspaces/{id}/skills")).into_response(),
+        Err(_) => return Redirect::to(&format!("/projects/{id}/skills")).into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    WorkspaceSkillDetailTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectSkillDetailTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         skill: skill_to_view(&skill),
@@ -877,7 +873,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
 
     SandboxView {
         id: s.id.to_string(),
-        workspace_id: s.workspace_id.to_string(),
+        project_id: s.project_id.to_string(),
         name: s.name.clone(),
         state: s.state.to_string(),
         last_error: s.last_error.clone(),
@@ -894,17 +890,17 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
     }
 }
 
-/// `lead_agent` is `None` if no WorkspaceLead exists (shouldn't happen
-/// after workspace create, but handled gracefully).
-async fn workspace_sidebar_context(
+/// `lead_agent` is `None` if no ProjectLead exists (shouldn't happen
+/// after project create, but handled gracefully).
+async fn project_sidebar_context(
     sub: &AuthSubject,
     state: &AppState,
-    workspace_id: domain::primitives::WorkspaceId,
+    project_id: domain::primitives::ProjectId,
 ) -> (Option<AgentView>, Vec<AgentView>) {
     let agents = state
         .app
         .agents()
-        .list_for_workspace(sub, workspace_id)
+        .list_for_project(sub, project_id)
         .await
         .unwrap_or_default();
 
@@ -915,7 +911,7 @@ async fn workspace_sidebar_context(
             id: a.id.to_string(),
             name: a.name.clone(),
         };
-        if a.agent_role == domain::agent::AgentRole::WorkspaceLead && lead.is_none() {
+        if a.agent_role == domain::agent::AgentRole::ProjectLead && lead.is_none() {
             lead = Some(view);
         } else {
             others.push(view);
@@ -924,8 +920,8 @@ async fn workspace_sidebar_context(
     (lead, others)
 }
 
-#[instrument(name = "web.workspace_sandboxes_page", skip_all)]
-async fn workspace_sandboxes_page(
+#[instrument(name = "web.project_sandboxes_page", skip_all)]
+async fn project_sandboxes_page(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -936,23 +932,23 @@ async fn workspace_sandboxes_page(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
     let sandboxes = state
         .app
         .sandboxes()
-        .list_for_workspace(&sub, workspace_id)
+        .list_for_project(&sub, project_id)
         .await
         .unwrap_or_default();
 
-    WorkspaceSandboxesPageTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectSandboxesPageTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         sandboxes: sandboxes.iter().map(sandbox_to_view).collect(),
@@ -960,8 +956,8 @@ async fn workspace_sandboxes_page(
     .into_response()
 }
 
-#[instrument(name = "web.workspace_sandbox_new", skip_all)]
-async fn workspace_sandbox_new(
+#[instrument(name = "web.project_sandbox_new", skip_all)]
+async fn project_sandbox_new(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -972,24 +968,24 @@ async fn workspace_sandbox_new(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    WorkspaceSandboxNewTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectSandboxNewTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
     }
     .into_response()
 }
 
-#[instrument(name = "web.workspace_sandbox_detail", skip_all)]
-async fn workspace_sandbox_detail(
+#[instrument(name = "web.project_sandbox_detail", skip_all)]
+async fn project_sandbox_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, sandbox_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -1000,22 +996,22 @@ async fn workspace_sandbox_detail(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
     let sandbox_id = SandboxId::from(sandbox_id);
     let sandbox = match state.app.sandboxes().find_by_id(&sub, sandbox_id).await {
         Ok(s) => s,
-        Err(_) => return Redirect::to(&format!("/workspaces/{id}/sandboxes")).into_response(),
+        Err(_) => return Redirect::to(&format!("/projects/{id}/sandboxes")).into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    WorkspaceSandboxDetailTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectSandboxDetailTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         sandbox: sandbox_to_view(&sandbox),
@@ -1023,8 +1019,8 @@ async fn workspace_sandbox_detail(
     .into_response()
 }
 
-#[instrument(name = "web.workspace_agent_new", skip_all)]
-async fn workspace_agent_new(
+#[instrument(name = "web.project_agent_new", skip_all)]
+async fn project_agent_new(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -1035,18 +1031,18 @@ async fn workspace_agent_new(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
     let sandbox_options: Vec<SandboxOptionView> = state
         .app
         .sandboxes()
-        .list_for_workspace(&sub, workspace_id)
+        .list_for_project(&sub, project_id)
         .await
         .unwrap_or_default()
         .iter()
@@ -1057,8 +1053,8 @@ async fn workspace_agent_new(
         })
         .collect();
 
-    WorkspaceAgentNewTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectAgentNewTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         sandbox_options,
@@ -1068,7 +1064,7 @@ async fn workspace_agent_new(
 
 fn role_label(role: domain::agent::AgentRole) -> &'static str {
     match role {
-        domain::agent::AgentRole::WorkspaceLead => "Workspace Lead",
+        domain::agent::AgentRole::ProjectLead => "Project Lead",
         domain::agent::AgentRole::Agent => "Agent",
     }
 }
@@ -1097,8 +1093,8 @@ struct AgentDetailQuery {
     error: Option<String>,
 }
 
-#[instrument(name = "web.workspace_agent_detail", skip_all)]
-async fn workspace_agent_detail(
+#[instrument(name = "web.project_agent_detail", skip_all)]
+async fn project_agent_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -1110,19 +1106,19 @@ async fn workspace_agent_detail(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
     let agent_id = AgentId::from(agent_id);
     let agent = match state.app.agents().find_by_id(&sub, agent_id).await {
         Ok(a) => a,
-        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
+        Err(_) => return Redirect::to(&format!("/projects/{id}")).into_response(),
     };
 
-    let (lead_agent, agents) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agents) = project_sidebar_context(&sub, &state, project_id).await;
 
     let attached_view = attached_sandbox_view(&sub, &state, agent.attached_sandbox).await;
 
@@ -1133,7 +1129,7 @@ async fn workspace_agent_detail(
         state
             .app
             .sandboxes()
-            .list_for_workspace(&sub, workspace_id)
+            .list_for_project(&sub, project_id)
             .await
             .unwrap_or_default()
             .iter()
@@ -1145,16 +1141,16 @@ async fn workspace_agent_detail(
             .collect()
     };
 
-    WorkspaceAgentDetailTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectAgentDetailTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents,
         agent: AgentDetailView {
             id: agent.id.to_string(),
-            workspace_id: agent.workspace_id.to_string(),
+            project_id: agent.project_id.to_string(),
             name: agent.name.clone(),
             role: role_label(agent.agent_role).to_string(),
-            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::WorkspaceLead),
+            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::ProjectLead),
             attached_sandbox: attached_view,
         },
         sandbox_options,
@@ -1163,8 +1159,8 @@ async fn workspace_agent_detail(
     .into_response()
 }
 
-#[instrument(name = "web.workspace_agent_history", skip_all)]
-async fn workspace_agent_history(
+#[instrument(name = "web.project_agent_history", skip_all)]
+async fn project_agent_history(
     State(state): State<AppState>,
     session: Session,
     Path((id, agent_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -1175,16 +1171,16 @@ async fn workspace_agent_history(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
     let agent_id = AgentId::from(agent_id);
     let agent = match state.app.agents().find_by_id(&sub, agent_id).await {
         Ok(a) => a,
-        Err(_) => return Redirect::to(&format!("/workspaces/{id}")).into_response(),
+        Err(_) => return Redirect::to(&format!("/projects/{id}")).into_response(),
     };
 
     // Last 200 messages — long enough for a typical workflow run, short
@@ -1196,7 +1192,7 @@ async fn workspace_agent_history(
         .await
         .unwrap_or_default();
 
-    let (lead_agent, agents) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agents) = project_sidebar_context(&sub, &state, project_id).await;
     let attached_view = attached_sandbox_view(&sub, &state, agent.attached_sandbox).await;
     let workflow_run = match (agent.workflow_id, agent.workflow_run_id) {
         (Some(wf), Some(run)) => Some((wf.to_string(), run.to_string())),
@@ -1273,16 +1269,16 @@ async fn workspace_agent_history(
         })
         .collect();
 
-    WorkspaceAgentHistoryTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectAgentHistoryTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents,
         agent: AgentDetailView {
             id: agent.id.to_string(),
-            workspace_id: agent.workspace_id.to_string(),
+            project_id: agent.project_id.to_string(),
             name: agent.name.clone(),
             role: role_label(agent.agent_role).to_string(),
-            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::WorkspaceLead),
+            is_lead: matches!(agent.agent_role, domain::agent::AgentRole::ProjectLead),
             attached_sandbox: attached_view,
         },
         messages,
@@ -1296,8 +1292,8 @@ pub struct ChatQuery {
     agent: Option<uuid::Uuid>,
 }
 
-#[instrument(name = "web.workspace_chat", skip_all)]
-async fn workspace_chat(
+#[instrument(name = "web.project_chat", skip_all)]
+async fn project_chat(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -1309,15 +1305,15 @@ async fn workspace_chat(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let all_workspaces = state
+    let all_projects = state
         .app
-        .workspaces()
+        .projects()
         .list_all(&sub)
         .await
         .unwrap_or_default();
@@ -1325,7 +1321,7 @@ async fn workspace_chat(
     let agents = state
         .app
         .agents()
-        .list_for_workspace(&sub, workspace_id)
+        .list_for_project(&sub, project_id)
         .await
         .unwrap_or_default();
 
@@ -1336,7 +1332,7 @@ async fn workspace_chat(
         }
         None => agents
             .iter()
-            .find(|a| a.agent_role == domain::agent::AgentRole::WorkspaceLead),
+            .find(|a| a.agent_role == domain::agent::AgentRole::ProjectLead),
     };
 
     let selected_agent_view = selected_agent.map(|a| AgentView {
@@ -1366,17 +1362,17 @@ async fn workspace_chat(
             id: a.id.to_string(),
             name: a.name.clone(),
         };
-        if a.agent_role == domain::agent::AgentRole::WorkspaceLead && lead_agent.is_none() {
+        if a.agent_role == domain::agent::AgentRole::ProjectLead && lead_agent.is_none() {
             lead_agent = Some(view);
         } else {
             agent_views.push(view);
         }
     }
 
-    WorkspaceHubTemplate {
-        workspaces: all_workspaces.iter().map(workspace_to_view).collect(),
-        selected_workspace_id: workspace_id.to_string(),
-        selected_workspace: Some(workspace_to_view(&ws)),
+    ProjectHubTemplate {
+        projects: all_projects.iter().map(project_to_view).collect(),
+        selected_project_id: project_id.to_string(),
+        selected_project: Some(project_to_view(&project)),
         lead_agent,
         agents: agent_views,
         selected_agent_id,
@@ -1392,7 +1388,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/tunnel/ws", get(crate::tunnel::tunnel_ws_handler))
 }
 
-/// Internal endpoint: returns secret values for an agent's workspace.
+/// Internal endpoint: returns secret values for an agent's project.
 /// Secured via SA token auth (AuthSubject::Agent) — same pattern as MCP gateway.
 #[instrument(
     name = "api.agent.secrets",
@@ -1404,8 +1400,8 @@ async fn api_agent_secrets(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Response {
-    let (workspace_id, jwt_agent_id) = match &auth {
-        AuthSubject::Agent(workspace_id, agent_id, _) => (*workspace_id, *agent_id),
+    let (project_id, jwt_agent_id) = match &auth {
+        AuthSubject::Agent(project_id, agent_id, _) => (*project_id, *agent_id),
         _ => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 
@@ -1417,8 +1413,8 @@ async fn api_agent_secrets(
 
     let secrets = match state
         .app
-        .workspace_secrets()
-        .list_decrypted(&auth, workspace_id)
+        .project_secrets()
+        .list_decrypted(&auth, project_id)
         .await
     {
         Ok(s) => s,
@@ -1653,8 +1649,8 @@ fn step_result_to_view(sr: &domain::workflow::StepResult) -> StepResultView {
     }
 }
 
-#[instrument(name = "web.workspace_workflows_page", skip_all)]
-async fn workspace_workflows_page(
+#[instrument(name = "web.project_workflows_page", skip_all)]
+async fn project_workflows_page(
     State(state): State<AppState>,
     session: Session,
     Path(id): Path<uuid::Uuid>,
@@ -1665,23 +1661,23 @@ async fn workspace_workflows_page(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
     let workflows = state
         .app
         .workflows()
-        .list_for_workspace(&sub, workspace_id)
+        .list_for_project(&sub, project_id)
         .await
         .unwrap_or_default();
 
-    WorkspaceWorkflowsPageTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectWorkflowsPageTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         workflows: workflows
@@ -1697,8 +1693,8 @@ struct WorkflowDetailQuery {
     flash: Option<String>,
 }
 
-#[instrument(name = "web.workspace_workflow_detail", skip_all)]
-async fn workspace_workflow_detail(
+#[instrument(name = "web.project_workflow_detail", skip_all)]
+async fn project_workflow_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, wf_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -1710,21 +1706,21 @@ async fn workspace_workflow_detail(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
     let workflow_id = WorkflowDefinitionId::from(wf_id);
     let workflow = match state.app.workflows().find_by_id(&sub, workflow_id).await {
-        Ok(w) if w.workspace_id == workspace_id => w,
+        Ok(w) if w.project_id == project_id => w,
         _ => {
-            return Redirect::to(&format!("/workspaces/{id}/workflows")).into_response();
+            return Redirect::to(&format!("/projects/{id}/workflows")).into_response();
         }
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
     let recent_runs = state
         .app
@@ -1733,8 +1729,8 @@ async fn workspace_workflow_detail(
         .await
         .unwrap_or_default();
 
-    WorkspaceWorkflowDetailTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectWorkflowDetailTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         workflow: workflow_definition_to_view_for_detail(&workflow, None),
@@ -1749,8 +1745,8 @@ struct WorkflowTriggerForm {
     payload: Option<String>,
 }
 
-#[instrument(name = "web.workspace_workflow_trigger", skip_all)]
-async fn workspace_workflow_trigger(
+#[instrument(name = "web.project_workflow_trigger", skip_all)]
+async fn project_workflow_trigger(
     State(state): State<AppState>,
     session: Session,
     Path((id, wf_id)): Path<(uuid::Uuid, uuid::Uuid)>,
@@ -1777,7 +1773,7 @@ async fn workspace_workflow_trigger(
             Err(e) => {
                 let msg = format!("invalid JSON payload: {e}");
                 return Redirect::to(&format!(
-                    "/workspaces/{id}/workflows/{wf_id}?flash={}",
+                    "/projects/{id}/workflows/{wf_id}?flash={}",
                     encode_query_value(&msg)
                 ))
                 .into_response();
@@ -1792,15 +1788,12 @@ async fn workspace_workflow_trigger(
         .trigger_run(&sub, workflow_id, payload)
         .await
     {
-        Ok(run) => Redirect::to(&format!(
-            "/workspaces/{id}/workflows/{wf_id}/runs/{}",
-            run.id
-        ))
-        .into_response(),
+        Ok(run) => Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
+            .into_response(),
         Err(e) => {
             let msg = format!("failed to trigger run: {e}");
             Redirect::to(&format!(
-                "/workspaces/{id}/workflows/{wf_id}?flash={}",
+                "/projects/{id}/workflows/{wf_id}?flash={}",
                 encode_query_value(&msg)
             ))
             .into_response()
@@ -1808,8 +1801,8 @@ async fn workspace_workflow_trigger(
     }
 }
 
-#[instrument(name = "web.workspace_workflow_run_detail", skip_all)]
-async fn workspace_workflow_run_detail(
+#[instrument(name = "web.project_workflow_run_detail", skip_all)]
+async fn project_workflow_run_detail(
     State(state): State<AppState>,
     session: Session,
     Path((id, wf_id, run_id)): Path<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
@@ -1820,32 +1813,32 @@ async fn workspace_workflow_run_detail(
     };
     let sub = AuthSubject::User(user_id);
 
-    let workspace_id = domain::primitives::WorkspaceId::from(id);
-    let ws = match state.app.workspaces().find_by_id(&sub, workspace_id).await {
-        Ok(ws) => ws,
-        Err(_) => return Redirect::to("/workspaces").into_response(),
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(project) => project,
+        Err(_) => return Redirect::to("/projects").into_response(),
     };
 
     let workflow_id = WorkflowDefinitionId::from(wf_id);
     let workflow = match state.app.workflows().find_by_id(&sub, workflow_id).await {
-        Ok(w) if w.workspace_id == workspace_id => w,
-        _ => return Redirect::to(&format!("/workspaces/{id}/workflows")).into_response(),
+        Ok(w) if w.project_id == project_id => w,
+        _ => return Redirect::to(&format!("/projects/{id}/workflows")).into_response(),
     };
 
     let run_id = WorkflowRunId::from(run_id);
     let run = match state.app.workflows().find_run_by_id(&sub, run_id).await {
-        Ok(r) if r.workspace_id == workspace_id && r.definition_id == workflow_id => r,
+        Ok(r) if r.project_id == project_id && r.definition_id == workflow_id => r,
         _ => {
-            return Redirect::to(&format!("/workspaces/{id}/workflows/{wf_id}")).into_response();
+            return Redirect::to(&format!("/projects/{id}/workflows/{wf_id}")).into_response();
         }
     };
 
-    let (lead_agent, agent_views) = workspace_sidebar_context(&sub, &state, workspace_id).await;
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
     let run_agents = state
         .app
         .agents()
-        .list_for_workflow_run(&sub, workspace_id, run_id)
+        .list_for_workflow_run(&sub, project_id, run_id)
         .await
         .unwrap_or_default();
 
@@ -1855,8 +1848,8 @@ async fn workspace_workflow_run_detail(
         .map(step_result_to_view)
         .collect::<Vec<_>>();
 
-    WorkspaceWorkflowRunDetailTemplate {
-        workspace: workspace_to_view(&ws),
+    ProjectWorkflowRunDetailTemplate {
+        project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
         workflow_id: workflow.id.to_string(),

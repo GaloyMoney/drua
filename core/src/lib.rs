@@ -11,6 +11,8 @@ pub mod library;
 pub mod mcp_creds;
 pub mod note;
 pub mod primitives;
+pub mod project;
+pub mod project_secret;
 pub mod prompt_executor;
 pub mod sandbox;
 pub mod skill;
@@ -18,8 +20,6 @@ pub mod toolset;
 pub mod tunnel;
 pub mod user;
 pub mod workflow;
-pub mod workspace;
-pub mod workspace_secret;
 
 pub use config::*;
 
@@ -33,18 +33,18 @@ use library::Library;
 use mcp_creds::McpCredentials;
 use note::Notes;
 use primitives::ContextGeneration;
+use project::Projects;
+use project_secret::ProjectSecrets;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool, Read,
-    SkillTool, SpacesTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
-    WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
+    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool,
+    ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool, TextEditor, ToolSets,
+    ToolSetsError, UseSkillTool, WorkflowTool,
 };
 use user::Users;
 use workflow::Workflows;
-use workspace::Workspaces;
-use workspace_secret::WorkspaceSecrets;
 
 #[derive(Clone)]
 pub struct App {
@@ -54,8 +54,8 @@ pub struct App {
     audit: Arc<Audit>,
     code_assistant: Option<Arc<CodeAssistant>>,
     toolsets: Arc<ToolSets>,
-    workspaces: Arc<Workspaces>,
-    workspace_secrets: Arc<WorkspaceSecrets>,
+    projects: Arc<Projects>,
+    project_secrets: Arc<ProjectSecrets>,
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
     workflows: Arc<Workflows>,
@@ -72,7 +72,7 @@ pub struct App {
 
 impl App {
     pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
-        // Fail loudly at startup rather than on first workspace-create.
+        // Fail loudly at startup rather than on first project-create.
         config.agents.validate()?;
         config
             .prompt_executor
@@ -109,7 +109,7 @@ impl App {
         if let Some(ca) = code_assistant.as_ref() {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }
-        toolsets.register_top_level(WorkspaceLog::new(Arc::clone(&audit)));
+        toolsets.register_top_level(ProjectLog::new(Arc::clone(&audit)));
         toolsets.set_audit(Arc::clone(&audit));
 
         let (prompt_executor, prompt_tx) = PromptExecutor::init(config.prompt_executor).await;
@@ -118,7 +118,7 @@ impl App {
         let mcp_creds = McpCredentials::new(pool);
 
         let encryption_key = config.encryption.encryption_key();
-        let workspace_secrets = WorkspaceSecrets::new(pool, encryption_key);
+        let project_secrets = ProjectSecrets::new(pool, encryption_key);
 
         // Built before Sandboxes::init so the provider can mint a fresh
         // installation token for `/initialize` to clone private repos.
@@ -203,8 +203,8 @@ impl App {
             context_generation.clone(),
         ));
 
-        toolsets.register_top_level(WorkspaceAgent::new(Arc::clone(&agents)));
-        // WorkspaceSandbox registration sits next to the other library-
+        toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
+        // ProjectSandbox registration sits next to the other library-
         // facing tools below; library_space mode needs `Arc<Library>`.
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
@@ -223,32 +223,32 @@ impl App {
             &jobs,
         ));
 
-        let workspaces = Arc::new(Workspaces::new(
+        let projects = Arc::new(Projects::new(
             pool,
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
             Arc::clone(&skills),
             Arc::clone(&notes),
-            workspace_secrets.clone(),
+            project_secrets.clone(),
             Arc::clone(&workflows),
             (*library).clone(),
         ));
         toolsets.register_top_level(SpacesTool::new(Arc::clone(&library)));
-        toolsets.register_top_level(WorkspaceSandbox::new(
+        toolsets.register_top_level(ProjectSandbox::new(
             Arc::clone(&sandboxes),
             Arc::clone(&library),
         ));
-        toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
+        toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
-        toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&workspaces)));
+        toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&projects)));
         toolsets.register_top_level(WorkflowTool::new(
             Arc::clone(&workflows),
-            Arc::clone(&workspaces),
+            Arc::clone(&projects),
             None,
         ));
 
         // Read-only library lookup lives behind progressive disclosure;
-        // notes/skill tools cover workspace-scoped writes.
+        // notes/skill tools cover project-scoped writes.
         toolsets.register_searchable(LibraryToolSet::new(Arc::clone(&library)));
 
         // Behind progressive disclosure to keep top-level list_tools small.
@@ -256,7 +256,7 @@ impl App {
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
             Arc::clone(&audit),
-            Arc::clone(&workspaces),
+            Arc::clone(&projects),
             Arc::clone(&library),
         ));
 
@@ -267,7 +267,7 @@ impl App {
             let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
                 Arc::clone(&library),
                 Arc::clone(&skills),
-                Arc::clone(&workspaces),
+                Arc::clone(&projects),
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
@@ -287,7 +287,7 @@ impl App {
             let sync_init = library::SyncFromLibraryJobInitializer::<workflow::Workflows>::new(
                 Arc::clone(&library),
                 Arc::clone(&workflows),
-                Arc::clone(&workspaces),
+                Arc::clone(&projects),
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
@@ -332,8 +332,8 @@ impl App {
             audit,
             code_assistant,
             toolsets,
-            workspaces,
-            workspace_secrets: Arc::new(workspace_secrets),
+            projects,
+            project_secrets: Arc::new(project_secrets),
             skills,
             sandboxes,
             workflows,
@@ -370,12 +370,12 @@ impl App {
         &self.toolsets
     }
 
-    pub fn workspaces(&self) -> &Workspaces {
-        &self.workspaces
+    pub fn projects(&self) -> &Projects {
+        &self.projects
     }
 
-    pub fn workspace_secrets(&self) -> &WorkspaceSecrets {
-        &self.workspace_secrets
+    pub fn project_secrets(&self) -> &ProjectSecrets {
+        &self.project_secrets
     }
 
     pub fn skills(&self) -> &Skills {

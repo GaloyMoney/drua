@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use es_entity::operation::hooks::CommitHook;
 
-use super::WorkspaceId;
+use super::ProjectId;
 
-/// Cross-cutting "something changed" signal for workspace context (notes/skills).
+/// Cross-cutting "something changed" signal for project context (notes/skills).
 /// Bumped on every Notes/Skills mutation; read by Agents to detect cache staleness.
 /// HA-safe via PG LISTEN/NOTIFY: the App spawns a listener that bumps this on
 /// `context_changed` notifications from other instances.
@@ -44,21 +44,21 @@ pub struct ContextBumpHook {
     generation: ContextGeneration,
     pool: sqlx::PgPool,
     /// `None` for global-scoped mutations (e.g. global skill upserts);
-    /// `Some(ws)` for workspace-scoped mutations. The payload is
+    /// `Some(project)` for project-scoped mutations. The payload is
     /// informational — listeners on other instances bump unconditionally.
-    workspace_id: Option<WorkspaceId>,
+    project_id: Option<ProjectId>,
 }
 
 impl ContextBumpHook {
     pub fn new(
         generation: ContextGeneration,
         pool: sqlx::PgPool,
-        workspace_id: Option<WorkspaceId>,
+        project_id: Option<ProjectId>,
     ) -> Self {
         Self {
             generation,
             pool,
-            workspace_id,
+            project_id,
         }
     }
 }
@@ -70,7 +70,7 @@ impl CommitHook for ContextBumpHook {
         self.generation.bump();
         let pool = self.pool;
         let payload = self
-            .workspace_id
+            .project_id
             .map(|w| w.to_string())
             .unwrap_or_else(|| "global".to_string());
         tokio::spawn(async move {
@@ -87,6 +87,6 @@ impl CommitHook for ContextBumpHook {
     fn merge(&mut self, other: &mut Self) -> bool {
         // Same-scope bumps collapse; different scopes keep separate hooks
         // so each peer gets a per-scope payload.
-        self.workspace_id == other.workspace_id
+        self.project_id == other.project_id
     }
 }
