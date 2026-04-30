@@ -22,6 +22,7 @@ pub struct AgentItem {
     pub id: String,
     pub name: String,
     pub role: String,
+    pub model: String,
     pub sandbox: Option<SandboxInfo>,
 }
 

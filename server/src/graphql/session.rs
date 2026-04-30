@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use async_graphql::{ComplexObject, Context, Enum, Object, SimpleObject, Union};
 
-use drua_core::agent::session::history;
+use drua_core::agent::session::{history, AgentSession as DomainAgentSession};
 
 use super::primitives::*;
 
@@ -185,11 +187,16 @@ pub struct ThreadMessageUsage {
 }
 
 pub struct AgentSession {
-    pub(super) agent_id: AgentId,
+    pub(super) entity: Arc<DomainAgentSession>,
 }
 
 #[Object]
 impl AgentSession {
+    /// Model used by the LLM for this session's prompts.
+    async fn model(&self) -> &str {
+        self.entity.model()
+    }
+
     /// Flat chat history: recent user messages and assistant responses.
     /// Returns the last `last` messages in chronological order.
     async fn chat_history(
@@ -201,7 +208,7 @@ impl AgentSession {
         let last_n = last.max(1) as usize;
         let messages = app
             .agents()
-            .chat_history(sub, self.agent_id, last_n)
+            .chat_history(sub, self.entity.agent_id, last_n)
             .await?;
         Ok(messages.into_iter().map(ChatMessage::from).collect())
     }
@@ -209,11 +216,20 @@ impl AgentSession {
     /// All threads in this session.
     async fn threads(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<SessionThread>> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let infos = app.agents().thread_infos(sub, self.agent_id).await?;
+        let infos = app.agents().thread_infos(sub, self.entity.agent_id).await?;
+        let agent_id = self.entity.agent_id;
         Ok(infos
             .into_iter()
-            .map(|info| SessionThread::from_info(info, self.agent_id))
+            .map(|info| SessionThread::from_info(info, agent_id))
             .collect())
+    }
+}
+
+impl From<DomainAgentSession> for AgentSession {
+    fn from(entity: DomainAgentSession) -> Self {
+        Self {
+            entity: Arc::new(entity),
+        }
     }
 }
 

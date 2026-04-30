@@ -116,6 +116,10 @@ pub fn draw_agent_details(frame: &mut Frame, state: &ScreenState, area: Rect) {
             Span::styled(" Role:  ", Style::default().fg(Color::DarkGray)),
             Span::styled(role_label, Style::default().fg(Color::White)),
         ]),
+        Line::from(vec![
+            Span::styled(" Model: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&agent.model, Style::default().fg(Color::White)),
+        ]),
     ];
 
     if let Some(ref sandbox) = agent.sandbox {

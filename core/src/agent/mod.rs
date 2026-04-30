@@ -652,6 +652,23 @@ impl Agents {
         Ok(self.sessions.chat_history(agent_id, last_n).await?)
     }
 
+    #[instrument(name = "domain.agent.find_session", skip(self, sub))]
+    pub async fn find_session(
+        &self,
+        sub: &AuthSubject,
+        agent_id: AgentId,
+    ) -> Result<session::AgentSession, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Agent(agent.workspace_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.find_session");
+        Audit::record_workspace_id(agent.workspace_id);
+        Audit::record_agent_id(agent_id);
+        Ok(self.sessions.find_for_agent(agent_id).await?)
+    }
+
     #[instrument(name = "domain.agent.thread_infos", skip(self, sub))]
     pub async fn thread_infos(
         &self,

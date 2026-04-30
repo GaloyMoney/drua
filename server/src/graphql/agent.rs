@@ -39,10 +39,13 @@ impl Agent {
         }))
     }
 
-    async fn session(&self) -> super::session::AgentSession {
-        super::session::AgentSession {
-            agent_id: self.entity.id,
-        }
+    async fn session(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<super::session::AgentSession> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let session = app.agents().find_session(sub, self.entity.id).await?;
+        Ok(super::session::AgentSession::from(session))
     }
 }
 

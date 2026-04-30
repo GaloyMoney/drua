@@ -51,6 +51,10 @@ type AgentSession {
 	"""
 	chatHistory(last: Int! = 20): [ChatMessage!]!
 	"""
+	Model used by the LLM for this session's prompts.
+	"""
+	model: String!
+	"""
 	All threads in this session.
 	"""
 	threads: [SessionThread!]!

@@ -146,6 +146,10 @@ impl AgentSession {
         self.current_main_thread
     }
 
+    pub fn model(&self) -> &str {
+        &self.model_defaults.model
+    }
+
     pub fn exportable_thread(
         &self,
         target: TargetThread,
