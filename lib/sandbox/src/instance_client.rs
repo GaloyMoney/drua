@@ -62,6 +62,20 @@ impl InstanceClient {
         Ok(resp)
     }
 
+    /// Notifies the sandbox-server that a new agent is attaching.
+    /// The server resets per-tenant state — currently the persistent
+    /// bash session's cwd — so the new agent doesn't inherit the
+    /// prior tenant's `cd`. Idempotent.
+    #[instrument(name = "sandbox.instance.attach", skip(self))]
+    pub async fn attach(&self) -> Result<(), InstanceError> {
+        self.http
+            .post(format!("{}/attach", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     #[instrument(name = "sandbox.instance.execute", skip_all, fields(tool = %req.tool))]
     pub async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, InstanceError> {
         let resp = self
@@ -85,6 +99,10 @@ pub struct InitializeRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub github_token: Option<String>,
 }
 
@@ -96,12 +114,24 @@ impl InitializeRequest {
                 mode: "scratch".to_string(),
                 repo_url: None,
                 branch: None,
+                library_url: None,
+                slug: None,
                 github_token,
             },
             SandboxMode::Repo { repo_url, branch } => Self {
                 mode: "repo".to_string(),
                 repo_url: Some(repo_url.clone()),
                 branch: branch.clone(),
+                library_url: None,
+                slug: None,
+                github_token,
+            },
+            SandboxMode::LibrarySpace { library_url, slug } => Self {
+                mode: "library_space".to_string(),
+                repo_url: None,
+                branch: None,
+                library_url: Some(library_url.clone()),
+                slug: Some(slug.clone()),
                 github_token,
             },
         }

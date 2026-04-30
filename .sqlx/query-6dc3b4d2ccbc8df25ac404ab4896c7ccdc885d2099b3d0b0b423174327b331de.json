@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM notes WHERE COALESCE(workspace_id = $1, $1 IS NULL) AND (NOT $2 OR workflow_id IS NOT DISTINCT FROM $3) AND (COALESCE(id < $5, true)) AND deleted = FALSE ORDER BY id DESC LIMIT $4) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $6 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN note_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM spaces WHERE (COALESCE(id < $2, true)) AND deleted = FALSE ORDER BY id DESC LIMIT $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $3 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN space_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,9 +31,6 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Bool",
-        "Uuid",
         "Int8",
         "Uuid",
         "Bool"
@@ -47,5 +44,5 @@
       false
     ]
   },
-  "hash": "388d1f07775c62b686480ec42d6e3dd3cfa95e837f4f7e4f8695cfe5efd8ff46"
+  "hash": "6dc3b4d2ccbc8df25ac404ab4896c7ccdc885d2099b3d0b0b423174327b331de"
 }

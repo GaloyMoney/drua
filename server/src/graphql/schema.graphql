@@ -124,17 +124,28 @@ here — `library.search_global` filters them out at the boundary.
 enum LibraryFileType {
 	NOTE
 	SKILL
+	SPACE_FILE
 }
 
 type LibrarySearchHit {
 	id: UUID!
+	"""
+	Set on `SpaceFile` hits: the file's path inside `spaces/<slug>/`.
+	"""
+	relativePath: String
 	score: Float!
 	snippet: String!
+	"""
+	Set on `SpaceFile` hits. Use this — not `workspace_id` — to
+	label the result's scope in UIs.
+	"""
+	spaceSlug: String
 	tags: [String!]!
 	title: String!
 	type: LibraryFileType!
 	"""
-	`null` for global content (skills with no workspace).
+	`null` for global content (skills with no workspace) and for
+	space files (which are scoped to a `space_slug` instead).
 	"""
 	workspaceId: WorkspaceId
 }

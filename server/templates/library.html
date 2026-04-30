@@ -74,9 +74,10 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .lib-type-badge.skill    { background: #1976d2; }
-  .lib-type-badge.note     { background: #388e3c; }
-  .lib-type-badge.workflow { background: #f57c00; }
+  .lib-type-badge.skill      { background: #1976d2; }
+  .lib-type-badge.note       { background: #388e3c; }
+  .lib-type-badge.workflow   { background: #f57c00; }
+  .lib-type-badge.space_file { background: #6a1b9a; }
   .lib-snippet {
     font-size: 0.85rem;
     color: var(--pico-color);
@@ -87,7 +88,7 @@
 
 {% block content %}
 <h2>Library</h2>
-<p><small>Search across all library files (skills, notes, workflows) in workspaces you can read.</small></p>
+<p><small>Search across all library files (skills, notes, space files) in workspaces you can read.</small></p>
 
 <form class="lib-search-form"
       hx-get="/library/search"
@@ -116,6 +117,7 @@
       <span class="lib-active-count">Type:</span>
       <label><input type="checkbox" name="t" value="skill">Skill</label>
       <label><input type="checkbox" name="t" value="note">Note</label>
+      <label><input type="checkbox" name="t" value="space_file">Space file</label>
       <span id="lib-active-count" class="lib-active-count"></span>
     </div>
   </div>

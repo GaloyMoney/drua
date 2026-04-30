@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
+use crate::library::Library;
 use crate::primitives::SandboxId;
 use crate::sandbox::{Sandbox, Sandboxes};
 
@@ -51,6 +52,10 @@ impl SandboxCommand {
 enum SandboxCreateMode {
     Scratch,
     Repo,
+    /// Sparse-checkout of `spaces/<space_slug>/` from the library repo.
+    /// Requires `space_slug` and that the caller's workspace is in
+    /// `Space.authorized_workspaces`.
+    LibrarySpace,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -70,6 +75,10 @@ struct WorkspaceSandboxParams {
     mode: Option<SandboxCreateMode>,
     repo_url: Option<String>,
     branch: Option<String>,
+    /// Required when `mode == "library_space"`. The space's slug
+    /// (from `spaces.create`) — the sandbox lands in
+    /// `<workspace>/library/spaces/<slug>/`.
+    space_slug: Option<String>,
     cpu: Option<String>,
     memory: Option<String>,
     disk_size: Option<String>,
@@ -86,20 +95,26 @@ struct WorkspaceSandboxParams {
     #[serde(default)]
     tool_args: Option<JsonObject>,
 
-    /// On `restart`: block server-side until state=ready (or fail) instead
-    /// of returning immediately while the lifecycle is still spinning.
-    /// Caps at the executor's 180s sandbox-ready timeout.
+    /// On `create` and `restart`: block until state=ready (or fail).
+    /// Defaults to `true` so callers don't accidentally race a
+    /// follow-up call against an in-flight `/initialize`. Pass
+    /// `wait: false` only when you genuinely want a fire-and-forget
+    /// provisioning. Budget: 6 minutes.
     #[serde(default)]
     wait: Option<bool>,
 }
 
 pub struct WorkspaceSandbox {
     sandboxes: Arc<Sandboxes>,
+    /// Library handle for `library_space` mode — supplies both the
+    /// space lookup (`find_space_by_slug_authorized`) and the upstream
+    /// repo URL (`Library::repo_url`).
+    library: Arc<Library>,
 }
 
 impl WorkspaceSandbox {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, library: Arc<Library>) -> Self {
+        Self { sandboxes, library }
     }
 }
 
@@ -129,14 +144,17 @@ impl TopLevelTool for WorkspaceSandbox {
     }
 
     fn description(&self) -> &str {
-        "Manage sandboxes. Commands: `create` (requires `name`, `mode`, \
-         optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
+        "Manage sandboxes. Commands: `create` (requires `name`, `mode` \
+         (`scratch`/`repo`/`library_space`), optional `repo_url`+`branch` \
+         for repo mode, `space_slug` for library_space mode, plus \
+         `cpu`, `memory`, `disk_size`; blocks until state=ready unless \
+         `wait: false`), \
          `list`, `get` (requires `sandbox_id`), \
          `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`; \
          per-tool args: ls/read take `path`, grep/glob take `pattern`), \
-         `restart` (requires `sandbox_id`; optional `wait: true` blocks until \
-         state=ready — wakes a suspended sandbox so it can be inspected; \
-         workflow-scoped sandboxes are suspended after each run), \
+         `restart` (requires `sandbox_id`; blocks until state=ready unless \
+         `wait: false` — wakes a suspended or errored sandbox; cannot run \
+         while a sandbox is still provisioning), \
          `suspend` (requires `sandbox_id`)."
     }
 
@@ -188,6 +206,29 @@ impl TopLevelTool for WorkspaceSandbox {
                         }
                     }
                     SandboxCreateMode::Scratch => sandbox::SandboxMode::Scratch,
+                    SandboxCreateMode::LibrarySpace => {
+                        let slug = params.space_slug.ok_or_else(|| {
+                            ToolSetsError::InvalidArgument(
+                                "space_slug is required when mode is 'library_space'".to_string(),
+                            )
+                        })?;
+                        let library_url = self.library.repo_url().map(str::to_string).ok_or_else(
+                            || {
+                                ToolSetsError::InvalidArgument(
+                                    "library_space mode requires `library.repo_url` to be configured"
+                                        .to_string(),
+                                )
+                            },
+                        )?;
+                        let space = self
+                            .library
+                            .find_space_by_slug_authorized(subject, &slug)
+                            .await?;
+                        sandbox::SandboxMode::LibrarySpace {
+                            library_url,
+                            slug: space.slug,
+                        }
+                    }
                 };
 
                 let specs = sandbox::SandboxSpecs {
@@ -202,9 +243,22 @@ impl TopLevelTool for WorkspaceSandbox {
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    format_sandbox(&sandbox),
-                )]))
+                if params.wait.unwrap_or(true) {
+                    let ready = self
+                        .sandboxes
+                        .wait_until_ready(sandbox.id, std::time::Duration::from_secs(360))
+                        .await
+                        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        format_sandbox(&ready),
+                    )]));
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Sandbox creation requested. Pass `wait: true` (the default) \
+                     to block until ready, or poll `get` until state=ready.\n\n{}",
+                    format_sandbox(&sandbox)
+                ))]))
             }
 
             SandboxCommand::List => {
@@ -264,10 +318,10 @@ impl TopLevelTool for WorkspaceSandbox {
                     .restart(subject, sandbox_id)
                     .await
                     .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
-                if params.wait.unwrap_or(false) {
+                if params.wait.unwrap_or(true) {
                     let ready = self
                         .sandboxes
-                        .wait_until_ready(sandbox.id, std::time::Duration::from_secs(180))
+                        .wait_until_ready(sandbox.id, std::time::Duration::from_secs(360))
                         .await
                         .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
                     Ok(CallToolResult::success(vec![Content::text(
@@ -275,7 +329,8 @@ impl TopLevelTool for WorkspaceSandbox {
                     )]))
                 } else {
                     Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Sandbox restart requested. Pass `wait: true` to block until ready, or poll `get` until state=ready.\n\n{}",
+                        "Sandbox restart requested. Pass `wait: true` (the default) to \
+                         block until ready, or poll `get` until state=ready.\n\n{}",
                         format_sandbox(&sandbox)
                     ))]))
                 }

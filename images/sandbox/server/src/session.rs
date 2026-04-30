@@ -47,9 +47,13 @@ enum IsolationLayer {
 }
 
 /// Try each isolation layer in order until one works (bwrap → uid-only → plain).
-async fn spawn_session_shell(workspace: &str, workspace_tmp: &str) -> Result<Child, String> {
+async fn spawn_session_shell(
+    workspace: &str,
+    workspace_tmp: &str,
+    cwd: &str,
+) -> Result<Child, String> {
     #[cfg(unix)]
-    match try_spawn(IsolationLayer::Bwrap, workspace, workspace_tmp) {
+    match try_spawn(IsolationLayer::Bwrap, workspace, workspace_tmp, cwd) {
         Ok(child) => return Ok(child),
         Err(e) if is_bwrap_unavailable(&e) => {
             tracing::warn!("bwrap unavailable for session, falling back: {e}");
@@ -59,7 +63,7 @@ async fn spawn_session_shell(workspace: &str, workspace_tmp: &str) -> Result<Chi
 
     #[cfg(unix)]
     if is_root() {
-        match try_spawn(IsolationLayer::UidOnly, workspace, workspace_tmp) {
+        match try_spawn(IsolationLayer::UidOnly, workspace, workspace_tmp, cwd) {
             Ok(child) => return Ok(child),
             Err(e) if is_spawn_failure(&e) => {
                 tracing::warn!("uid-only session failed (fake-root?), falling back: {e}");
@@ -68,10 +72,15 @@ async fn spawn_session_shell(workspace: &str, workspace_tmp: &str) -> Result<Chi
         }
     }
 
-    try_spawn(IsolationLayer::Plain, workspace, workspace_tmp)
+    try_spawn(IsolationLayer::Plain, workspace, workspace_tmp, cwd)
 }
 
-fn try_spawn(layer: IsolationLayer, workspace: &str, workspace_tmp: &str) -> Result<Child, String> {
+fn try_spawn(
+    layer: IsolationLayer,
+    workspace: &str,
+    workspace_tmp: &str,
+    cwd: &str,
+) -> Result<Child, String> {
     let mut cmd = match layer {
         IsolationLayer::Bwrap => {
             let mut c = Command::new("bwrap");
@@ -130,7 +139,7 @@ fn try_spawn(layer: IsolationLayer, workspace: &str, workspace_tmp: &str) -> Res
         )
         .env("NIX_REMOTE", "daemon")
         .env("PS1", "")
-        .current_dir(workspace);
+        .current_dir(cwd);
 
     cmd.spawn()
         .map_err(|e| format!("Failed to execute command: {e}"))
@@ -166,6 +175,12 @@ pub struct BashSession {
     inner: Mutex<Option<BashSessionInner>>,
     workspace: String,
     workspace_tmp: String,
+    /// Where freshly-spawned shells start. `/initialize` and the new
+    /// `/reset_cwd` endpoint update this so a per-mode working dir
+    /// (e.g. `/workspace/library/spaces/<slug>`) is honoured and a
+    /// new agent attaching to a preexisting sandbox doesn't inherit
+    /// the previous tenant's `cd`.
+    cwd: tokio::sync::RwLock<String>,
 }
 
 #[derive(Debug)]
@@ -180,9 +195,32 @@ impl BashSession {
         let workspace_tmp = format!("{workspace}/tmp");
         Self {
             inner: Mutex::new(None),
-            workspace,
+            workspace: workspace.clone(),
             workspace_tmp,
+            cwd: tokio::sync::RwLock::new(workspace),
         }
+    }
+
+    /// Record a new starting cwd and drop the active shell so the
+    /// next `execute` respawns inside `cwd`. No-op if `cwd` is empty.
+    pub async fn set_cwd(&self, cwd: String) {
+        if cwd.is_empty() {
+            return;
+        }
+        {
+            let mut guard = self.cwd.write().await;
+            *guard = cwd;
+        }
+        // Drop any live shell so the next /execute respawns with the
+        // fresh cwd. Drop is best-effort; a half-running shell will
+        // be cleaned up naturally on next read failure.
+        let mut inner = self.inner.lock().await;
+        let _ = inner.take();
+    }
+
+    /// Snapshot of the current cwd.
+    pub async fn current_cwd(&self) -> String {
+        self.cwd.read().await.clone()
     }
 
     /// Lazily creates the session on first call. On stdin error or stdout EOF,
@@ -326,7 +364,19 @@ impl BashSession {
         let _ = tokio::fs::create_dir_all(&self.workspace).await;
         let _ = tokio::fs::create_dir_all(&self.workspace_tmp).await;
 
-        let mut child = spawn_session_shell(&self.workspace, &self.workspace_tmp).await?;
+        let cwd = {
+            let cwd_guard = self.cwd.read().await;
+            // Fall back to workspace if the recorded cwd no longer
+            // exists (e.g. an old space dir was deleted out from
+            // under us) — keeps the shell alive instead of failing
+            // to spawn.
+            if std::path::Path::new(cwd_guard.as_str()).is_dir() {
+                cwd_guard.clone()
+            } else {
+                self.workspace.clone()
+            }
+        };
+        let mut child = spawn_session_shell(&self.workspace, &self.workspace_tmp, &cwd).await?;
 
         let stdin = child
             .stdin

@@ -8,7 +8,7 @@ use super::upstream::Upstream;
 /// WriteToRuntime and reverse-sync SyncSkillsFromLibrary use this queue).
 pub const LIBRARY_LOCK_QUEUE: &str = "library-lock";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct WriteToRuntimeConfig {
     pub file: UpstreamOp,
 }
@@ -57,13 +57,16 @@ impl JobRunner for WriteToRuntimeRunner {
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
         self.upstream.pull().await?;
 
-        // Workspace init / cleanup: always execute, no hash comparison.
+        // Workspace/space init/cleanup: always execute, no hash comparison.
         match &self.file {
             UpstreamOp::WorkspaceInit { workspace_name } => {
                 return self.workspace_init(workspace_name).await;
             }
             UpstreamOp::WorkspaceCleanup { workspace_name } => {
                 return self.workspace_cleanup(workspace_name).await;
+            }
+            UpstreamOp::SpaceInit { slug } => {
+                return self.space_init(slug).await;
             }
             UpstreamOp::WriteFile(_) => {}
         }
@@ -103,8 +106,24 @@ impl WriteToRuntimeRunner {
             .iter()
             .map(|s| format!("runtime/workspaces/{workspace_name}/{s}/.gitkeep"))
             .collect();
+        let message = format!("workspace: init {workspace_name}");
+        self.scaffold_or_reset(&paths, &message, "workspace init")
+            .await
+    }
 
-        let err_msg = match self.scaffold_paths(&paths, workspace_name).await {
+    async fn space_init(&self, slug: &str) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+        let paths = vec![format!("spaces/{slug}/.gitkeep")];
+        let message = format!("space: init {slug}");
+        self.scaffold_or_reset(&paths, &message, "space init").await
+    }
+
+    async fn scaffold_or_reset(
+        &self,
+        paths: &[String],
+        commit_message: &str,
+        op_label: &'static str,
+    ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+        let err_msg = match self.scaffold_paths(paths, commit_message).await {
             Ok(()) => {
                 self.upstream.push().await?;
                 return Ok(JobCompletion::Complete);
@@ -112,9 +131,9 @@ impl WriteToRuntimeRunner {
             Err(e) => e.to_string(),
         };
 
-        tracing::warn!(error = %err_msg, "workspace init failed, resetting working tree");
+        tracing::warn!(error = %err_msg, op = op_label, "scaffold failed, resetting working tree");
         if let Err(reset_err) = self.upstream.reset_dirty_state().await {
-            tracing::error!(error = %reset_err, "reset after failed init also failed");
+            tracing::error!(error = %reset_err, op = op_label, "reset after failed scaffold also failed");
         }
         Err(err_msg.into())
     }
@@ -122,14 +141,14 @@ impl WriteToRuntimeRunner {
     async fn scaffold_paths(
         &self,
         paths: &[String],
-        workspace_name: &str,
+        commit_message: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for path in paths {
             self.upstream.write_file(path, "").await?;
         }
         let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         self.upstream
-            .commit_paths(&path_refs, &format!("workspace: init {workspace_name}"))
+            .commit_paths(&path_refs, commit_message)
             .await?;
         Ok(())
     }

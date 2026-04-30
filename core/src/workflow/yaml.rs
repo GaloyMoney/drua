@@ -140,6 +140,15 @@ impl WorkflowSandboxYaml {
                             disk_size,
                         },
                     },
+                    // TODO(library-space): expose as a `WorkflowSandboxYaml::LibrarySpace`
+                    // variant once workflow declarations support library-space sandboxes.
+                    SandboxMode::LibrarySpace { slug, .. } => {
+                        tracing::warn!(
+                            %slug,
+                            "library-space sandbox cannot be serialized to workflow yaml yet"
+                        );
+                        todo!("library-space sandbox setup not yet implemented")
+                    }
                 }
             }
         }

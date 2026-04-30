@@ -308,6 +308,7 @@ async fn library_search(
         .filter_map(|s| match s.as_str() {
             "skill" => Some(drua_core::library::DocType::Skill),
             "note" => Some(drua_core::library::DocType::Note),
+            "space_file" => Some(drua_core::library::DocType::SpaceFile),
             _ => None,
         })
         .collect();
@@ -360,10 +361,6 @@ async fn library_search(
     let views: Vec<LibraryHitView> = hits
         .into_iter()
         .map(|h| {
-            let workspace_name = workspace_lookup
-                .get(&h.workspace_id)
-                .cloned()
-                .unwrap_or_else(|| h.workspace_id.to_string());
             let (type_label, type_class, detail_url) = match h.doc_type {
                 drua_core::library::DocType::Skill => (
                     "Skill".to_string(),
@@ -382,11 +379,29 @@ async fn library_search(
                     )),
                 ),
                 drua_core::library::DocType::Note => ("Note".to_string(), "note".to_string(), None),
+                // No detail page for space files yet — they're not workspace-scoped
+                // and `library.get_file(id)` is the only lookup path planned.
+                drua_core::library::DocType::SpaceFile => {
+                    ("Space File".to_string(), "space_file".to_string(), None)
+                }
+            };
+            let scope_label = match (&h.doc_type, &h.space_slug, h.workspace_id.is_nil()) {
+                (drua_core::library::DocType::SpaceFile, Some(slug), _) => match &h.relative_path {
+                    Some(path) => format!("space: {slug}/{path}"),
+                    None => format!("space: {slug}"),
+                },
+                (_, _, true) => "global".to_string(),
+                _ => {
+                    let name = workspace_lookup
+                        .get(&h.workspace_id)
+                        .cloned()
+                        .unwrap_or_else(|| h.workspace_id.to_string());
+                    format!("workspace: {name}")
+                }
             };
             LibraryHitView {
                 id: h.doc_id.to_string(),
-                workspace_id: h.workspace_id.to_string(),
-                workspace_name,
+                scope_label,
                 type_label,
                 type_class,
                 title: h.title,
@@ -833,6 +848,7 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         SandboxMode::Repo { repo_url, branch } => {
             ("Repo".to_string(), Some(repo_url.clone()), branch.clone())
         }
+        SandboxMode::LibrarySpace { slug, .. } => (format!("LibrarySpace({slug})"), None, None),
     };
 
     let exported_system_prompt = s.exported_system_prompt.as_ref().map(|f| ExportedFileView {
@@ -1525,6 +1541,9 @@ fn workflow_sandbox_to_view(d: &domain::workflow::WorkflowSandboxDecl) -> Workfl
                 SandboxMode::Repo { repo_url, branch } => {
                     ("repo".to_string(), Some(repo_url.clone()), branch.clone())
                 }
+                SandboxMode::LibrarySpace { slug, .. } => {
+                    (format!("library_space({slug})"), None, None)
+                }
             };
             WorkflowSandboxView {
                 name: name.clone(),
@@ -1622,16 +1641,6 @@ fn step_result_to_view(sr: &domain::workflow::StepResult) -> StepResultView {
     }
 }
 
-fn note_to_view(n: &domain::note::Note) -> NoteView {
-    NoteView {
-        id: n.id.to_string(),
-        title: n.title().to_string(),
-        content: n.body().to_string(),
-        tags: n.tags().to_vec(),
-        created_at: n.created_at(),
-    }
-}
-
 #[instrument(name = "web.workspace_workflows_page", skip_all)]
 async fn workspace_workflows_page(
     State(state): State<AppState>,
@@ -1712,20 +1721,12 @@ async fn workspace_workflow_detail(
         .await
         .unwrap_or_default();
 
-    let workflow_notes = state
-        .app
-        .notes()
-        .list_for_workflow_definition(&sub, workspace_id, workflow_id)
-        .await
-        .unwrap_or_default();
-
     WorkspaceWorkflowDetailTemplate {
         workspace: workspace_to_view(&ws),
         lead_agent,
         agents: agent_views,
         workflow: workflow_definition_to_view_for_detail(&workflow, None),
         recent_runs: recent_runs.iter().map(workflow_run_to_view).collect(),
-        workflow_notes: workflow_notes.iter().map(note_to_view).collect(),
         flash: query.flash,
     }
     .into_response()

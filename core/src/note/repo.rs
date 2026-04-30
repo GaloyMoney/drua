@@ -13,7 +13,6 @@ use super::entity::*;
     columns(
         workspace_id(ty = "WorkspaceId", list_for(by(created_at))),
         pinned(ty = "bool"),
-        workflow_id(ty = "Option<WorkflowDefinitionId>", list_for(by(created_at))),
     ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "crate::library::LibraryError")

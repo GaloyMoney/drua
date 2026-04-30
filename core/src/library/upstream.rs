@@ -388,6 +388,106 @@ impl Upstream {
         Ok(results)
     }
 
+    /// Walks `spaces/<slug>/**/*.md` and returns one `SpaceFileChange` per
+    /// added/modified/deleted file since `last_commit`. On first run
+    /// (`None`) every tracked `*.md` under `spaces/` is reported as
+    /// `Upserted`. Files outside `spaces/<slug>/` are skipped (e.g. a
+    /// stray `spaces/README.md` at the top level).
+    pub async fn changed_space_files(
+        &self,
+        last_commit: Option<&str>,
+    ) -> Result<Vec<SpaceFileChange>, LibraryError> {
+        self.require_git_repo()?;
+
+        let raw = match last_commit {
+            Some(commit) => {
+                let output = tokio::process::Command::new("git")
+                    .args([
+                        "diff",
+                        "--name-status",
+                        "--no-renames",
+                        &format!("{commit}..HEAD"),
+                        "--",
+                        "spaces/",
+                    ])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git diff: {e}")))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LibraryError::Git(format!("git diff failed: {stderr}")));
+                }
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            }
+            None => {
+                let output = tokio::process::Command::new("git")
+                    .args(["ls-files", "--", "spaces/*/**/*.md"])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| LibraryError::Git(format!("git ls-files: {e}")))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LibraryError::Git(format!("git ls-files failed: {stderr}")));
+                }
+                // Synthesise an "A\t<path>" line per tracked file so the
+                // parser below handles initial sync uniformly.
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| format!("A\t{p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        let mut changes = Vec::new();
+        for line in raw.lines() {
+            let Some((status, path)) = line.split_once('\t') else {
+                continue;
+            };
+            if !path.ends_with(".md") {
+                continue;
+            }
+            let Some((slug, relative_path)) = parse_space_path(path) else {
+                continue;
+            };
+            // Status is single-letter for non-rename diffs (we passed
+            // `--no-renames` so renames decompose into D + A).
+            let kind = status.chars().next().unwrap_or('?');
+            match kind {
+                'A' | 'M' | 'C' | 'T' => {
+                    let full = self.repo_path.join(path);
+                    match tokio::fs::read_to_string(&full).await {
+                        Ok(content) => changes.push(SpaceFileChange::Upserted {
+                            slug,
+                            relative_path,
+                            content,
+                        }),
+                        Err(e) => {
+                            tracing::debug!(
+                                path = %path,
+                                error = %e,
+                                "skipping unreadable space file"
+                            );
+                        }
+                    }
+                }
+                'D' => {
+                    changes.push(SpaceFileChange::Deleted {
+                        slug,
+                        relative_path,
+                    });
+                }
+                other => {
+                    tracing::debug!(status = %other, path, "unexpected git status, skipping");
+                }
+            }
+        }
+        Ok(changes)
+    }
+
     /// `git rm -r` the directory and commit. No-op if it doesn't exist.
     pub async fn remove_dir_and_commit(
         &self,
@@ -475,4 +575,64 @@ async fn clone(repo_url: &str, repo_path: &Path, token: Option<&str>) -> Result<
     }
     tracing::info!(path = %repo_path.display(), "library repo cloned");
     Ok(())
+}
+
+/// One change to a `spaces/<slug>/<relative_path>` `*.md` file. Renames
+/// are decomposed into a `Deleted` + `Upserted` pair (we pass
+/// `--no-renames` to git diff so it never emits R/100 lines); space file
+/// identity is `(space_id, relative_path)` so a rename is genuinely a
+/// new identity.
+#[derive(Debug, Clone)]
+pub enum SpaceFileChange {
+    Upserted {
+        slug: String,
+        relative_path: String,
+        content: String,
+    },
+    Deleted {
+        slug: String,
+        relative_path: String,
+    },
+}
+
+/// Splits `spaces/<slug>/<rest…>` into `(slug, rest)`. Returns `None`
+/// for malformed paths (e.g. `spaces/README.md` directly under
+/// `spaces/`).
+fn parse_space_path(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("spaces/")?;
+    let (slug, relative_path) = rest.split_once('/')?;
+    if slug.is_empty() || relative_path.is_empty() {
+        return None;
+    }
+    Some((slug.to_string(), relative_path.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_space_path_extracts_slug_and_rest() {
+        assert_eq!(
+            parse_space_path("spaces/oncall/runbooks/incident-foo.md"),
+            Some(("oncall".to_string(), "runbooks/incident-foo.md".to_string()))
+        );
+        assert_eq!(
+            parse_space_path("spaces/incidents/notes.md"),
+            Some(("incidents".to_string(), "notes.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_space_path_rejects_top_level_files() {
+        assert_eq!(parse_space_path("spaces/README.md"), None);
+        assert_eq!(parse_space_path("spaces/"), None);
+        assert_eq!(parse_space_path("spaces"), None);
+    }
+
+    #[test]
+    fn parse_space_path_rejects_non_space_paths() {
+        assert_eq!(parse_space_path("runtime/notes/foo.md"), None);
+        assert_eq!(parse_space_path("lib/concepts/foo.md"), None);
+    }
 }

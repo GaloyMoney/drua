@@ -10,6 +10,7 @@ use drua_core::library::{DocType, GlobalSearchHit};
 pub enum LibraryFileType {
     Skill,
     Note,
+    SpaceFile,
 }
 
 impl From<LibraryFileType> for DocType {
@@ -17,18 +18,21 @@ impl From<LibraryFileType> for DocType {
         match t {
             LibraryFileType::Skill => DocType::Skill,
             LibraryFileType::Note => DocType::Note,
+            LibraryFileType::SpaceFile => DocType::SpaceFile,
         }
     }
 }
 
-/// Workflow rows can't reach this conversion in practice because
-/// `Library::search_global` drops them before fusion; default to Note
+/// `Workflow` rows can't reach this conversion in practice —
+/// `Library::search_global` drops them before fusion. Default to Note
 /// if one ever does.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
         match t {
             DocType::Skill => LibraryFileType::Skill,
-            DocType::Note | DocType::Workflow => LibraryFileType::Note,
+            DocType::Note => LibraryFileType::Note,
+            DocType::SpaceFile => LibraryFileType::SpaceFile,
+            DocType::Workflow => LibraryFileType::Note,
         }
     }
 }
@@ -47,13 +51,19 @@ pub struct LibrarySearchInput {
 #[derive(SimpleObject, Clone)]
 pub struct LibrarySearchHit {
     pub id: UUID,
-    /// `null` for global content (skills with no workspace).
+    /// `null` for global content (skills with no workspace) and for
+    /// space files (which are scoped to a `space_slug` instead).
     pub workspace_id: Option<WorkspaceId>,
     pub r#type: LibraryFileType,
     pub title: String,
     pub snippet: String,
     pub score: f64,
     pub tags: Vec<String>,
+    /// Set on `SpaceFile` hits. Use this — not `workspace_id` — to
+    /// label the result's scope in UIs.
+    pub space_slug: Option<String>,
+    /// Set on `SpaceFile` hits: the file's path inside `spaces/<slug>/`.
+    pub relative_path: Option<String>,
 }
 
 impl LibrarySearchHit {
@@ -72,6 +82,8 @@ impl LibrarySearchHit {
             snippet,
             score: hit.score,
             tags: hit.tags,
+            space_slug: hit.space_slug,
+            relative_path: hit.relative_path,
         }
     }
 }

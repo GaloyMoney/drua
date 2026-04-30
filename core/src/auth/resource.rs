@@ -1,5 +1,5 @@
 use crate::primitives::{
-    AgentId, McpCredsId, NoteId, SandboxId, SkillId, WorkflowDefinitionId, WorkspaceId,
+    AgentId, McpCredsId, NoteId, SandboxId, SkillId, SpaceId, WorkflowDefinitionId, WorkspaceId,
     WorkspaceSecretId,
 };
 
@@ -20,6 +20,8 @@ pub enum AuthResource {
     Skill(WorkspaceId, Option<SkillId>),
     Workflow(WorkspaceId, Option<WorkflowDefinitionId>),
     AuditLog(WorkspaceId),
+    /// Library-wide; not workspace-scoped.
+    Space(Option<SpaceId>),
     /// Matched by [`super::AuthScope::External`] scopes by name.
     External(String),
 }
@@ -35,7 +37,7 @@ impl AuthResource {
             | AuthResource::Skill(ws, _)
             | AuthResource::Workflow(ws, _)
             | AuthResource::AuditLog(ws) => Some(*ws),
-            AuthResource::McpCreds(_) | AuthResource::External(_) => None,
+            AuthResource::McpCreds(_) | AuthResource::Space(_) | AuthResource::External(_) => None,
         }
     }
 }

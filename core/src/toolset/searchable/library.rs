@@ -59,6 +59,7 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 enum LibraryFileType {
     Skill,
     Note,
+    SpaceFile,
 }
 
 impl From<LibraryFileType> for DocType {
@@ -66,17 +67,19 @@ impl From<LibraryFileType> for DocType {
         match t {
             LibraryFileType::Skill => DocType::Skill,
             LibraryFileType::Note => DocType::Note,
+            LibraryFileType::SpaceFile => DocType::SpaceFile,
         }
     }
 }
 
-/// Workflow rows can't reach this conversion in practice — `Library::
-/// search_global` drops them before fusion. Default to Note as a
-/// defensive fallback.
+/// `Workflow` rows can't reach this conversion in practice —
+/// `Library::search_global` drops them before fusion. Default to Note
+/// as a defensive fallback.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
         match t {
             DocType::Skill => LibraryFileType::Skill,
+            DocType::SpaceFile => LibraryFileType::SpaceFile,
             DocType::Note | DocType::Workflow => LibraryFileType::Note,
         }
     }
@@ -150,6 +153,13 @@ struct LibraryFileOutput {
     /// `null` for global content (skills with no workspace).
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_id: Option<String>,
+    /// Populated only for `space_file` hits. The space's slug.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    space_slug: Option<String>,
+    /// Populated only for `space_file` hits. The file's path inside
+    /// `spaces/<space_slug>/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relative_path: Option<String>,
 }
 
 impl From<LibraryFile> for LibraryFileOutput {
@@ -166,6 +176,8 @@ impl From<LibraryFile> for LibraryFileOutput {
             body: f.body,
             tags: f.tags,
             workspace_id,
+            space_slug: f.space_slug,
+            relative_path: f.relative_path,
         }
     }
 }
@@ -399,6 +411,7 @@ fn type_str(t: LibraryFileType) -> &'static str {
     match t {
         LibraryFileType::Skill => "skill",
         LibraryFileType::Note => "note",
+        LibraryFileType::SpaceFile => "space_file",
     }
 }
 
@@ -412,7 +425,12 @@ fn render_get_files_text(files: &[LibraryFileOutput], missing: &[String], total:
     let mut omitted: Vec<&str> = Vec::new();
 
     for (i, f) in files.iter().enumerate() {
-        let header = format!("[{}] {}", f.type_str(), f.title);
+        let header = match (&f.space_slug, &f.relative_path) {
+            (Some(slug), Some(path)) => {
+                format!("[{}] [{slug}] {path} — {}", f.type_str(), f.title)
+            }
+            _ => format!("[{}] {}", f.type_str(), f.title),
+        };
         let body = truncate_with_marker(&f.body, TEXT_BODY_CHARS_PER_FILE);
         let separator = if i == 0 { "" } else { "\n---\n" };
         let chunk = format!("{separator}{header}\n\n{body}");
@@ -493,6 +511,8 @@ mod tests {
             title: "global skill".into(),
             body: "body".into(),
             tags: vec![],
+            space_slug: None,
+            relative_path: None,
         };
         let out = LibraryFileOutput::from(f);
         assert!(out.workspace_id.is_none());
@@ -510,9 +530,37 @@ mod tests {
             title: "scoped note".into(),
             body: "body".into(),
             tags: vec!["t1".into()],
+            space_slug: None,
+            relative_path: None,
         };
         let out = LibraryFileOutput::from(f);
         assert_eq!(out.workspace_id.as_deref(), Some(ws.to_string().as_str()));
+    }
+
+    #[test]
+    fn library_file_output_carries_space_metadata() {
+        let f = LibraryFile {
+            doc_id: uuid::Uuid::new_v4(),
+            doc_type: DocType::SpaceFile,
+            workspace_id: uuid::Uuid::nil(),
+            title: "Incident playbook".into(),
+            body: "body".into(),
+            tags: vec![],
+            space_slug: Some("oncall".into()),
+            relative_path: Some("runbooks/incident-foo.md".into()),
+        };
+        let out = LibraryFileOutput::from(f);
+        assert_eq!(out.space_slug.as_deref(), Some("oncall"));
+        assert_eq!(
+            out.relative_path.as_deref(),
+            Some("runbooks/incident-foo.md")
+        );
+
+        let header_files = vec![out];
+        let rendered = render_get_files_text(&header_files, &[], 1);
+        assert!(
+            rendered.contains("[space_file] [oncall] runbooks/incident-foo.md — Incident playbook")
+        );
     }
 
     #[test]
@@ -525,6 +573,8 @@ mod tests {
             body: big_body.clone(),
             tags: vec![],
             workspace_id: None,
+            space_slug: None,
+            relative_path: None,
         };
         let text = render_get_files_text(&[f], &[], 1);
         assert!(
@@ -545,6 +595,8 @@ mod tests {
                 body: body.clone(),
                 tags: vec![],
                 workspace_id: None,
+                space_slug: None,
+                relative_path: None,
             })
             .collect();
         let text = render_get_files_text(&files, &[], 4);
@@ -562,6 +614,8 @@ mod tests {
             body: big_body.clone(),
             tags: vec![],
             workspace_id: None,
+            space_slug: None,
+            relative_path: None,
         }];
         let _text = render_get_files_text(&files, &[], 1);
         let v = serde_json::to_value(&files).unwrap();

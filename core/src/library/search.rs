@@ -2,7 +2,8 @@ use pgvector::Vector;
 use sqlx::PgPool;
 
 use super::error::LibraryError;
-use super::file::{DocType, SearchableFields};
+use super::file::{DocType, GitFileHash, SearchableFields};
+use crate::primitives::SpaceId;
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -23,6 +24,11 @@ pub struct GlobalSearchHit {
     pub content: String,
     pub tags: Vec<String>,
     pub score: f64,
+    /// Populated only for `doc_type = SpaceFile`. Lets callers cite a
+    /// hit as `<space_slug>/<relative_path>` instead of the meaningless
+    /// nil workspace id space-file rows carry in `library_search_data`.
+    pub space_slug: Option<String>,
+    pub relative_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +39,12 @@ pub struct LibraryFile {
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
+    /// Populated only for `doc_type = SpaceFile`. The space's slug and
+    /// the file's path inside `spaces/<slug>/`. Joined from
+    /// `space_search_data` + `spaces` so callers can cite a hit as
+    /// `<space_slug>/<relative_path>` without a follow-up lookup.
+    pub space_slug: Option<String>,
+    pub relative_path: Option<String>,
 }
 
 impl std::fmt::Display for SearchResult {
@@ -105,16 +117,23 @@ impl SearchStore {
 
     /// Bulk fetch by `doc_id`. Doc type is part of the table's primary
     /// key but not required here — UUIDs don't collide across types in
-    /// practice. Caller filters / orders as needed.
+    /// practice. Space-file rows are joined to `space_search_data` and
+    /// `spaces` so each `LibraryFile` carries its `(space_slug, relative_path)`
+    /// citation; non-space rows leave both fields `None`.
     #[tracing::instrument(name = "library.search_store.find_by_ids", skip(self, ids))]
     pub async fn find_by_ids(&self, ids: &[uuid::Uuid]) -> Result<Vec<LibraryFile>, LibraryError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let rows = sqlx::query!(
-            r#"SELECT doc_id, doc_type, workspace_id, title_text, content_text, tags
-               FROM library_search_data
-               WHERE doc_id = ANY($1)"#,
+            r#"SELECT lsd.doc_id, lsd.doc_type, lsd.workspace_id,
+                      lsd.title_text, lsd.content_text, lsd.tags,
+                      s.slug AS "space_slug?",
+                      ssd.relative_path AS "relative_path?"
+               FROM library_search_data lsd
+               LEFT JOIN space_search_data ssd ON ssd.doc_id = lsd.doc_id
+               LEFT JOIN spaces s ON s.id = ssd.space_id
+               WHERE lsd.doc_id = ANY($1)"#,
             ids,
         )
         .fetch_all(&self.pool)
@@ -128,6 +147,8 @@ impl SearchStore {
                 title: r.title_text,
                 body: r.content_text,
                 tags: parse_tags(&r.tags),
+                space_slug: r.space_slug,
+                relative_path: r.relative_path,
             })
             .collect())
     }
@@ -143,6 +164,73 @@ impl SearchStore {
             .bind(workspace_id)
             .execute(op.as_executor())
             .await?;
+        Ok(())
+    }
+
+    /// Atomic upsert of a space file across `library_search_data` (FTS
+    /// index) and `space_search_data` (slug + relative_path citation).
+    /// Compares the recorded `content_hash` first and returns `false`
+    /// when nothing has changed, so the caller can skip embedding work.
+    #[tracing::instrument(
+        name = "library.search_store.upsert_space_file_if_changed",
+        skip(self, fields, content_hash),
+        fields(doc_id = %fields.doc_id, %relative_path)
+    )]
+    pub async fn upsert_space_file_if_changed(
+        &self,
+        fields: &SearchableFields,
+        space_id: SpaceId,
+        relative_path: &str,
+        content_hash: &GitFileHash,
+    ) -> Result<bool, LibraryError> {
+        let mut tx = self.pool.begin().await?;
+        let existing: Option<String> = sqlx::query_scalar!(
+            "SELECT content_hash FROM space_search_data WHERE doc_id = $1",
+            fields.doc_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.as_deref() == Some(content_hash.as_str()) {
+            return Ok(false);
+        }
+        self.upsert_in_op(&mut tx, fields).await?;
+        let space_uuid = uuid::Uuid::from(space_id);
+        let hash = content_hash.as_str();
+        sqlx::query!(
+            r#"INSERT INTO space_search_data (doc_id, space_id, relative_path, content_hash, title)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (doc_id) DO UPDATE SET
+                   relative_path = EXCLUDED.relative_path,
+                   content_hash = EXCLUDED.content_hash,
+                   title = EXCLUDED.title"#,
+            fields.doc_id,
+            space_uuid,
+            relative_path,
+            hash,
+            &fields.title,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Atomic delete of a space file from both `space_search_data`
+    /// and `library_search_data`. Idempotent — no-op if `doc_id`
+    /// wasn't previously indexed.
+    #[tracing::instrument(name = "library.search_store.delete_space_file", skip(self))]
+    pub async fn delete_space_file(&self, doc_id: uuid::Uuid) -> Result<(), LibraryError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!("DELETE FROM space_search_data WHERE doc_id = $1", doc_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!(
+            "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
+            doc_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -266,7 +354,46 @@ impl SearchStore {
             Vec::new()
         };
 
-        Ok(rrf_fuse(fts_rows, vec_rows, limit))
+        let mut hits = rrf_fuse(fts_rows, vec_rows, limit);
+        self.enrich_space_hits(&mut hits).await?;
+        Ok(hits)
+    }
+
+    /// SpaceFile rows in `library_search_data` carry a nil `workspace_id`
+    /// — the meaningful citation is `(space_slug, relative_path)`,
+    /// which lives in `space_search_data` + `spaces`. Single batched
+    /// query keyed by the SpaceFile doc_ids in the result set.
+    async fn enrich_space_hits(&self, hits: &mut [GlobalSearchHit]) -> Result<(), LibraryError> {
+        let space_ids: Vec<uuid::Uuid> = hits
+            .iter()
+            .filter(|h| h.doc_type == DocType::SpaceFile)
+            .map(|h| h.doc_id)
+            .collect();
+        if space_ids.is_empty() {
+            return Ok(());
+        }
+        let rows = sqlx::query!(
+            r#"SELECT ssd.doc_id, s.slug AS space_slug, ssd.relative_path
+               FROM space_search_data ssd
+               JOIN spaces s ON s.id = ssd.space_id
+               WHERE ssd.doc_id = ANY($1)"#,
+            &space_ids,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let by_id: std::collections::HashMap<uuid::Uuid, (String, String)> = rows
+            .into_iter()
+            .map(|r| (r.doc_id, (r.space_slug, r.relative_path)))
+            .collect();
+        for hit in hits.iter_mut() {
+            if hit.doc_type == DocType::SpaceFile {
+                if let Some((slug, path)) = by_id.get(&hit.doc_id) {
+                    hit.space_slug = Some(slug.clone());
+                    hit.relative_path = Some(path.clone());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -353,6 +480,8 @@ fn rrf_fuse(
             content: c.content,
             tags: c.tags,
             score: (c.score / max_score).clamp(0.0, 1.0),
+            space_slug: None,
+            relative_path: None,
         })
         .collect();
 
@@ -380,6 +509,7 @@ fn parse_doc_type(s: &str) -> DocType {
         "note" => DocType::Note,
         "skill" => DocType::Skill,
         "workflow" => DocType::Workflow,
+        "space_file" => DocType::SpaceFile,
         _ => DocType::Note,
     }
 }

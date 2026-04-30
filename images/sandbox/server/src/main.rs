@@ -33,6 +33,10 @@ struct InitializeRequest {
     #[serde(default)]
     branch: Option<String>,
     #[serde(default)]
+    library_url: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
     github_token: Option<String>,
 }
 
@@ -69,9 +73,9 @@ async fn execute(
 ) -> Json<ExecuteResponse> {
     let result = match req.tool.as_str() {
         "bash" => execute_bash(&session, &req.input).await,
-        "str_replace_based_edit_tool" => execute_text_editor(&req.input).await,
-        "Grep" => execute_grep(&req.input).await,
-        "Glob" => execute_glob(&req.input).await,
+        "str_replace_based_edit_tool" => execute_text_editor(&session, &req.input).await,
+        "Grep" => execute_grep(&session, &req.input).await,
+        "Glob" => execute_glob(&session, &req.input).await,
         other => Err(format!("Unknown tool: {other}")),
     };
 
@@ -119,15 +123,32 @@ async fn execute_bash(
     }
 }
 
-// Layer 1 isolation: rejects any path that resolves outside the workspace
-// root after symlink resolution.
-fn validate_path(path: &str) -> Result<PathBuf, String> {
-    let workspace = PathBuf::from(workspace_root());
-    let workspace_canonical =
-        std::fs::canonicalize(&workspace).map_err(|e| format!("Cannot resolve workspace: {e}"))?;
+/// Async wrapper that resolves `path` against the session's current
+/// scope root and rejects anything that escapes it. The scope is the
+/// session's cwd — tighter than the workspace for `library_space`
+/// mode: a session pinned to `/workspace/library/spaces/<slug>`
+/// blocks reads/writes anywhere else under `/workspace/library`
+/// (other spaces, the `.git` tree, etc.). For `scratch` and `repo`
+/// modes the cwd equals the workspace root or the cloned repo dir,
+/// matching the previous behaviour.
+async fn validate_path(session: &SharedSession, path: &str) -> Result<PathBuf, String> {
+    let cwd = session.current_cwd().await;
+    let scope = if cwd.is_empty() {
+        PathBuf::from(workspace_root())
+    } else {
+        PathBuf::from(cwd)
+    };
+    validate_path_against(&scope, path)
+}
+
+/// Pure-fn core of `validate_path` — used by both the async wrapper
+/// and the unit tests so the latter don't need a real `SharedSession`.
+fn validate_path_against(scope: &std::path::Path, path: &str) -> Result<PathBuf, String> {
+    let scope_canonical = std::fs::canonicalize(scope)
+        .map_err(|e| format!("Cannot resolve scope root '{}': {e}", scope.display()))?;
 
     let abs_path = if PathBuf::from(path).is_relative() {
-        workspace.join(path)
+        scope.join(path)
     } else {
         PathBuf::from(path)
     };
@@ -148,37 +169,40 @@ fn validate_path(path: &str) -> Result<PathBuf, String> {
         }
     };
 
-    if !canonical.starts_with(&workspace_canonical) {
+    if !canonical.starts_with(&scope_canonical) {
         return Err(format!(
-            "Access denied: path '{}' is outside workspace '{}'",
+            "Access denied: path '{}' is outside scope '{}'",
             path,
-            workspace_root()
+            scope.display()
         ));
     }
     Ok(canonical)
 }
 
-async fn execute_text_editor(input: &serde_json::Value) -> Result<String, String> {
+async fn execute_text_editor(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
     let command = input
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'command' field")?;
 
     match command {
-        "view" => editor_view(input).await,
-        "create" => editor_create(input).await,
-        "str_replace" => editor_str_replace(input).await,
-        "insert" => editor_insert(input).await,
+        "view" => editor_view(session, input).await,
+        "create" => editor_create(session, input).await,
+        "str_replace" => editor_str_replace(session, input).await,
+        "insert" => editor_insert(session, input).await,
         other => Err(format!("Unknown text editor command: {other}")),
     }
 }
 
-async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
+async fn editor_view(session: &SharedSession, input: &serde_json::Value) -> Result<String, String> {
     let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
-    let validated = validate_path(raw_path)?;
+    let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
 
     let meta = tokio::fs::metadata(path)
@@ -235,7 +259,10 @@ async fn editor_view(input: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
+async fn editor_create(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
     let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
@@ -251,7 +278,7 @@ async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
             .await
             .map_err(|e| format!("Error creating directories: {e}"))?;
     }
-    let validated = validate_path(raw_path)?;
+    let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
 
     tokio::fs::write(path, file_text)
@@ -261,12 +288,15 @@ async fn editor_create(input: &serde_json::Value) -> Result<String, String> {
     Ok(format!("File created successfully at: {path}"))
 }
 
-async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String> {
+async fn editor_str_replace(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
     let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
-    let validated = validate_path(raw_path)?;
+    let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
     let old_str = input
         .get("old_str")
@@ -302,12 +332,15 @@ async fn editor_str_replace(input: &serde_json::Value) -> Result<String, String>
 }
 
 /// `insert_line == 0` means insert at the beginning of the file.
-async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
+async fn editor_insert(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
     let raw_path = input
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' field")?;
-    let validated = validate_path(raw_path)?;
+    let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
     let insert_line = input
         .get("insert_line")
@@ -348,7 +381,10 @@ async fn editor_insert(input: &serde_json::Value) -> Result<String, String> {
     ))
 }
 
-async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
+async fn execute_grep(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
     let pattern = input
         .get("pattern")
         .and_then(|v| v.as_str())
@@ -412,9 +448,10 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
     let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     args.push(search_path.to_string());
 
+    let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
         Duration::from_millis(DEFAULT_TIMEOUT_MS),
-        Command::new("rg").args(&args).output(),
+        Command::new("rg").args(&args).current_dir(&scope).output(),
     )
     .await
     .map_err(|_| format!("Grep timed out after {DEFAULT_TIMEOUT_MS}ms"))?
@@ -440,7 +477,10 @@ async fn execute_grep(input: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
+async fn execute_glob(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
     let pattern = input
         .get("pattern")
         .and_then(|v| v.as_str())
@@ -448,6 +488,7 @@ async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
 
     let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
+    let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
         Duration::from_millis(DEFAULT_TIMEOUT_MS),
         Command::new("rg")
@@ -457,6 +498,7 @@ async fn execute_glob(input: &serde_json::Value) -> Result<String, String> {
                 &format!("--glob={pattern}"),
                 search_path,
             ])
+            .current_dir(&scope)
             .output(),
     )
     .await
@@ -483,7 +525,10 @@ fn github_token_path() -> String {
     std::env::var("GITHUB_TOKEN_PATH").unwrap_or_else(|_| DEFAULT_GITHUB_TOKEN_PATH.to_string())
 }
 
-async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeResponse> {
+async fn initialize(
+    State(session): State<SharedSession>,
+    Json(req): Json<InitializeRequest>,
+) -> Json<InitializeResponse> {
     if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
         if let Err(e) = write_github_token(&github_token_path(), token).await {
             return Json(InitializeResponse {
@@ -495,13 +540,36 @@ async fn initialize(Json(req): Json<InitializeRequest>) -> Json<InitializeRespon
         }
     }
 
-    initialize_inner(
+    let resp = initialize_inner(
         &workspace_root(),
         &req.mode,
         req.repo_url.as_deref(),
         req.branch.as_deref(),
+        req.library_url.as_deref(),
+        req.slug.as_deref(),
     )
-    .await
+    .await;
+
+    // Pin the bash session's cwd to whatever the mode-specific
+    // initializer chose. Empty cwd or an error response leaves the
+    // existing cwd alone.
+    if resp.0.error.is_none() {
+        session.set_cwd(resp.0.cwd.clone()).await;
+    }
+
+    resp
+}
+
+/// Per-agent attach hook. Called by core whenever a new agent
+/// attaches to this sandbox so the new tenant gets a clean shell
+/// pinned to the cwd `/initialize` recorded — i.e. doesn't inherit
+/// the previous tenant's `cd`. Implementation detail today: re-pin
+/// the bash session's cwd to its current value, which drops any
+/// active shell so the next `/execute` respawns.
+async fn attach(State(session): State<SharedSession>) -> &'static str {
+    let cwd = session.current_cwd().await;
+    session.set_cwd(cwd).await;
+    "ok"
 }
 
 async fn initialize_inner(
@@ -509,12 +577,15 @@ async fn initialize_inner(
     mode: &str,
     repo_url: Option<&str>,
     branch: Option<&str>,
+    library_url: Option<&str>,
+    slug: Option<&str>,
 ) -> Json<InitializeResponse> {
     let result = match mode {
         "scratch" => initialize_scratch(workspace).await,
         "repo" => initialize_repo(workspace, repo_url, branch).await,
+        "library_space" => initialize_library_space(workspace, library_url, slug).await,
         other => Err(format!(
-            "Unknown mode: {other}. Expected 'scratch' or 'repo'."
+            "Unknown mode: {other}. Expected 'scratch', 'repo', or 'library_space'."
         )),
     };
 
@@ -666,6 +737,182 @@ async fn initialize_repo(
     })
 }
 
+/// Sparse-checkout of `library_url` narrowed to `spaces/<slug>/`.
+///
+/// Layout: clones into `<workspace>/library/`, configures cone-mode sparse
+/// checkout for the single `spaces/<slug>` directory, and returns the
+/// space dir as `cwd`.
+///
+/// `--filter=blob:none` keeps the initial fetch lightweight (treeless
+/// partial clone — blobs are demand-fetched on read). `--no-checkout`
+/// avoids materializing files before the sparse path is set so we never
+/// touch sibling spaces. Idempotent across restarts via the `.git` check.
+async fn initialize_library_space(
+    workspace: &str,
+    library_url: Option<&str>,
+    slug: Option<&str>,
+) -> Result<InitializeResponse, String> {
+    let library_url = library_url
+        .filter(|u| !u.is_empty())
+        .ok_or("Missing 'library_url' for library_space mode")?;
+    let slug = slug
+        .filter(|s| !s.is_empty())
+        .ok_or("Missing 'slug' for library_space mode")?;
+    validate_space_slug(slug)?;
+
+    let clone_dir = PathBuf::from(workspace).join("library");
+    tokio::fs::create_dir_all(workspace)
+        .await
+        .map_err(|e| format!("Failed to create workspace: {e}"))?;
+
+    let already_cloned = clone_dir.join(".git").is_dir();
+    if !already_cloned {
+        let output = Command::new("git")
+            .args([
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                library_url,
+                clone_dir.to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git clone: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git clone failed: {stderr}"));
+        }
+    }
+
+    let clone_dir_str = clone_dir
+        .to_str()
+        .ok_or("Library clone path is not valid UTF-8")?;
+
+    // Defensive: if a previous run was killed mid-checkout (e.g.
+    // a racing `sandbox.restart` SIGKILLed git), git refuses every
+    // subsequent operation with "Unable to create '.git/index.lock':
+    // File exists". The lock is process-local and stale by the time
+    // we arrive here, so drop it before continuing.
+    let lock = clone_dir.join(".git/index.lock");
+    if lock.exists() {
+        tracing::warn!(
+            path = %lock.display(),
+            "removing orphan .git/index.lock from previous run"
+        );
+        let _ = tokio::fs::remove_file(&lock).await;
+    }
+
+    let output = Command::new("git")
+        .args(["-C", clone_dir_str, "sparse-checkout", "init", "--cone"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git sparse-checkout init: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git sparse-checkout init failed: {stderr}"));
+    }
+
+    let space_path = format!("spaces/{slug}");
+    let space_dir = clone_dir.join(&space_path);
+
+    // Race window: `Library::create_space` queues the `spaces/<slug>/.gitkeep`
+    // commit through an inbox + write job. The MCP boundary already
+    // waits for the local clone on the core server, but remote
+    // (GitHub) propagation can lag a beat. Retry sparse-checkout +
+    // refresh from remote up to `max_attempts` × `retry_delay` before
+    // giving up. Both knobs are env-overridable for fast tests.
+    let max_attempts: u32 = std::env::var("LIBRARY_SPACE_INIT_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    let retry_delay = std::time::Duration::from_secs(
+        std::env::var("LIBRARY_SPACE_INIT_RETRY_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2),
+    );
+
+    for attempt in 1..=max_attempts {
+        let output = Command::new("git")
+            .args(["-C", clone_dir_str, "sparse-checkout", "set", &space_path])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git sparse-checkout set: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git sparse-checkout set failed: {stderr}"));
+        }
+
+        // `sparse-checkout set` materialises the configured paths from
+        // the current HEAD. After a `--no-checkout` clone there's no
+        // working tree yet, and after a remote-side fetch HEAD may
+        // have moved — `git checkout` finishes the job in both cases.
+        let output = Command::new("git")
+            .args(["-C", clone_dir_str, "checkout"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git checkout: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git checkout failed: {stderr}"));
+        }
+
+        if space_dir.is_dir() {
+            break;
+        }
+
+        if attempt == max_attempts {
+            return Err(format!(
+                "spaces/{slug} not present in library after sparse checkout \
+                 (gave up after {max_attempts} attempts)"
+            ));
+        }
+
+        // Fetch the latest from remote and fast-forward HEAD so the
+        // next sparse-checkout pass sees the publish.
+        tracing::warn!(
+            slug,
+            attempt,
+            "spaces/{slug} not yet in HEAD, refreshing from remote"
+        );
+        let _ = Command::new("git")
+            .args(["-C", clone_dir_str, "fetch", "origin"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git fetch: {e}"))?;
+        let _ = Command::new("git")
+            .args(["-C", clone_dir_str, "reset", "--hard", "@{u}"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git reset: {e}"))?;
+        tokio::time::sleep(retry_delay).await;
+    }
+
+    // Anchor skill/system-prompt discovery at the space dir so a
+    // space can ship its own CLAUDE.md and `.claude/skills/...` —
+    // same mechanism repo mode uses, just scoped to the sparse-
+    // checkout root.
+    let system_prompt = scan_claude_md(&space_dir).await;
+    let skills = scan_skills(&space_dir).await;
+
+    Ok(InitializeResponse {
+        cwd: space_dir.to_string_lossy().to_string(),
+        exported_system_prompt: system_prompt,
+        exported_skills: skills,
+        error: None,
+    })
+}
+
+/// Reject path-traversal and absolute-path attempts before they reach git.
+/// A space slug is a single directory name under `spaces/`; nested paths,
+/// `..`, and leading `/` are not valid.
+fn validate_space_slug(slug: &str) -> Result<(), String> {
+    if slug.contains('/') || slug.contains('\\') || slug == "." || slug == ".." {
+        return Err(format!("invalid space slug: {slug}"));
+    }
+    Ok(())
+}
+
 fn extract_repo_name(url: &str) -> Result<String, String> {
     let path = url.trim_end_matches('/');
     let name = path
@@ -798,6 +1045,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/execute", post(execute))
         .route("/initialize", post(initialize))
+        .route("/attach", post(attach))
         .with_state(session);
 
     let port: u16 = std::env::var("PORT")
@@ -819,7 +1067,9 @@ mod tests {
     use super::*;
 
     /// Set WORKSPACE_ROOT to the system temp dir so that tests using
-    /// `std::env::temp_dir()` pass path validation. Called once per process.
+    /// `std::env::temp_dir()` pass path validation. Also tightens the
+    /// `library_space` retry knobs so the sad-path test doesn't sleep
+    /// for the full production budget. Called once per process.
     fn init_test_workspace() {
         use std::sync::Once;
         static INIT: Once = Once::new();
@@ -827,6 +1077,8 @@ mod tests {
             let tmp = std::env::temp_dir();
             std::fs::create_dir_all(&tmp).unwrap();
             std::env::set_var("WORKSPACE_ROOT", tmp.to_str().unwrap());
+            std::env::set_var("LIBRARY_SPACE_INIT_MAX_ATTEMPTS", "1");
+            std::env::set_var("LIBRARY_SPACE_INIT_RETRY_SECS", "0");
         });
     }
 
@@ -887,14 +1139,14 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "line one\nline two\nline three"
         });
-        let result = editor_create(&create_input).await;
+        let result = editor_create(&test_session(), &create_input).await;
         assert!(result.is_ok(), "create failed: {:?}", result);
 
         let view_input = serde_json::json!({
             "command": "view",
             "path": file.to_str().unwrap()
         });
-        let result = editor_view(&view_input).await.unwrap();
+        let result = editor_view(&test_session(), &view_input).await.unwrap();
         assert!(result.contains("1: line one"));
         assert!(result.contains("2: line two"));
         assert!(result.contains("3: line three"));
@@ -914,14 +1166,14 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "a\nb\nc\nd\ne"
         });
-        editor_create(&create_input).await.unwrap();
+        editor_create(&test_session(), &create_input).await.unwrap();
 
         let view_input = serde_json::json!({
             "command": "view",
             "path": file.to_str().unwrap(),
             "view_range": [2, 4]
         });
-        let result = editor_view(&view_input).await.unwrap();
+        let result = editor_view(&test_session(), &view_input).await.unwrap();
         assert!(result.contains("2: b"));
         assert!(result.contains("3: c"));
         assert!(result.contains("4: d"));
@@ -944,7 +1196,7 @@ mod tests {
             "command": "view",
             "path": dir.to_str().unwrap()
         });
-        let result = editor_view(&view_input).await.unwrap();
+        let result = editor_view(&test_session(), &view_input).await.unwrap();
         assert!(result.contains("file_a.txt"));
         assert!(result.contains("file_b.txt"));
 
@@ -963,7 +1215,7 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "hello world\ngoodbye world"
         });
-        editor_create(&create_input).await.unwrap();
+        editor_create(&test_session(), &create_input).await.unwrap();
 
         let replace_input = serde_json::json!({
             "command": "str_replace",
@@ -971,7 +1223,7 @@ mod tests {
             "old_str": "hello world",
             "new_str": "hello rust"
         });
-        let result = editor_str_replace(&replace_input).await;
+        let result = editor_str_replace(&test_session(), &replace_input).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Successfully replaced"));
 
@@ -994,7 +1246,7 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "hello world"
         });
-        editor_create(&create_input).await.unwrap();
+        editor_create(&test_session(), &create_input).await.unwrap();
 
         let replace_input = serde_json::json!({
             "command": "str_replace",
@@ -1002,7 +1254,7 @@ mod tests {
             "old_str": "nonexistent",
             "new_str": "replacement"
         });
-        let result = editor_str_replace(&replace_input).await;
+        let result = editor_str_replace(&test_session(), &replace_input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No match found"));
 
@@ -1021,7 +1273,7 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "foo bar foo"
         });
-        editor_create(&create_input).await.unwrap();
+        editor_create(&test_session(), &create_input).await.unwrap();
 
         let replace_input = serde_json::json!({
             "command": "str_replace",
@@ -1029,7 +1281,7 @@ mod tests {
             "old_str": "foo",
             "new_str": "baz"
         });
-        let result = editor_str_replace(&replace_input).await;
+        let result = editor_str_replace(&test_session(), &replace_input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("2 matches"));
 
@@ -1048,7 +1300,7 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "line one\nline two\n"
         });
-        editor_create(&create_input).await.unwrap();
+        editor_create(&test_session(), &create_input).await.unwrap();
 
         let insert_input = serde_json::json!({
             "command": "insert",
@@ -1056,7 +1308,7 @@ mod tests {
             "insert_line": 0,
             "new_str": "header line"
         });
-        let result = editor_insert(&insert_input).await;
+        let result = editor_insert(&test_session(), &insert_input).await;
         assert!(result.is_ok(), "insert failed: {:?}", result);
 
         let content = tokio::fs::read_to_string(&file).await.unwrap();
@@ -1074,7 +1326,7 @@ mod tests {
             "command": "view",
             "path": "/nonexistent/path/file.txt"
         });
-        let result = editor_view(&input).await;
+        let result = editor_view(&test_session(), &input).await;
         assert!(result.is_err());
     }
 
@@ -1091,7 +1343,7 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "dispatch test"
         });
-        let result = execute_text_editor(&input).await;
+        let result = execute_text_editor(&test_session(), &input).await;
         assert!(result.is_ok());
 
         // Test view via dispatch
@@ -1099,13 +1351,13 @@ mod tests {
             "command": "view",
             "path": file.to_str().unwrap()
         });
-        let result = execute_text_editor(&input).await;
+        let result = execute_text_editor(&test_session(), &input).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("dispatch test"));
 
         // Test unknown command
         let input = serde_json::json!({"command": "delete"});
-        let result = execute_text_editor(&input).await;
+        let result = execute_text_editor(&test_session(), &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown"));
 
@@ -1552,6 +1804,202 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    /// Build a bare git repo with `spaces/<slug>/<file>` for two slugs and
+    /// return its path.
+    async fn make_library_bare_repo(base: &Path) -> PathBuf {
+        let bare_dir = base.join("library.git");
+        let work_dir = base.join("library-work");
+
+        let output = Command::new("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git init --bare failed");
+
+        let output = Command::new("git")
+            .args([
+                "clone",
+                bare_dir.to_str().unwrap(),
+                work_dir.to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git clone failed");
+
+        for slug in ["oncall", "incidents"] {
+            let dir = work_dir.join("spaces").join(slug);
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            tokio::fs::write(dir.join("README.md"), format!("# {slug}\n"))
+                .await
+                .unwrap();
+        }
+
+        for (key, val) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            let _ = Command::new("git")
+                .args(["-C", work_dir.to_str().unwrap(), "config", key, val])
+                .output()
+                .await;
+        }
+        let _ = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "add", "-f", "."])
+            .output()
+            .await;
+        let output = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "commit", "-m", "init"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new("git")
+            .args(["-C", work_dir.to_str().unwrap(), "push"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        bare_dir
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_sparse_clones_only_target_slug() {
+        init_test_workspace();
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-init-libspace");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let bare_dir = make_library_bare_repo(&base).await;
+        let workspace = base.join("workspace");
+
+        let result = initialize_library_space(
+            workspace.to_str().unwrap(),
+            Some(bare_dir.to_str().unwrap()),
+            Some("oncall"),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "initialize_library_space failed: {:?}",
+            result
+        );
+        let resp = result.unwrap();
+        assert!(resp.error.is_none());
+        assert!(
+            resp.cwd.ends_with("/library/spaces/oncall"),
+            "unexpected cwd: {}",
+            resp.cwd
+        );
+
+        let library_dir = workspace.join("library");
+        assert!(library_dir.join(".git").is_dir());
+        assert!(library_dir.join("spaces").join("oncall").is_dir());
+        assert!(
+            !library_dir.join("spaces").join("incidents").is_dir(),
+            "sibling space should not be checked out"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_is_idempotent_across_restarts() {
+        init_test_workspace();
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-libspace-idempotent");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let bare_dir = make_library_bare_repo(&base).await;
+        let workspace = base.join("workspace");
+
+        for _ in 0..2 {
+            let result = initialize_library_space(
+                workspace.to_str().unwrap(),
+                Some(bare_dir.to_str().unwrap()),
+                Some("oncall"),
+            )
+            .await;
+            assert!(result.is_ok(), "second call failed: {:?}", result);
+        }
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_missing_url_fails() {
+        let result =
+            initialize_library_space("/tmp/sandbox-libspace-missing-url", None, Some("oncall"))
+                .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("library_url"));
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_missing_slug_fails() {
+        let result = initialize_library_space(
+            "/tmp/sandbox-libspace-missing-slug",
+            Some("https://example.com/lib.git"),
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("slug"));
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_rejects_traversal_slug() {
+        let result = initialize_library_space(
+            "/tmp/sandbox-libspace-traversal",
+            Some("https://example.com/lib.git"),
+            Some("../etc"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid space slug"));
+    }
+
+    #[tokio::test]
+    async fn initialize_library_space_unknown_slug_fails() {
+        init_test_workspace();
+        if !git_available().await {
+            eprintln!("git not available, skipping");
+            return;
+        }
+        let base = std::env::temp_dir().join("sandbox-test-libspace-unknown");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let bare_dir = make_library_bare_repo(&base).await;
+        let workspace = base.join("workspace");
+
+        let result = initialize_library_space(
+            workspace.to_str().unwrap(),
+            Some(bare_dir.to_str().unwrap()),
+            Some("does-not-exist"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not present in library"));
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
     // ── Grep tool ────────────────────────────────────────────────────
 
     /// Returns true when `rg` is on PATH.
@@ -1584,7 +2032,7 @@ mod tests {
             "path": dir.to_str().unwrap(),
             "output_mode": "content"
         });
-        let result = execute_grep(&input).await;
+        let result = execute_grep(&test_session(), &input).await;
         assert!(result.is_ok(), "grep failed: {:?}", result);
         let output = result.unwrap();
         assert!(output.contains("hello world"));
@@ -1612,7 +2060,7 @@ mod tests {
             "path": dir.to_str().unwrap(),
             "output_mode": "files_with_matches"
         });
-        let result = execute_grep(&input).await.unwrap();
+        let result = execute_grep(&test_session(), &input).await.unwrap();
         assert!(result.contains("a.txt"));
         assert!(!result.contains("b.txt"));
 
@@ -1636,7 +2084,7 @@ mod tests {
             "pattern": "zzz_nonexistent",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_grep(&input).await;
+        let result = execute_grep(&test_session(), &input).await;
         assert!(result.is_ok());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1661,7 +2109,7 @@ mod tests {
             "output_mode": "content",
             "head_limit": 3
         });
-        let result = execute_grep(&input).await.unwrap();
+        let result = execute_grep(&test_session(), &input).await.unwrap();
         assert_eq!(result.lines().count(), 3);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1670,7 +2118,7 @@ mod tests {
     #[tokio::test]
     async fn grep_missing_pattern_returns_error() {
         let input = serde_json::json!({});
-        let result = execute_grep(&input).await;
+        let result = execute_grep(&test_session(), &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("pattern"));
     }
@@ -1695,7 +2143,7 @@ mod tests {
             "pattern": "*.rs",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_glob(&input).await;
+        let result = execute_glob(&test_session(), &input).await;
         assert!(result.is_ok(), "glob failed: {:?}", result);
         let output = result.unwrap();
         assert!(output.contains("foo.rs"));
@@ -1721,7 +2169,7 @@ mod tests {
             "pattern": "*.xyz",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_glob(&input).await;
+        let result = execute_glob(&test_session(), &input).await;
         assert!(result.is_ok());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1730,7 +2178,7 @@ mod tests {
     #[tokio::test]
     async fn glob_missing_pattern_returns_error() {
         let input = serde_json::json!({});
-        let result = execute_glob(&input).await;
+        let result = execute_glob(&test_session(), &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("pattern"));
     }
@@ -1748,7 +2196,7 @@ mod tests {
         let test_file = dir.join("test-validate.txt");
         std::fs::write(&test_file, "ok").unwrap();
 
-        let result = validate_path(test_file.to_str().unwrap());
+        let result = validate_path_against(&dir, test_file.to_str().unwrap());
         assert!(result.is_ok(), "expected ok, got: {:?}", result);
 
         std::fs::remove_file(&test_file).unwrap();
@@ -1757,7 +2205,8 @@ mod tests {
     #[test]
     fn validate_path_rejects_outside_paths() {
         init_test_workspace();
-        let result = validate_path("/etc/passwd");
+        let workspace = PathBuf::from(workspace_root());
+        let result = validate_path_against(&workspace, "/etc/passwd");
         assert!(result.is_err());
         assert!(
             result.as_ref().unwrap_err().contains("Access denied"),
@@ -1769,7 +2218,8 @@ mod tests {
     #[test]
     fn validate_path_rejects_secrets() {
         init_test_workspace();
-        let result = validate_path("/run/secrets/github-token");
+        let workspace = PathBuf::from(workspace_root());
+        let result = validate_path_against(&workspace, "/run/secrets/github-token");
         assert!(result.is_err());
         // Either "Access denied" (if the path exists) or "Cannot resolve"
         // (if parent doesn't exist). Both are acceptable rejections.
@@ -1788,7 +2238,7 @@ mod tests {
 
         // Try to escape workspace via ../
         let traversal = format!("{workspace}/../etc/passwd");
-        let result = validate_path(&traversal);
+        let result = validate_path_against(&PathBuf::from(&workspace), &traversal);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1805,7 +2255,7 @@ mod tests {
 
         // Non-existent file in a valid directory should pass
         let new_file = format!("{workspace}/does-not-exist-yet.txt");
-        let result = validate_path(&new_file);
+        let result = validate_path_against(&PathBuf::from(&workspace), &new_file);
         assert!(
             result.is_ok(),
             "expected ok for new file, got: {:?}",

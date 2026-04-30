@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use sandbox::AdminError;
+use sandbox::{AdminError, InstanceError};
 
 use crate::auth::error::AuthorizationError;
 use crate::primitives::{AgentId, WorkspaceId};
@@ -21,6 +21,8 @@ pub enum SandboxError {
     Query(#[from] SandboxQueryError),
     #[error("SandboxError - Admin: {0}")]
     Admin(#[from] AdminError),
+    #[error("SandboxError - Instance: {0}")]
+    Instance(#[from] InstanceError),
     #[error("SandboxError - Hydration: {0}")]
     Hydration(#[from] es_entity::EntityHydrationError),
     #[error("SandboxError - sandbox does not belong to workspace {expected} (actual: {actual})")]

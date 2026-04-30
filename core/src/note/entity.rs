@@ -18,10 +18,6 @@ pub enum NoteEvent {
         content: String,
         tags: Vec<String>,
         file_hash: GitFileHash,
-        /// `Some` attaches the note to a workflow definition (runbook
-        /// context). `None` is workspace-scoped, the original behaviour.
-        #[serde(default)]
-        workflow_id: Option<WorkflowDefinitionId>,
     },
     Updated {
         title: String,
@@ -44,8 +40,6 @@ pub struct Note {
     pub(crate) tags: Vec<String>,
     pub(crate) file_hash: Option<GitFileHash>,
     pub(crate) pinned: bool,
-    #[builder(default)]
-    pub workflow_id: Option<WorkflowDefinitionId>,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
@@ -231,7 +225,6 @@ impl TryFromEvents<NoteEvent> for Note {
                     content,
                     tags,
                     file_hash,
-                    workflow_id,
                 } => {
                     builder = builder
                         .id(*id)
@@ -241,8 +234,7 @@ impl TryFromEvents<NoteEvent> for Note {
                         .content(content.clone())
                         .tags(tags.clone())
                         .file_hash(Some(file_hash.clone()))
-                        .pinned(false)
-                        .workflow_id(*workflow_id);
+                        .pinned(false);
                 }
                 NoteEvent::Updated {
                     title,
@@ -286,8 +278,6 @@ pub struct NewNote {
     pub(super) file_hash: GitFileHash,
     #[builder(default)]
     pub(super) pinned: bool,
-    #[builder(default, setter(into, strip_option))]
-    pub(super) workflow_id: Option<WorkflowDefinitionId>,
 }
 
 impl NewNote {
@@ -310,7 +300,6 @@ impl IntoEvents<NoteEvent> for NewNote {
                 content: self.content,
                 tags: self.tags,
                 file_hash: self.file_hash,
-                workflow_id: self.workflow_id,
             }],
         )
     }
@@ -321,7 +310,7 @@ mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
     use crate::library::GitFileHash;
-    use crate::primitives::{NoteId, WorkflowDefinitionId, WorkspaceId};
+    use crate::primitives::{NoteId, WorkspaceId};
 
     use super::{NewNote, Note};
 
@@ -363,26 +352,6 @@ mod tests {
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
         assert_eq!(note.workspace_name, "test");
         assert!(note.file_hash.is_some());
-        assert!(note.workflow_id.is_none());
-    }
-
-    #[test]
-    fn note_workflow_scoped_hydration() {
-        let wf = WorkflowDefinitionId::new();
-        let new = NewNote::builder()
-            .id(NoteId::new())
-            .workspace_id(WorkspaceId::new())
-            .workspace_name("test")
-            .title("Runbook")
-            .content("On alert, query Honeycomb dataset X.")
-            .tags(vec!["runbook".into()])
-            .file_hash(test_hash())
-            .workflow_id(wf)
-            .build()
-            .unwrap();
-
-        let note = Note::try_from_events(new.into_events()).unwrap();
-        assert_eq!(note.workflow_id, Some(wf));
     }
 
     #[test]

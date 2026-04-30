@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM library_search_data WHERE doc_id = $1 AND doc_type = 'space_file'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a9507cbe98734de26b70898efe49cd9b328af4fe76018206d1478099b720cbf9"
+}

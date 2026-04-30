@@ -98,10 +98,14 @@ pub struct LibraryTemplate {
 #[allow(dead_code)]
 pub struct LibraryHitView {
     pub id: String,
-    pub workspace_id: String,
-    pub workspace_name: String,
+    /// Already-formatted scope line — e.g. `workspace: oncall` for
+    /// workspace-scoped hits, `space: my-runbooks` for space files,
+    /// or `global` for global skills. The template renders this
+    /// verbatim.
+    pub scope_label: String,
     pub type_label: String,
-    /// CSS class on the type badge: `skill`, `note`, or `workflow`.
+    /// CSS class on the type badge: `skill`, `note`, `workflow`, or
+    /// `space_file`.
     pub type_class: String,
     pub title: String,
     pub snippet: String,
@@ -264,7 +268,6 @@ pub struct WorkspaceWorkflowDetailTemplate {
     pub agents: Vec<AgentView>,
     pub workflow: WorkflowDefinitionView,
     pub recent_runs: Vec<WorkflowRunView>,
-    pub workflow_notes: Vec<NoteView>,
     pub flash: Option<String>,
 }
 
@@ -279,15 +282,6 @@ pub struct WorkspaceWorkflowRunDetailTemplate {
     pub run: WorkflowRunView,
     pub steps: Vec<StepResultView>,
     pub run_agents: Vec<AgentView>,
-}
-
-#[allow(dead_code)]
-pub struct NoteView {
-    pub id: String,
-    pub title: String,
-    pub content: String,
-    pub tags: Vec<String>,
-    pub created_at: String,
 }
 
 // ── Sandboxes ─────────────────────────────────────────────────────────

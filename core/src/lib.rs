@@ -38,8 +38,8 @@ use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool, Read,
-    SkillTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool, WorkspaceAgent,
-    WorkspaceLog, WorkspaceSandbox,
+    SkillTool, SpacesTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
+    WorkspaceAgent, WorkspaceLog, WorkspaceSandbox,
 };
 use user::Users;
 use workflow::Workflows;
@@ -148,15 +148,17 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Library::init(
-            &config.library,
-            pool,
-            embedder.clone(),
-            &mut jobs,
-            github_app.clone(),
-        )
-        .await
-        .map_err(|e| AppError::Library(e.to_string()))?;
+        let library = Arc::new(
+            Library::init(
+                &config.library,
+                pool,
+                embedder.clone(),
+                &mut jobs,
+                github_app.clone(),
+            )
+            .await
+            .map_err(|e| AppError::Library(e.to_string()))?,
+        );
 
         // Bumped by Notes/Skills mutations (local) and PG NOTIFY (peers).
         // Read on the hot path of `Agents::send_message` to skip DB
@@ -168,7 +170,7 @@ impl App {
         let skills = Arc::new(Skills::new(
             pool,
             Arc::clone(&sandboxes),
-            library.clone(),
+            (*library).clone(),
             context_generation.clone(),
         ));
 
@@ -186,7 +188,7 @@ impl App {
         // system prompts at creation time.
         let notes = Arc::new(Notes::new(
             pool,
-            library.clone(),
+            (*library).clone(),
             context_generation.clone(),
         ));
 
@@ -202,7 +204,8 @@ impl App {
         ));
 
         toolsets.register_top_level(WorkspaceAgent::new(Arc::clone(&agents)));
-        toolsets.register_top_level(WorkspaceSandbox::new(Arc::clone(&sandboxes)));
+        // WorkspaceSandbox registration sits next to the other library-
+        // facing tools below; library_space mode needs `Arc<Library>`.
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
@@ -214,9 +217,10 @@ impl App {
 
         let workflows = Arc::new(Workflows::new(
             pool,
-            library.clone(),
+            (*library).clone(),
             Arc::clone(&skills),
             execute_run_spawner,
+            &jobs,
         ));
 
         let workspaces = Arc::new(Workspaces::new(
@@ -227,7 +231,12 @@ impl App {
             Arc::clone(&notes),
             workspace_secrets.clone(),
             Arc::clone(&workflows),
-            library.clone(),
+            (*library).clone(),
+        ));
+        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library)));
+        toolsets.register_top_level(WorkspaceSandbox::new(
+            Arc::clone(&sandboxes),
+            Arc::clone(&library),
         ));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&workspaces)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
@@ -240,7 +249,7 @@ impl App {
 
         // Read-only library lookup lives behind progressive disclosure;
         // notes/skill tools cover workspace-scoped writes.
-        toolsets.register_searchable(LibraryToolSet::new(Arc::new(library.clone())));
+        toolsets.register_searchable(LibraryToolSet::new(Arc::clone(&library)));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
@@ -253,7 +262,6 @@ impl App {
         // Reverse-sync (file → entity) for every service that implements
         // `LibraryImporter`. Uses library-lock queue to serialise with
         // forward-sync writes; `merge()` collapses bursts into one batch.
-        let library = Arc::new(library);
         {
             let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
                 Arc::clone(&library),
@@ -285,6 +293,23 @@ impl App {
                 .spawn_with_queue_id(
                     job::JobId::new(),
                     library::SyncFromLibraryConfig {
+                        sync_interval_secs: config.library.skill_sync_interval_secs,
+                        last_sync_commit: None,
+                    },
+                    library::LIBRARY_LOCK_QUEUE,
+                )
+                .await
+                .map_err(|e| AppError::Job(e.to_string()))?;
+        }
+
+        {
+            let sync_init =
+                library::space::file_sync::SpaceFilesSyncJobInitializer::new(Arc::clone(&library));
+            let sync_spawner = jobs.add_initializer(sync_init);
+            sync_spawner
+                .spawn_with_queue_id(
+                    job::JobId::new(),
+                    library::space::file_sync::SpaceFilesSyncConfig {
                         sync_interval_secs: config.library.skill_sync_interval_secs,
                         last_sync_commit: None,
                     },

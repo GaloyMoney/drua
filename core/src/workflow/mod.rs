@@ -34,6 +34,9 @@ pub struct Workflows {
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
+    /// Cloned `Jobs` handle so `await_run_completion` can block on the
+    /// `ExecuteRun` job (whose id == run id) without polling.
+    jobs: ::job::Jobs,
 }
 
 impl crate::library::LibraryImporter for Workflows {
@@ -161,12 +164,14 @@ impl Workflows {
         library: Library,
         skills: Arc<Skills>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
+        jobs: &::job::Jobs,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new(pool, library),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             execute_run_spawner,
+            jobs: jobs.clone(),
         }
     }
 
@@ -175,12 +180,14 @@ impl Workflows {
         pool: &sqlx::PgPool,
         skills: Arc<Skills>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
+        jobs: &::job::Jobs,
     ) -> Self {
         Self {
             repo: WorkflowDefinitionRepo::new_without_library(pool),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             execute_run_spawner,
+            jobs: jobs.clone(),
         }
     }
 
@@ -508,6 +515,35 @@ impl Workflows {
             AuthResource::Workflow(run.workspace_id, Some(run.definition_id)),
         )?;
         Ok(run)
+    }
+
+    /// Block until the run reaches a terminal state, then return it.
+    /// Backed by `Jobs::await_completions` on the `ExecuteRun` job —
+    /// the spawner uses the run id as the job id (see `spawn_run`).
+    /// Returns immediately if the run is already terminal.
+    #[instrument(name = "core.workflow.await_run_completion", skip_all)]
+    pub async fn await_run_completion(
+        &self,
+        sub: &AuthSubject,
+        run_id: WorkflowRunId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<WorkflowRun, WorkflowError> {
+        let run = self.run_repo.find_by_id(run_id).await?;
+        sub.can(
+            AuthVerb::Read,
+            AuthResource::Workflow(run.workspace_id, Some(run.definition_id)),
+        )?;
+        if matches!(
+            run.state,
+            WorkflowRunState::Succeeded | WorkflowRunState::Failed
+        ) {
+            return Ok(run);
+        }
+        self.jobs
+            .await_completions(&[run_id.into()], timeout)
+            .await
+            .map_err(|e| WorkflowError::Job(e.to_string()))?;
+        Ok(self.run_repo.find_by_id(run_id).await?)
     }
 
     #[instrument(name = "core.workflow.delete_for_workspace_in_op", skip_all)]
