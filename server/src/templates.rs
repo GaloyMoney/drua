@@ -268,7 +268,6 @@ pub struct WorkspaceWorkflowDetailTemplate {
     pub agents: Vec<AgentView>,
     pub workflow: WorkflowDefinitionView,
     pub recent_runs: Vec<WorkflowRunView>,
-    pub workflow_notes: Vec<NoteView>,
     pub flash: Option<String>,
 }
 
@@ -283,15 +282,6 @@ pub struct WorkspaceWorkflowRunDetailTemplate {
     pub run: WorkflowRunView,
     pub steps: Vec<StepResultView>,
     pub run_agents: Vec<AgentView>,
-}
-
-#[allow(dead_code)]
-pub struct NoteView {
-    pub id: String,
-    pub title: String,
-    pub content: String,
-    pub tags: Vec<String>,
-    pub created_at: String,
 }
 
 // ── Sandboxes ─────────────────────────────────────────────────────────

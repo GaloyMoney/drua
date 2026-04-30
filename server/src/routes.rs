@@ -1641,16 +1641,6 @@ fn step_result_to_view(sr: &domain::workflow::StepResult) -> StepResultView {
     }
 }
 
-fn note_to_view(n: &domain::note::Note) -> NoteView {
-    NoteView {
-        id: n.id.to_string(),
-        title: n.title().to_string(),
-        content: n.body().to_string(),
-        tags: n.tags().to_vec(),
-        created_at: n.created_at(),
-    }
-}
-
 #[instrument(name = "web.workspace_workflows_page", skip_all)]
 async fn workspace_workflows_page(
     State(state): State<AppState>,
@@ -1731,20 +1721,12 @@ async fn workspace_workflow_detail(
         .await
         .unwrap_or_default();
 
-    let workflow_notes = state
-        .app
-        .notes()
-        .list_for_workflow_definition(&sub, workspace_id, workflow_id)
-        .await
-        .unwrap_or_default();
-
     WorkspaceWorkflowDetailTemplate {
         workspace: workspace_to_view(&ws),
         lead_agent,
         agents: agent_views,
         workflow: workflow_definition_to_view_for_detail(&workflow, None),
         recent_runs: recent_runs.iter().map(workflow_run_to_view).collect(),
-        workflow_notes: workflow_notes.iter().map(note_to_view).collect(),
         flash: query.flash,
     }
     .into_response()

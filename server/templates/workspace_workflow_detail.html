@@ -205,24 +205,4 @@
   {% endif %}
 </section>
 
-<section>
-  <h4>Workflow notes</h4>
-  <p><small>Runbook-style context attached to this workflow definition (shared across runs). Add via the <code>notes</code> MCP tool: <code>notes(command: store, title: "...", content: "...", workflow_id: "{{ workflow.id }}")</code>.</small></p>
-  {% if workflow_notes.is_empty() %}
-  <p><em>No notes attached to this workflow.</em></p>
-  {% else %}
-  {% for note in workflow_notes %}
-  <article class="note-card">
-    <h5>{{ note.title }}</h5>
-    {% if !note.tags.is_empty() %}
-    <div class="note-tags">
-      {% for t in note.tags %}<span class="note-tag">{{ t }}</span>{% endfor %}
-    </div>
-    {% endif %}
-    <pre style="white-space: pre-wrap; font-size: 0.85rem; margin-top: 0.5rem; padding: 0; background: none; border: none;">{{ note.content }}</pre>
-    <small style="color: var(--pico-muted-color);">Created {{ note.created_at }}</small>
-  </article>
-  {% endfor %}
-  {% endif %}
-</section>
 {% endblock %}
