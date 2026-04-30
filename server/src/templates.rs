@@ -194,6 +194,29 @@ pub struct ProjectSkillDetailTemplate {
     pub skill: SkillView,
 }
 
+// ── Spaces ────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub struct SpaceRowView {
+    pub id: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub mounted: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "project_spaces.html")]
+pub struct ProjectSpacesPageTemplate {
+    pub project: ProjectView,
+    pub lead_agent: Option<AgentView>,
+    pub agents: Vec<AgentView>,
+    /// Every non-soft-deleted library space, with `mounted` indicating
+    /// whether this project currently mounts it.
+    pub spaces: Vec<SpaceRowView>,
+    /// Optional inline status message after a mount/unmount POST.
+    pub flash: Option<String>,
+}
+
 // ── Workflows ─────────────────────────────────────────────────────────
 
 #[allow(dead_code)]

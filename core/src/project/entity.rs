@@ -26,6 +26,11 @@ pub enum ProjectEvent {
     SpaceMounted {
         space_id: SpaceId,
     },
+    /// Project drops visibility of a previously-mounted `Space`.
+    /// Idempotent: emitted only when the space was in `mounted_spaces`.
+    SpaceUnmounted {
+        space_id: SpaceId,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -84,6 +89,15 @@ impl Project {
         self.events.push(ProjectEvent::SpaceMounted { space_id });
         Idempotent::Executed(())
     }
+
+    pub(super) fn unmount_space(&mut self, space_id: SpaceId) -> Idempotent<()> {
+        let Some(idx) = self.mounted_spaces.iter().position(|id| *id == space_id) else {
+            return Idempotent::AlreadyApplied;
+        };
+        self.mounted_spaces.remove(idx);
+        self.events.push(ProjectEvent::SpaceUnmounted { space_id });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Project {
@@ -125,6 +139,9 @@ impl TryFromEvents<ProjectEvent> for Project {
                     if !mounted_spaces.contains(space_id) {
                         mounted_spaces.push(*space_id);
                     }
+                }
+                ProjectEvent::SpaceUnmounted { space_id } => {
+                    mounted_spaces.retain(|id| id != space_id);
                 }
             }
         }
@@ -248,6 +265,45 @@ mod tests {
         let again = project.mount_space(space_id);
         assert!(!again.did_execute());
         assert_eq!(project.mounted_spaces, vec![space_id]);
+    }
+
+    #[test]
+    fn unmount_space_removes_and_is_idempotent() {
+        let mut project = new_project();
+        let space_id = crate::primitives::SpaceId::new();
+        let _ = project.mount_space(space_id);
+        assert!(project.is_space_mounted(space_id));
+
+        let res = project.unmount_space(space_id);
+        assert!(res.did_execute());
+        assert!(!project.is_space_mounted(space_id));
+        assert!(project.mounted_spaces.is_empty());
+
+        let again = project.unmount_space(space_id);
+        assert!(!again.did_execute());
+    }
+
+    #[test]
+    fn mount_unmount_remount_hydration() {
+        let id = ProjectId::new();
+        let space_a = crate::primitives::SpaceId::new();
+
+        let events = es_entity::EntityEvents::init(
+            id,
+            [
+                super::ProjectEvent::Initialized {
+                    id,
+                    lead_agent_id: AgentId::new(),
+                    name: "p".to_string(),
+                    description: None,
+                },
+                super::ProjectEvent::SpaceMounted { space_id: space_a },
+                super::ProjectEvent::SpaceUnmounted { space_id: space_a },
+                super::ProjectEvent::SpaceMounted { space_id: space_a },
+            ],
+        );
+        let project = Project::try_from_events(events).unwrap();
+        assert_eq!(project.mounted_spaces, vec![space_a]);
     }
 
     #[test]

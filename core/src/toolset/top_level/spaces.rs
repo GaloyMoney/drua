@@ -24,6 +24,9 @@ enum SpacesParams {
     /// it shows up in `<spaces>` and is accessible via `space:<slug>/`
     /// paths.
     Mount { slug: String },
+    /// Drops a space from the calling agent's project. Idempotent;
+    /// the space itself is unaffected.
+    Unmount { slug: String },
     /// Lists spaces. Defaults to spaces mounted on the caller's
     /// project; `all: true` returns every space in the library
     /// (used to discover candidates before `mount`).
@@ -38,6 +41,7 @@ impl SpacesParams {
         match self {
             Self::Create { .. } => "create",
             Self::Mount { .. } => "mount",
+            Self::Unmount { .. } => "unmount",
             Self::List { .. } => "list",
         }
     }
@@ -78,12 +82,12 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "mount", "list"],
+                "enum": ["create", "mount", "unmount", "list"],
                 "description": "Which spaces operation to perform."
             },
             "slug": {
                 "type": "string",
-                "description": "Directory-safe identifier ([a-z0-9-]+, no leading/trailing hyphens). Becomes spaces/<slug>/ in the library repo. Required for create and mount."
+                "description": "Directory-safe identifier ([a-z0-9-]+, no leading/trailing hyphens). Becomes spaces/<slug>/ in the library repo. Required for create, mount, and unmount."
             },
             "description": {
                 "type": "string",
@@ -123,6 +127,8 @@ impl TopLevelTool for SpacesTool {
          the new space onto the caller's project), \
          `mount` (requires `slug`; declares that the caller's project \
          can see the space), \
+         `unmount` (requires `slug`; drops a previously-mounted space \
+         — the space itself is unaffected), \
          `list` (defaults to spaces mounted by the caller's project; \
          pass `all: true` to discover every space in the library)."
     }
@@ -184,6 +190,32 @@ impl TopLevelTool for SpacesTool {
                 );
                 let out = SpacesOutput {
                     command: "mount".to_string(),
+                    space: Some(SpaceSummary::from(&space)),
+                    spaces: None,
+                };
+                (text, out)
+            }
+            SpacesParams::Unmount { slug } => {
+                let space = self
+                    .library
+                    .find_space_by_slug(&slug)
+                    .await?
+                    .ok_or_else(|| {
+                        ToolSetsError::Library(
+                            crate::library::SpaceError::NotFound { slug: slug.clone() }.into(),
+                        )
+                    })?;
+                self.projects
+                    .unmount_space(subject, project_id, space.id)
+                    .await
+                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+
+                let text = format!(
+                    "Space unmounted from project {}.\n  slug: {}",
+                    project_id, space.slug
+                );
+                let out = SpacesOutput {
+                    command: "unmount".to_string(),
                     space: Some(SpaceSummary::from(&space)),
                     spaces: None,
                 };

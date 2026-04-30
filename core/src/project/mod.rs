@@ -310,6 +310,31 @@ impl Projects {
         Ok(())
     }
 
+    /// Drops `space_id` from `project_id`'s mounted set. Idempotent:
+    /// unmounting a space that wasn't mounted is a no-op. Doesn't
+    /// touch the `Space` itself — the library row stays intact, only
+    /// this project's view is updated.
+    #[instrument(name = "domain.project.unmount_space", skip(self, sub))]
+    pub async fn unmount_space(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+        space_id: SpaceId,
+    ) -> Result<(), ProjectError> {
+        sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.unmount_space");
+        Audit::record_project_id(project_id);
+        Audit::record_space_id(space_id);
+
+        let mut op = self.repo.begin_op().await?;
+        let mut project = self.repo.find_by_id_in_op(&mut op, project_id).await?;
+        if project.unmount_space(space_id).did_execute() {
+            self.repo.update_in_op(&mut op, &mut project).await?;
+        }
+        op.commit().await?;
+        Ok(())
+    }
+
     /// Spaces visible to `project_id` — hydrated from `Library`. Soft-
     /// deleted spaces silently drop out of the result.
     #[instrument(name = "domain.project.list_mounted_spaces", skip(self, sub))]
