@@ -8,6 +8,10 @@ mod search;
 pub mod space;
 mod sync_runner;
 mod synced;
+// Read-side helpers (head_commit_hash, changed_*, parse_space_path) are
+// dead now that the unified runner reads via GitEngine; they go away
+// with the forthcoming write-path libgit2 migration.
+#[allow(dead_code)]
 mod upstream;
 
 use std::sync::Arc;
@@ -34,10 +38,8 @@ pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
 pub use sync_runner::{LibrarySyncConfig, LibrarySyncJobInitializer, LIBRARY_SYNC_JOB};
 pub(crate) use synced::slugify;
 pub use synced::{
-    matches_runtime_subdir, Changes, LibraryImporter, LibrarySynced, ParsedFile,
-    SyncFromLibraryConfig, SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
+    matches_runtime_subdir, LibraryImporter, LibrarySynced, ParsedFile, SyncedFile, UpsertError,
 };
-pub use upstream::SpaceFileChange;
 
 const LIBRARY_WRITE_JOB: &str = "library.write";
 const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
@@ -91,7 +93,6 @@ pub struct Library {
     search: SearchStore,
     inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
-    upstream: Upstream,
     git: Arc<git::GitEngine>,
     space_repo: SpaceRepo,
     repo_url: Option<String>,
@@ -141,7 +142,6 @@ impl Library {
             search,
             inbox,
             embedder,
-            upstream,
             git,
             space_repo: SpaceRepo::new(pool),
             repo_url: config.repo_url.clone(),
@@ -396,10 +396,6 @@ impl Library {
         &self.embedder
     }
 
-    pub(in crate::library) fn upstream(&self) -> &Upstream {
-        &self.upstream
-    }
-
     pub(in crate::library) fn git(&self) -> &git::GitEngine {
         &self.git
     }
@@ -430,63 +426,6 @@ impl Library {
         };
         self.enqueue_write(op, file).await?;
         Ok(())
-    }
-
-    /// Generic reverse-sync. Returns parsed `ParsedFile`s for every changed
-    /// file under the importer's `doc_type` subdir since `last_sync_commit`.
-    /// On first run (`None`), returns all tracked files. Empty `files` when
-    /// HEAD hasn't moved.
-    #[tracing::instrument(name = "library.find_changes", skip_all)]
-    pub async fn find_changes<S: LibraryImporter>(
-        &self,
-        importer: &S,
-        last_sync_commit: Option<&str>,
-    ) -> Result<Changes, LibraryError> {
-        self.upstream.pull().await?;
-
-        let head = self.upstream.head_commit_hash().await?;
-        let head = match head {
-            Some(h) => h,
-            None => {
-                tracing::debug!("no commits in library repo");
-                return Ok(Changes {
-                    head_commit: String::new(),
-                    files: Vec::new(),
-                });
-            }
-        };
-
-        if last_sync_commit == Some(head.as_str()) {
-            return Ok(Changes {
-                head_commit: head,
-                files: Vec::new(),
-            });
-        }
-
-        let doc_type = importer.doc_type();
-        let changed = self
-            .upstream
-            .changed_files(last_sync_commit, doc_type.subdir(), doc_type.ext())
-            .await?;
-
-        let mut files = Vec::with_capacity(changed.len());
-        for (path, content) in &changed {
-            match importer.parse(content.as_bytes(), path) {
-                Some(parsed) => files.push(parsed),
-                None => {
-                    tracing::warn!(
-                        path = %path,
-                        doc_type = doc_type.as_str(),
-                        "failed to parse library file, skipping"
-                    );
-                }
-            }
-        }
-
-        Ok(Changes {
-            head_commit: head,
-            files,
-        })
     }
 
     #[tracing::instrument(name = "library.search", skip(self))]

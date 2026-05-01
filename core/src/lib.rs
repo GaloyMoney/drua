@@ -260,72 +260,10 @@ impl App {
             Arc::clone(&library),
         ));
 
-        // Reverse-sync (file → entity) for every service that implements
-        // `LibraryImporter`. Uses library-lock queue to serialise with
-        // forward-sync writes; `merge()` collapses bursts into one batch.
-        {
-            let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
-                Arc::clone(&library),
-                Arc::clone(&skills),
-                Arc::clone(&projects),
-                "skill.sync-from-library",
-            );
-            let sync_spawner = jobs.add_initializer(sync_init);
-            sync_spawner
-                .spawn_with_queue_id(
-                    job::JobId::new(),
-                    library::SyncFromLibraryConfig {
-                        sync_interval_secs: config.library.skill_sync_interval_secs,
-                        last_sync_commit: None,
-                    },
-                    library::LIBRARY_LOCK_QUEUE,
-                )
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
-
-        {
-            let sync_init = library::SyncFromLibraryJobInitializer::<workflow::Workflows>::new(
-                Arc::clone(&library),
-                Arc::clone(&workflows),
-                Arc::clone(&projects),
-                "workflow.sync-from-library",
-            );
-            let sync_spawner = jobs.add_initializer(sync_init);
-            sync_spawner
-                .spawn_with_queue_id(
-                    job::JobId::new(),
-                    library::SyncFromLibraryConfig {
-                        sync_interval_secs: config.library.skill_sync_interval_secs,
-                        last_sync_commit: None,
-                    },
-                    library::LIBRARY_LOCK_QUEUE,
-                )
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
-
-        {
-            let sync_init =
-                library::space::file_sync::SpaceFilesSyncJobInitializer::new(Arc::clone(&library));
-            let sync_spawner = jobs.add_initializer(sync_init);
-            sync_spawner
-                .spawn_with_queue_id(
-                    job::JobId::new(),
-                    library::space::file_sync::SpaceFilesSyncConfig {
-                        sync_interval_secs: config.library.skill_sync_interval_secs,
-                        last_sync_commit: None,
-                    },
-                    library::LIBRARY_LOCK_QUEUE,
-                )
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
-
-        // Unified libgit2-backed reverse-sync, running in parallel with
-        // the three typed runners above so we can verify parity before
-        // cutover. All four pipelines serialise on `library-lock` and
-        // upserts are idempotent so duplicate work is harmless.
+        // Unified libgit2-backed reverse-sync. One runner walks the
+        // bare-repo diff between last_sync_commit and HEAD, dispatching
+        // each delta to the first importer in the registry that claims
+        // the path. Replaces the three legacy typed runners.
         {
             let registry = library::ImporterRegistry::new()
                 .register(Arc::clone(&skills))
