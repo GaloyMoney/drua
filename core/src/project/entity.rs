@@ -22,12 +22,10 @@ pub enum ProjectEvent {
     Archived {
         archived_at: DateTime<Utc>,
     },
-    /// Project declares it sees a `Space` (idempotent on `space_id`).
     SpaceMounted {
         space_id: SpaceId,
     },
-    /// Project drops visibility of a previously-mounted `Space`.
-    /// Idempotent: emitted only when the space was in `mounted_spaces`.
+    /// Emitted only when the space was in `mounted_spaces`.
     SpaceUnmounted {
         space_id: SpaceId,
     },

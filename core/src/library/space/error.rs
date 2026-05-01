@@ -31,6 +31,12 @@ pub enum SpaceError {
     },
     #[error("SpaceError - InvalidRelPath: {rel_path:?} (must be relative, no '..' segments)")]
     InvalidRelPath { rel_path: String },
+    #[error("SpaceError - CrossSpaceMove: from {from_slug:?} to {to_slug:?} not supported")]
+    CrossSpaceMove { from_slug: String, to_slug: String },
+    #[error("SpaceError - DestExists: {rel_path:?} already exists")]
+    DestExists { rel_path: String },
+    #[error("SpaceError - SrcMissing: {rel_path:?} does not exist")]
+    SrcMissing { rel_path: String },
     #[error("SpaceError - Io: {0}")]
     Io(String),
 }

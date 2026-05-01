@@ -72,6 +72,8 @@ async fn execute(
         "str_replace_based_edit_tool" => execute_text_editor(&session, &req.input).await,
         "Grep" => execute_grep(&session, &req.input).await,
         "Glob" => execute_glob(&session, &req.input).await,
+        "Move" => execute_move(&session, &req.input).await,
+        "Delete" => execute_delete(&session, &req.input).await,
         other => Err(format!("Unknown tool: {other}")),
     };
 
@@ -371,6 +373,69 @@ async fn editor_insert(
         "Successfully inserted {} lines after line {insert_line}.",
         new_lines.len()
     ))
+}
+
+async fn execute_move(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
+    let from_raw = input
+        .get("from")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'from' field")?;
+    let to_raw = input
+        .get("to")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'to' field")?;
+
+    if let Some(parent) = std::path::Path::new(to_raw).parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Error creating directories: {e}"))?;
+    }
+    let from = validate_path(session, from_raw).await?;
+    let to = validate_path(session, to_raw).await?;
+
+    if !tokio::fs::try_exists(&from)
+        .await
+        .map_err(|e| format!("Error: {e}"))?
+    {
+        return Err(format!("Error: source does not exist: {from_raw}"));
+    }
+    if tokio::fs::try_exists(&to)
+        .await
+        .map_err(|e| format!("Error: {e}"))?
+    {
+        return Err(format!("Error: destination already exists: {to_raw}"));
+    }
+
+    tokio::fs::rename(&from, &to)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
+
+    Ok(format!("Moved {from_raw} -> {to_raw}"))
+}
+
+async fn execute_delete(
+    session: &SharedSession,
+    input: &serde_json::Value,
+) -> Result<String, String> {
+    let raw_path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'path' field")?;
+    let validated = validate_path(session, raw_path).await?;
+
+    let exists = tokio::fs::try_exists(&validated)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
+    if !exists {
+        return Ok(format!("File already absent: {raw_path}"));
+    }
+    tokio::fs::remove_file(&validated)
+        .await
+        .map_err(|e| format!("Error: {e}"))?;
+    Ok(format!("Deleted {raw_path}"))
 }
 
 async fn execute_grep(

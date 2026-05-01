@@ -116,6 +116,50 @@ pub enum UpstreamOp {
     SpaceInit {
         slug: String,
     },
+    /// Blind write of `content` to `spaces/{slug}/{relative_path}`.
+    /// Used by `text_editor` `create` semantics; overwrites any
+    /// existing file. Idempotent against itself via the hash check.
+    SpaceFileWrite {
+        slug: String,
+        relative_path: String,
+        content: String,
+    },
+    /// Removes `spaces/{slug}/{relative_path}` from the library repo.
+    /// No-op if the file doesn't exist.
+    SpaceFileDelete {
+        slug: String,
+        relative_path: String,
+    },
+    /// Read–modify–write at the worker: under the LIBRARY_LOCK_QUEUE,
+    /// the runner re-reads the freshest disk state and verifies that
+    /// `old_str` appears exactly once before substituting `new_str`.
+    /// Eliminates the read-then-write race window that would exist if
+    /// the substitution happened at the call site.
+    SpaceFileStrReplace {
+        slug: String,
+        relative_path: String,
+        old_str: String,
+        new_str: String,
+    },
+    /// Read–modify–write at the worker: inserts `text` after
+    /// `line_number` in the existing file (`0` = beginning of file).
+    /// Same race-safety rationale as `SpaceFileStrReplace`.
+    SpaceFileInsert {
+        slug: String,
+        relative_path: String,
+        line_number: usize,
+        text: String,
+    },
+    /// Renames `spaces/{slug}/{from_relative_path}` to
+    /// `spaces/{slug}/{to_relative_path}`. Worker errors out if `from`
+    /// is missing or `to` already exists; cross-space moves are
+    /// rejected at the call site (different `slug` would require a
+    /// different op).
+    SpaceFileMove {
+        slug: String,
+        from_relative_path: String,
+        to_relative_path: String,
+    },
 }
 
 impl UpstreamOp {
@@ -216,7 +260,12 @@ impl UpstreamOp {
             UpstreamOp::WriteFile(s) => Some(s.searchable_fields()),
             UpstreamOp::ProjectInit { .. }
             | UpstreamOp::ProjectCleanup { .. }
-            | UpstreamOp::SpaceInit { .. } => None,
+            | UpstreamOp::SpaceInit { .. }
+            | UpstreamOp::SpaceFileWrite { .. }
+            | UpstreamOp::SpaceFileDelete { .. }
+            | UpstreamOp::SpaceFileStrReplace { .. }
+            | UpstreamOp::SpaceFileInsert { .. }
+            | UpstreamOp::SpaceFileMove { .. } => None,
         }
     }
 
@@ -228,15 +277,44 @@ impl UpstreamOp {
                 format!("runtime/projects/{project_name}")
             }
             UpstreamOp::SpaceInit { slug } => format!("spaces/{slug}"),
+            UpstreamOp::SpaceFileWrite {
+                slug,
+                relative_path,
+                ..
+            }
+            | UpstreamOp::SpaceFileDelete {
+                slug,
+                relative_path,
+            }
+            | UpstreamOp::SpaceFileStrReplace {
+                slug,
+                relative_path,
+                ..
+            }
+            | UpstreamOp::SpaceFileInsert {
+                slug,
+                relative_path,
+                ..
+            } => format!("spaces/{slug}/{relative_path}"),
+            UpstreamOp::SpaceFileMove {
+                slug,
+                from_relative_path,
+                ..
+            } => format!("spaces/{slug}/{from_relative_path}"),
         }
     }
 
     pub(crate) fn content(&self) -> String {
         match self {
             UpstreamOp::WriteFile(s) => s.rendered.clone(),
+            UpstreamOp::SpaceFileWrite { content, .. } => content.clone(),
             UpstreamOp::ProjectInit { .. }
             | UpstreamOp::ProjectCleanup { .. }
-            | UpstreamOp::SpaceInit { .. } => String::new(),
+            | UpstreamOp::SpaceInit { .. }
+            | UpstreamOp::SpaceFileDelete { .. }
+            | UpstreamOp::SpaceFileStrReplace { .. }
+            | UpstreamOp::SpaceFileInsert { .. }
+            | UpstreamOp::SpaceFileMove { .. } => String::new(),
         }
     }
 
@@ -250,6 +328,30 @@ impl UpstreamOp {
                 format!("project: delete {project_name}")
             }
             UpstreamOp::SpaceInit { slug } => format!("space: init {slug}"),
+            UpstreamOp::SpaceFileWrite {
+                slug,
+                relative_path,
+                ..
+            } => format!("space:{slug}: write {relative_path}"),
+            UpstreamOp::SpaceFileDelete {
+                slug,
+                relative_path,
+            } => format!("space:{slug}: delete {relative_path}"),
+            UpstreamOp::SpaceFileStrReplace {
+                slug,
+                relative_path,
+                ..
+            } => format!("space:{slug}: edit {relative_path}"),
+            UpstreamOp::SpaceFileInsert {
+                slug,
+                relative_path,
+                ..
+            } => format!("space:{slug}: insert {relative_path}"),
+            UpstreamOp::SpaceFileMove {
+                slug,
+                from_relative_path,
+                to_relative_path,
+            } => format!("space:{slug}: move {from_relative_path} -> {to_relative_path}"),
         }
     }
 
@@ -270,6 +372,40 @@ impl UpstreamOp {
             }
             UpstreamOp::SpaceInit { slug } => format!("space-init:{slug}"),
             UpstreamOp::WriteFile(s) => s.file_hash().to_string(),
+            // Space-file ops carry no inherent idempotency: the same
+            // mutation re-issued is a fresh user intent. We rely on the
+            // worker's disk-hash short-circuit (for blind writes) or the
+            // unique-occurrence check (for str_replace) to stay safe.
+            UpstreamOp::SpaceFileWrite { content, .. } => {
+                GitFileHash::from_blob_bytes(content.as_bytes()).to_string()
+            }
+            UpstreamOp::SpaceFileDelete {
+                slug,
+                relative_path,
+            } => format!("space-delete:{slug}:{relative_path}"),
+            UpstreamOp::SpaceFileStrReplace {
+                slug,
+                relative_path,
+                old_str,
+                new_str,
+            } => {
+                let payload = format!("{slug}\0{relative_path}\0{old_str}\0{new_str}");
+                GitFileHash::from_blob_bytes(payload.as_bytes()).to_string()
+            }
+            UpstreamOp::SpaceFileInsert {
+                slug,
+                relative_path,
+                line_number,
+                text,
+            } => {
+                let payload = format!("{slug}\0{relative_path}\0{line_number}\0{text}");
+                GitFileHash::from_blob_bytes(payload.as_bytes()).to_string()
+            }
+            UpstreamOp::SpaceFileMove {
+                slug,
+                from_relative_path,
+                to_relative_path,
+            } => format!("space-move:{slug}:{from_relative_path}->{to_relative_path}"),
         }
     }
 

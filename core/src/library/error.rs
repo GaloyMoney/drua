@@ -24,4 +24,6 @@ pub enum LibraryError {
         "LibraryError - SpaceInitFailed: scaffolding commit for space {slug:?} did not complete"
     )]
     SpaceInitFailed { slug: String },
+    #[error("LibraryError - SpaceOpFailed: upstream operation on space {slug:?} did not complete")]
+    SpaceOpFailed { slug: String },
 }

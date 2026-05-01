@@ -461,9 +461,16 @@ fn register_tool_bridge(
     Ok(())
 }
 
+/// Builds the `{"ok":false,"error":...}` envelope. Delegates string
+/// escaping to `serde_json` so control characters (newlines, tabs)
+/// inside the message are encoded as `\n`, `\t`, etc. — otherwise
+/// `JSON.parse(raw)` in `__dispatch` chokes with a generic
+/// "Bad control character in string literal" and the agent never
+/// sees the underlying tool error.
 fn encode_error(msg: &str) -> String {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(r#"{{"ok":false,"error":"{escaped}"}}"#)
+    let escaped = serde_json::to_string(msg)
+        .unwrap_or_else(|_| "\"<error message could not be encoded>\"".into());
+    format!(r#"{{"ok":false,"error":{escaped}}}"#)
 }
 
 /// Bootstrap (tools proxy) + user code wrapped in an async IIFE for

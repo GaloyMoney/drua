@@ -203,15 +203,13 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox = self
                     .sandboxes
                     .create(subject, project_id, name, specs, sandbox_mode)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                    .await?;
 
                 if params.wait.unwrap_or(true) {
                     let ready = self
                         .sandboxes
                         .wait_until_ready(sandbox.id, std::time::Duration::from_secs(360))
-                        .await
-                        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                        .await?;
                     return Ok(CallToolResult::success(vec![Content::text(
                         format_sandbox(&ready),
                     )]));
@@ -225,11 +223,7 @@ impl TopLevelTool for ProjectSandbox {
             }
 
             SandboxCommand::List => {
-                let sandboxes = self
-                    .sandboxes
-                    .list_for_project(subject, project_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandboxes = self.sandboxes.list_for_project(subject, project_id).await?;
 
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandboxes(&sandboxes),
@@ -241,11 +235,7 @@ impl TopLevelTool for ProjectSandbox {
                     ToolSetsError::MissingArgument("sandbox_id is required for get".to_string())
                 })?;
 
-                let sandbox = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
 
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
@@ -263,11 +253,7 @@ impl TopLevelTool for ProjectSandbox {
 
                 Audit::record_sandbox_id(sandbox_id);
 
-                let _ = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let _ = self.sandboxes.find_by_id(subject, sandbox_id).await?;
 
                 execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
             }
@@ -276,17 +262,12 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for restart".to_string())
                 })?;
-                let sandbox = self
-                    .sandboxes
-                    .restart(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.restart(subject, sandbox_id).await?;
                 if params.wait.unwrap_or(true) {
                     let ready = self
                         .sandboxes
                         .wait_until_ready(sandbox.id, std::time::Duration::from_secs(360))
-                        .await
-                        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                        .await?;
                     Ok(CallToolResult::success(vec![Content::text(
                         format_sandbox(&ready),
                     )]))
@@ -303,11 +284,7 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for suspend".to_string())
                 })?;
-                let sandbox = self
-                    .sandboxes
-                    .suspend(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.suspend(subject, sandbox_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -353,10 +330,7 @@ async fn execute_inspect(
         InspectTool::Ls => build_ls_request(&tool_args)?,
     };
 
-    let client = sandboxes
-        .instance_client_for_read(sub, sandbox_id)
-        .await
-        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+    let client = sandboxes.instance_client_for_read(sub, sandbox_id).await?;
 
     match client.execute(&req).await {
         Ok(resp) => {

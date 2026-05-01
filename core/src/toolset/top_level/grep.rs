@@ -116,7 +116,7 @@ impl TopLevelTool for Grep {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs.
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -134,11 +134,7 @@ impl TopLevelTool for Grep {
             .to_string();
         let args_value = serde_json::Value::Object(args);
 
-        let space_output = self
-            .space_fs
-            .grep(subject, &path, &args_value)
-            .await
-            .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+        let space_output = self.space_fs.grep(subject, &path, &args_value).await?;
 
         if let Some(output) = space_output {
             let out = TextOutput {
@@ -155,8 +151,7 @@ impl TopLevelTool for Grep {
         let client = self
             .sandboxes
             .instance_client_for_read(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+            .await?;
 
         // Recover the original args object from the Value we built above.
         let args = match args_value {

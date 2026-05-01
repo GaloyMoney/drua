@@ -66,8 +66,8 @@ impl Projects {
     }
 
     /// Bump `<spaces>` (and any other project-keyed cached blocks)
-    /// when this op commits. Called from `mount_space_internal_in_op`
-    /// and `unmount_space`; both mutate `Project.mounted_spaces`.
+    /// when this op commits. Called from `mount_space_in_op` and
+    /// `unmount_space_in_op`; both mutate `Project.mounted_spaces`.
     fn register_context_bump<OP: AtomicOperation>(&self, op: &mut OP, project_id: ProjectId) {
         let hook = ContextBumpHook::new(
             self.context_generation.clone(),
@@ -268,10 +268,6 @@ impl Projects {
         project_id: ProjectId,
         slug: &str,
     ) -> Result<Space, ProjectError> {
-        sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
-        Audit::record_action_if_unset("project.mount_space");
-        Audit::record_project_id(project_id);
-
         let space = self
             .library
             .find_space_by_slug(slug)
@@ -281,10 +277,34 @@ impl Projects {
             })?;
 
         let mut op = self.repo.begin_op().await?;
-        self.mount_space_internal_in_op(&mut op, project_id, space.id)
+        self.mount_space_in_op(&mut op, sub, project_id, space.id)
             .await?;
         op.commit().await?;
         Ok(space)
+    }
+
+    /// Composable variant of [`Self::mount_space`] — takes the caller's
+    /// transaction so the mount can be bundled with other writes
+    /// atomically. Idempotent: no-op if the space is already mounted.
+    #[instrument(name = "domain.project.mount_space_in_op", skip(self, op, sub))]
+    pub async fn mount_space_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+        space_id: SpaceId,
+    ) -> Result<(), ProjectError> {
+        sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.mount_space");
+        Audit::record_project_id(project_id);
+        Audit::record_space_id(space_id);
+
+        let mut project = self.repo.find_by_id_in_op(&mut *op, project_id).await?;
+        if project.mount_space(space_id).did_execute() {
+            self.repo.update_in_op(&mut *op, &mut project).await?;
+            self.register_context_bump(op, project_id);
+        }
+        Ok(())
     }
 
     /// Creates a new library space and mounts it onto `project_id`.
@@ -305,31 +325,12 @@ impl Projects {
         Audit::record_project_id(project_id);
 
         let space = self.library.create_space(sub, slug, description).await?;
-        Audit::record_space_id(space.id);
 
         let mut op = self.repo.begin_op().await?;
-        self.mount_space_internal_in_op(&mut op, project_id, space.id)
+        self.mount_space_in_op(&mut op, sub, project_id, space.id)
             .await?;
         op.commit().await?;
         Ok(space)
-    }
-
-    /// Trusted-caller variant: skips the project-admin check. Used
-    /// by the public `mount_space` / `create_and_mount_space` wrappers
-    /// after they have authorised the broader operation.
-    #[instrument(name = "domain.project.mount_space_internal_in_op", skip(self, op))]
-    async fn mount_space_internal_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        project_id: ProjectId,
-        space_id: SpaceId,
-    ) -> Result<(), ProjectError> {
-        let mut project = self.repo.find_by_id_in_op(&mut *op, project_id).await?;
-        if project.mount_space(space_id).did_execute() {
-            self.repo.update_in_op(&mut *op, &mut project).await?;
-            self.register_context_bump(op, project_id);
-        }
-        Ok(())
     }
 
     /// Drops `space_id` from `project_id`'s mounted set. Idempotent:
@@ -343,18 +344,33 @@ impl Projects {
         project_id: ProjectId,
         space_id: SpaceId,
     ) -> Result<(), ProjectError> {
+        let mut op = self.repo.begin_op().await?;
+        self.unmount_space_in_op(&mut op, sub, project_id, space_id)
+            .await?;
+        op.commit().await?;
+        Ok(())
+    }
+
+    /// Composable variant of [`Self::unmount_space`] — takes the caller's
+    /// transaction. Idempotent.
+    #[instrument(name = "domain.project.unmount_space_in_op", skip(self, op, sub))]
+    pub async fn unmount_space_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+        space_id: SpaceId,
+    ) -> Result<(), ProjectError> {
         sub.can(AuthVerb::Update, AuthResource::Project(Some(project_id)))?;
         Audit::record_action_if_unset("project.unmount_space");
         Audit::record_project_id(project_id);
         Audit::record_space_id(space_id);
 
-        let mut op = self.repo.begin_op().await?;
-        let mut project = self.repo.find_by_id_in_op(&mut op, project_id).await?;
+        let mut project = self.repo.find_by_id_in_op(&mut *op, project_id).await?;
         if project.unmount_space(space_id).did_execute() {
-            self.repo.update_in_op(&mut op, &mut project).await?;
-            self.register_context_bump(&mut op, project_id);
+            self.repo.update_in_op(&mut *op, &mut project).await?;
+            self.register_context_bump(op, project_id);
         }
-        op.commit().await?;
         Ok(())
     }
 
@@ -438,11 +454,12 @@ impl Projects {
         let total = spaces.len();
 
         let header = "<spaces>\n\
-             This project has the following knowledge spaces mounted. They \
-             are read-only collaborative folders backed by a shared library. \
-             Use the file tools (read, ls, glob, grep) with paths prefixed \
-             `space:<slug>/` to read their contents — no sandbox attachment \
-             is required.\n";
+             This project has the following knowledge spaces mounted — \
+             collaborative folders backed by a shared library. Use the \
+             file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
+             paths prefixed `space:<slug>/` to read or write their \
+             contents. Writes commit to the upstream library automatically; \
+             no sandbox attachment is required.\n";
 
         let mut buf = String::from(header);
         for s in spaces.iter().take(SPACES_BLOCK_LIMIT) {

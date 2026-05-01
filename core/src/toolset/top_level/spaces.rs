@@ -169,8 +169,7 @@ impl TopLevelTool for SpacesTool {
                 let space = self
                     .projects
                     .create_and_mount_space(subject, project_id, slug, description)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .await?;
 
                 let text = format!("Space created.\n  id: {}\n  slug: {}", space.id, space.slug);
                 let out = SpacesOutput {
@@ -184,8 +183,7 @@ impl TopLevelTool for SpacesTool {
                 let space = self
                     .projects
                     .mount_space(subject, project_id, &slug)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .await?;
 
                 let text = format!(
                     "Space mounted onto project {}.\n  slug: {}",
@@ -210,8 +208,7 @@ impl TopLevelTool for SpacesTool {
                     })?;
                 self.projects
                     .unmount_space(subject, project_id, space.id)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .await?;
 
                 let text = format!(
                     "Space unmounted from project {}.\n  slug: {}",
@@ -230,8 +227,7 @@ impl TopLevelTool for SpacesTool {
                 } else {
                     self.projects
                         .list_mounted_spaces(subject, project_id)
-                        .await
-                        .map_err(|e| ToolSetsError::Project(e.to_string()))?
+                        .await?
                 };
 
                 let summaries: Vec<SpaceSummary> = spaces.iter().map(SpaceSummary::from).collect();

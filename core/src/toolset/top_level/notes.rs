@@ -148,10 +148,7 @@ async fn resolve_project_name(
     subject: &AuthSubject,
 ) -> Result<String, ToolSetsError> {
     let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
-    let project = projects
-        .find_by_id(subject, project_id)
-        .await
-        .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+    let project = projects.find_by_id(subject, project_id).await?;
     Ok(project.name)
 }
 

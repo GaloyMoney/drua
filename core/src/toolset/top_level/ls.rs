@@ -66,7 +66,7 @@ impl TopLevelTool for Ls {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -77,11 +77,7 @@ impl TopLevelTool for Ls {
         let params: LsParams = parse_params(arguments)?;
         Audit::record_action("ls");
 
-        let space_entries = self
-            .space_fs
-            .view_dir(subject, &params.path)
-            .await
-            .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+        let space_entries = self.space_fs.view_dir(subject, &params.path).await?;
 
         if let Some(entries) = space_entries {
             let filtered = filter_ignored(entries, &params.ignore);
@@ -98,8 +94,7 @@ impl TopLevelTool for Ls {
         let client = self
             .sandboxes
             .instance_client_for_read(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+            .await?;
 
         let req = ExecuteRequest {
             tool: "str_replace_based_edit_tool".to_string(),

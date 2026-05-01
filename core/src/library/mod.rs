@@ -237,6 +237,154 @@ impl Library {
         Ok(space)
     }
 
+    /// Blind overwrite of `spaces/<slug>/<relative_path>`. Awaits the
+    /// upstream push so callers can rely on the file being at the
+    /// remote when this returns.
+    ///
+    /// Trusted-caller: mount-membership authz lives in `Projects`
+    /// (`Project.mounted_spaces`), not on `AuthScope`. `SpaceFs` is
+    /// the public boundary and gates every call via
+    /// `Projects::space_for_subject`. Visibility is `pub(in crate::library)`
+    /// so external code can't bypass that gate.
+    #[tracing::instrument(name = "library.write_space_file", skip(self, space, content), fields(slug = %space.slug))]
+    pub(in crate::library) async fn write_space_file(
+        &self,
+        space: &Space,
+        relative_path: String,
+        content: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.write_file");
+        self.spawn_and_await_space_op(
+            &space.slug,
+            UpstreamOp::SpaceFileWrite {
+                slug: space.slug.clone(),
+                relative_path,
+                content,
+            },
+        )
+        .await
+    }
+
+    /// Removes `spaces/<slug>/<relative_path>` from the library repo.
+    /// No-op if the file doesn't exist on disk. Trusted-caller — see
+    /// [`Library::write_space_file`].
+    #[tracing::instrument(name = "library.delete_space_file", skip(self, space), fields(slug = %space.slug))]
+    pub(in crate::library) async fn delete_space_file(
+        &self,
+        space: &Space,
+        relative_path: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.delete_file");
+        self.spawn_and_await_space_op(
+            &space.slug,
+            UpstreamOp::SpaceFileDelete {
+                slug: space.slug.clone(),
+                relative_path,
+            },
+        )
+        .await
+    }
+
+    /// Read–modify–write at the worker. Verifies `old_str` appears
+    /// exactly once on the freshest disk state before substituting.
+    /// Trusted-caller — see [`Library::write_space_file`].
+    #[tracing::instrument(name = "library.str_replace_space_file", skip(self, space, old_str, new_str), fields(slug = %space.slug))]
+    pub(in crate::library) async fn str_replace_space_file(
+        &self,
+        space: &Space,
+        relative_path: String,
+        old_str: String,
+        new_str: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.str_replace");
+        self.spawn_and_await_space_op(
+            &space.slug,
+            UpstreamOp::SpaceFileStrReplace {
+                slug: space.slug.clone(),
+                relative_path,
+                old_str,
+                new_str,
+            },
+        )
+        .await
+    }
+
+    /// Read–modify–write at the worker. Inserts `text` after
+    /// `line_number` (1-based, `0` = beginning of file). Out-of-range
+    /// line numbers append at EOF. Trusted-caller — see
+    /// [`Library::write_space_file`].
+    #[tracing::instrument(name = "library.insert_space_file", skip(self, space, text), fields(slug = %space.slug))]
+    pub(in crate::library) async fn insert_space_file(
+        &self,
+        space: &Space,
+        relative_path: String,
+        line_number: usize,
+        text: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.insert");
+        self.spawn_and_await_space_op(
+            &space.slug,
+            UpstreamOp::SpaceFileInsert {
+                slug: space.slug.clone(),
+                relative_path,
+                line_number,
+                text,
+            },
+        )
+        .await
+    }
+
+    /// Renames `spaces/<slug>/<from>` → `spaces/<slug>/<to>`. Worker
+    /// rejects same-path, missing src, or existing dest. Cross-space
+    /// moves are blocked at `SpaceFs::move_file` — both sides must
+    /// resolve to the same `Space`. Trusted-caller — see
+    /// [`Library::write_space_file`].
+    #[tracing::instrument(name = "library.move_space_file", skip(self, space), fields(slug = %space.slug))]
+    pub(in crate::library) async fn move_space_file(
+        &self,
+        space: &Space,
+        from_relative_path: String,
+        to_relative_path: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.move_file");
+        self.spawn_and_await_space_op(
+            &space.slug,
+            UpstreamOp::SpaceFileMove {
+                slug: space.slug.clone(),
+                from_relative_path,
+                to_relative_path,
+            },
+        )
+        .await
+    }
+
+    /// Spawns a single space-related `UpstreamOp` on the
+    /// `LIBRARY_LOCK_QUEUE` and blocks until it completes (or the
+    /// 30s timeout fires). Used by the four space-file write helpers
+    /// so callers can rely on "returned == pushed".
+    async fn spawn_and_await_space_op(
+        &self,
+        slug: &str,
+        op: UpstreamOp,
+    ) -> Result<(), LibraryError> {
+        const SPACE_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let job_id = ::job::JobId::new();
+        let config = WriteToRuntimeConfig { file: op };
+        self.write_spawner
+            .spawn_with_queue_id(job_id, config, LIBRARY_LOCK_QUEUE)
+            .await?;
+        let outcomes = self
+            .jobs
+            .await_completions(&[job_id], Some(SPACE_OP_TIMEOUT))
+            .await?;
+        if !outcomes.iter().all(|o| o.is_completed()) {
+            return Err(LibraryError::SpaceOpFailed {
+                slug: slug.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Lists every space, paginated. Soft-deleted spaces drop out
     /// at the SQL layer (`delete = "soft_without_queries"`). Used by
     /// admin tools and the `spaces` `list { all: true }` flag.

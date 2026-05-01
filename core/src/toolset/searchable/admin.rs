@@ -500,8 +500,7 @@ impl AdminToolSet {
                 let sandbox = self
                     .sandboxes
                     .create(subject, project_id, name, specs, sandbox_mode)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                    .await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -511,11 +510,7 @@ impl AdminToolSet {
                 let project_id = params.project_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
-                let sandboxes = self
-                    .sandboxes
-                    .list_for_project(subject, project_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandboxes = self.sandboxes.list_for_project(subject, project_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandboxes(&sandboxes),
                 )]))
@@ -525,11 +520,7 @@ impl AdminToolSet {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for get".to_string())
                 })?;
-                let sandbox = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -576,22 +567,14 @@ impl AdminToolSet {
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .map(String::from);
-                let project = self
-                    .projects
-                    .create(subject, &name, description)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                let project = self.projects.create(subject, &name, description).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_project_created(&project),
                 )]))
             }
 
             ProjectCommand::List => {
-                let all = self
-                    .projects
-                    .list_all(subject)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                let all = self.projects.list_all(subject).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_projects(&all),
                 )]))
@@ -659,8 +642,7 @@ impl AdminToolSet {
                 let space = self
                     .projects
                     .mount_space(subject, project_id, &slug)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .await?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Space mounted onto project {project_id}.\n  slug: {}\n  id: {}",
                     space.slug, space.id,
@@ -682,8 +664,7 @@ impl AdminToolSet {
                     .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
                 self.projects
                     .unmount_space(subject, project_id, space.id)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .await?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Space unmounted from project {project_id}.\n  slug: {}\n  id: {}",
                     space.slug, space.id,
@@ -729,10 +710,7 @@ async fn execute_inspect(
         InspectTool::Ls => build_ls_request(&tool_args)?,
     };
 
-    let client = sandboxes
-        .instance_client_for(sub, sandbox_id)
-        .await
-        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+    let client = sandboxes.instance_client_for(sub, sandbox_id).await?;
 
     match client.execute(&req).await {
         Ok(resp) => {

@@ -1,9 +1,10 @@
 //! `str_replace_based_edit_tool` — Anthropic-compatible text editor.
 //! Two backends:
 //!
-//! - `space:<slug>/...` paths: `view` runs through `SpaceFs::view_file`
-//!   (no sandbox needed); mutating commands return a clean
-//!   "not yet supported" error.
+//! - `space:<slug>/...` paths: all four commands route through
+//!   `SpaceFs`. Reads (`view`) hit the on-disk library clone; writes
+//!   (`create` / `str_replace` / `insert`) enqueue an `UpstreamOp` on
+//!   the library lock queue and block until the upstream push lands.
 //! - Anything else: forwards verbatim to the agent's attached
 //!   sandbox via the `/execute` endpoint.
 //!
@@ -103,6 +104,33 @@ fn command_is_mutating(command: &str) -> bool {
     !matches!(command, "view")
 }
 
+/// Builds a helpful `MissingArgument` error that names the missing
+/// field and shows the full per-command recipe inline. Streaming
+/// model glitches sometimes produce empty `{}` tool calls; a concrete
+/// example in the error body lets the next turn self-correct without
+/// a follow-up "what should I send?" round-trip.
+fn missing_arg(field: &str) -> ToolSetsError {
+    let recipe = match field {
+        "command" => {
+            "Required: { command: \"view\"|\"create\"|\"str_replace\"|\"insert\", path: \"...\", \
+             [view_range|file_text|old_str|new_str|insert_line per command] }"
+        }
+        "file_text" => {
+            "create requires: { command: \"create\", path: \"...\", file_text: \"...\" }"
+        }
+        "old_str" | "new_str" => {
+            "str_replace requires: { command: \"str_replace\", path: \"...\", old_str: \"...\", \
+             new_str: \"...\" }"
+        }
+        "insert_line" => {
+            "insert requires: { command: \"insert\", path: \"...\", insert_line: <int>, \
+             new_str: \"...\" }"
+        }
+        _ => "see tool input_schema for required fields",
+    };
+    ToolSetsError::MissingArgument(format!("{field}. {recipe}"))
+}
+
 #[async_trait::async_trait]
 impl TopLevelTool for TextEditor {
     fn name(&self) -> &str {
@@ -111,8 +139,10 @@ impl TopLevelTool for TextEditor {
 
     fn description(&self) -> &str {
         "Anthropic-compatible text editor. Commands: `view` (read file or list \
-         directory; supports `space:<slug>/...` paths from mounted spaces), \
-         `create` / `str_replace` / `insert` (sandbox-only writes)."
+         directory), `create` (write a new file), `str_replace` (replace a \
+         unique substring), `insert` (insert text at a line). Accepts both \
+         in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
+         spaces — writes to spaces commit to the upstream library."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -124,8 +154,7 @@ impl TopLevelTool for TextEditor {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from project admins — see bash.rs.
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -137,44 +166,85 @@ impl TopLevelTool for TextEditor {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?
+            .ok_or_else(|| missing_arg("command"))?
             .to_string();
         Audit::record_action("text_editor");
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Mutating commands on `space:` paths short-circuit before
-        // hitting `SpaceFs` so we don't run the auth gate just to
-        // return a "not supported" message.
-        if command_is_mutating(&command) && SpaceFs::is_space_path(path) {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "write commands on space paths are not yet supported. \
-                 For now, use the spaces tool to create files in spaces."
-                    .to_string(),
-            )]));
-        }
-
-        // `view` against `space:<slug>/...` runs through SpaceFs. For
-        // any other path SpaceFs returns Ok(None) and we fall through.
-        if !command_is_mutating(&command) {
-            let view_range = args
-                .get("view_range")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| {
-                    let s = arr.first()?.as_i64()?;
-                    let e = arr.get(1)?.as_i64()?;
-                    Some((s, e))
-                });
-            let space_view = self
-                .space_fs
-                .view_file(subject, path, view_range)
-                .await
-                .map_err(|e| ToolSetsError::Project(e.to_string()))?;
-            if let Some(view) = space_view {
-                let output = match view {
-                    FileView::File(text) => text,
-                    FileView::Dir(entries) => entries.join("\n"),
-                };
+        // `space:<slug>/...` paths are handled entirely by SpaceFs —
+        // both reads (`view`) and writes (`create` / `str_replace` /
+        // `insert`). Each helper returns Ok(None) on non-space paths
+        // so we fall through to the sandbox dispatch below.
+        if SpaceFs::is_space_path(path) {
+            let space_result: Option<String> = match command.as_str() {
+                "view" => {
+                    let view_range =
+                        args.get("view_range")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| {
+                                let s = arr.first()?.as_i64()?;
+                                let e = arr.get(1)?.as_i64()?;
+                                Some((s, e))
+                            });
+                    self.space_fs
+                        .view_file(subject, path, view_range)
+                        .await?
+                        .map(|view| match view {
+                            FileView::File(text) => text,
+                            FileView::Dir(entries) => entries.join("\n"),
+                        })
+                }
+                "create" => {
+                    let file_text = args
+                        .get("file_text")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("file_text"))?
+                        .to_string();
+                    self.space_fs
+                        .write_file(subject, path, file_text)
+                        .await?
+                        .map(|()| format!("Wrote {path}"))
+                }
+                "str_replace" => {
+                    let old_str = args
+                        .get("old_str")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("old_str"))?
+                        .to_string();
+                    let new_str = args
+                        .get("new_str")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("new_str"))?
+                        .to_string();
+                    self.space_fs
+                        .str_replace(subject, path, old_str, new_str)
+                        .await?
+                        .map(|()| format!("Replaced text in {path}"))
+                }
+                "insert" => {
+                    let line_number = args
+                        .get("insert_line")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| missing_arg("insert_line"))?
+                        .max(0) as usize;
+                    let new_str = args
+                        .get("new_str")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("new_str"))?
+                        .to_string();
+                    self.space_fs
+                        .insert_line(subject, path, line_number, new_str)
+                        .await?
+                        .map(|()| format!("Inserted text at line {line_number} of {path}"))
+                }
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "unknown text_editor command: {command}"
+                    ))]));
+                }
+            };
+            if let Some(output) = space_result {
                 let out = TextOutput {
                     output: output.clone(),
                 };
@@ -200,8 +270,7 @@ impl TopLevelTool for TextEditor {
             self.sandboxes
                 .instance_client_for_read(subject, sandbox_id)
                 .await
-        }
-        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+        }?;
 
         let req = ExecuteRequest {
             tool: "str_replace_based_edit_tool".to_string(),

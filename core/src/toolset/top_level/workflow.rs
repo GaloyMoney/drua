@@ -496,8 +496,7 @@ impl TopLevelTool for WorkflowTool {
                     .projects
                     .find_by_id(subject, project_id)
                     .await
-                    .map(|w| w.name)
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .map(|w| w.name)?;
 
                 let sandbox_decls: Vec<WorkflowSandboxDecl> =
                     sandboxes.into_iter().map(|s| s.into_decl()).collect();

@@ -75,7 +75,7 @@ impl TopLevelTool for GlobTool {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs.
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -97,11 +97,7 @@ impl TopLevelTool for GlobTool {
             .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?
             .to_string();
 
-        let space_files = self
-            .space_fs
-            .glob(subject, &path, &pattern)
-            .await
-            .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+        let space_files = self.space_fs.glob(subject, &path, &pattern).await?;
 
         if let Some(files) = space_files {
             let text = files.join("\n");
@@ -117,8 +113,7 @@ impl TopLevelTool for GlobTool {
         let client = self
             .sandboxes
             .instance_client_for_read(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+            .await?;
 
         let req = ExecuteRequest {
             tool: "Glob".to_string(),

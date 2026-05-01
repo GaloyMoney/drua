@@ -69,7 +69,7 @@ impl TopLevelTool for Read {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs.
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -84,8 +84,7 @@ impl TopLevelTool for Read {
         let space_view = self
             .space_fs
             .view_file(subject, &params.path, view_range)
-            .await
-            .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+            .await?;
 
         if let Some(view) = space_view {
             let content = match view {
@@ -116,8 +115,7 @@ impl TopLevelTool for Read {
         let client = self
             .sandboxes
             .instance_client_for_read(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+            .await?;
 
         let req = ExecuteRequest {
             tool: "str_replace_based_edit_tool".to_string(),
