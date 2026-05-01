@@ -268,6 +268,7 @@ impl App {
                 Arc::clone(&library),
                 Arc::clone(&skills),
                 Arc::clone(&projects),
+                "skill.sync-from-library",
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner
@@ -288,6 +289,7 @@ impl App {
                 Arc::clone(&library),
                 Arc::clone(&workflows),
                 Arc::clone(&projects),
+                "workflow.sync-from-library",
             );
             let sync_spawner = jobs.add_initializer(sync_init);
             sync_spawner

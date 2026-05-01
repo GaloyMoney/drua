@@ -33,8 +33,8 @@ pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
 pub(crate) use synced::slugify;
 pub use synced::{
-    Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
-    SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
+    matches_runtime_subdir, Changes, LibraryImporter, LibrarySynced, ParsedFile,
+    SyncFromLibraryConfig, SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
 };
 pub use upstream::SpaceFileChange;
 
@@ -433,12 +433,13 @@ impl Library {
     }
 
     /// Generic reverse-sync. Returns parsed `ParsedFile`s for every changed
-    /// file under `S::Entity::DOC_TYPE`'s subdir since `last_sync_commit`.
+    /// file under the importer's `doc_type` subdir since `last_sync_commit`.
     /// On first run (`None`), returns all tracked files. Empty `files` when
     /// HEAD hasn't moved.
-    #[tracing::instrument(name = "library.find_changes", skip(self))]
+    #[tracing::instrument(name = "library.find_changes", skip_all)]
     pub async fn find_changes<S: LibraryImporter>(
         &self,
+        importer: &S,
         last_sync_commit: Option<&str>,
     ) -> Result<Changes, LibraryError> {
         self.upstream.pull().await?;
@@ -462,7 +463,7 @@ impl Library {
             });
         }
 
-        let doc_type = <S::Entity as LibrarySynced>::DOC_TYPE;
+        let doc_type = importer.doc_type();
         let changed = self
             .upstream
             .changed_files(last_sync_commit, doc_type.subdir(), doc_type.ext())
@@ -470,7 +471,7 @@ impl Library {
 
         let mut files = Vec::with_capacity(changed.len());
         for (path, content) in &changed {
-            match S::parse(content, path) {
+            match importer.parse(content.as_bytes(), path) {
                 Some(parsed) => files.push(parsed),
                 None => {
                     tracing::warn!(

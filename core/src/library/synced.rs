@@ -151,31 +151,56 @@ pub trait LibrarySynced: Sized + Send + Sync + 'static {
 pub type UpsertError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Implemented on **services** (`Skills`, `Workflows`, …) that import
-/// entities from the git-backed library. The associated `Entity` carries
-/// the forward-sync projection (`LibrarySynced::DOC_TYPE` is the source of
-/// truth for subdir/extension and file format identity).
+/// entities from the git-backed library. Decoupled from `LibrarySynced`:
+/// the importer claims paths, parses bytes, and upserts/deletes; the
+/// unified sync runner dispatches on `matches`.
 pub trait LibraryImporter: Send + Sync + 'static {
-    type Entity: LibrarySynced;
+    /// True if this importer claims the path.
+    fn matches(&self, path: &str) -> bool;
 
-    /// Reverse-sync `JobType` name; must be unique per impl.
-    const JOB_TYPE: &'static str;
+    fn doc_type(&self) -> DocType;
 
     /// `true` rejects parsed files whose folder doesn't resolve to a
     /// project; `false` allows global files.
-    const PROJECT_REQUIRED: bool = false;
+    fn project_required(&self) -> bool {
+        false
+    }
 
     /// Parse on-disk bytes into a `SyncedFile`. `None` means "skip"
     /// (logged by the runner). `needs_rewrite` is reflected back to the
     /// write job to trigger canonicalisation.
-    fn parse(content: &str, path: &str) -> Option<ParsedFile>;
+    fn parse(&self, content: &[u8], path: &str) -> Option<ParsedFile>;
 
     fn upsert_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         file: &SyncedFile,
+        path: &str,
         project_id: Option<ProjectId>,
         file_hash: GitFileHash,
     ) -> impl std::future::Future<Output = Result<(), UpsertError>> + Send;
+
+    fn delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> impl std::future::Future<Output = Result<(), UpsertError>> + Send;
+}
+
+/// `runtime/{subdir}/<file>.{ext}` (global) or
+/// `runtime/projects/*/{subdir}/<file>.{ext}` (project-scoped).
+pub fn matches_runtime_subdir(path: &str, subdir: &str, ext: &str) -> bool {
+    let dot_ext = format!(".{ext}");
+    if !path.ends_with(&dot_ext) {
+        return false;
+    }
+    if path.starts_with(&format!("runtime/{subdir}/")) {
+        return true;
+    }
+    if path.starts_with("runtime/projects/") {
+        return path.contains(&format!("/{subdir}/"));
+    }
+    false
 }
 
 #[derive(Debug)]
@@ -208,22 +233,28 @@ impl SyncFromLibraryConfig {
     }
 }
 
-/// Generic over `S: LibraryImporter`. The service is the parameter — the
-/// associated `Entity` (`LibrarySynced` impl) supplies subdir/extension/
-/// `DOC_TYPE` for the parametric `find_changes`, and `S::JOB_TYPE` is the
-/// unique job-runner name.
+/// Generic over `S: LibraryImporter`. Per-type `JobType` name comes
+/// through the constructor instead of a trait const so the importer
+/// trait can stay dyn-compatible.
 pub struct SyncFromLibraryJobInitializer<S: LibraryImporter> {
     library: Arc<Library>,
     service: Arc<S>,
     projects: Arc<Projects>,
+    job_type: &'static str,
 }
 
 impl<S: LibraryImporter> SyncFromLibraryJobInitializer<S> {
-    pub fn new(library: Arc<Library>, service: Arc<S>, projects: Arc<Projects>) -> Self {
+    pub fn new(
+        library: Arc<Library>,
+        service: Arc<S>,
+        projects: Arc<Projects>,
+        job_type: &'static str,
+    ) -> Self {
         Self {
             library,
             service,
             projects,
+            job_type,
         }
     }
 }
@@ -232,7 +263,7 @@ impl<S: LibraryImporter> JobInitializer for SyncFromLibraryJobInitializer<S> {
     type Config = SyncFromLibraryConfig;
 
     fn job_type(&self) -> JobType {
-        JobType::new(S::JOB_TYPE)
+        JobType::new(self.job_type)
     }
 
     fn init(
@@ -261,11 +292,7 @@ struct SyncFromLibraryRunner<S: LibraryImporter> {
 
 #[async_trait::async_trait]
 impl<S: LibraryImporter> JobRunner for SyncFromLibraryRunner<S> {
-    #[tracing::instrument(
-        name = "library.sync_from_library.run",
-        skip_all,
-        fields(job_type = S::JOB_TYPE)
-    )]
+    #[tracing::instrument(name = "library.sync_from_library.run", skip_all)]
     async fn run(
         &self,
         current_job: CurrentJob,
@@ -275,7 +302,7 @@ impl<S: LibraryImporter> JobRunner for SyncFromLibraryRunner<S> {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    doc_type = <S::Entity as LibrarySynced>::DOC_TYPE.as_str(),
+                    doc_type = self.service.doc_type().as_str(),
                     "library sync cycle failed"
                 );
                 self.config.last_sync_commit.clone()
@@ -300,7 +327,10 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let changes = self
             .library
-            .find_changes::<S>(self.config.last_sync_commit.as_deref())
+            .find_changes(
+                self.service.as_ref(),
+                self.config.last_sync_commit.as_deref(),
+            )
             .await?;
 
         if changes.files.is_empty() {
@@ -312,12 +342,13 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
             return Ok(commit);
         }
 
-        let doc_type = <S::Entity as LibrarySynced>::DOC_TYPE.as_str();
+        let doc_type = self.service.doc_type();
+        let doc_type_str = doc_type.as_str();
 
         tracing::info!(
             count = changes.files.len(),
             head = %changes.head_commit,
-            doc_type,
+            doc_type = doc_type_str,
             "processing changed files from library"
         );
 
@@ -326,6 +357,7 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
         let mut resolved: Vec<(ParsedFile, Option<ProjectId>)> =
             Vec::with_capacity(changes.files.len());
 
+        let project_required = self.service.project_required();
         for parsed in changes.files {
             let project_id = match &parsed.file.project_name {
                 Some(name) => match ws_cache.get(name).copied() {
@@ -356,8 +388,11 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
                 None => None,
             };
 
-            if S::PROJECT_REQUIRED && project_id.is_none() {
-                tracing::warn!(doc_type, "project required but unresolved; skipping");
+            if project_required && project_id.is_none() {
+                tracing::warn!(
+                    doc_type = doc_type_str,
+                    "project required but unresolved; skipping"
+                );
                 continue;
             }
             resolved.push((parsed, project_id));
@@ -366,14 +401,19 @@ impl<S: LibraryImporter> SyncFromLibraryRunner<S> {
         let mut op = current_job.begin_op().await?;
         for (parsed, project_id) in &resolved {
             let file_hash = parsed.file.file_hash();
+            let path = parsed
+                .file
+                .original_path
+                .clone()
+                .unwrap_or_else(|| parsed.file.relative_path());
             if let Err(e) = self
                 .service
-                .upsert_in_op(&mut op, &parsed.file, *project_id, file_hash)
+                .upsert_in_op(&mut op, &parsed.file, &path, *project_id, file_hash)
                 .await
             {
                 tracing::warn!(
                     error = %e,
-                    doc_type,
+                    doc_type = doc_type_str,
                     "failed to upsert from library, skipping"
                 );
             }
