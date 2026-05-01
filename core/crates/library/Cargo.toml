@@ -12,8 +12,12 @@ github-app = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+uuid = { workspace = true }
 async-trait = "0.1"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+es-entity = { workspace = true }
+derive_builder = "0.20"
+chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true }

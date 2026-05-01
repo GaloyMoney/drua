@@ -2,6 +2,8 @@ mod config;
 mod error;
 mod git;
 mod job;
+pub mod primitives;
+pub mod space;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,10 +14,12 @@ use tokio::sync::mpsc;
 pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
+pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
 
 use self::git::GitEngine;
 use self::job::{CommitTick, LibrarySyncConfig, LibrarySyncJobInitializer};
 
+#[allow(dead_code)]
 pub struct Library {
     config: LibraryConfig,
     pool: sqlx::PgPool,

@@ -24,6 +24,7 @@ fn read_blob(repo: &git2::Repository, path: &str) -> Option<Vec<u8>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
 async fn init_clones_and_resyncs_fixture_repo() {
     let fixture = TestRepo::init(&[("spaces/test/dummy.md", "hello\n")]);
     let data_dir = library_data_dir("init_clones_and_resyncs_fixture_repo");
