@@ -12,7 +12,7 @@ github-app = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 async-trait = "0.1"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 es-entity = { workspace = true }

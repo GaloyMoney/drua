@@ -1,7 +1,24 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::importer::GitFileHash;
 use crate::{GitHubAppTokenProvider, LibraryError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitDelta {
+    pub path: String,
+    pub kind: DeltaKind,
+    pub file_hash: GitFileHash,
+    /// Empty for `Deleted`.
+    pub content: Vec<u8>,
+}
 
 pub struct GitEngine {
     repo_path: PathBuf,
@@ -34,6 +51,84 @@ impl GitEngine {
             write_lock: tokio::sync::Mutex::new(()),
             github_app,
         })
+    }
+
+    /// Diff between two commits (None `from` = walk all of `to`'s tree as Added)
+    /// returning each changed path with its blob content at `to` (or empty for
+    /// deletes).
+    #[tracing::instrument(name = "library.git.changes_since", skip_all)]
+    pub async fn changes_since(
+        &self,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let path = self.repo_path.clone();
+        let from = from.map(String::from);
+        let to = to.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<CommitDelta>, LibraryError> {
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            let to_oid = git2::Oid::from_str(&to)
+                .map_err(|e| LibraryError::Git(format!("parse to oid: {e}")))?;
+            let to_tree = repo
+                .find_commit(to_oid)
+                .and_then(|c| c.tree())
+                .map_err(|e| LibraryError::Git(format!("to tree: {e}")))?;
+
+            let from_tree = match from.as_deref() {
+                Some(s) => {
+                    let oid = git2::Oid::from_str(s)
+                        .map_err(|e| LibraryError::Git(format!("parse from oid: {e}")))?;
+                    Some(
+                        repo.find_commit(oid)
+                            .and_then(|c| c.tree())
+                            .map_err(|e| LibraryError::Git(format!("from tree: {e}")))?,
+                    )
+                }
+                None => None,
+            };
+
+            let diff = repo
+                .diff_tree_to_tree(from_tree.as_ref(), Some(&to_tree), None)
+                .map_err(|e| LibraryError::Git(format!("diff: {e}")))?;
+
+            let mut deltas: Vec<CommitDelta> = Vec::new();
+            for delta in diff.deltas() {
+                let kind = match delta.status() {
+                    git2::Delta::Added => DeltaKind::Added,
+                    git2::Delta::Modified => DeltaKind::Modified,
+                    git2::Delta::Deleted => DeltaKind::Deleted,
+                    _ => continue,
+                };
+                let entry = match kind {
+                    DeltaKind::Deleted => delta.old_file(),
+                    _ => delta.new_file(),
+                };
+                let path_str = match entry.path() {
+                    Some(p) => p.to_string_lossy().into_owned(),
+                    None => continue,
+                };
+                let oid = entry.id();
+                let content = match kind {
+                    DeltaKind::Deleted => Vec::new(),
+                    _ => match repo.find_blob(oid) {
+                        Ok(b) => b.content().to_vec(),
+                        Err(_) => continue,
+                    },
+                };
+                deltas.push(CommitDelta {
+                    path: path_str,
+                    kind,
+                    file_hash: GitFileHash::new(oid.to_string()),
+                    content,
+                });
+            }
+            Ok(deltas)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("changes_since join: {e}")))?
     }
 
     #[tracing::instrument(name = "library.git.fetch_and_head", skip_all)]

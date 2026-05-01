@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{library_data_dir, TestRepo};
+use common::{library_data_dir, reset_library_db_state, TestRepo};
 use drua_library::{Library, LibraryConfig};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
@@ -30,6 +30,8 @@ async fn init_clones_and_resyncs_fixture_repo() {
     let data_dir = library_data_dir("init_clones_and_resyncs_fixture_repo");
 
     let pool = pool().await;
+    reset_library_db_state(&pool).await;
+
     let embedder = Arc::new(code_assistant_core::embedder::Embedder::new().expect("embedder"));
 
     let job_config = job::JobSvcConfig::builder()

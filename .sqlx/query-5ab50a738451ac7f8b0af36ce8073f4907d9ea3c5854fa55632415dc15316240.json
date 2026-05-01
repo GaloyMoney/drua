@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT doc_id, doc_type, scope_id, scope_slug, name, path, content\n               FROM library_documents\n               WHERE search_tsv @@ plainto_tsquery('english', $1)\n                 AND ($2::text IS NULL OR doc_type = $2)\n               ORDER BY ts_rank(search_tsv, plainto_tsquery('english', $1)) DESC\n               LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "doc_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "doc_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "scope_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "scope_slug",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "content",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "5ab50a738451ac7f8b0af36ce8073f4907d9ea3c5854fa55632415dc15316240"
+}

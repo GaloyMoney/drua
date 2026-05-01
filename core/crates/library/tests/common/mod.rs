@@ -21,6 +21,30 @@ pub fn library_data_dir(test_name: &str) -> PathBuf {
     tests_dir().join(".library").join(test_name)
 }
 
+/// `spawn_unique` is a no-op while a row exists, so a stuck "running" job
+/// from a crashed previous run would prevent the poller from ever invoking
+/// our runner. Tests should call this before constructing `Library`.
+pub async fn reset_library_db_state(pool: &sqlx::PgPool) {
+    sqlx::query("DELETE FROM job_executions WHERE job_type = 'library.sync'")
+        .execute(pool)
+        .await
+        .expect("delete job_executions");
+    sqlx::query(
+        "DELETE FROM job_events WHERE id IN (SELECT id FROM jobs WHERE job_type = 'library.sync')",
+    )
+    .execute(pool)
+    .await
+    .expect("delete job_events");
+    sqlx::query("DELETE FROM jobs WHERE job_type = 'library.sync'")
+        .execute(pool)
+        .await
+        .expect("delete jobs");
+    sqlx::query("DELETE FROM library_documents")
+        .execute(pool)
+        .await
+        .expect("delete library_documents");
+}
+
 fn fixtures_root() -> PathBuf {
     ensure_artifacts_wiped();
     let root = tests_dir().join("fixtures");
@@ -28,54 +52,77 @@ fn fixtures_root() -> PathBuf {
     root
 }
 
+/// A bare upstream + a working clone. `path()` returns the bare upstream
+/// (libgit2 only pushes to bare); commits go through the work clone and are
+/// pushed to upstream by `commit`.
 pub struct TestRepo {
-    path: PathBuf,
+    upstream: PathBuf,
+    work: PathBuf,
 }
 
 impl TestRepo {
     pub fn init(files: &[(&str, &str)]) -> Self {
-        let path = fixtures_root().join(format!(
-            "repo-{}-{}",
+        let root = fixtures_root();
+        let stamp = format!(
+            "{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
-        ));
-        std::fs::create_dir_all(&path).expect("create repo dir");
+        );
+        let upstream = root.join(format!("upstream-{stamp}.git"));
+        let work = root.join(format!("work-{stamp}"));
 
-        git(&path, &["init", "--quiet", "--initial-branch=main"]);
-        git(&path, &["config", "user.email", "test@example.com"]);
-        git(&path, &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(&upstream).expect("create upstream");
+        std::fs::create_dir_all(&work).expect("create work");
 
-        for (rel, content) in files {
-            let full = path.join(rel);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).expect("mkdir -p");
-            }
-            std::fs::write(&full, content).expect("write file");
-        }
+        git(
+            &upstream,
+            &["init", "--bare", "--quiet", "--initial-branch=main"],
+        );
 
-        git(&path, &["add", "."]);
-        git(&path, &["commit", "--quiet", "-m", "initial commit"]);
+        git(&work, &["init", "--quiet", "--initial-branch=main"]);
+        git(&work, &["config", "user.email", "test@example.com"]);
+        git(&work, &["config", "user.name", "Test"]);
+        git(
+            &work,
+            &["remote", "add", "origin", &upstream.to_string_lossy()],
+        );
 
-        Self { path }
+        write_files(&work, files);
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "--quiet", "-m", "initial commit"]);
+        git(&work, &["push", "--quiet", "-u", "origin", "main"]);
+
+        Self { upstream, work }
     }
 
+    /// Path to the bare upstream — pass to `LibraryConfig::repo_url`.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.upstream
     }
 
+    /// Add a new commit upstream. Pulls any external pushes (e.g. Library's
+    /// `.gitkeep`) into the work clone first so the new commit lands on top.
     pub fn commit(&self, files: &[(&str, &str)], message: &str) {
-        for (rel, content) in files {
-            let full = self.path.join(rel);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).expect("mkdir -p");
-            }
-            std::fs::write(&full, content).expect("write file");
+        git(&self.work, &["fetch", "--quiet", "origin"]);
+        git(&self.work, &["reset", "--hard", "origin/main"]);
+
+        write_files(&self.work, files);
+        git(&self.work, &["add", "."]);
+        git(&self.work, &["commit", "--quiet", "-m", message]);
+        git(&self.work, &["push", "--quiet", "origin", "main"]);
+    }
+}
+
+fn write_files(root: &Path, files: &[(&str, &str)]) {
+    for (rel, content) in files {
+        let full = root.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir -p");
         }
-        git(&self.path, &["add", "."]);
-        git(&self.path, &["commit", "--quiet", "-m", message]);
+        std::fs::write(&full, content).expect("write file");
     }
 }
 

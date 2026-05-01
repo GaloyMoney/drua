@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod git;
+mod importer;
 mod job;
 pub mod primitives;
 mod search;
@@ -15,8 +16,9 @@ use tokio::sync::mpsc;
 pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
+pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 pub use search::{SearchStore, SearchableFields};
-pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
+pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces};
 
 use self::git::GitEngine;
 use self::job::{CommitTick, LibrarySyncConfig, LibrarySyncJobInitializer};
@@ -29,6 +31,7 @@ pub struct Library {
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     git: Arc<GitEngine>,
     search: SearchStore,
+    spaces: Spaces,
     _fetcher: tokio::task::JoinHandle<()>,
 }
 
@@ -43,6 +46,9 @@ impl Library {
         let repo_path = PathBuf::from(&config.data_dir);
         let git = Arc::new(GitEngine::init(&config.repo_url, repo_path, github_app.clone()).await?);
 
+        let search = SearchStore::new(pool);
+        let spaces = Spaces::new(&git, pool);
+
         let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
         let fetcher = Self::spawn_fetcher(
             Arc::clone(&git),
@@ -50,8 +56,14 @@ impl Library {
             Duration::from_millis(config.fetch_interval_ms),
         );
 
-        // @@ pass a collection of dyn LibraryImporter
-        let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(tick_rx));
+        let importers: Vec<Arc<dyn LibraryImporter>> = vec![Arc::new(spaces.clone())];
+
+        let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
+            tick_rx,
+            Arc::clone(&git),
+            search.clone(),
+            importers,
+        ));
         spawner
             .spawn_unique(::job::JobId::new(), LibrarySyncConfig::default())
             .await?;
@@ -66,7 +78,8 @@ impl Library {
             embedder,
             github_app,
             git,
-            search: SearchStore::new(pool),
+            search,
+            spaces,
             _fetcher: fetcher,
         })
     }
@@ -99,5 +112,13 @@ impl Library {
                 }
             }
         })
+    }
+
+    pub fn spaces(&self) -> &Spaces {
+        &self.spaces
+    }
+
+    pub fn search(&self) -> &SearchStore {
+        &self.search
     }
 }

@@ -1,0 +1,83 @@
+use std::borrow::Cow;
+
+use crate::SearchableFields;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocType(Cow<'static, str>);
+
+impl DocType {
+    pub const fn new(doc_type: &'static str) -> Self {
+        DocType(Cow::Borrowed(doc_type))
+    }
+
+    /// Construct from a runtime string (e.g. a DB row). Prefer
+    /// [`DocType::new`] for compile-time-known doc types.
+    pub fn from_owned(doc_type: String) -> Self {
+        DocType(Cow::Owned(doc_type))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for DocType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitFileHash(pub String);
+
+impl GitFileHash {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UpsertError {
+    #[error("sqlx: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    #[error("parse: {0}")]
+    Parse(String),
+    #[error("other: {0}")]
+    Other(String),
+}
+
+#[async_trait::async_trait]
+pub trait LibraryImporter: Send + Sync + 'static {
+    /// True if this importer claims the path.
+    fn matches(&self, path: &str) -> bool;
+
+    fn doc_type(&self) -> DocType;
+
+    /// Upsert the document into its service-specific tables. Returns
+    /// `Some(SearchableFields)` when the caller should also write the
+    /// search index row; `None` when the importer handled everything
+    /// itself (or skipped — e.g. content unchanged).
+    async fn upsert_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        old_file_hash: Option<GitFileHash>,
+        file_hash: GitFileHash,
+        path: &str,
+        content: &[u8],
+    ) -> Result<Option<SearchableFields>, UpsertError>;
+
+    /// Default: warn-and-skip. Importers whose service supports
+    /// delete-by-path should override.
+    async fn delete_in_op(
+        &self,
+        _op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<(), UpsertError> {
+        tracing::warn!(%path, doc_type = self.doc_type().as_str(), "delete_in_op not implemented; skipping");
+        Ok(())
+    }
+}

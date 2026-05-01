@@ -4,6 +4,10 @@ use job::{CurrentJob, Job, JobCompletion, JobInitializer, JobRunner, JobSpawner,
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::git::{CommitDelta, DeltaKind, GitEngine};
+use crate::importer::LibraryImporter;
+use crate::search::SearchStore;
+
 pub(crate) const LIBRARY_SYNC_JOB: &str = "library.sync";
 
 #[derive(Debug, Clone)]
@@ -21,12 +25,23 @@ struct LibrarySyncState {
 
 pub(crate) struct LibrarySyncJobInitializer {
     rx: Arc<Mutex<mpsc::Receiver<CommitTick>>>,
+    git: Arc<GitEngine>,
+    search: SearchStore,
+    importers: Vec<Arc<dyn LibraryImporter>>,
 }
 
 impl LibrarySyncJobInitializer {
-    pub fn new(rx: mpsc::Receiver<CommitTick>) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<CommitTick>,
+        git: Arc<GitEngine>,
+        search: SearchStore,
+        importers: Vec<Arc<dyn LibraryImporter>>,
+    ) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
+            git,
+            search,
+            importers,
         }
     }
 }
@@ -45,12 +60,18 @@ impl JobInitializer for LibrarySyncJobInitializer {
     ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
         Ok(Box::new(LibrarySyncRunner {
             rx: Arc::clone(&self.rx),
+            git: Arc::clone(&self.git),
+            search: self.search.clone(),
+            importers: self.importers.clone(),
         }))
     }
 }
 
 struct LibrarySyncRunner {
     rx: Arc<Mutex<mpsc::Receiver<CommitTick>>>,
+    git: Arc<GitEngine>,
+    search: SearchStore,
+    importers: Vec<Arc<dyn LibraryImporter>>,
 }
 
 #[async_trait::async_trait]
@@ -74,14 +95,14 @@ impl JobRunner for LibrarySyncRunner {
                             if state.last_processed_head.as_deref() == Some(tick.head.as_str()) {
                                 continue;
                             }
-                            // @@ loop all changed files in the commits since last and tick
-                            // and execute the importer needed
-                            //
-                            // if the return value is Some(searchable_field)
-                            // call self.search.upsert_in_op
-                            // op.
                             tracing::debug!(head = %tick.head, "library.sync: processing tick");
-                            state.last_processed_head = Some(tick.head.clone());
+                            self.process_tick(
+                                &current_job,
+                                state.last_processed_head.as_deref(),
+                                &tick.head,
+                            )
+                            .await;
+                            state.last_processed_head = Some(tick.head);
                             current_job.update_execution_state(state.clone()).await?;
                         }
                         None => {
@@ -92,5 +113,58 @@ impl JobRunner for LibrarySyncRunner {
                 }
             }
         }
+    }
+}
+
+impl LibrarySyncRunner {
+    async fn process_tick(&self, current_job: &CurrentJob, from: Option<&str>, to: &str) {
+        let deltas = match self.git.changes_since(from, to).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, ?from, to, "changes_since failed");
+                return;
+            }
+        };
+
+        for delta in deltas {
+            let importer = match self.importers.iter().find(|i| i.matches(&delta.path)) {
+                Some(i) => i,
+                None => continue,
+            };
+            if let Err(e) = self.dispatch(current_job, importer.as_ref(), &delta).await {
+                tracing::warn!(error = %e, path = %delta.path, "library.sync: dispatch failed");
+            }
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        current_job: &CurrentJob,
+        importer: &dyn LibraryImporter,
+        delta: &CommitDelta,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut op = current_job.begin_op().await?;
+        let fields = match delta.kind {
+            DeltaKind::Deleted => {
+                importer.delete_in_op(&mut op, &delta.path).await?;
+                None
+            }
+            DeltaKind::Added | DeltaKind::Modified => {
+                importer
+                    .upsert_in_op(
+                        &mut op,
+                        None,
+                        delta.file_hash.clone(),
+                        &delta.path,
+                        &delta.content,
+                    )
+                    .await?
+            }
+        };
+        if let Some(fields) = fields {
+            self.search.upsert_in_op(&mut op, &fields).await?;
+        }
+        op.commit().await?;
+        Ok(())
     }
 }
