@@ -1,0 +1,19 @@
+[package]
+name = "drua-library"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+sqlx = { workspace = true }
+job = { workspace = true }
+code-assistant-core = { workspace = true }
+github-app = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+async-trait = "0.1"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
