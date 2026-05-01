@@ -21,7 +21,9 @@ pub use search::{SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces};
 
 use self::git::GitEngine;
-use self::job::{CommitTick, LibrarySyncConfig, LibrarySyncJobInitializer};
+use self::job::{
+    CommitTick, LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer,
+};
 
 #[allow(dead_code)]
 pub struct Library {
@@ -46,8 +48,13 @@ impl Library {
         let repo_path = PathBuf::from(&config.data_dir);
         let git = Arc::new(GitEngine::init(&config.repo_url, repo_path, github_app.clone()).await?);
 
-        let search = SearchStore::new(pool);
+        let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);
+
+        let embed_spawner = jobs.add_initializer(LibraryEmbedJobInitializer::new(
+            search.clone(),
+            Arc::clone(&embedder),
+        ));
 
         let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
         let fetcher = Self::spawn_fetcher(
@@ -63,6 +70,7 @@ impl Library {
             Arc::clone(&git),
             search.clone(),
             importers,
+            embed_spawner,
         ));
         spawner
             .spawn_unique(::job::JobId::new(), LibrarySyncConfig::default())

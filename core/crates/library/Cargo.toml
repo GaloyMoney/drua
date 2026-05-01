@@ -15,6 +15,7 @@ serde = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
 async-trait = "0.1"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+pgvector = { workspace = true }
 es-entity = { workspace = true }
 derive_builder = "0.20"
 chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }

@@ -140,4 +140,27 @@ impl LibraryImporter for Spaces {
             content: content_str,
         }))
     }
+
+    async fn delete_in_op(
+        &self,
+        _op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<Option<uuid::Uuid>, UpsertError> {
+        if path.ends_with("/.gitkeep") {
+            return Ok(None);
+        }
+        let mut parts = path.splitn(3, '/');
+        let _ = parts.next();
+        let slug = parts
+            .next()
+            .ok_or_else(|| UpsertError::Parse(format!("bad space path: {path}")))?;
+        let rel = parts
+            .next()
+            .ok_or_else(|| UpsertError::Parse(format!("bad space path: {path}")))?;
+
+        Ok(Some(uuid::Uuid::new_v5(
+            &SPACE_DOC_NAMESPACE,
+            format!("{slug}/{rel}").as_bytes(),
+        )))
+    }
 }

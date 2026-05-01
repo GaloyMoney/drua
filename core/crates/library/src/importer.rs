@@ -1,8 +1,12 @@
 use std::borrow::Cow;
 
+use serde::{Deserialize, Serialize};
+
 use crate::SearchableFields;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(transparent)]
+#[serde(transparent)]
 pub struct DocType(Cow<'static, str>);
 
 impl DocType {
@@ -10,14 +14,14 @@ impl DocType {
         DocType(Cow::Borrowed(doc_type))
     }
 
-    /// Construct from a runtime string (e.g. a DB row). Prefer
-    /// [`DocType::new`] for compile-time-known doc types.
-    pub fn from_owned(doc_type: String) -> Self {
-        DocType(Cow::Owned(doc_type))
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<String> for DocType {
+    fn from(s: String) -> Self {
+        DocType(Cow::Owned(s))
     }
 }
 
@@ -70,14 +74,15 @@ pub trait LibraryImporter: Send + Sync + 'static {
         content: &[u8],
     ) -> Result<Option<SearchableFields>, UpsertError>;
 
-    /// Default: warn-and-skip. Importers whose service supports
-    /// delete-by-path should override.
+    /// Reverse of [`Self::upsert_in_op`]. Returns `Some(doc_id)` to signal
+    /// the runner should also delete the search-store row (paired with
+    /// [`Self::doc_type`]); `None` skips. Default: warn-and-skip.
     async fn delete_in_op(
         &self,
         _op: &mut es_entity::DbOp<'_>,
         path: &str,
-    ) -> Result<(), UpsertError> {
+    ) -> Result<Option<uuid::Uuid>, UpsertError> {
         tracing::warn!(%path, doc_type = self.doc_type().as_str(), "delete_in_op not implemented; skipping");
-        Ok(())
+        Ok(None)
     }
 }

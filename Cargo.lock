@@ -1439,6 +1439,7 @@ dependencies = [
  "git2",
  "github-app",
  "job",
+ "pgvector",
  "serde",
  "sqlx",
  "thiserror 2.0.18",

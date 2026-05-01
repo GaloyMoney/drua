@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use job::{CurrentJob, Job, JobCompletion, JobInitializer, JobRunner, JobSpawner, JobType};
+use job::{CurrentJob, Job, JobCompletion, JobId, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 
+use super::LibraryEmbedConfig;
 use crate::git::{CommitDelta, DeltaKind, GitEngine};
 use crate::importer::LibraryImporter;
 use crate::search::SearchStore;
@@ -28,6 +29,7 @@ pub(crate) struct LibrarySyncJobInitializer {
     git: Arc<GitEngine>,
     search: SearchStore,
     importers: Vec<Arc<dyn LibraryImporter>>,
+    embed_spawner: JobSpawner<LibraryEmbedConfig>,
 }
 
 impl LibrarySyncJobInitializer {
@@ -36,12 +38,14 @@ impl LibrarySyncJobInitializer {
         git: Arc<GitEngine>,
         search: SearchStore,
         importers: Vec<Arc<dyn LibraryImporter>>,
+        embed_spawner: JobSpawner<LibraryEmbedConfig>,
     ) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
             git,
             search,
             importers,
+            embed_spawner,
         }
     }
 }
@@ -63,6 +67,7 @@ impl JobInitializer for LibrarySyncJobInitializer {
             git: Arc::clone(&self.git),
             search: self.search.clone(),
             importers: self.importers.clone(),
+            embed_spawner: self.embed_spawner.clone(),
         }))
     }
 }
@@ -72,6 +77,7 @@ struct LibrarySyncRunner {
     git: Arc<GitEngine>,
     search: SearchStore,
     importers: Vec<Arc<dyn LibraryImporter>>,
+    embed_spawner: JobSpawner<LibraryEmbedConfig>,
 }
 
 #[async_trait::async_trait]
@@ -144,13 +150,16 @@ impl LibrarySyncRunner {
         delta: &CommitDelta,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut op = current_job.begin_op().await?;
-        let fields = match delta.kind {
+        match delta.kind {
             DeltaKind::Deleted => {
-                importer.delete_in_op(&mut op, &delta.path).await?;
-                None
+                if let Some(doc_id) = importer.delete_in_op(&mut op, &delta.path).await? {
+                    self.search
+                        .delete_in_op(&mut op, doc_id, importer.doc_type())
+                        .await?;
+                }
             }
             DeltaKind::Added | DeltaKind::Modified => {
-                importer
+                let fields = importer
                     .upsert_in_op(
                         &mut op,
                         None,
@@ -158,11 +167,21 @@ impl LibrarySyncRunner {
                         &delta.path,
                         &delta.content,
                     )
-                    .await?
+                    .await?;
+                if let Some(fields) = fields {
+                    let doc_id = fields.doc_id;
+                    let doc_type = fields.doc_type.clone();
+                    self.search.upsert_in_op(&mut op, &fields).await?;
+                    // Embedding runs concurrently — no queue id.
+                    self.embed_spawner
+                        .spawn_in_op(
+                            &mut op,
+                            JobId::new(),
+                            LibraryEmbedConfig { doc_id, doc_type },
+                        )
+                        .await?;
+                }
             }
-        };
-        if let Some(fields) = fields {
-            self.search.upsert_in_op(&mut op, &fields).await?;
         }
         op.commit().await?;
         Ok(())
