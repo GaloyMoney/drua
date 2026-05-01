@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+
+{% block title %}Spaces — {{ project.name }} — Galoy Agents{% endblock %}
+
+{% block head %}
+<style>
+  .proj-back {
+    display: block;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+  }
+  .proj-back:hover { color: var(--pico-primary); }
+  .proj-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .proj-mode-header h4 { margin: 0; font-size: 1rem; }
+  .proj-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: none;
+    text-decoration: none;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .proj-settings-btn:hover {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .agent-item {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--pico-border-radius);
+    text-decoration: none;
+    color: var(--pico-color);
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .agent-item:hover,
+  .agent-item.active {
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+  }
+  .space-row {
+    display: grid;
+    grid-template-columns: 4rem 1fr auto;
+    gap: 1rem;
+    align-items: center;
+    padding: 0.5rem 0.25rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+  }
+  .space-row:last-child { border-bottom: none; }
+  .space-row .slug {
+    font-family: var(--pico-font-family-monospace);
+    font-weight: 600;
+  }
+  .space-row .description {
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+  }
+  .space-row form { margin: 0; }
+  .space-row button.mount {
+    background: var(--pico-primary);
+    color: var(--pico-primary-inverse);
+    border-color: var(--pico-primary);
+  }
+  .space-row button.unmount {
+    background: var(--pico-secondary-background);
+    color: var(--pico-secondary-inverse);
+    border-color: var(--pico-secondary-border);
+  }
+  .space-row .badge-mounted {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    background: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+    border-radius: var(--pico-border-radius);
+    font-size: 0.75rem;
+  }
+  .space-row .badge-unmounted {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    color: var(--pico-muted-color);
+    font-size: 0.75rem;
+  }
+</style>
+{% endblock %}
+
+{% block sidebar_content %}
+<a href="/projects" class="proj-back">&larr; Projects</a>
+<div class="proj-mode-header">
+  <h4>{{ project.name }}</h4>
+  <a href="/projects/{{ project.id }}" class="proj-settings-btn" title="Project settings">&#9881;</a>
+</div>
+
+{% match lead_agent %}
+  {% when Some(lead) %}
+  <a href="/projects/{{ project.id }}/chat?agent={{ lead.id }}" class="agent-item">
+    {{ lead.name }}
+  </a>
+  {% when None %}
+{% endmatch %}
+
+<div class="section-label">Agents</div>
+{% if !agents.is_empty() %}
+{% for agent in agents %}
+<a href="/projects/{{ project.id }}/chat?agent={{ agent.id }}" class="agent-item">
+  {{ agent.name }}
+</a>
+{% endfor %}
+{% else %}
+<small style="padding: 0.25rem 0.75rem; color: var(--pico-muted-color);">No agents yet</small>
+{% endif %}
+<a href="/projects/{{ project.id }}/agents/new" class="agent-item" style="color: var(--pico-muted-color); font-style: italic;">+ Add Agent</a>
+
+<hr style="margin: 0.75rem 0;">
+<nav>
+  <ul>
+    <li><a href="/projects/{{ project.id }}/skills" class="agent-item">Skills</a></li>
+    <li><a href="/projects/{{ project.id }}/sandboxes" class="agent-item">Sandboxes</a></li>
+    <li><a href="/projects/{{ project.id }}/workflows" class="agent-item">Workflows</a></li>
+    <li><a href="/projects/{{ project.id }}/spaces" class="agent-item active">Spaces</a></li>
+  </ul>
+</nav>
+
+<div class="sidebar-bottom">
+  <a href="/auth/logout">Logout</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<h2>Spaces</h2>
+<p><small>Knowledge spaces this project can read. Mounted spaces appear in the agent's
+system prompt and are addressable via <code>space:&lt;slug&gt;/...</code> paths.</small></p>
+
+{% match flash %}
+  {% when Some(msg) %}<article style="padding: 0.5rem 0.75rem; background: var(--pico-primary-background); color: var(--pico-primary-inverse); border-radius: var(--pico-border-radius);">{{ msg }}</article>
+  {% when None %}
+{% endmatch %}
+
+{% if spaces.is_empty() %}
+<p><em>No library spaces yet. Use the <code>spaces</code> tool from a chat with the
+project lead, or run <code>spaces.create</code> programmatically, to add the first
+one.</em></p>
+{% else %}
+<figure>
+  {% for s in spaces %}
+  <div class="space-row">
+    <div>
+      {% if s.mounted %}<span class="badge-mounted">mounted</span>{% else %}<span class="badge-unmounted">available</span>{% endif %}
+    </div>
+    <div>
+      <div class="slug">space:{{ s.slug }}</div>
+      {% match s.description %}{% when Some(d) %}<div class="description">{{ d }}</div>{% when None %}{% endmatch %}
+    </div>
+    <div>
+      {% if s.mounted %}
+      <form method="POST" action="/projects/{{ project.id }}/spaces/unmount">
+        <input type="hidden" name="space_id" value="{{ s.id }}">
+        <button type="submit" class="unmount">Unmount</button>
+      </form>
+      {% else %}
+      <form method="POST" action="/projects/{{ project.id }}/spaces/mount">
+        <input type="hidden" name="slug" value="{{ s.slug }}">
+        <button type="submit" class="mount">Mount</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</figure>
+{% endif %}
+{% endblock %}

@@ -6,7 +6,7 @@ pub mod repo;
 pub mod session;
 mod system_prompt;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::audit::Audit;
 use crate::note::Notes;
@@ -35,22 +35,26 @@ pub use error::AgentError;
 use repo::AgentRepo;
 use session::Sessions;
 
-/// Snapshot of dynamic system blocks (notes + skills), keyed by
+/// Snapshot of dynamic system blocks (notes + skills + spaces), keyed by
 /// `ContextGeneration` at fetch time. Skips DB round-trips on the hot path.
 #[derive(Clone)]
 struct CachedProjectContext {
     generation: u64,
     notes_block: Option<session::message::SystemBlock>,
     skills_block: Option<session::message::SystemBlock>,
+    spaces_block: Option<session::message::SystemBlock>,
 }
 
 impl CachedProjectContext {
     fn to_blocks(&self) -> Vec<session::message::SystemBlock> {
-        let mut out = Vec::with_capacity(2);
+        let mut out = Vec::with_capacity(3);
         if let Some(b) = &self.notes_block {
             out.push(b.clone());
         }
         if let Some(b) = &self.skills_block {
+            out.push(b.clone());
+        }
+        if let Some(b) = &self.spaces_block {
             out.push(b.clone());
         }
         out
@@ -64,6 +68,10 @@ pub struct Agents {
     sandboxes: Arc<Sandboxes>,
     skills: Arc<Skills>,
     notes: Option<Arc<Notes>>,
+    /// Late-bound: `Projects::new` takes `Arc<Agents>`, so we set this
+    /// after both are constructed via `Agents::set_projects`. Used only
+    /// to render the dynamic `<spaces>` system block.
+    projects: Arc<OnceLock<Arc<crate::project::Projects>>>,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -90,12 +98,21 @@ impl Agents {
             sandboxes,
             skills,
             notes,
+            projects: Arc::new(OnceLock::new()),
             config,
             toolsets,
             prompt_requests,
             context_generation,
             context_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Late-binds the `Projects` service so the dynamic `<spaces>`
+    /// block can be rendered. `Projects::new` takes `Arc<Agents>`, so
+    /// the cyclic dependency forces this two-step wiring at app init.
+    /// Idempotent — second call is a no-op.
+    pub fn set_projects(&self, projects: Arc<crate::project::Projects>) {
+        let _ = self.projects.set(projects);
     }
 
     /// Hot-path lookup of dynamic system blocks. Reads `ContextGeneration`
@@ -131,11 +148,21 @@ impl Agents {
             .ok()
             .flatten()
             .map(|text| session::message::SystemBlock::Skills { text });
+        let spaces_block = match self.projects.get() {
+            Some(projects) => projects
+                .spaces_context_for_project(project_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|text| session::message::SystemBlock::Spaces { text }),
+            None => None,
+        };
 
         let entry = CachedProjectContext {
             generation: current_gen,
             notes_block: notes_block.clone(),
             skills_block: skills_block.clone(),
+            spaces_block: spaces_block.clone(),
         };
         let result = entry.to_blocks();
         if let Ok(mut cache) = self.context_cache.write() {
@@ -369,6 +396,15 @@ impl Agents {
             system_blocks.push(session::message::SystemBlock::Skills {
                 text: skills_content,
             });
+        }
+
+        if let Some(projects) = self.projects.get() {
+            if let Ok(Some(spaces_content)) = projects.spaces_context_for_project(project_id).await
+            {
+                system_blocks.push(session::message::SystemBlock::Spaces {
+                    text: spaces_content,
+                });
+            }
         }
 
         let session_model_defaults = ModelDefaults {

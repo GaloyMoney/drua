@@ -56,6 +56,10 @@ impl Upstream {
         })
     }
 
+    pub fn repo_path(&self) -> &std::path::Path {
+        &self.repo_path
+    }
+
     async fn fresh_token(github_app: &Option<Arc<GitHubAppTokenProvider>>) -> Option<String> {
         match github_app.as_ref() {
             Some(provider) => match provider.generate_token().await {
@@ -95,6 +99,13 @@ impl Upstream {
         self.repo_path.join(relative_path).exists()
     }
 
+    pub async fn read_file(&self, relative_path: &str) -> Result<String, LibraryError> {
+        let full_path = self.repo_path.join(relative_path);
+        tokio::fs::read_to_string(&full_path)
+            .await
+            .map_err(|e| LibraryError::Io(format!("read {}: {e}", full_path.display())))
+    }
+
     pub async fn write_file(&self, relative_path: &str, content: &str) -> Result<(), LibraryError> {
         let full_path = self.repo_path.join(relative_path);
         if let Some(parent) = full_path.parent() {
@@ -106,6 +117,29 @@ impl Upstream {
             .await
             .map_err(|e| LibraryError::Io(e.to_string()))?;
         tracing::info!(path = %full_path.display(), "wrote runtime file");
+        Ok(())
+    }
+
+    /// Renames `from` → `to` on disk; creates parent dirs for `to` if
+    /// missing. Caller must check the existence pre-conditions
+    /// (src exists / dest absent) — `tokio::fs::rename` will overwrite
+    /// silently on most filesystems.
+    pub async fn rename_file(&self, from: &str, to: &str) -> Result<(), LibraryError> {
+        let from_full = self.repo_path.join(from);
+        let to_full = self.repo_path.join(to);
+        if let Some(parent) = to_full.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| LibraryError::Io(e.to_string()))?;
+        }
+        tokio::fs::rename(&from_full, &to_full)
+            .await
+            .map_err(|e| LibraryError::Io(e.to_string()))?;
+        tracing::info!(
+            from = %from_full.display(),
+            to = %to_full.display(),
+            "renamed library file"
+        );
         Ok(())
     }
 

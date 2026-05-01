@@ -545,6 +545,7 @@ enum SystemBlockKind {
 	NOTES
 	ROLE
 	SKILLS
+	SPACES
 	TOOLS
 }
 

@@ -496,8 +496,7 @@ impl TopLevelTool for WorkflowTool {
                     .projects
                     .find_by_id(subject, project_id)
                     .await
-                    .map(|w| w.name)
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .map(|w| w.name)?;
 
                 let sandbox_decls: Vec<WorkflowSandboxDecl> =
                     sandboxes.into_iter().map(|s| s.into_decl()).collect();
@@ -669,9 +668,6 @@ fn sandbox_to_output(d: &WorkflowSandboxDecl) -> WorkflowSandboxOutput {
                 SandboxMode::Scratch => ("scratch".to_string(), None, None),
                 SandboxMode::Repo { repo_url, branch } => {
                     ("repo".to_string(), Some(repo_url.clone()), branch.clone())
-                }
-                SandboxMode::LibrarySpace { slug, .. } => {
-                    (format!("library_space({slug})"), None, None)
                 }
             };
             let (cpu, memory, disk_size) = match specs {
@@ -860,9 +856,6 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                         Some(b) => format!("repo({repo_url}@{b})"),
                         None => format!("repo({repo_url})"),
                     },
-                    SandboxMode::LibrarySpace { slug, .. } => {
-                        format!("library_space({slug})")
-                    }
                 },
             };
             out.push_str(&format!("  - {} kind={kind}\n", sb.name()));

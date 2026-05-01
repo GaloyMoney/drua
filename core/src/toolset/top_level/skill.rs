@@ -184,8 +184,7 @@ impl TopLevelTool for SkillTool {
                     .projects
                     .find_by_id(subject, project_id)
                     .await
-                    .map(|w| w.name)
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                    .map(|w| w.name)?;
 
                 let skill = self
                     .skills

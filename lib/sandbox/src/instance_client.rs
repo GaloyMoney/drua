@@ -99,10 +99,6 @@ pub struct InitializeRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub library_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slug: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub github_token: Option<String>,
 }
 
@@ -114,24 +110,12 @@ impl InitializeRequest {
                 mode: "scratch".to_string(),
                 repo_url: None,
                 branch: None,
-                library_url: None,
-                slug: None,
                 github_token,
             },
             SandboxMode::Repo { repo_url, branch } => Self {
                 mode: "repo".to_string(),
                 repo_url: Some(repo_url.clone()),
                 branch: branch.clone(),
-                library_url: None,
-                slug: None,
-                github_token,
-            },
-            SandboxMode::LibrarySpace { library_url, slug } => Self {
-                mode: "library_space".to_string(),
-                repo_url: None,
-                branch: None,
-                library_url: Some(library_url.clone()),
-                slug: Some(slug.clone()),
                 github_token,
             },
         }

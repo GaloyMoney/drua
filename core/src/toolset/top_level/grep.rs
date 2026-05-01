@@ -1,8 +1,10 @@
-//! `Grep` — content search across files inside the agent's attached sandbox.
-//! Wire-compatible with Claude Code's `Grep` tool and ripgrep-style flags.
+//! `Grep` — content search across files. Two backends:
+//!
+//! - `space:<slug>/...` paths route through `SpaceFs::grep`.
+//! - Anything else forwards to the sandbox-server's `Grep` handler
+//!   via `/execute`. Both shell out to `rg`.
 //!
 //! Read-only: executable with either `SandboxUse` or `SandboxRead`.
-//! Server-side handler shells out to `rg`.
 
 use std::sync::{Arc, LazyLock};
 
@@ -11,23 +13,28 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::SpaceFs;
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{schema_for, TextOutput};
+use super::{OutputSchema, TextOutput};
 
 pub struct Grep {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl Grep {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self {
+            sandboxes,
+            space_fs,
+        }
     }
 }
 
-static GREP_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<TextOutput>);
+static GREP_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
 
 static GREP_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
@@ -39,7 +46,7 @@ static GREP_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "path": {
                 "type": "string",
-                "description": "File or directory to search in. Defaults to workspace root."
+                "description": "File or directory to search in. Defaults to workspace root, or use `space:<slug>/...` to read from a mounted space."
             },
             "glob": {
                 "type": "string",
@@ -95,9 +102,8 @@ impl TopLevelTool for Grep {
     }
 
     fn description(&self) -> &str {
-        "Search file contents using ripgrep inside the agent's attached sandbox. \
-         Supports regex patterns, glob filters, file-type filters, and context \
-         lines. Read-only — works with both full and read-only sandbox attachments."
+        "Search file contents using ripgrep. Accepts either an in-sandbox path \
+         or a `space:<slug>/...` path that reads from the project's mounted spaces."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -105,12 +111,12 @@ impl TopLevelTool for Grep {
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&GREP_OUTPUT_SCHEMA)
+        Some(GREP_OUTPUT.schema())
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         // See bash.rs.
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -118,37 +124,55 @@ impl TopLevelTool for Grep {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        Audit::record_action("grep");
+
+        let args = arguments.unwrap_or_default();
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let args_value = serde_json::Value::Object(args);
+
+        let space_output = self.space_fs.grep(subject, &path, &args_value).await?;
+
+        if let Some(output) = space_output {
+            let out = TextOutput {
+                output: output.clone(),
+            };
+            return Ok(GREP_OUTPUT.success(output, &out));
+        }
+
         let sandbox_id = subject
             .readable_sandbox_id()
             .ok_or(ToolSetsError::Unauthorized)?;
-        Audit::record_action("grep");
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self
             .sandboxes
             .instance_client_for_read(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+            .await?;
 
+        // Recover the original args object from the Value we built above.
+        let args = match args_value {
+            serde_json::Value::Object(o) => o,
+            _ => unreachable!("constructed from JsonObject above"),
+        };
         let req = ExecuteRequest {
             tool: "Grep".to_string(),
-            input: serde_json::Value::Object(arguments.unwrap_or_default()),
+            input: serde_json::Value::Object(args),
         };
 
         match client.execute(&req).await {
             Ok(resp) => {
                 let out = TextOutput {
-                    output: resp.output,
+                    output: resp.output.clone(),
                 };
-                let structured = serde_json::to_value(&out).expect("TextOutput serialization");
-                let content = vec![Content::text(&out.output)];
-                let mut result = if resp.is_error {
-                    CallToolResult::error(content)
+                Ok(if resp.is_error {
+                    GREP_OUTPUT.error(resp.output, &out)
                 } else {
-                    CallToolResult::success(content)
-                };
-                result.structured_content = Some(structured);
-                Ok(result)
+                    GREP_OUTPUT.success(resp.output, &out)
+                })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

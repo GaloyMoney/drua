@@ -106,6 +106,20 @@ impl AuthSubject {
             .any(|s| matches!(s, AuthScope::ProjectAdmin(_)))
     }
 
+    /// Visibility predicate for sandbox/space file tools (Bash, Read,
+    /// LS, Glob, Grep, Edit, Move, Delete). Mirrors the dual gate
+    /// these tools share: subject must be an Agent (users and
+    /// anonymous never run files) and must NOT be a project admin
+    /// (admins orchestrate; they don't run files themselves).
+    ///
+    /// Centralised here so a future scope/resource refactor can
+    /// replace the body with a `can(...)` call once the auth model
+    /// gains a verb that maps cleanly to "agent task tools" — see
+    /// `core/src/auth/scope.rs` for the current scope model.
+    pub fn can_use_agent_file_tools(&self) -> bool {
+        self.is_agent() && !self.is_project_admin()
+    }
+
     /// `SandboxUse` implies read; first match wins.
     pub fn readable_sandbox_id(&self) -> Option<SandboxId> {
         self.scopes().iter().find_map(|s| match s {

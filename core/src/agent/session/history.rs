@@ -123,6 +123,7 @@ pub enum ThreadSystemBlockKind {
     Role,
     Notes,
     Skills,
+    Spaces,
 }
 
 impl From<SystemBlockKind> for ThreadSystemBlockKind {
@@ -134,6 +135,7 @@ impl From<SystemBlockKind> for ThreadSystemBlockKind {
             SystemBlockKind::Role => ThreadSystemBlockKind::Role,
             SystemBlockKind::Notes => ThreadSystemBlockKind::Notes,
             SystemBlockKind::Skills => ThreadSystemBlockKind::Skills,
+            SystemBlockKind::Spaces => ThreadSystemBlockKind::Spaces,
         }
     }
 }

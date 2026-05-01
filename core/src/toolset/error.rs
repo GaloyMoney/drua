@@ -25,9 +25,9 @@ pub enum ToolSetsError {
     #[error("ToolSetsError - Agent: {0}")]
     Agent(String),
     #[error("ToolSetsError - Sandbox: {0}")]
-    Sandbox(String),
+    Sandbox(#[from] crate::sandbox::SandboxError),
     #[error("ToolSetsError - Project: {0}")]
-    Project(String),
+    Project(#[from] crate::project::ProjectError),
     #[error("ToolSetsError - Tunnel: {0}")]
     Tunnel(String),
     #[error("ToolSetsError - Note: {0}")]

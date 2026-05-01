@@ -14,7 +14,7 @@ use drua_core as domain;
 use domain::auth::AuthSubject;
 use domain::mcp_creds::McpCreds;
 use domain::primitives::{
-    AgentId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
+    AgentId, SandboxId, SkillId, SpaceId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use domain::sandbox::{SandboxAgentMode, SandboxMode};
 use domain::workflow::WorkflowTrigger;
@@ -69,6 +69,9 @@ pub fn router() -> Router<AppState> {
             "/projects/{id}/agents/{agent_id}/history",
             get(project_agent_history),
         )
+        .route("/projects/{id}/spaces", get(project_spaces_page))
+        .route("/projects/{id}/spaces/mount", post(project_space_mount))
+        .route("/projects/{id}/spaces/unmount", post(project_space_unmount))
         .route("/projects/{id}/workflows", get(project_workflows_page))
         .route(
             "/projects/{id}/workflows/{wf_id}",
@@ -799,6 +802,154 @@ async fn project_skills_page(
     .into_response()
 }
 
+// ── Spaces ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SpacesPageQuery {
+    flash: Option<String>,
+}
+
+#[instrument(name = "web.project_spaces_page", skip_all)]
+async fn project_spaces_page(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<SpacesPageQuery>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+
+    let project_id = domain::primitives::ProjectId::from(id);
+    let project = match state.app.projects().find_by_id(&sub, project_id).await {
+        Ok(p) => p,
+        Err(_) => return Redirect::to("/projects").into_response(),
+    };
+
+    let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
+
+    let all_spaces = state
+        .app
+        .library()
+        .list_all_spaces(&sub)
+        .await
+        .unwrap_or_default();
+    let mounted = state
+        .app
+        .projects()
+        .list_mounted_spaces(&sub, project_id)
+        .await
+        .unwrap_or_default();
+    let mounted_ids: std::collections::HashSet<_> = mounted.iter().map(|s| s.id).collect();
+
+    let mut spaces: Vec<SpaceRowView> = all_spaces
+        .iter()
+        .map(|s| SpaceRowView {
+            id: s.id.to_string(),
+            slug: s.slug.clone(),
+            description: s.description.clone(),
+            mounted: mounted_ids.contains(&s.id),
+        })
+        .collect();
+    // Mounted first, then alphabetical by slug.
+    spaces.sort_by(|a, b| match (a.mounted, b.mounted) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.slug.cmp(&b.slug),
+    });
+
+    ProjectSpacesPageTemplate {
+        project: project_to_view(&project),
+        lead_agent,
+        agents: agent_views,
+        spaces,
+        flash: query.flash,
+    }
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct SpaceMountForm {
+    slug: String,
+}
+
+#[instrument(name = "web.project_space_mount", skip_all)]
+async fn project_space_mount(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<SpaceMountForm>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+    let project_id = domain::primitives::ProjectId::from(id);
+
+    let flash = match state
+        .app
+        .projects()
+        .mount_space(&sub, project_id, &form.slug)
+        .await
+    {
+        Ok(space) => format!("Mounted space:{}", space.slug),
+        Err(e) => format!("Mount failed: {e}"),
+    };
+    redirect_to_spaces(project_id, &flash)
+}
+
+#[derive(Debug, Deserialize)]
+struct SpaceUnmountForm {
+    space_id: uuid::Uuid,
+}
+
+#[instrument(name = "web.project_space_unmount", skip_all)]
+async fn project_space_unmount(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<uuid::Uuid>,
+    Form(form): Form<SpaceUnmountForm>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+    let project_id = domain::primitives::ProjectId::from(id);
+    let space_id = SpaceId::from(form.space_id);
+
+    let flash = match state
+        .app
+        .projects()
+        .unmount_space(&sub, project_id, space_id)
+        .await
+    {
+        Ok(()) => "Space unmounted.".to_string(),
+        Err(e) => format!("Unmount failed: {e}"),
+    };
+    redirect_to_spaces(project_id, &flash)
+}
+
+fn redirect_to_spaces(project_id: domain::primitives::ProjectId, flash: &str) -> Response {
+    // Minimal query-string escaping: ampersands and percent break the
+    // flash split, spaces survive the round-trip via `+`.
+    let encoded: String = flash
+        .chars()
+        .map(|c| match c {
+            ' ' => "+".to_string(),
+            '&' => "%26".to_string(),
+            '%' => "%25".to_string(),
+            '+' => "%2B".to_string(),
+            '#' => "%23".to_string(),
+            _ => c.to_string(),
+        })
+        .collect();
+    Redirect::to(&format!("/projects/{project_id}/spaces?flash={encoded}")).into_response()
+}
+
 #[instrument(name = "web.project_skill_detail", skip_all)]
 async fn project_skill_detail(
     State(state): State<AppState>,
@@ -845,7 +996,6 @@ fn sandbox_to_view(s: &domain::sandbox::Sandbox) -> SandboxView {
         SandboxMode::Repo { repo_url, branch } => {
             ("Repo".to_string(), Some(repo_url.clone()), branch.clone())
         }
-        SandboxMode::LibrarySpace { slug, .. } => (format!("LibrarySpace({slug})"), None, None),
     };
 
     let exported_system_prompt = s.exported_system_prompt.as_ref().map(|f| ExportedFileView {
@@ -1548,9 +1698,6 @@ fn workflow_sandbox_to_view(d: &domain::workflow::WorkflowSandboxDecl) -> Workfl
                 SandboxMode::Scratch => ("scratch".to_string(), None, None),
                 SandboxMode::Repo { repo_url, branch } => {
                     ("repo".to_string(), Some(repo_url.clone()), branch.clone())
-                }
-                SandboxMode::LibrarySpace { slug, .. } => {
-                    (format!("library_space({slug})"), None, None)
                 }
             };
             WorkflowSandboxView {

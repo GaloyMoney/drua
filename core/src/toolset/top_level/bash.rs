@@ -91,9 +91,8 @@ impl TopLevelTool for Bash {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from project admins (they don't attach sandboxes).
-        // Other agents see it whether attached or not so the model can ask to attach.
-        subject.is_agent() && !subject.is_project_admin()
+        // Visible whether attached or not so the model can ask to attach.
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -108,8 +107,7 @@ impl TopLevelTool for Bash {
         let client = self
             .sandboxes
             .instance_client_for(subject, sandbox_id)
-            .await
-            .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+            .await?;
 
         let req = ExecuteRequest {
             tool: "bash".to_string(),

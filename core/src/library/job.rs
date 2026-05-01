@@ -68,6 +68,40 @@ impl JobRunner for WriteToRuntimeRunner {
             UpstreamOp::SpaceInit { slug } => {
                 return self.space_init(slug).await;
             }
+            UpstreamOp::SpaceFileWrite { content, .. } => {
+                return self
+                    .space_file_op(self.write_space_file_op(content).await)
+                    .await;
+            }
+            UpstreamOp::SpaceFileDelete { .. } => {
+                return self.space_file_op(self.delete_space_file_op().await).await;
+            }
+            UpstreamOp::SpaceFileStrReplace {
+                old_str, new_str, ..
+            } => {
+                return self
+                    .space_file_op(self.str_replace_space_file_op(old_str, new_str).await)
+                    .await;
+            }
+            UpstreamOp::SpaceFileInsert {
+                line_number, text, ..
+            } => {
+                return self
+                    .space_file_op(self.insert_space_file_op(*line_number, text).await)
+                    .await;
+            }
+            UpstreamOp::SpaceFileMove {
+                slug,
+                from_relative_path,
+                to_relative_path,
+            } => {
+                return self
+                    .space_file_op(
+                        self.move_space_file_op(slug, from_relative_path, to_relative_path)
+                            .await,
+                    )
+                    .await;
+            }
             UpstreamOp::WriteFile(_) => {}
         }
 
@@ -149,6 +183,153 @@ impl WriteToRuntimeRunner {
         let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         self.upstream
             .commit_paths(&path_refs, commit_message)
+            .await?;
+        Ok(())
+    }
+
+    /// Common wrapper for the four space-file ops: each helper returns
+    /// the staged commit-or-error result; this dispatches push or
+    /// resets the working tree on failure.
+    async fn space_file_op(
+        &self,
+        staged: Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+        match staged {
+            Ok(()) => {
+                self.upstream.push().await?;
+                Ok(JobCompletion::Complete)
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                tracing::warn!(error = %err_msg, op = %self.file.commit_message(), "space-file op failed, resetting working tree");
+                if let Err(reset_err) = self.upstream.reset_dirty_state().await {
+                    tracing::error!(error = %reset_err, "reset after failed space-file op also failed");
+                }
+                Err(err_msg.into())
+            }
+        }
+    }
+
+    /// Blind overwrite. Hash short-circuit: if the freshest disk
+    /// content already matches, no commit is produced (and `push` in
+    /// the wrapper is still safe — it's a no-op on a clean tree).
+    async fn write_space_file_op(
+        &self,
+        content: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let canonical_path = self.file.relative_path();
+        let new_hash = self.file.file_hash();
+        if self
+            .upstream
+            .file_hash_on_disk(&canonical_path)
+            .await
+            .as_ref()
+            == Some(&new_hash)
+        {
+            tracing::debug!(path = %canonical_path, "space file unchanged, skipping write");
+            return Ok(());
+        }
+        self.upstream.write_file(&canonical_path, content).await?;
+        self.upstream
+            .add_and_commit(&canonical_path, &self.file.commit_message())
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_space_file_op(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let canonical_path = self.file.relative_path();
+        if !self.upstream.file_exists(&canonical_path).await {
+            tracing::debug!(path = %canonical_path, "space file already absent, skipping delete");
+            return Ok(());
+        }
+        self.upstream.remove_file(&canonical_path).await?;
+        self.upstream
+            .commit_paths(&[&canonical_path], &self.file.commit_message())
+            .await?;
+        Ok(())
+    }
+
+    /// Read–modify–write inside the queue lock. Verifies `old_str`
+    /// occurs exactly once on disk; aborts with a clean error otherwise.
+    async fn str_replace_space_file_op(
+        &self,
+        old_str: &str,
+        new_str: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let canonical_path = self.file.relative_path();
+        let current = self.upstream.read_file(&canonical_path).await?;
+        let count = current.matches(old_str).count();
+        if count == 0 {
+            return Err(format!("str_replace: old_str not found in {canonical_path}").into());
+        }
+        if count > 1 {
+            return Err(format!(
+                "str_replace: old_str appears {count} times in {canonical_path}; must be unique"
+            )
+            .into());
+        }
+        let new_content = current.replacen(old_str, new_str, 1);
+        self.upstream
+            .write_file(&canonical_path, &new_content)
+            .await?;
+        self.upstream
+            .add_and_commit(&canonical_path, &self.file.commit_message())
+            .await?;
+        Ok(())
+    }
+
+    /// Read–modify–write inside the queue lock. `line_number == 0`
+    /// inserts at the top of the file; otherwise inserts after that
+    /// 1-based line number. Out-of-range line numbers append at EOF.
+    async fn insert_space_file_op(
+        &self,
+        line_number: usize,
+        text: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let canonical_path = self.file.relative_path();
+        let current = self.upstream.read_file(&canonical_path).await?;
+        let mut lines: Vec<String> = current.lines().map(String::from).collect();
+        let idx = line_number.min(lines.len());
+        for (offset, t) in text.lines().enumerate() {
+            lines.insert(idx + offset, t.to_string());
+        }
+        let mut new_content = lines.join("\n");
+        if current.ends_with('\n') {
+            new_content.push('\n');
+        }
+        self.upstream
+            .write_file(&canonical_path, &new_content)
+            .await?;
+        self.upstream
+            .add_and_commit(&canonical_path, &self.file.commit_message())
+            .await?;
+        Ok(())
+    }
+
+    /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Verifies
+    /// pre-conditions on the freshest disk state inside the queue:
+    /// src must exist, dest must not. Cross-space moves never reach
+    /// here — the call site rejects different slugs.
+    async fn move_space_file_op(
+        &self,
+        slug: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let from_path = format!("spaces/{slug}/{from}");
+        let to_path = format!("spaces/{slug}/{to}");
+        if from == to {
+            return Err(format!("move: src and dest are the same: {from_path}").into());
+        }
+        if !self.upstream.file_exists(&from_path).await {
+            return Err(format!("move: src does not exist: {from_path}").into());
+        }
+        if self.upstream.file_exists(&to_path).await {
+            return Err(format!("move: dest already exists: {to_path}").into());
+        }
+        self.upstream.rename_file(&from_path, &to_path).await?;
+        self.upstream
+            .commit_paths(&[&from_path, &to_path], &self.file.commit_message())
             .await?;
         Ok(())
     }

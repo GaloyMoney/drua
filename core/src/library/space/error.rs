@@ -24,13 +24,21 @@ pub enum SpaceError {
     MissingField(String),
     #[error("SpaceError - NotFound: slug {slug:?}")]
     NotFound { slug: String },
-    #[error(
-        "SpaceError - ProjectNotAuthorized: project {project_id} is not in space {slug:?}'s authorized list"
-    )]
-    ProjectNotAuthorized {
+    #[error("SpaceError - NotMounted: space {slug:?} is not mounted by project {project_id}")]
+    NotMounted {
         slug: String,
         project_id: crate::primitives::ProjectId,
     },
+    #[error("SpaceError - InvalidRelPath: {rel_path:?} (must be relative, no '..' segments)")]
+    InvalidRelPath { rel_path: String },
+    #[error("SpaceError - CrossSpaceMove: from {from_slug:?} to {to_slug:?} not supported")]
+    CrossSpaceMove { from_slug: String, to_slug: String },
+    #[error("SpaceError - DestExists: {rel_path:?} already exists")]
+    DestExists { rel_path: String },
+    #[error("SpaceError - SrcMissing: {rel_path:?} does not exist")]
+    SrcMissing { rel_path: String },
+    #[error("SpaceError - Io: {0}")]
+    Io(String),
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {

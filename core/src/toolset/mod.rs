@@ -10,9 +10,9 @@ pub use error::*;
 pub use filter::OutputFilter;
 pub use searchable::*;
 pub use top_level::{
-    Bash, CallCatalogTool, ComposeTool, ComposeTypes, DescribeCatalogTool, GlobTool, Grep, Ls,
-    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog, SkillTool,
-    SpacesTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
+    Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
+    Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog,
+    SkillTool, SpacesTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
 };
 pub use traits::*;
 

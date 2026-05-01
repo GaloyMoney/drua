@@ -730,7 +730,8 @@ fn build_thread_grid(thread_nodes: Vec<ThreadNode>) -> ThreadGridState {
     }
 }
 
-/// B=Base, T=Tools, H=beHavioral (avoids B clash), R=Role, N=Notes, S=Skills.
+/// B=Base, T=Tools, H=beHavioral (avoids B clash), R=Role, N=Notes,
+/// S=Skills, K=Knowledgebase (Spaces — avoids S clash with Skills).
 fn system_kind_letter(kind: &str) -> char {
     match kind {
         "BASE" => 'B',
@@ -739,6 +740,7 @@ fn system_kind_letter(kind: &str) -> char {
         "ROLE" => 'R',
         "NOTES" => 'N',
         "SKILLS" => 'S',
+        "SPACES" => 'K',
         _ => '?',
     }
 }

@@ -15,7 +15,6 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::Library;
 use crate::primitives::SandboxId;
 use crate::sandbox::{Sandbox, Sandboxes};
 
@@ -52,10 +51,6 @@ impl SandboxCommand {
 enum SandboxCreateMode {
     Scratch,
     Repo,
-    /// Sparse-checkout of `spaces/<space_slug>/` from the library repo.
-    /// Requires `space_slug` and that the caller's project is in
-    /// `Space.authorized_projects`.
-    LibrarySpace,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -75,10 +70,6 @@ struct ProjectSandboxParams {
     mode: Option<SandboxCreateMode>,
     repo_url: Option<String>,
     branch: Option<String>,
-    /// Required when `mode == "library_space"`. The space's slug
-    /// (from `spaces.create`) — the sandbox lands in
-    /// `<workspace>/library/spaces/<slug>/`.
-    space_slug: Option<String>,
     cpu: Option<String>,
     memory: Option<String>,
     disk_size: Option<String>,
@@ -106,15 +97,11 @@ struct ProjectSandboxParams {
 
 pub struct ProjectSandbox {
     sandboxes: Arc<Sandboxes>,
-    /// Library handle for `library_space` mode — supplies both the
-    /// space lookup (`find_space_by_slug_authorized`) and the upstream
-    /// repo URL (`Library::repo_url`).
-    library: Arc<Library>,
 }
 
 impl ProjectSandbox {
-    pub fn new(sandboxes: Arc<Sandboxes>, library: Arc<Library>) -> Self {
-        Self { sandboxes, library }
+    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
+        Self { sandboxes }
     }
 }
 
@@ -145,10 +132,9 @@ impl TopLevelTool for ProjectSandbox {
 
     fn description(&self) -> &str {
         "Manage sandboxes. Commands: `create` (requires `name`, `mode` \
-         (`scratch`/`repo`/`library_space`), optional `repo_url`+`branch` \
-         for repo mode, `space_slug` for library_space mode, plus \
-         `cpu`, `memory`, `disk_size`; blocks until state=ready unless \
-         `wait: false`), \
+         (`scratch`/`repo`), optional `repo_url`+`branch` for repo mode, \
+         plus `cpu`, `memory`, `disk_size`; blocks until state=ready \
+         unless `wait: false`), \
          `list`, `get` (requires `sandbox_id`), \
          `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`; \
          per-tool args: ls/read take `path`, grep/glob take `pattern`), \
@@ -206,29 +192,6 @@ impl TopLevelTool for ProjectSandbox {
                         }
                     }
                     SandboxCreateMode::Scratch => sandbox::SandboxMode::Scratch,
-                    SandboxCreateMode::LibrarySpace => {
-                        let slug = params.space_slug.ok_or_else(|| {
-                            ToolSetsError::InvalidArgument(
-                                "space_slug is required when mode is 'library_space'".to_string(),
-                            )
-                        })?;
-                        let library_url = self.library.repo_url().map(str::to_string).ok_or_else(
-                            || {
-                                ToolSetsError::InvalidArgument(
-                                    "library_space mode requires `library.repo_url` to be configured"
-                                        .to_string(),
-                                )
-                            },
-                        )?;
-                        let space = self
-                            .library
-                            .find_space_by_slug_authorized(subject, &slug)
-                            .await?;
-                        sandbox::SandboxMode::LibrarySpace {
-                            library_url,
-                            slug: space.slug,
-                        }
-                    }
                 };
 
                 let specs = sandbox::SandboxSpecs {
@@ -240,15 +203,13 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox = self
                     .sandboxes
                     .create(subject, project_id, name, specs, sandbox_mode)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                    .await?;
 
                 if params.wait.unwrap_or(true) {
                     let ready = self
                         .sandboxes
                         .wait_until_ready(sandbox.id, std::time::Duration::from_secs(360))
-                        .await
-                        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                        .await?;
                     return Ok(CallToolResult::success(vec![Content::text(
                         format_sandbox(&ready),
                     )]));
@@ -262,11 +223,7 @@ impl TopLevelTool for ProjectSandbox {
             }
 
             SandboxCommand::List => {
-                let sandboxes = self
-                    .sandboxes
-                    .list_for_project(subject, project_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandboxes = self.sandboxes.list_for_project(subject, project_id).await?;
 
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandboxes(&sandboxes),
@@ -278,11 +235,7 @@ impl TopLevelTool for ProjectSandbox {
                     ToolSetsError::MissingArgument("sandbox_id is required for get".to_string())
                 })?;
 
-                let sandbox = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
 
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
@@ -300,11 +253,7 @@ impl TopLevelTool for ProjectSandbox {
 
                 Audit::record_sandbox_id(sandbox_id);
 
-                let _ = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let _ = self.sandboxes.find_by_id(subject, sandbox_id).await?;
 
                 execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
             }
@@ -313,17 +262,12 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for restart".to_string())
                 })?;
-                let sandbox = self
-                    .sandboxes
-                    .restart(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.restart(subject, sandbox_id).await?;
                 if params.wait.unwrap_or(true) {
                     let ready = self
                         .sandboxes
                         .wait_until_ready(sandbox.id, std::time::Duration::from_secs(360))
-                        .await
-                        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                        .await?;
                     Ok(CallToolResult::success(vec![Content::text(
                         format_sandbox(&ready),
                     )]))
@@ -340,11 +284,7 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for suspend".to_string())
                 })?;
-                let sandbox = self
-                    .sandboxes
-                    .suspend(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.suspend(subject, sandbox_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -390,10 +330,7 @@ async fn execute_inspect(
         InspectTool::Ls => build_ls_request(&tool_args)?,
     };
 
-    let client = sandboxes
-        .instance_client_for_read(sub, sandbox_id)
-        .await
-        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+    let client = sandboxes.instance_client_for_read(sub, sandbox_id).await?;
 
     match client.execute(&req).await {
         Ok(resp) => {

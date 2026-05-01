@@ -1,8 +1,12 @@
-//! `str_replace_based_edit_tool` — the in-sandbox file editor. Wire-compatible
-//! with Anthropic's built-in `text_editor_20250728`: same name, same
-//! `command` discriminator (`view` / `create` / `str_replace` / `insert`),
-//! same field names. Forwards the request body verbatim to the
-//! sandbox-tool-server's `/execute` endpoint.
+//! `str_replace_based_edit_tool` — Anthropic-compatible text editor.
+//! Two backends:
+//!
+//! - `space:<slug>/...` paths: all four commands route through
+//!   `SpaceFs`. Reads (`view`) hit the on-disk library clone; writes
+//!   (`create` / `str_replace` / `insert`) enqueue an `UpstreamOp` on
+//!   the library lock queue and block until the upstream push lands.
+//! - Anything else: forwards verbatim to the agent's attached
+//!   sandbox via the `/execute` endpoint.
 //!
 //! Visibility / authz mirrors [`super::Bash`]:
 //! - Visible only to [`AuthSubject::Agent`] / [`AuthSubject::AgentOnBehalfOfUser`].
@@ -10,9 +14,7 @@
 //!   `SandboxRead`.
 //! - `create` / `str_replace` / `insert` mutate state → require
 //!   `SandboxUse`. Enforced inside [`TextEditor::call`] after parsing
-//!   the command, so the tool is visible-but-unauthorized for read-only
-//!   attachments calling a write command (clear error, model can ask to
-//!   upgrade the attachment).
+//!   the command.
 
 use std::sync::{Arc, LazyLock};
 
@@ -21,25 +23,29 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::library::{FileView, SpaceFs};
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{schema_for, TextOutput};
+use super::{OutputSchema, TextOutput};
 
 pub struct TextEditor {
     sandboxes: Arc<Sandboxes>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl TextEditor {
-    pub fn new(sandboxes: Arc<Sandboxes>) -> Self {
-        Self { sandboxes }
+    pub fn new(sandboxes: Arc<Sandboxes>, space_fs: Arc<SpaceFs>) -> Self {
+        Self {
+            sandboxes,
+            space_fs,
+        }
     }
 }
 
-static TEXT_EDITOR_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<TextOutput>);
+static TEXT_EDITOR_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
 
 static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     // Union of fields across all commands; `command` discriminates and
@@ -54,7 +60,7 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "path": {
                 "type": "string",
-                "description": "Absolute path to the file or directory inside the sandbox workspace."
+                "description": "Path to the file or directory. In-sandbox absolute path, or `space:<slug>/...` for a mounted space (view-only)."
             },
             "view_range": {
                 "type": "array",
@@ -98,18 +104,45 @@ fn command_is_mutating(command: &str) -> bool {
     !matches!(command, "view")
 }
 
+/// Builds a helpful `MissingArgument` error that names the missing
+/// field and shows the full per-command recipe inline. Streaming
+/// model glitches sometimes produce empty `{}` tool calls; a concrete
+/// example in the error body lets the next turn self-correct without
+/// a follow-up "what should I send?" round-trip.
+fn missing_arg(field: &str) -> ToolSetsError {
+    let recipe = match field {
+        "command" => {
+            "Required: { command: \"view\"|\"create\"|\"str_replace\"|\"insert\", path: \"...\", \
+             [view_range|file_text|old_str|new_str|insert_line per command] }"
+        }
+        "file_text" => {
+            "create requires: { command: \"create\", path: \"...\", file_text: \"...\" }"
+        }
+        "old_str" | "new_str" => {
+            "str_replace requires: { command: \"str_replace\", path: \"...\", old_str: \"...\", \
+             new_str: \"...\" }"
+        }
+        "insert_line" => {
+            "insert requires: { command: \"insert\", path: \"...\", insert_line: <int>, \
+             new_str: \"...\" }"
+        }
+        _ => "see tool input_schema for required fields",
+    };
+    ToolSetsError::MissingArgument(format!("{field}. {recipe}"))
+}
+
 #[async_trait::async_trait]
 impl TopLevelTool for TextEditor {
     fn name(&self) -> &str {
-        "str_replace_based_edit_tool"
+        "Edit"
     }
 
     fn description(&self) -> &str {
-        "Anthropic-compatible text editor for the agent's attached sandbox. \
-         Commands: `view` (read file or list directory), `create` (write a \
-         new file), `str_replace` (replace a unique substring), `insert` \
-         (insert text at a line). `view` works with read-only attachments; \
-         the other commands require write access."
+        "Anthropic-compatible text editor. Commands: `view` (read file or list \
+         directory), `create` (write a new file), `str_replace` (replace a \
+         unique substring), `insert` (insert text at a line). Accepts both \
+         in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
+         spaces — writes to spaces commit to the upstream library."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -117,12 +150,11 @@ impl TopLevelTool for TextEditor {
     }
 
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        Some(&TEXT_EDITOR_OUTPUT_SCHEMA)
+        Some(TEXT_EDITOR_OUTPUT.schema())
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Hidden from project admins — see bash.rs.
-        subject.is_agent() && !subject.is_project_admin()
+        subject.can_use_agent_file_tools()
     }
 
     async fn call(
@@ -134,20 +166,103 @@ impl TopLevelTool for TextEditor {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolSetsError::MissingArgument("command".to_string()))?;
+            .ok_or_else(|| missing_arg("command"))?
+            .to_string();
+        Audit::record_action("text_editor");
+
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+
+        // `space:<slug>/...` paths are handled entirely by SpaceFs —
+        // both reads (`view`) and writes (`create` / `str_replace` /
+        // `insert`). Each helper returns Ok(None) on non-space paths
+        // so we fall through to the sandbox dispatch below.
+        if SpaceFs::is_space_path(path) {
+            let space_result: Option<String> = match command.as_str() {
+                "view" => {
+                    let view_range =
+                        args.get("view_range")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| {
+                                let s = arr.first()?.as_i64()?;
+                                let e = arr.get(1)?.as_i64()?;
+                                Some((s, e))
+                            });
+                    self.space_fs
+                        .view_file(subject, path, view_range)
+                        .await?
+                        .map(|view| match view {
+                            FileView::File(text) => text,
+                            FileView::Dir(entries) => entries.join("\n"),
+                        })
+                }
+                "create" => {
+                    let file_text = args
+                        .get("file_text")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("file_text"))?
+                        .to_string();
+                    self.space_fs
+                        .write_file(subject, path, file_text)
+                        .await?
+                        .map(|()| format!("Wrote {path}"))
+                }
+                "str_replace" => {
+                    let old_str = args
+                        .get("old_str")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("old_str"))?
+                        .to_string();
+                    let new_str = args
+                        .get("new_str")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("new_str"))?
+                        .to_string();
+                    self.space_fs
+                        .str_replace(subject, path, old_str, new_str)
+                        .await?
+                        .map(|()| format!("Replaced text in {path}"))
+                }
+                "insert" => {
+                    let line_number = args
+                        .get("insert_line")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| missing_arg("insert_line"))?
+                        .max(0) as usize;
+                    let new_str = args
+                        .get("new_str")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| missing_arg("new_str"))?
+                        .to_string();
+                    self.space_fs
+                        .insert_line(subject, path, line_number, new_str)
+                        .await?
+                        .map(|()| format!("Inserted text at line {line_number} of {path}"))
+                }
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "unknown text_editor command: {command}"
+                    ))]));
+                }
+            };
+            if let Some(output) = space_result {
+                let out = TextOutput {
+                    output: output.clone(),
+                };
+                return Ok(TEXT_EDITOR_OUTPUT.success(output, &out));
+            }
+        }
 
         // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
-        let sandbox_id = if command_is_mutating(command) {
+        let sandbox_id = if command_is_mutating(&command) {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
             subject
                 .readable_sandbox_id()
                 .ok_or(ToolSetsError::Unauthorized)?
         };
-        Audit::record_action("text_editor");
         Audit::record_sandbox_id(sandbox_id);
 
-        let client = if command_is_mutating(command) {
+        let client = if command_is_mutating(&command) {
             self.sandboxes
                 .instance_client_for(subject, sandbox_id)
                 .await
@@ -155,8 +270,7 @@ impl TopLevelTool for TextEditor {
             self.sandboxes
                 .instance_client_for_read(subject, sandbox_id)
                 .await
-        }
-        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+        }?;
 
         let req = ExecuteRequest {
             tool: "str_replace_based_edit_tool".to_string(),
@@ -166,17 +280,13 @@ impl TopLevelTool for TextEditor {
         match client.execute(&req).await {
             Ok(resp) => {
                 let out = TextOutput {
-                    output: resp.output,
+                    output: resp.output.clone(),
                 };
-                let structured = serde_json::to_value(&out).expect("TextOutput serialization");
-                let content = vec![Content::text(&out.output)];
-                let mut result = if resp.is_error {
-                    CallToolResult::error(content)
+                Ok(if resp.is_error {
+                    TEXT_EDITOR_OUTPUT.error(resp.output, &out)
                 } else {
-                    CallToolResult::success(content)
-                };
-                result.structured_content = Some(structured);
-                Ok(result)
+                    TEXT_EDITOR_OUTPUT.success(resp.output, &out)
+                })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "sandbox /execute call failed: {e}"

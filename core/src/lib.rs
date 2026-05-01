@@ -39,9 +39,9 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, GlobTool, Grep, LibraryToolSet, Ls, NotesTool,
-    ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool, TextEditor, ToolSets,
-    ToolSetsError, UseSkillTool, WorkflowTool,
+    AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
+    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool, TextEditor,
+    ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
 };
 use user::Users;
 use workflow::Workflows;
@@ -175,13 +175,11 @@ impl App {
         ));
 
         // Sandbox-backed tools must be registered after sandboxes is up
-        // but before toolsets is wrapped in Arc.
+        // but before toolsets is wrapped in Arc. The five read tools
+        // (text_editor, grep, glob, read, ls) are deferred — they take
+        // `Arc<SpaceFs>` for the `space:<slug>/...` re-routing branch
+        // and `SpaceFs` depends on Projects, which doesn't exist yet.
         toolsets.register_top_level(Bash::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(TextEditor::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(GlobTool::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(Read::new(Arc::clone(&sandboxes)));
-        toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
         // Created before Agents so pinned notes can be injected into agent
@@ -204,8 +202,6 @@ impl App {
         ));
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
-        // ProjectSandbox registration sits next to the other library-
-        // facing tools below; library_space mode needs `Arc<Library>`.
 
         let execute_run_initializer = Workflows::execute_run_job_initializer(
             pool,
@@ -232,12 +228,33 @@ impl App {
             project_secrets.clone(),
             Arc::clone(&workflows),
             (*library).clone(),
+            context_generation.clone(),
         ));
-        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library)));
-        toolsets.register_top_level(ProjectSandbox::new(
-            Arc::clone(&sandboxes),
+        // Late-binding: Agents needs Projects to render the dynamic
+        // `<spaces>` system block, but Projects::new takes Arc<Agents>.
+        agents.set_projects(Arc::clone(&projects));
+
+        // Sandboxless read facade for `space:<slug>/...` paths. The
+        // five read tools branch on the `space:` prefix and dispatch
+        // through here when present; otherwise they fall through to
+        // the existing sandbox `/execute` path.
+        let space_fs = Arc::new(library::SpaceFs::new(
             Arc::clone(&library),
+            Arc::clone(&projects),
         ));
+        toolsets.register_top_level(TextEditor::new(
+            Arc::clone(&sandboxes),
+            Arc::clone(&space_fs),
+        ));
+        toolsets.register_top_level(Grep::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(GlobTool::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(Read::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(Ls::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(MoveFile::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+        toolsets.register_top_level(Delete::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
+
+        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library), Arc::clone(&projects)));
+        toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&projects)));

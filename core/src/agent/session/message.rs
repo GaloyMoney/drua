@@ -44,6 +44,7 @@ pub enum SystemBlockKind {
     Role,
     Notes,
     Skills,
+    Spaces,
 }
 
 impl SystemBlockKind {
@@ -55,6 +56,7 @@ impl SystemBlockKind {
         SystemBlockKind::Role,
         SystemBlockKind::Notes,
         SystemBlockKind::Skills,
+        SystemBlockKind::Spaces,
     ];
 }
 
@@ -67,6 +69,7 @@ pub enum SystemBlock {
     Role { text: String },
     Notes { text: String },
     Skills { text: String },
+    Spaces { text: String },
 }
 
 impl SystemBlock {
@@ -78,6 +81,7 @@ impl SystemBlock {
             SystemBlock::Role { .. } => SystemBlockKind::Role,
             SystemBlock::Notes { .. } => SystemBlockKind::Notes,
             SystemBlock::Skills { .. } => SystemBlockKind::Skills,
+            SystemBlock::Spaces { .. } => SystemBlockKind::Spaces,
         }
     }
 
@@ -88,7 +92,8 @@ impl SystemBlock {
             | SystemBlock::Behavioral { text }
             | SystemBlock::Role { text }
             | SystemBlock::Notes { text }
-            | SystemBlock::Skills { text } => text,
+            | SystemBlock::Skills { text }
+            | SystemBlock::Spaces { text } => text,
         }
     }
 }
@@ -198,7 +203,8 @@ impl From<SystemBlock> for llm::prompt::SystemBlock {
             | SystemBlock::Behavioral { text }
             | SystemBlock::Role { text }
             | SystemBlock::Notes { text }
-            | SystemBlock::Skills { text } => text,
+            | SystemBlock::Skills { text }
+            | SystemBlock::Spaces { text } => text,
         };
         llm::prompt::SystemBlock::Text {
             text,
@@ -344,12 +350,11 @@ impl From<llm::prompt::Tool> for ToolDefinition {
 #[serde(rename_all = "snake_case")]
 pub enum SandboxOperation {
     /// `agent_mode` is the agent's permission (`read`/`write`).
-    /// `kind` is the sandbox's bootstrap mode (`scratch`/`repo`/
-    /// `library_space`). `cwd` is the inside-sandbox working
-    /// directory recorded by the runtime — the notification renders
-    /// it as the agent's only path of interest. `scope` is a short
-    /// human label like `repo "my-app"` or `space "oncall"`, used
-    /// inside the `<sandbox>` text.
+    /// `kind` is the sandbox's bootstrap mode (`scratch`/`repo`).
+    /// `cwd` is the inside-sandbox working directory recorded by the
+    /// runtime — the notification renders it as the agent's only path
+    /// of interest. `scope` is a short human label like
+    /// `repo "my-app"`, used inside the `<sandbox>` text.
     Attach {
         agent_mode: String,
         kind: String,
@@ -376,12 +381,6 @@ pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> S
                 None => format!("Attached sandbox \"{sandbox_name}\" in {agent_mode} mode."),
             };
             let body = match kind.as_str() {
-                "library_space" => format!(
-                    "Working directory: {cwd}\n\
-                     This is your space's checkout — files you create here are committed \
-                     and pushed back to the space on `git push`. Stay inside this directory; \
-                     tools reject paths outside it."
-                ),
                 "repo" => format!(
                     "Working directory: {cwd}\n\
                      The repository is checked out here at the requested branch. Stay inside \

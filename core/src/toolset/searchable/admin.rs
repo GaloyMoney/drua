@@ -14,7 +14,8 @@ use serde::Deserialize;
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
-use crate::library::{Library, Space};
+use crate::auth::{AuthResource, AuthVerb};
+use crate::library::{Library, Space, SpaceError};
 use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
@@ -213,16 +214,27 @@ enum SpacesCommand {
     Create,
     List,
     Get,
+    /// Attach an existing space to any project. Admin variant —
+    /// project_id is explicit (the tool isn't bound to a project).
+    Mount,
+    /// Detach a space from any project. Project-scoped admins use the
+    /// top-level `spaces` tool instead; this admin variant lets you
+    /// reach into any project.
+    Unmount,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SpacesParams {
     command: SpacesCommand,
-    /// Slug for `create` and `get`. Must match `[a-z0-9-]+` with no
-    /// leading / trailing / double hyphens.
+    /// Slug for `create`, `get`, `mount`, `unmount`. Must match
+    /// `[a-z0-9-]+` with no leading / trailing / double hyphens.
     slug: Option<String>,
     /// Optional human-readable summary, used by `create`.
     description: Option<String>,
+    /// Required for `mount` and `unmount`. The project to attach the
+    /// space to (or detach from).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    project_id: Option<ProjectId>,
 }
 
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
@@ -270,10 +282,12 @@ static TOOLS: &[ToolDef] = &[
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
                        `spaces/<slug>/` in the knowledge-base repo. Commands: \
-                       `create` (requires `slug`, optional `description`; the calling \
-                       subject's project is auto-added to the authorized list), \
-                       `list` (no args), \
-                       `get` (requires `slug`; bypasses project ACL for admins).",
+                       `create` (requires `slug`, optional `description`; the space \
+                       is created unmounted — pair with `mount` to attach), \
+                       `list` (no args; every space in the library), \
+                       `get` (requires `slug`), \
+                       `mount` (requires `slug` and `project_id`; idempotent), \
+                       `unmount` (requires `slug` and `project_id`; idempotent).",
         schema: &SPACES_SCHEMA,
     },
 ];
@@ -486,8 +500,7 @@ impl AdminToolSet {
                 let sandbox = self
                     .sandboxes
                     .create(subject, project_id, name, specs, sandbox_mode)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                    .await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -497,11 +510,7 @@ impl AdminToolSet {
                 let project_id = params.project_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
-                let sandboxes = self
-                    .sandboxes
-                    .list_for_project(subject, project_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandboxes = self.sandboxes.list_for_project(subject, project_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandboxes(&sandboxes),
                 )]))
@@ -511,11 +520,7 @@ impl AdminToolSet {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for get".to_string())
                 })?;
-                let sandbox = self
-                    .sandboxes
-                    .find_by_id(subject, sandbox_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+                let sandbox = self.sandboxes.find_by_id(subject, sandbox_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
@@ -562,22 +567,14 @@ impl AdminToolSet {
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .map(String::from);
-                let project = self
-                    .projects
-                    .create(subject, &name, description)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                let project = self.projects.create(subject, &name, description).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_project_created(&project),
                 )]))
             }
 
             ProjectCommand::List => {
-                let all = self
-                    .projects
-                    .list_all(subject)
-                    .await
-                    .map_err(|e| ToolSetsError::Project(e.to_string()))?;
+                let all = self.projects.list_all(subject).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_projects(&all),
                 )]))
@@ -621,12 +618,56 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("slug is required for get".to_string())
                 })?;
                 Audit::record_action("spaces.get");
+                subject
+                    .can(AuthVerb::Read, AuthResource::Space(None))
+                    .map_err(|e| ToolSetsError::Library(e.into()))?;
                 let space = self
                     .library
-                    .find_space_by_slug_admin(subject, &slug)
-                    .await?;
+                    .find_space_by_slug(&slug)
+                    .await?
+                    .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_space(
                     &space, false,
+                ))]))
+            }
+
+            SpacesCommand::Mount => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for mount".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for mount".to_string())
+                })?;
+                Audit::record_action("spaces.mount");
+                let space = self
+                    .projects
+                    .mount_space(subject, project_id, &slug)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Space mounted onto project {project_id}.\n  slug: {}\n  id: {}",
+                    space.slug, space.id,
+                ))]))
+            }
+
+            SpacesCommand::Unmount => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for unmount".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for unmount".to_string())
+                })?;
+                Audit::record_action("spaces.unmount");
+                let space = self
+                    .library
+                    .find_space_by_slug(&slug)
+                    .await?
+                    .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
+                self.projects
+                    .unmount_space(subject, project_id, space.id)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Space unmounted from project {project_id}.\n  slug: {}\n  id: {}",
+                    space.slug, space.id,
                 ))]))
             }
         }
@@ -669,10 +710,7 @@ async fn execute_inspect(
         InspectTool::Ls => build_ls_request(&tool_args)?,
     };
 
-    let client = sandboxes
-        .instance_client_for(sub, sandbox_id)
-        .await
-        .map_err(|e| ToolSetsError::Sandbox(e.to_string()))?;
+    let client = sandboxes.instance_client_for(sub, sandbox_id).await?;
 
     match client.execute(&req).await {
         Ok(resp) => {
@@ -910,21 +948,11 @@ fn format_projects(project: &[Project]) -> String {
 }
 
 fn format_space(s: &Space, created: bool) -> String {
-    let authorized: Vec<String> = s
-        .authorized_projects
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let auth_str = if authorized.is_empty() {
-        "none".to_string()
-    } else {
-        authorized.join(", ")
-    };
     let description = s.description.as_deref().unwrap_or("\u{2014}");
     let header = if created { "Space created." } else { "Space:" };
     format!(
-        "{header}\n  id: {}\n  slug: {}\n  description: {}\n  authorized_projects: {}",
-        s.id, s.slug, description, auth_str,
+        "{header}\n  id: {}\n  slug: {}\n  description: {}",
+        s.id, s.slug, description,
     )
 }
 
@@ -934,19 +962,15 @@ fn format_spaces(spaces: &[Space]) -> String {
     }
 
     let mut lines = Vec::with_capacity(spaces.len() + 2);
-    lines.push(format!(
-        "{:<38} {:<24} {:<6} {}",
-        "ID", "SLUG", "PROJ#", "DESCRIPTION"
-    ));
+    lines.push(format!("{:<38} {:<24} {}", "ID", "SLUG", "DESCRIPTION"));
     lines.push("-".repeat(100));
 
     for s in spaces {
         let description = s.description.as_deref().unwrap_or("\u{2014}");
         lines.push(format!(
-            "{:<38} {:<24} {:<6} {}",
+            "{:<38} {:<24} {}",
             s.id,
             truncate(&s.slug, 24),
-            s.authorized_projects.len(),
             description,
         ));
     }
@@ -1021,12 +1045,41 @@ mod tests {
     }
 
     #[test]
+    fn spaces_mount_parses_slug_and_project_id() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "mount",
+            "slug": "oncall",
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Mount));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+    }
+
+    #[test]
+    fn spaces_unmount_parses_slug_and_project_id() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "unmount",
+            "slug": "oncall",
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Unmount));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+    }
+
+    #[test]
     fn spaces_schema_includes_command_enum() {
         let schema = &*SPACES_SCHEMA;
         let s = serde_json::to_string(schema).unwrap();
         assert!(s.contains("\"create\""));
         assert!(s.contains("\"list\""));
         assert!(s.contains("\"get\""));
+        assert!(s.contains("\"mount\""));
+        assert!(s.contains("\"unmount\""));
     }
 
     #[test]
