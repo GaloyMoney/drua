@@ -44,8 +44,13 @@
           SQLX_OFFLINE = true;
           nativeBuildInputs = [
             pkgs.pkg-config
+            # libgit2-sys vendored build needs cmake; openssl-sys needs perl.
+            pkgs.cmake
+            pkgs.perl
           ];
-          buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          buildInputs = [
+            pkgs.openssl
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
           ];
         };
@@ -447,6 +452,9 @@
             pkgs.sqlx-cli
             pkgs.postgresql
             pkgs.pkg-config
+            pkgs.cmake
+            pkgs.perl
+            pkgs.openssl
             pkgs.docker-compose
             pkgs.podman
             pkgs.podman-compose
