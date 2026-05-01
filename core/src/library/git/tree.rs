@@ -55,11 +55,7 @@ pub(super) fn diff_trees(
         None,
     )?;
 
-    Ok(TreeDiff {
-        from: from.map(super::CommitOid),
-        to: super::CommitOid(to),
-        deltas,
-    })
+    Ok(TreeDiff { deltas })
 }
 
 pub(super) fn read_blob_at(

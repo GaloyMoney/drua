@@ -29,8 +29,6 @@ impl CommitOid {
 
 #[derive(Debug)]
 pub struct TreeDiff {
-    pub from: Option<CommitOid>,
-    pub to: CommitOid,
     pub deltas: Vec<Delta>,
 }
 
@@ -38,14 +36,6 @@ pub struct TreeDiff {
 pub enum Delta {
     Upserted { path: String },
     Deleted { path: String },
-}
-
-impl Delta {
-    pub fn path(&self) -> &str {
-        match self {
-            Delta::Upserted { path } | Delta::Deleted { path } => path,
-        }
-    }
 }
 
 /// Drop signals shutdown by closing the command channel; the blocking

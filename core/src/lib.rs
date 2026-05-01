@@ -322,6 +322,36 @@ impl App {
                 .map_err(|e| AppError::Job(e.to_string()))?;
         }
 
+        // Unified libgit2-backed reverse-sync, running in parallel with
+        // the three typed runners above so we can verify parity before
+        // cutover. All four pipelines serialise on `library-lock` and
+        // upserts are idempotent so duplicate work is harmless.
+        {
+            let registry = library::ImporterRegistry::new()
+                .register(Arc::clone(&skills))
+                .register(Arc::clone(&workflows))
+                .register(Arc::new(library::SpaceFilesImporter::new(Arc::clone(
+                    &library,
+                ))));
+            let sync_init = library::LibrarySyncJobInitializer::new(
+                Arc::clone(&library),
+                Arc::new(registry),
+                Arc::clone(&projects),
+            );
+            let sync_spawner = jobs.add_initializer(sync_init);
+            sync_spawner
+                .spawn_with_queue_id(
+                    job::JobId::new(),
+                    library::LibrarySyncConfig {
+                        sync_interval_secs: config.library.skill_sync_interval_secs,
+                        last_sync_commit: None,
+                    },
+                    library::LIBRARY_LOCK_QUEUE,
+                )
+                .await
+                .map_err(|e| AppError::Job(e.to_string()))?;
+        }
+
         jobs.start_poll()
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;

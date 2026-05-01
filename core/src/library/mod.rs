@@ -1,15 +1,12 @@
 mod error;
 mod file;
-// Wired into Library here but unused at runtime until the unified sync
-// runner lands; the dead-code allow lifts in that commit.
-#[allow(dead_code)]
 mod git;
-#[allow(dead_code)] // Wired into the runner registry one commit later.
 pub mod importer;
 mod inbox;
 mod job;
 mod search;
 pub mod space;
+mod sync_runner;
 mod synced;
 mod upstream;
 
@@ -30,9 +27,11 @@ pub use file::{
     parse_skill_markdown, render_note_markdown, render_skill_markdown, DocType, GitFileHash,
     SearchableFields, UpstreamOp,
 };
+pub use importer::{ImporterRegistry, SpaceFilesImporter};
 pub use job::LIBRARY_LOCK_QUEUE;
 pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
+pub use sync_runner::{LibrarySyncConfig, LibrarySyncJobInitializer, LIBRARY_SYNC_JOB};
 pub(crate) use synced::slugify;
 pub use synced::{
     matches_runtime_subdir, Changes, LibraryImporter, LibrarySynced, ParsedFile,
@@ -401,7 +400,6 @@ impl Library {
         &self.upstream
     }
 
-    #[allow(dead_code)] // Used by the unified sync runner (next commit).
     pub(in crate::library) fn git(&self) -> &git::GitEngine {
         &self.git
     }
