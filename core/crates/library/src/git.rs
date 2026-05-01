@@ -156,7 +156,9 @@ impl GitEngine {
     /// `update` receives `(input_path, current_content)` (content is `None` if
     /// the file doesn't exist at HEAD) and returns `(rename_to, output_content)`.
     /// `rename_to = None` keeps the same path; `Some(new)` is an atomic move.
-    /// `output_content = None` deletes the file.
+    /// `output_content = None` deletes the file. The closure may return
+    /// `Err(LibraryError::Validation(_))` to abort with a typed error
+    /// (e.g. `str_replace` sentinel-not-unique).
     ///
     /// On non-fast-forward push, fetches origin, resets local main to the new
     /// remote, re-invokes `update` against the new HEAD, and pushes once more.
@@ -169,7 +171,9 @@ impl GitEngine {
         commit_message: String,
     ) -> Result<(), LibraryError>
     where
-        F: Fn(&str, Option<&[u8]>) -> (Option<String>, Option<Vec<u8>>) + Send + 'static,
+        F: Fn(&str, Option<&[u8]>) -> Result<(Option<String>, Option<Vec<u8>>), LibraryError>
+            + Send
+            + 'static,
     {
         let _guard = self.write_lock.lock().await;
         let token = Self::fresh_token(self.github_app.as_ref()).await;
@@ -191,6 +195,9 @@ impl GitEngine {
                     token.as_deref(),
                 ) {
                     Ok(()) => return Ok(()),
+                    // Validation errors are deterministic (closure-side), so
+                    // refetch+retry would just produce the same failure.
+                    Err(e @ LibraryError::Validation(_)) => return Err(e),
                     Err(e) if attempt < MAX_ATTEMPTS => {
                         tracing::info!(
                             error = %e,
@@ -216,7 +223,7 @@ impl GitEngine {
         token: Option<&str>,
     ) -> Result<(), LibraryError>
     where
-        F: Fn(&str, Option<&[u8]>) -> (Option<String>, Option<Vec<u8>>),
+        F: Fn(&str, Option<&[u8]>) -> Result<(Option<String>, Option<Vec<u8>>), LibraryError>,
     {
         let head_commit = repo
             .head()
@@ -228,7 +235,7 @@ impl GitEngine {
             .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
 
         let current_content = Self::read_blob_at(repo, &head_tree, path)?;
-        let (rename_to, new_content) = update(path, current_content.as_deref());
+        let (rename_to, new_content) = update(path, current_content.as_deref())?;
         let new_path: &str = rename_to.as_deref().unwrap_or(path);
 
         // Step 1: remove old path if it's a move
@@ -264,6 +271,305 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
 
         Self::push_main(repo, token)
+    }
+
+    /// Apply multiple file changes in a single commit + push.
+    /// `changes` is a list of `(path, content_opt)` — `None` deletes
+    /// (no-op if absent). No-op overall if the resulting tree matches
+    /// HEAD. Same retry-on-non-ff semantics as `update_file`.
+    #[tracing::instrument(name = "library.git.commit_changes", skip_all, fields(count = changes.len()))]
+    pub async fn commit_changes(
+        &self,
+        changes: Vec<(String, Option<Vec<u8>>)>,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.write_lock.lock().await;
+        let token = Self::fresh_token(self.github_app.as_ref()).await;
+        let repo_path = self.repo_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            const MAX_ATTEMPTS: u32 = 2;
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match Self::try_commit_changes_once(&repo, &changes, &commit_message, token.as_deref()) {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < MAX_ATTEMPTS => {
+                        tracing::info!(error = %e, attempt, "commit_changes failed, refetching and retrying");
+                        Self::fetch_origin(&repo, token.as_deref())?;
+                        Self::reset_main_to_origin(&repo)?;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("commit_changes join: {e}")))?
+    }
+
+    fn try_commit_changes_once(
+        repo: &git2::Repository,
+        changes: &[(String, Option<Vec<u8>>)],
+        commit_message: &str,
+        token: Option<&str>,
+    ) -> Result<(), LibraryError> {
+        let head_commit = repo
+            .head()
+            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
+            .peel_to_commit()
+            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
+        let head_tree = head_commit
+            .tree()
+            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
+
+        let mut current_oid = head_tree.id();
+        for (path, content) in changes {
+            let current_tree = repo
+                .find_tree(current_oid)
+                .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
+            current_oid = Self::apply_edit(repo, &current_tree, path, content.clone())?;
+        }
+
+        if current_oid == head_tree.id() {
+            tracing::debug!("commit_changes: tree unchanged, skipping commit");
+            return Ok(());
+        }
+
+        let final_tree = repo
+            .find_tree(current_oid)
+            .map_err(|e| LibraryError::Git(format!("find final: {e}")))?;
+        let sig = git2::Signature::now("drua-library", "drua-library@local")
+            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            commit_message,
+            &final_tree,
+            &[&head_commit],
+        )
+        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
+
+        Self::push_main(repo, token)
+    }
+
+    /// Atomically move `from` → `to` and push. Errors with
+    /// `LibraryError::Validation` if `from` is missing or `to` already
+    /// exists at HEAD. Same retry-on-non-ff semantics as `update_file`.
+    #[tracing::instrument(name = "library.git.move_file", skip_all, fields(%from, %to))]
+    pub async fn move_file(
+        &self,
+        from: String,
+        to: String,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        if from == to {
+            return Err(LibraryError::Validation(format!(
+                "move: src and dest are the same: {from}"
+            )));
+        }
+        let _guard = self.write_lock.lock().await;
+        let token = Self::fresh_token(self.github_app.as_ref()).await;
+        let repo_path = self.repo_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            const MAX_ATTEMPTS: u32 = 2;
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match Self::try_move_once(&repo, &from, &to, &commit_message, token.as_deref()) {
+                    Ok(()) => return Ok(()),
+                    Err(e @ LibraryError::Validation(_)) => return Err(e),
+                    Err(e) if attempt < MAX_ATTEMPTS => {
+                        tracing::info!(error = %e, attempt, "move_file failed, refetching and retrying");
+                        Self::fetch_origin(&repo, token.as_deref())?;
+                        Self::reset_main_to_origin(&repo)?;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("move_file join: {e}")))?
+    }
+
+    fn try_move_once(
+        repo: &git2::Repository,
+        from: &str,
+        to: &str,
+        commit_message: &str,
+        token: Option<&str>,
+    ) -> Result<(), LibraryError> {
+        let head_commit = repo
+            .head()
+            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
+            .peel_to_commit()
+            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
+        let head_tree = head_commit
+            .tree()
+            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
+
+        let from_content = Self::read_blob_at(repo, &head_tree, from)?
+            .ok_or_else(|| LibraryError::Validation(format!("move: src does not exist: {from}")))?;
+        if Self::read_blob_at(repo, &head_tree, to)?.is_some() {
+            return Err(LibraryError::Validation(format!(
+                "move: dest already exists: {to}"
+            )));
+        }
+
+        let intermediate_oid = Self::apply_edit(repo, &head_tree, from, None)?;
+        let intermediate_tree = repo
+            .find_tree(intermediate_oid)
+            .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
+        let final_oid = Self::apply_edit(repo, &intermediate_tree, to, Some(from_content))?;
+
+        let final_tree = repo
+            .find_tree(final_oid)
+            .map_err(|e| LibraryError::Git(format!("find final: {e}")))?;
+        let sig = git2::Signature::now("drua-library", "drua-library@local")
+            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            commit_message,
+            &final_tree,
+            &[&head_commit],
+        )
+        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
+
+        Self::push_main(repo, token)
+    }
+
+    /// Recursively remove every blob under `dir_path` and push.
+    /// No-op if the directory doesn't exist at HEAD. Same retry-on-non-ff
+    /// semantics as `update_file`.
+    #[tracing::instrument(name = "library.git.delete_dir", skip_all, fields(%dir_path))]
+    pub async fn delete_dir(
+        &self,
+        dir_path: String,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        let _guard = self.write_lock.lock().await;
+        let token = Self::fresh_token(self.github_app.as_ref()).await;
+        let repo_path = self.repo_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            const MAX_ATTEMPTS: u32 = 2;
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match Self::try_delete_dir_once(&repo, &dir_path, &commit_message, token.as_deref())
+                {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < MAX_ATTEMPTS => {
+                        tracing::info!(error = %e, attempt, "delete_dir failed, refetching and retrying");
+                        Self::fetch_origin(&repo, token.as_deref())?;
+                        Self::reset_main_to_origin(&repo)?;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("delete_dir join: {e}")))?
+    }
+
+    fn try_delete_dir_once(
+        repo: &git2::Repository,
+        dir_path: &str,
+        commit_message: &str,
+        token: Option<&str>,
+    ) -> Result<(), LibraryError> {
+        let head_commit = repo
+            .head()
+            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
+            .peel_to_commit()
+            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
+        let head_tree = head_commit
+            .tree()
+            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
+
+        let segments: Vec<&str> = dir_path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return Err(LibraryError::Git("empty dir_path".into()));
+        }
+
+        let new_oid = Self::remove_dir_recursive(repo, Some(&head_tree), &segments)?;
+        if new_oid == head_tree.id() {
+            tracing::debug!("delete_dir: tree unchanged, skipping commit");
+            return Ok(());
+        }
+
+        let new_tree = repo
+            .find_tree(new_oid)
+            .map_err(|e| LibraryError::Git(format!("find new tree: {e}")))?;
+        let sig = git2::Signature::now("drua-library", "drua-library@local")
+            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            commit_message,
+            &new_tree,
+            &[&head_commit],
+        )
+        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
+
+        Self::push_main(repo, token)
+    }
+
+    fn remove_dir_recursive(
+        repo: &git2::Repository,
+        dir_tree: Option<&git2::Tree>,
+        segments: &[&str],
+    ) -> Result<git2::Oid, LibraryError> {
+        let mut tb = repo
+            .treebuilder(dir_tree)
+            .map_err(|e| LibraryError::Git(format!("treebuilder: {e}")))?;
+
+        let head = segments[0];
+        if segments.len() == 1 {
+            if dir_tree.and_then(|t| t.get_name(head)).is_some() {
+                tb.remove(head)
+                    .map_err(|e| LibraryError::Git(format!("remove dir: {e}")))?;
+            }
+        } else {
+            let sub = dir_tree
+                .and_then(|t| t.get_name(head))
+                .filter(|e| e.kind() == Some(git2::ObjectType::Tree))
+                .and_then(|e| repo.find_tree(e.id()).ok());
+            let Some(sub_tree) = sub else {
+                return Ok(dir_tree.map(|t| t.id()).unwrap_or_else(git2::Oid::zero));
+            };
+            let new_sub_oid = Self::remove_dir_recursive(repo, Some(&sub_tree), &segments[1..])?;
+            let new_sub = repo
+                .find_tree(new_sub_oid)
+                .map_err(|e| LibraryError::Git(format!("find sub: {e}")))?;
+            const MODE_TREE: i32 = 0o040000;
+            if new_sub.iter().count() == 0 {
+                tb.remove(head)
+                    .map_err(|e| LibraryError::Git(format!("remove dir: {e}")))?;
+            } else {
+                tb.insert(head, new_sub_oid, MODE_TREE)
+                    .map_err(|e| LibraryError::Git(format!("insert dir: {e}")))?;
+            }
+        }
+
+        tb.write()
+            .map_err(|e| LibraryError::Git(format!("tree write: {e}")))
     }
 
     fn read_blob_at(

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use es_entity::AtomicOperation as _;
+use es_entity::AtomicOperation;
 use pgvector::Vector;
 use sqlx::PgPool;
 
@@ -17,6 +17,13 @@ pub struct SearchableFields {
     pub name: String,
     pub path: Option<String>,
     pub content: String,
+}
+
+/// Result of a search query: the indexed fields plus the RRF score.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub fields: SearchableFields,
+    pub score: f64,
 }
 
 #[derive(Clone)]
@@ -67,7 +74,7 @@ impl SearchStore {
     #[tracing::instrument(name = "library.search_store.delete_in_op", skip_all, fields(%doc_id, %doc_type))]
     pub async fn delete_in_op(
         &self,
-        op: &mut es_entity::DbOp<'_>,
+        op: &mut impl AtomicOperation,
         doc_id: uuid::Uuid,
         doc_type: DocType,
     ) -> Result<(), LibraryError> {
@@ -84,7 +91,7 @@ impl SearchStore {
     #[tracing::instrument(name = "library.search_store.upsert_in_op", skip_all)]
     pub async fn upsert_in_op(
         &self,
-        op: &mut es_entity::DbOp<'_>,
+        op: &mut impl AtomicOperation,
         fields: &SearchableFields,
     ) -> Result<(), LibraryError> {
         sqlx::query!(
@@ -129,18 +136,24 @@ impl SearchStore {
         Ok(())
     }
 
-    /// Reciprocal-Rank-Fusion of FTS and vector similarity. If
-    /// `query_embedding` is `None` we embed the query string; if embedding
-    /// fails we fall back to FTS-only.
+    /// Reciprocal-Rank-Fusion of FTS and vector similarity. Filters:
+    /// - `scope_ids` empty → no scope filter; non-empty → match scope_id
+    ///   in the slice OR `scope_id IS NULL` (global / scopeless docs).
+    /// - `doc_types` empty → no type filter; non-empty → match any.
+    ///
+    /// If `query_embedding` is `None` we embed the query string; if
+    /// embedding fails we fall back to FTS-only.
     #[tracing::instrument(name = "library.search_store.search", skip_all)]
     pub async fn search(
         &self,
         query: &str,
         query_embedding: Option<Vec<f32>>,
-        doc_type: Option<DocType>,
+        scope_ids: &[uuid::Uuid],
+        doc_types: &[DocType],
         limit: usize,
-    ) -> Result<Vec<SearchableFields>, LibraryError> {
-        let doc_type_filter: Option<&str> = doc_type.as_ref().map(|d| d.as_str());
+    ) -> Result<Vec<SearchHit>, LibraryError> {
+        let doc_type_strs: Vec<&str> = doc_types.iter().map(|d| d.as_str()).collect();
+        let scope_filter_active = !scope_ids.is_empty();
         let over_fetch = (limit * 3).max(10) as i64;
 
         let fts = sqlx::query!(
@@ -149,11 +162,15 @@ impl SearchStore {
                       scope_id, scope_slug, name, path, content
                FROM library_documents
                WHERE search_tsv @@ plainto_tsquery('english', $1)
-                 AND ($2::text IS NULL OR doc_type = $2)
+                 AND ($2::bool = false OR scope_id = ANY($3) OR scope_id IS NULL)
+                 AND ($4::bool = false OR doc_type = ANY($5))
                ORDER BY ts_rank(search_tsv, plainto_tsquery('english', $1)) DESC
-               LIMIT $3"#,
+               LIMIT $6"#,
             query,
-            doc_type_filter,
+            scope_filter_active,
+            scope_ids,
+            !doc_type_strs.is_empty(),
+            &doc_type_strs as &[&str],
             over_fetch,
         )
         .fetch_all(&self.pool)
@@ -178,11 +195,15 @@ impl SearchStore {
                           scope_id, scope_slug, name, path, content
                    FROM library_documents
                    WHERE embedding IS NOT NULL
-                     AND ($2::text IS NULL OR doc_type = $2)
+                     AND ($2::bool = false OR scope_id = ANY($3) OR scope_id IS NULL)
+                     AND ($4::bool = false OR doc_type = ANY($5))
                    ORDER BY embedding <=> $1
-                   LIMIT $3"#,
+                   LIMIT $6"#,
                 v as Vector,
-                doc_type_filter,
+                scope_filter_active,
+                scope_ids,
+                !doc_type_strs.is_empty(),
+                &doc_type_strs as &[&str],
                 over_fetch,
             )
             .fetch_all(&self.pool)
@@ -236,7 +257,63 @@ impl SearchStore {
 
         Ok(ranked
             .into_iter()
-            .filter_map(|(key, _)| by_key.remove(&key))
+            .filter_map(|(key, score)| {
+                by_key
+                    .remove(&key)
+                    .map(|fields| SearchHit { fields, score })
+            })
             .collect())
+    }
+
+    /// Bulk hydration by `doc_id` only — `(doc_id, doc_type)` is the
+    /// primary key but in practice `doc_id`s are globally unique
+    /// (UUID-v5 derived per importer).
+    #[tracing::instrument(name = "library.search_store.find_by_ids", skip_all, fields(count = ids.len()))]
+    pub async fn find_by_ids(
+        &self,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<SearchableFields>, LibraryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query!(
+            r#"SELECT doc_id, doc_type, scope_id, scope_slug, name, path, content
+               FROM library_documents
+               WHERE doc_id = ANY($1)"#,
+            ids,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| SearchableFields {
+                doc_id: r.doc_id,
+                doc_type: r.doc_type.into(),
+                scope_id: r.scope_id,
+                scope_slug: r.scope_slug,
+                name: r.name,
+                path: r.path,
+                content: r.content,
+            })
+            .collect())
+    }
+
+    /// Removes every row whose `scope_id` matches the supplied id.
+    /// Used by project/space cleanup paths to drop search rows in the
+    /// same op as the entity delete.
+    #[tracing::instrument(name = "library.search_store.delete_for_scope_in_op", skip_all, fields(%scope_id))]
+    pub async fn delete_for_scope_in_op(
+        &self,
+        op: &mut impl AtomicOperation,
+        scope_id: uuid::Uuid,
+    ) -> Result<(), LibraryError> {
+        sqlx::query!(
+            "DELETE FROM library_documents WHERE scope_id = $1",
+            scope_id,
+        )
+        .execute(op.as_executor())
+        .await?;
+        Ok(())
     }
 }

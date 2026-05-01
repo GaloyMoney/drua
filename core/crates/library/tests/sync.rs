@@ -65,20 +65,20 @@ async fn space_file_imports_into_search_store() {
     loop {
         let hits = library
             .search()
-            .search("bravo", None, None, 10)
+            .search("bravo", None, &[], &[], 10)
             .await
             .expect("search");
         if let Some(hit) = hits.iter().find(|h| {
-            h.scope_slug.as_deref() == Some(slug.as_str())
-                && h.path.as_deref() == Some("runbook.md")
+            h.fields.scope_slug.as_deref() == Some(slug.as_str())
+                && h.fields.path.as_deref() == Some("runbook.md")
         }) {
-            assert_eq!(hit.name, "runbook.md");
+            assert_eq!(hit.fields.name, "runbook.md");
             assert!(
-                hit.content.contains("bravo"),
+                hit.fields.content.contains("bravo"),
                 "content was {:?}",
-                hit.content
+                hit.fields.content
             );
-            assert_eq!(hit.doc_type.as_str(), "space_file");
+            assert_eq!(hit.fields.doc_type.as_str(), "space_file");
             return;
         }
         if Instant::now() >= deadline {

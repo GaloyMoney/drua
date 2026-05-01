@@ -6,6 +6,7 @@ mod job;
 pub mod primitives;
 mod search;
 pub mod space;
+mod synced;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,13 +18,17 @@ pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use search::{SearchStore, SearchableFields};
+pub use job::WriteOp;
+pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces};
+pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
 use self::job::{
     CommitTick, LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer,
+    LibraryWriteConfig, LibraryWriteJobInitializer,
 };
+use self::synced::{HookEntry, LibrarySyncHook};
 
 #[allow(dead_code)]
 pub struct Library {
@@ -34,6 +39,7 @@ pub struct Library {
     git: Arc<GitEngine>,
     search: SearchStore,
     spaces: Spaces,
+    write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
     _fetcher: tokio::task::JoinHandle<()>,
 }
 
@@ -55,6 +61,8 @@ impl Library {
             search.clone(),
             Arc::clone(&embedder),
         ));
+
+        let write_spawner = jobs.add_initializer(LibraryWriteJobInitializer::new(Arc::clone(&git)));
 
         let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
         let fetcher = Self::spawn_fetcher(
@@ -88,6 +96,7 @@ impl Library {
             git,
             search,
             spaces,
+            write_spawner,
             _fetcher: fetcher,
         })
     }
@@ -128,5 +137,92 @@ impl Library {
 
     pub fn search(&self) -> &SearchStore {
         &self.search
+    }
+
+    /// Per-repo `post_persist_hook` body collapses to a one-liner over
+    /// this: projects the entity into a write op and registers the
+    /// commit hook when at least one persisted event was a content
+    /// event.
+    #[tracing::instrument(name = "library.sync_entity_in_op", skip_all)]
+    pub async fn sync_entity_in_op<E, OP>(
+        &self,
+        op: &mut OP,
+        entity: &E,
+        new_events: &mut es_entity::LastPersisted<'_, E::Event>,
+    ) -> Result<(), LibraryError>
+    where
+        E: LibrarySynced,
+        OP: es_entity::AtomicOperation,
+    {
+        if !new_events.any(|p| E::is_content_event(&p.event)) {
+            return Ok(());
+        }
+        self.enqueue_in_op(
+            op,
+            HookEntry {
+                fields: Some(entity.searchable_fields()),
+                deletes: entity.extra_search_deletes(),
+                write_op: Some(entity.write_op()),
+            },
+        )
+        .await
+    }
+
+    /// Lower-level: enqueue an arbitrary write op (and optional search
+    /// row) on the per-transaction batch. Use for non-entity-backed
+    /// work like project scaffolding or directory cleanup.
+    #[tracing::instrument(name = "library.enqueue_write_in_op", skip_all)]
+    pub async fn enqueue_write_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        write_op: WriteOp,
+    ) -> Result<(), LibraryError> {
+        self.enqueue_in_op(
+            op,
+            HookEntry {
+                fields: None,
+                deletes: Vec::new(),
+                write_op: Some(write_op),
+            },
+        )
+        .await
+    }
+
+    /// Wipes search-index rows whose `scope_id` matches `scope_id` and
+    /// queues a directory delete on the upstream repo. Call inside the
+    /// scope-owner's delete transaction for atomicity.
+    #[tracing::instrument(name = "library.cleanup_for_scope_in_op", skip_all, fields(%scope_id, %dir_path))]
+    pub async fn cleanup_for_scope_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        scope_id: uuid::Uuid,
+        dir_path: String,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        self.search.delete_for_scope_in_op(op, scope_id).await?;
+        self.enqueue_write_in_op(
+            op,
+            WriteOp::DeleteDir {
+                path: dir_path,
+                message: commit_message,
+            },
+        )
+        .await
+    }
+
+    async fn enqueue_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        entry: HookEntry,
+    ) -> Result<(), LibraryError> {
+        use es_entity::operation::hooks::CommitHook as _;
+        let hook = LibrarySyncHook::new(self.write_spawner.clone(), self.search.clone(), entry);
+        if let Err(hook) = op.add_commit_hook(hook) {
+            let _ = hook
+                .force_execute_pre_commit(op)
+                .await
+                .map_err(LibraryError::Sqlx)?;
+        }
+        Ok(())
     }
 }

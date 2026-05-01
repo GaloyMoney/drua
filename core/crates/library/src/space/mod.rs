@@ -62,13 +62,161 @@ impl Spaces {
         self.git
             .update_file(
                 format!("spaces/{}/.gitkeep", space.slug),
-                |_input_path, _current| (None, Some(Vec::new())),
+                |_input_path, _current| Ok((None, Some(Vec::new()))),
                 format!("space: init {}", space.slug),
             )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))?;
 
         Ok(space)
+    }
+
+    /// Blind overwrite of `spaces/{slug}/{relative_path}`.
+    #[tracing::instrument(name = "library.spaces.write_file", skip_all, fields(%slug, %relative_path))]
+    pub async fn write_file(
+        &self,
+        slug: &str,
+        relative_path: &str,
+        content: String,
+    ) -> Result<(), SpaceError> {
+        let path = format!("spaces/{slug}/{relative_path}");
+        let bytes = content.into_bytes();
+        self.git
+            .update_file(
+                path,
+                move |_, _| Ok((None, Some(bytes.clone()))),
+                format!("space:{slug}: write {relative_path}"),
+            )
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))
+    }
+
+    /// Removes `spaces/{slug}/{relative_path}`. No-op if absent at HEAD.
+    #[tracing::instrument(name = "library.spaces.delete_file", skip_all, fields(%slug, %relative_path))]
+    pub async fn delete_file(&self, slug: &str, relative_path: &str) -> Result<(), SpaceError> {
+        let path = format!("spaces/{slug}/{relative_path}");
+        self.git
+            .update_file(
+                path,
+                |_, _| Ok((None, None)),
+                format!("space:{slug}: delete {relative_path}"),
+            )
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))
+    }
+
+    /// Read–modify–write substitution: errors if `old_str` doesn't appear
+    /// exactly once in the freshest disk content.
+    #[tracing::instrument(name = "library.spaces.str_replace", skip_all, fields(%slug, %relative_path))]
+    pub async fn str_replace(
+        &self,
+        slug: &str,
+        relative_path: &str,
+        old_str: String,
+        new_str: String,
+    ) -> Result<(), SpaceError> {
+        let path = format!("spaces/{slug}/{relative_path}");
+        let path_for_err = path.clone();
+        self.git
+            .update_file(
+                path,
+                move |_, current| {
+                    let current = current.ok_or_else(|| {
+                        crate::LibraryError::Validation(format!(
+                            "str_replace: file does not exist: {path_for_err}"
+                        ))
+                    })?;
+                    let current_str = std::str::from_utf8(current).map_err(|e| {
+                        crate::LibraryError::Validation(format!(
+                            "str_replace: non-utf8 content in {path_for_err}: {e}"
+                        ))
+                    })?;
+                    let count = current_str.matches(&old_str).count();
+                    if count == 0 {
+                        return Err(crate::LibraryError::Validation(format!(
+                            "str_replace: old_str not found in {path_for_err}"
+                        )));
+                    }
+                    if count > 1 {
+                        return Err(crate::LibraryError::Validation(format!(
+                            "str_replace: old_str appears {count} times in {path_for_err}; must be unique"
+                        )));
+                    }
+                    let new_content = current_str.replacen(&old_str, &new_str, 1);
+                    Ok((None, Some(new_content.into_bytes())))
+                },
+                format!("space:{slug}: edit {relative_path}"),
+            )
+            .await
+            .map_err(|e| match e {
+                crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
+                other => SpaceError::Git(other.to_string()),
+            })
+    }
+
+    /// Read–modify–write insert. `line_number == 0` inserts at the
+    /// beginning; out-of-range numbers append at EOF.
+    #[tracing::instrument(name = "library.spaces.insert", skip_all, fields(%slug, %relative_path))]
+    pub async fn insert(
+        &self,
+        slug: &str,
+        relative_path: &str,
+        line_number: usize,
+        text: String,
+    ) -> Result<(), SpaceError> {
+        let path = format!("spaces/{slug}/{relative_path}");
+        let path_for_err = path.clone();
+        self.git
+            .update_file(
+                path,
+                move |_, current| {
+                    let current = current.ok_or_else(|| {
+                        crate::LibraryError::Validation(format!(
+                            "insert: file does not exist: {path_for_err}"
+                        ))
+                    })?;
+                    let current_str = std::str::from_utf8(current).map_err(|e| {
+                        crate::LibraryError::Validation(format!(
+                            "insert: non-utf8 content in {path_for_err}: {e}"
+                        ))
+                    })?;
+                    let mut lines: Vec<String> = current_str.lines().map(String::from).collect();
+                    let idx = line_number.min(lines.len());
+                    for (offset, t) in text.lines().enumerate() {
+                        lines.insert(idx + offset, t.to_string());
+                    }
+                    let mut new_content = lines.join("\n");
+                    if current_str.ends_with('\n') {
+                        new_content.push('\n');
+                    }
+                    Ok((None, Some(new_content.into_bytes())))
+                },
+                format!("space:{slug}: insert {relative_path}"),
+            )
+            .await
+            .map_err(|e| match e {
+                crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
+                other => SpaceError::Git(other.to_string()),
+            })
+    }
+
+    /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
+    /// `from` is missing or `to` already exists.
+    #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to))]
+    pub async fn move_file(&self, slug: &str, from: &str, to: &str) -> Result<(), SpaceError> {
+        let from_path = format!("spaces/{slug}/{from}");
+        let to_path = format!("spaces/{slug}/{to}");
+        self.git
+            .move_file(
+                from_path,
+                to_path,
+                format!("space:{slug}: move {from} -> {to}"),
+            )
+            .await
+            .map_err(|e| match e {
+                crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
+                other => SpaceError::Git(other.to_string()),
+            })
     }
 }
 

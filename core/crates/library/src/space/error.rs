@@ -20,6 +20,8 @@ pub enum SpaceError {
     MissingField(String),
     #[error("SpaceError - Git: {0}")]
     Git(String),
+    #[error("SpaceError - Validation: {0}")]
+    Validation(String),
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {
