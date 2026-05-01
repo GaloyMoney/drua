@@ -74,6 +74,12 @@ impl JobRunner for LibrarySyncRunner {
                             if state.last_processed_head.as_deref() == Some(tick.head.as_str()) {
                                 continue;
                             }
+                            // @@ loop all changed files in the commits since last and tick
+                            // and execute the importer needed
+                            //
+                            // if the return value is Some(searchable_field)
+                            // call self.search.upsert_in_op
+                            // op.
                             tracing::debug!(head = %tick.head, "library.sync: processing tick");
                             state.last_processed_head = Some(tick.head.clone());
                             current_job.update_execution_state(state.clone()).await?;

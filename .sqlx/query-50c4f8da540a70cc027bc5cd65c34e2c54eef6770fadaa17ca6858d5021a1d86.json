@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO library_documents\n                   (doc_id, doc_type, scope_id, scope_slug, name, path, content)\n               VALUES ($1, $2, $3, $4, $5, $6, $7)\n               ON CONFLICT (doc_id, doc_type) DO UPDATE SET\n                   scope_id   = EXCLUDED.scope_id,\n                   scope_slug = EXCLUDED.scope_slug,\n                   name       = EXCLUDED.name,\n                   path       = EXCLUDED.path,\n                   content    = EXCLUDED.content",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "50c4f8da540a70cc027bc5cd65c34e2c54eef6770fadaa17ca6858d5021a1d86"
+}

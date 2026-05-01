@@ -3,6 +3,7 @@ mod error;
 mod git;
 mod job;
 pub mod primitives;
+mod search;
 pub mod space;
 
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use tokio::sync::mpsc;
 pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
+pub use search::{SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
 
 use self::git::GitEngine;
@@ -26,6 +28,7 @@ pub struct Library {
     embedder: Arc<code_assistant_core::embedder::Embedder>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     git: Arc<GitEngine>,
+    search: SearchStore,
     _fetcher: tokio::task::JoinHandle<()>,
 }
 
@@ -47,6 +50,7 @@ impl Library {
             Duration::from_millis(config.fetch_interval_ms),
         );
 
+        // @@ pass a collection of dyn LibraryImporter
         let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(tick_rx));
         spawner
             .spawn_unique(::job::JobId::new(), LibrarySyncConfig::default())
@@ -62,6 +66,7 @@ impl Library {
             embedder,
             github_app,
             git,
+            search: SearchStore::new(pool),
             _fetcher: fetcher,
         })
     }

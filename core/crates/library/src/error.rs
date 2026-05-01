@@ -8,4 +8,6 @@ pub enum LibraryError {
     Io(String),
     #[error("job: {0}")]
     Job(#[from] job::error::JobError),
+    #[error("sqlx: {0}")]
+    Sqlx(#[from] sqlx::Error),
 }
