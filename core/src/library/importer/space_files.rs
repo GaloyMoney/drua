@@ -89,22 +89,19 @@ impl LibraryImporter for SpaceFilesImporter {
         };
         let doc_id = doc_id_for(space.id, rel_path);
 
+        let fields = SearchableFields {
+            doc_id,
+            doc_type: DocType::SpaceFile,
+            project_id: uuid::Uuid::nil(),
+            title: file.title.clone(),
+            body: file.body.clone(),
+            tags: Vec::new(),
+        };
+
         let upserted = self
             .library
             .search_store()
-            .upsert_space_file_if_changed(
-                &SearchableFields {
-                    doc_id,
-                    doc_type: DocType::SpaceFile,
-                    project_id: uuid::Uuid::nil(),
-                    title: file.title.clone(),
-                    body: file.body.clone(),
-                    tags: Vec::new(),
-                },
-                space.id,
-                rel_path,
-                &hash,
-            )
+            .upsert_space_file_if_changed(&fields, space.id, rel_path, &hash)
             .await?;
         if !upserted {
             tracing::debug!(%slug, %rel_path, "space file unchanged, skipping");
@@ -112,7 +109,7 @@ impl LibraryImporter for SpaceFilesImporter {
         }
 
         // Embedding is best-effort; FTS works without it.
-        let text = format!("{}\n\n{}", file.title, file.body);
+        let text = fields.text_for_embedding();
         match self.library.embedder().embed_document(&text).await {
             Ok(emb) => {
                 if let Err(e) = self

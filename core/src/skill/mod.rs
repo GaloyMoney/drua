@@ -413,7 +413,7 @@ fn extract_skill_body(rendered: &str) -> Option<String> {
 
 impl crate::library::LibraryImporter for Skills {
     fn matches(&self, path: &str) -> bool {
-        crate::library::matches_runtime_subdir(path, "skills", "md")
+        crate::library::matches_runtime_subdir(path, DocType::Skill)
     }
 
     fn doc_type(&self) -> DocType {
@@ -485,17 +485,6 @@ impl crate::library::LibraryImporter for Skills {
             tracing::info!(id = %doc_id, name = %name, "created skill from library");
         }
         self.register_context_bump(op, project_id);
-        Ok(())
-    }
-
-    // TODO: implement entity deletion when service supports delete-by-id-prefix.
-    // Today's typed runner has no delete handling either, so we preserve parity.
-    async fn delete_in_op(
-        &self,
-        _op: &mut es_entity::DbOp<'_>,
-        path: &str,
-    ) -> Result<(), crate::library::UpsertError> {
-        tracing::warn!(path, "skill delete from library not yet supported");
         Ok(())
     }
 }

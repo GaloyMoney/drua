@@ -114,20 +114,22 @@ impl Library {
         jobs: &mut ::job::Jobs,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
-        let upstream = Upstream::init(
-            config.repo_url.as_deref(),
-            config.repo_path(),
-            github_app.clone(),
-        )
-        .await?;
-        let git = Arc::new(
+        // Two independent clones of the same remote (working tree
+        // for the write path, bare for the read path); run in parallel
+        // so cold-start pays one network round-trip, not two.
+        let (upstream, git) = tokio::try_join!(
+            Upstream::init(
+                config.repo_url.as_deref(),
+                config.repo_path(),
+                github_app.clone(),
+            ),
             git::GitEngine::init(
                 config.repo_url.as_deref(),
                 config.git_engine_path(),
-                github_app,
-            )
-            .await?,
-        );
+                github_app.clone(),
+            ),
+        )?;
+        let git = Arc::new(git);
         let search = SearchStore::new(pool);
 
         let write_init = WriteToRuntimeJobInitializer::new(upstream.clone());

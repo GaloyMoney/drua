@@ -174,17 +174,32 @@ pub trait LibraryImporter: Send + Sync + 'static {
         file_hash: GitFileHash,
     ) -> impl std::future::Future<Output = Result<(), UpsertError>> + Send;
 
+    /// Default: warn-and-skip. Importers whose service supports
+    /// delete-by-path should override.
     fn delete_in_op(
         &self,
-        op: &mut es_entity::DbOp<'_>,
+        _op: &mut es_entity::DbOp<'_>,
         path: &str,
-    ) -> impl std::future::Future<Output = Result<(), UpsertError>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), UpsertError>> + Send {
+        let doc_type = self.doc_type();
+        let path = path.to_string();
+        async move {
+            tracing::warn!(
+                path,
+                doc_type = doc_type.as_str(),
+                "delete from library not yet supported"
+            );
+            Ok(())
+        }
+    }
 }
 
-/// `runtime/{subdir}/<file>.{ext}` (global) or
-/// `runtime/projects/*/{subdir}/<file>.{ext}` (project-scoped).
-pub fn matches_runtime_subdir(path: &str, subdir: &str, ext: &str) -> bool {
-    let dot_ext = format!(".{ext}");
+/// True if `path` is `runtime/{subdir}/<file>.{ext}` (global) or
+/// `runtime/projects/*/{subdir}/<file>.{ext}` (project-scoped) for the
+/// given doc type's subdir + extension.
+pub fn matches_runtime_subdir(path: &str, doc_type: DocType) -> bool {
+    let subdir = doc_type.subdir();
+    let dot_ext = format!(".{}", doc_type.ext());
     if !path.ends_with(&dot_ext) {
         return false;
     }

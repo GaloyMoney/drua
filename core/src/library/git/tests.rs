@@ -60,7 +60,7 @@ fn origin_url(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_origin_init_succeeds_head_none() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");
@@ -73,7 +73,7 @@ async fn empty_origin_init_succeeds_head_none() {
     assert!(engine.head().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fetch_advances_head() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");
@@ -90,7 +90,7 @@ async fn fetch_advances_head() {
     assert_eq!(head.0, c1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tree_diff_reports_added_modified_deleted() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");
@@ -146,7 +146,7 @@ async fn tree_diff_reports_added_modified_deleted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tree_diff_from_none_lists_all_as_upserted() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");
@@ -182,7 +182,7 @@ async fn tree_diff_from_none_lists_all_as_upserted() {
         .all(|d| matches!(d, Delta::Upserted { .. })));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_blob_returns_bytes_and_none() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");
@@ -210,7 +210,7 @@ async fn read_blob_returns_bytes_and_none() {
     assert!(missing.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nested_directory_paths_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");
@@ -253,7 +253,7 @@ async fn nested_directory_paths_round_trip() {
     assert_eq!(bytes, b"v2");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_fetch_no_change() {
     let tmp = tempfile::tempdir().unwrap();
     let origin_path = tmp.path().join("origin.git");

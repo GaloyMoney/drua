@@ -41,7 +41,7 @@ pub struct Workflows {
 
 impl crate::library::LibraryImporter for Workflows {
     fn matches(&self, path: &str) -> bool {
-        crate::library::matches_runtime_subdir(path, "workflows", "yml")
+        crate::library::matches_runtime_subdir(path, crate::library::DocType::Workflow)
     }
 
     fn doc_type(&self) -> crate::library::DocType {
@@ -164,17 +164,6 @@ impl crate::library::LibraryImporter for Workflows {
             self.repo.create_in_op(op, new).await?;
             tracing::info!(id = %doc_id, name = %name, "created workflow from library");
         }
-        Ok(())
-    }
-
-    // TODO: implement entity deletion when service supports delete-by-id-prefix.
-    // Today's typed runner has no delete handling either, so we preserve parity.
-    async fn delete_in_op(
-        &self,
-        _op: &mut es_entity::DbOp<'_>,
-        path: &str,
-    ) -> Result<(), crate::library::UpsertError> {
-        tracing::warn!(path, "workflow delete from library not yet supported");
         Ok(())
     }
 }

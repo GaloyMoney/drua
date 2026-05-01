@@ -38,22 +38,12 @@ pub enum Delta {
     Deleted { path: String },
 }
 
-/// Drop signals shutdown by closing the command channel; the blocking
-/// actor task can't be aborted, but exits when its receiver returns None.
-struct ActorHandle(Option<JoinHandle<()>>);
-
-impl Drop for ActorHandle {
-    fn drop(&mut self) {
-        // spawn_blocking JoinHandles can't be aborted; channel-close drives
-        // shutdown. Keep the handle owned so it doesn't leak the future,
-        // then detach.
-        let _ = self.0.take();
-    }
-}
-
 pub struct GitEngine {
     cmds: mpsc::Sender<actor::UpstreamCmd>,
-    _handle: ActorHandle,
+    // spawn_blocking handles can't be aborted; shutdown is driven by
+    // the actor observing rx.blocking_recv() == None when the sender
+    // here drops. The handle is owned only so the task isn't detached.
+    _handle: JoinHandle<()>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
 }
 
@@ -73,7 +63,7 @@ impl GitEngine {
 
         Ok(Self {
             cmds: tx,
-            _handle: ActorHandle(Some(handle)),
+            _handle: handle,
             github_app,
         })
     }
