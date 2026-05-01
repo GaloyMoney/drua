@@ -1,6 +1,8 @@
 mod error;
 mod file;
-#[allow(dead_code)] // Wired up in subsequent commits.
+// Wired into Library here but unused at runtime until the unified sync
+// runner lands; the dead-code allow lifts in that commit.
+#[allow(dead_code)]
 mod git;
 mod inbox;
 mod job;
@@ -74,6 +76,13 @@ impl LibraryConfig {
             None => std::path::PathBuf::from(".library"),
         }
     }
+
+    pub fn git_engine_path(&self) -> std::path::PathBuf {
+        match &self.data_dir {
+            Some(d) => std::path::PathBuf::from(d).join("git"),
+            None => std::path::PathBuf::from(".library").join("git"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -82,6 +91,7 @@ pub struct Library {
     inbox: obix::Inbox,
     embedder: Arc<code_assistant_core::embedder::Embedder>,
     upstream: Upstream,
+    git: Arc<git::GitEngine>,
     space_repo: SpaceRepo,
     repo_url: Option<String>,
     /// Direct handle to the `WriteToRuntime` spawner so `create_space`
@@ -102,8 +112,20 @@ impl Library {
         jobs: &mut ::job::Jobs,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
-        let upstream =
-            Upstream::init(config.repo_url.as_deref(), config.repo_path(), github_app).await?;
+        let upstream = Upstream::init(
+            config.repo_url.as_deref(),
+            config.repo_path(),
+            github_app.clone(),
+        )
+        .await?;
+        let git = Arc::new(
+            git::GitEngine::init(
+                config.repo_url.as_deref(),
+                config.git_engine_path(),
+                github_app,
+            )
+            .await?,
+        );
         let search = SearchStore::new(pool);
 
         let write_init = WriteToRuntimeJobInitializer::new(upstream.clone());
@@ -119,6 +141,7 @@ impl Library {
             inbox,
             embedder,
             upstream,
+            git,
             space_repo: SpaceRepo::new(pool),
             repo_url: config.repo_url.clone(),
             write_spawner,
@@ -374,6 +397,11 @@ impl Library {
 
     pub(in crate::library) fn upstream(&self) -> &Upstream {
         &self.upstream
+    }
+
+    #[allow(dead_code)] // Used by the unified sync runner (next commit).
+    pub(in crate::library) fn git(&self) -> &git::GitEngine {
+        &self.git
     }
 
     /// No-auth slug → `Space` lookup used by the file-sync job to

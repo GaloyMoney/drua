@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
@@ -64,7 +64,6 @@ impl Drop for ActorHandle {
 pub struct GitEngine {
     cmds: mpsc::Sender<actor::UpstreamCmd>,
     _handle: ActorHandle,
-    repo_path: PathBuf,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
 }
 
@@ -77,8 +76,7 @@ impl GitEngine {
     ) -> Result<Self, LibraryError> {
         let token = fresh_token(&github_app).await;
         let url = repo_url.map(String::from);
-        let path_for_init = repo_path.clone();
-        let repo = actor::ensure_repo(path_for_init, url, token).await?;
+        let repo = actor::ensure_repo(repo_path, url, token).await?;
 
         let (tx, rx) = mpsc::channel(64);
         let handle = tokio::task::spawn_blocking(move || actor::run(repo, rx));
@@ -86,7 +84,6 @@ impl GitEngine {
         Ok(Self {
             cmds: tx,
             _handle: ActorHandle(Some(handle)),
-            repo_path,
             github_app,
         })
     }
@@ -137,10 +134,6 @@ impl GitEngine {
         })
         .await?;
         recv(rx).await
-    }
-
-    pub fn repo_path(&self) -> &Path {
-        &self.repo_path
     }
 
     async fn send(&self, cmd: actor::UpstreamCmd) -> Result<(), LibraryError> {
