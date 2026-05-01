@@ -1,5 +1,7 @@
 mod error;
 mod file;
+#[allow(dead_code)] // Wired up in subsequent commits.
+mod git;
 mod inbox;
 mod job;
 mod search;
