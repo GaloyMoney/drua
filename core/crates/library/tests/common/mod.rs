@@ -1,3 +1,7 @@
+// Each integration test file is its own binary; helpers used by some but not
+// all of them otherwise trigger dead_code warnings per-binary.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
