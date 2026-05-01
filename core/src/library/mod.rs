@@ -4,6 +4,8 @@ mod file;
 // runner lands; the dead-code allow lifts in that commit.
 #[allow(dead_code)]
 mod git;
+#[allow(dead_code)] // Wired into the runner registry one commit later.
+pub mod importer;
 mod inbox;
 mod job;
 mod search;

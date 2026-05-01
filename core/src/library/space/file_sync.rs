@@ -29,7 +29,7 @@ const SPACE_FILE_NAMESPACE: Uuid = Uuid::from_u128(0x6c4d339d_2184_4fa9_9f12_6e3
 
 /// Deterministic `doc_id` for a space file. Idempotent re-imports rely
 /// on this: same `(space, path)` always hashes the same UUID.
-pub fn doc_id_for(space_id: SpaceId, relative_path: &str) -> Uuid {
+pub(crate) fn doc_id_for(space_id: SpaceId, relative_path: &str) -> Uuid {
     let key = format!("{}:{relative_path}", uuid::Uuid::from(space_id));
     Uuid::new_v5(&SPACE_FILE_NAMESPACE, key.as_bytes())
 }
