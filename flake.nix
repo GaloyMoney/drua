@@ -44,6 +44,10 @@
           SQLX_OFFLINE = true;
           nativeBuildInputs = [
             pkgs.pkg-config
+            # `git2`'s `vendored-openssl` feature (pulled in by drua-library)
+            # builds OpenSSL from source via `openssl-src`, which shells out
+            # to perl during ./Configure.
+            pkgs.perl
           ];
           buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
