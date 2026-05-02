@@ -78,39 +78,16 @@ impl LibraryImporter for WorkflowsImporter {
             }
         };
 
-        let project_id = project.id;
-        let parsed_for_search = ParsedSearch::from(&parsed);
+        // Always returns Ok(None): see SkillsImporter for the rationale
+        // — the post_persist_hook (LibrarySyncHook) on the workflow
+        // repo is the single source of truth for search+embed when
+        // the entity changes; the importer is just the entity-persist
+        // path.
         self.workflows
-            .import_from_library(op, parsed, project_id)
+            .import_from_library(op, parsed, project.id)
             .await
             .map_err(|e| UpsertError::Other(format!("workflow upsert: {e}")))?;
 
-        Ok(Some(SearchableFields {
-            doc_id: parsed_for_search.doc_id,
-            doc_type: DruaDocType::new("workflow"),
-            scope_id: Some(uuid::Uuid::from(project_id)),
-            scope_slug: parsed_for_search.scope_slug,
-            name: parsed_for_search.name,
-            path: Some(path.to_string()),
-            content: parsed_for_search.content,
-        }))
-    }
-}
-
-struct ParsedSearch {
-    doc_id: uuid::Uuid,
-    scope_slug: Option<String>,
-    name: String,
-    content: String,
-}
-
-impl From<&crate::workflow::yaml::ParsedWorkflow> for ParsedSearch {
-    fn from(p: &crate::workflow::yaml::ParsedWorkflow) -> Self {
-        Self {
-            doc_id: uuid::Uuid::from(p.workflow_id),
-            scope_slug: p.project_name.clone(),
-            name: p.name.clone(),
-            content: p.description.clone().unwrap_or_default(),
-        }
+        Ok(None)
     }
 }

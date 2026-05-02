@@ -62,13 +62,16 @@ impl Workflows {
 
     /// Reverse-sync entry point: persist a `ParsedWorkflow` produced
     /// by the library importer. Creates or updates depending on
-    /// whether the workflow already exists.
+    /// whether the workflow already exists. `Ok(None)` signals
+    /// idempotency — the existing entity's `file_hash` matches the
+    /// incoming bytes, so the caller should skip search re-upsert +
+    /// embed re-spawn.
     pub(crate) async fn import_from_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,
         parsed: yaml::ParsedWorkflow,
         project_id: ProjectId,
-    ) -> Result<WorkflowDefinition, WorkflowError> {
+    ) -> Result<Option<WorkflowDefinition>, WorkflowError> {
         let yaml::ParsedWorkflow {
             workflow_id,
             project_name,
@@ -85,7 +88,7 @@ impl Workflows {
         let file_hash = drua_library::GitFileHash::new(rendered);
 
         if let Some(mut existing) = self.repo.maybe_find_by_id(workflow_id).await? {
-            if existing
+            if !existing
                 .update_from_library(
                     Some(name.clone()),
                     Some(description.clone()),
@@ -96,9 +99,10 @@ impl Workflows {
                 )
                 .did_execute()
             {
-                self.repo.update_in_op(op, &mut existing).await?;
+                return Ok(None);
             }
-            return Ok(existing);
+            self.repo.update_in_op(op, &mut existing).await?;
+            return Ok(Some(existing));
         }
 
         let trigger = match trigger {
@@ -128,7 +132,7 @@ impl Workflows {
         let new = builder
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
-        Ok(self.repo.create_in_op(op, new).await?)
+        Ok(Some(self.repo.create_in_op(op, new).await?))
     }
 
     /// No git sync — for tests.

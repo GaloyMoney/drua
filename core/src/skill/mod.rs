@@ -435,14 +435,16 @@ impl Skills {
 
     /// Reverse-sync entry point: persist a `ParsedSkill` produced by
     /// the library importer. Creates or updates depending on whether
-    /// the skill already exists. Returns the `Skill` so the caller
-    /// (importer) can build a search row from it.
+    /// the skill already exists. `Ok(None)` signals idempotency — the
+    /// existing entity's `file_hash` matches the incoming bytes (i.e.
+    /// the round-trip is hitting a forward-write we already handled),
+    /// so the caller should skip search re-upsert + embed re-spawn.
     pub(crate) async fn import_from_library<OP: AtomicOperation>(
         &self,
         op: &mut OP,
         parsed: ParsedSkill,
         project_id: Option<ProjectId>,
-    ) -> Result<Skill, SkillError> {
+    ) -> Result<Option<Skill>, SkillError> {
         let file_hash = parsed.file_hash();
 
         if let Some(mut existing) = self
@@ -450,7 +452,7 @@ impl Skills {
             .maybe_find_by_id_in_op(&mut *op, parsed.skill_id)
             .await?
         {
-            if existing
+            if !existing
                 .update(
                     Some(parsed.name.clone()),
                     Some(parsed.description.clone()),
@@ -459,10 +461,11 @@ impl Skills {
                 )
                 .did_execute()
             {
-                self.repo.update_in_op(op, &mut existing).await?;
+                return Ok(None);
             }
+            self.repo.update_in_op(op, &mut existing).await?;
             self.register_context_bump(op, project_id);
-            return Ok(existing);
+            return Ok(Some(existing));
         }
 
         let mut builder = NewSkill::builder()
@@ -482,7 +485,7 @@ impl Skills {
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
         let skill = self.repo.create_in_op(op, new).await?;
         self.register_context_bump(op, project_id);
-        Ok(skill)
+        Ok(Some(skill))
     }
 
     /// Constructor without library sync — for tests or contexts where

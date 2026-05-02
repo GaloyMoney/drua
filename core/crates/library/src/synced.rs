@@ -2,7 +2,7 @@ use es_entity::operation::hooks::{CommitHook, HookOperation, PreCommitRet};
 use job::{JobId, JobSpawner};
 
 use crate::importer::DocType;
-use crate::job::{LibraryWriteConfig, WriteOp};
+use crate::job::{LibraryEmbedConfig, LibraryWriteConfig, WriteOp};
 use crate::search::{SearchStore, SearchableFields};
 
 /// Implemented on entity types whose mutations should sync to the
@@ -42,13 +42,20 @@ pub(crate) struct HookEntry {
     pub write_op: Option<WriteOp>,
 }
 
-/// Batches per-transaction library writes: upserts every search row in
-/// the same op, then spawns one [`crate::job::LibraryWriteJobInitializer`]
-/// job per write so the upstream commit is durable past the
-/// transaction (the job is persisted in the same op as the entity, so
-/// the outbox property holds — entity + job land or roll back together).
+/// Batches per-transaction library writes. On the per-transaction
+/// pre-commit:
+/// - upserts every search row in the same op
+/// - spawns one embed job per upserted row so the embedding lands
+///   without waiting for the upstream-commit round-trip (importer
+///   short-circuits on file_hash match to avoid re-embedding the
+///   round-trip's tick)
+/// - spawns one [`crate::job::LibraryWriteJobInitializer`] job per
+///   write so the upstream commit is durable past the transaction
+///   (the job is persisted in the same op as the entity, so the
+///   outbox property holds — entity + job land or roll back together).
 pub(crate) struct LibrarySyncHook {
     write_spawner: JobSpawner<LibraryWriteConfig>,
+    embed_spawner: JobSpawner<LibraryEmbedConfig>,
     search: SearchStore,
     entries: Vec<HookEntry>,
 }
@@ -56,11 +63,13 @@ pub(crate) struct LibrarySyncHook {
 impl LibrarySyncHook {
     pub(crate) fn new(
         write_spawner: JobSpawner<LibraryWriteConfig>,
+        embed_spawner: JobSpawner<LibraryEmbedConfig>,
         search: SearchStore,
         entry: HookEntry,
     ) -> Self {
         Self {
             write_spawner,
+            embed_spawner,
             search,
             entries: vec![entry],
         }
@@ -78,6 +87,17 @@ impl CommitHook for LibrarySyncHook {
                     .upsert_in_op(&mut op, fields)
                     .await
                     .map_err(sqlx_from_library_err)?;
+                let embed_config = LibraryEmbedConfig {
+                    doc_id: fields.doc_id,
+                    doc_type: fields.doc_type.clone(),
+                };
+                if let Err(e) = self
+                    .embed_spawner
+                    .spawn_in_op(&mut op, JobId::new(), embed_config)
+                    .await
+                {
+                    return Err(sqlx::Error::Protocol(format!("library embed spawn: {e}")));
+                }
             }
             for (doc_id, doc_type) in &entry.deletes {
                 self.search

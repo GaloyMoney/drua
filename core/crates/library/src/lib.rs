@@ -27,8 +27,8 @@ pub use synced::LibrarySynced;
 pub use self::git::DirEntry;
 use self::git::GitEngine;
 use self::job::{
-    CommitTick, ImporterRegistry, LibraryEmbedJobInitializer, LibrarySyncConfig,
-    LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
+    CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
+    LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
 };
 use self::synced::{HookEntry, LibrarySyncHook};
 
@@ -44,6 +44,7 @@ pub struct Library {
     spaces: Spaces,
     importers: ImporterRegistry,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
+    embed_spawner: ::job::JobSpawner<LibraryEmbedConfig>,
     /// Fetcher task handle is wrapped in `Arc` so the `Library` itself
     /// can be `Clone` (consumers store it directly rather than via a
     /// further `Arc` wrapper).
@@ -88,7 +89,7 @@ impl Library {
             Arc::clone(&git),
             search.clone(),
             Arc::clone(&importers),
-            embed_spawner,
+            embed_spawner.clone(),
         ));
         spawner
             .spawn_unique(::job::JobId::new(), LibrarySyncConfig::default())
@@ -108,6 +109,7 @@ impl Library {
             spaces,
             importers,
             write_spawner,
+            embed_spawner,
             _fetcher: Arc::new(fetcher),
         })
     }
@@ -290,7 +292,12 @@ impl Library {
         entry: HookEntry,
     ) -> Result<(), LibraryError> {
         use es_entity::operation::hooks::CommitHook as _;
-        let hook = LibrarySyncHook::new(self.write_spawner.clone(), self.search.clone(), entry);
+        let hook = LibrarySyncHook::new(
+            self.write_spawner.clone(),
+            self.embed_spawner.clone(),
+            self.search.clone(),
+            entry,
+        );
         if let Err(hook) = op.add_commit_hook(hook) {
             let _ = hook
                 .force_execute_pre_commit(op)

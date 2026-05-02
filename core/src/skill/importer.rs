@@ -74,21 +74,18 @@ impl LibraryImporter for SkillsImporter {
             None => None,
         };
 
-        let parsed_for_persist = parsed.clone();
-        let skill = self
-            .skills
-            .import_from_library(op, parsed_for_persist, project_id)
+        // Always returns Ok(None): when `import_from_library` persists
+        // the skill, its `post_persist_hook` (LibrarySyncHook) is what
+        // upserts the search row and spawns the embed job. When it
+        // signals idempotency (file_hash unchanged) we want to skip
+        // the hook AND any sync.rs-side re-index. Either way the
+        // importer is just the entity-persist path; the hook owns
+        // search+embed for entity-backed doc types.
+        self.skills
+            .import_from_library(op, parsed, project_id)
             .await
             .map_err(|e| UpsertError::Other(format!("skill upsert: {e}")))?;
 
-        Ok(Some(SearchableFields {
-            doc_id: uuid::Uuid::from(skill.id),
-            doc_type: DruaDocType::new("skill"),
-            scope_id: project_id.map(uuid::Uuid::from),
-            scope_slug: parsed.project_name,
-            name: parsed.name,
-            path: Some(path.to_string()),
-            content: parsed.description,
-        }))
+        Ok(None)
     }
 }
