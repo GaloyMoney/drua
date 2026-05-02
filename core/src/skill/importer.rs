@@ -58,12 +58,12 @@ impl LibraryImporter for SkillsImporter {
             Some(name) => match self.projects.find_by_name(name).await {
                 Ok(Some(project)) => Some(project.id),
                 Ok(None) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         project_name = %name,
                         path,
-                        "skill references unknown project; importing as global"
+                        "skill references unknown project; skipping import"
                     );
-                    None
+                    return Ok(None);
                 }
                 Err(e) => {
                     return Err(UpsertError::Other(format!(

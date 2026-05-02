@@ -1,3 +1,5 @@
+use drua_library::GitFileHash;
+
 use crate::primitives::SkillId;
 
 /// Renders a skill as markdown with frontmatter — the canonical
@@ -37,6 +39,26 @@ pub struct ParsedSkill {
     pub updated_at: String,
     pub original_path: String,
     pub needs_rewrite: bool,
+}
+
+impl ParsedSkill {
+    /// Canonical on-disk form for the parsed skill — must match
+    /// [`crate::skill::Skill::rendered`] byte-for-byte so reverse-sync's
+    /// `GitFileHash` compare against an existing entity short-circuits.
+    pub fn render(&self) -> String {
+        render_skill_markdown(
+            self.skill_id.into(),
+            &self.name,
+            &self.description,
+            &self.body,
+            &self.created_at,
+            &self.updated_at,
+        )
+    }
+
+    pub fn file_hash(&self) -> GitFileHash {
+        GitFileHash::new(self.render())
+    }
 }
 
 /// Handles three formats:

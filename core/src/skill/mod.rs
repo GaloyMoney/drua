@@ -443,14 +443,7 @@ impl Skills {
         parsed: ParsedSkill,
         project_id: Option<ProjectId>,
     ) -> Result<Skill, SkillError> {
-        let file_hash = drua_library::GitFileHash::new(crate::skill::file::render_skill_markdown(
-            uuid::Uuid::from(parsed.skill_id),
-            &parsed.name,
-            &parsed.description,
-            &parsed.body,
-            &parsed.created_at,
-            &parsed.updated_at,
-        ));
+        let file_hash = parsed.file_hash();
 
         if let Some(mut existing) = self
             .repo
