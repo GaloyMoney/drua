@@ -23,7 +23,7 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{FileView, SpaceFs};
+use crate::space_fs::{FileView, SpaceFs};
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 

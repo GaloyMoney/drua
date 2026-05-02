@@ -1,16 +1,14 @@
 mod error;
-pub mod space_fs;
-pub(crate) mod space_path;
 
 use std::sync::Arc;
 
 use es_entity::AtomicOperation;
 
 pub use drua_library::{
-    GitFileHash, NewSpace, SearchableFields, Space, SpaceError, SpaceEvent, WriteOp,
+    DirEntry, GitFileHash, NewSpace, SearchableFields, Space, SpaceError, SpaceEvent, Spaces,
+    WriteOp,
 };
 pub use error::LibraryError;
-pub use space_fs::{FileView, SpaceFs};
 
 use crate::github_app::GitHubAppTokenProvider;
 
@@ -453,11 +451,7 @@ impl Library {
             crate::auth::AuthResource::Space(None),
         )?;
         crate::audit::Audit::record_action_if_unset("space.create");
-        let space = self
-            .inner
-            .spaces()
-            .create(slug.into(), description)
-            .await?;
+        let space = self.inner.spaces().create(slug.into(), description).await?;
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
         Ok(space)
     }
@@ -477,8 +471,12 @@ impl Library {
         Ok(self.inner.spaces().list_all().await?)
     }
 
-    pub fn space_root(&self, slug: &str) -> std::path::PathBuf {
-        self.inner.repo_path().join("spaces").join(slug)
+    /// Direct accessor to the underlying drua_library `Spaces` service.
+    /// Use for read/write/list/walk against spaces — the proxy methods
+    /// previously hung on `Library` have moved here so SpaceFs can wrap
+    /// `Spaces` directly without going through the library wrapper.
+    pub fn spaces(&self) -> &Spaces {
+        self.inner.spaces()
     }
 
     #[tracing::instrument(name = "library.find_space_by_slug", skip(self))]
@@ -497,83 +495,6 @@ impl Library {
         Ok(self.inner.spaces().find_by_ids(ids).await?)
     }
 
-    /// Trusted-caller — `SpaceFs::write` is the public boundary;
-    /// mount-membership authz lives in `Projects`.
-    #[tracing::instrument(name = "library.write_space_file", skip(self, space, content), fields(slug = %space.slug))]
-    pub(in crate::library) async fn write_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-        content: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.write_file");
-        self.inner
-            .spaces()
-            .write_file(&space.slug, &relative_path, content)
-            .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "library.delete_space_file", skip(self, space), fields(slug = %space.slug))]
-    pub(in crate::library) async fn delete_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.delete_file");
-        self.inner
-            .spaces()
-            .delete_file(&space.slug, &relative_path)
-            .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "library.str_replace_space_file", skip(self, space, old_str, new_str), fields(slug = %space.slug))]
-    pub(in crate::library) async fn str_replace_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-        old_str: String,
-        new_str: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.str_replace");
-        self.inner
-            .spaces()
-            .str_replace(&space.slug, &relative_path, old_str, new_str)
-            .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "library.insert_space_file", skip(self, space, text), fields(slug = %space.slug))]
-    pub(in crate::library) async fn insert_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-        line_number: usize,
-        text: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.insert");
-        self.inner
-            .spaces()
-            .insert(&space.slug, &relative_path, line_number, text)
-            .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "library.move_space_file", skip(self, space), fields(slug = %space.slug))]
-    pub(in crate::library) async fn move_space_file(
-        &self,
-        space: &Space,
-        from_relative_path: String,
-        to_relative_path: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.move_file");
-        self.inner
-            .spaces()
-            .move_file(&space.slug, &from_relative_path, &to_relative_path)
-            .await?;
-        Ok(())
-    }
 
     #[tracing::instrument(name = "library.search", skip(self))]
     pub async fn search(
@@ -642,7 +563,10 @@ impl Library {
         }
         crate::audit::Audit::record_action_if_unset("library.get_files");
         let rows = self.inner.search().find_by_ids(ids).await?;
-        Ok(rows.into_iter().filter_map(fields_to_library_file).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(fields_to_library_file)
+            .collect())
     }
 
     /// Append a custom `LibraryImporter` (skills, workflows, …). Called

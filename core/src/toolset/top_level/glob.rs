@@ -13,7 +13,7 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::SpaceFs;
+use crate::space_fs::SpaceFs;
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;

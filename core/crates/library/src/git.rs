@@ -11,6 +11,13 @@ pub enum DeltaKind {
     Deleted,
 }
 
+/// One immediate child of a tree at HEAD. Returned by `list_dir_at_head`.
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitDelta {
     pub path: String,
@@ -73,8 +80,8 @@ impl GitEngine {
         let to = to.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<CommitDelta>, LibraryError> {
-            let repo = git2::Repository::open(&path)
-                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
             let to_oid = git2::Oid::from_str(&to)
                 .map_err(|e| LibraryError::Git(format!("parse to oid: {e}")))?;
@@ -137,6 +144,133 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("changes_since join: {e}")))?
     }
 
+    /// Read the blob at `path` from HEAD's tree. `Ok(None)` when the
+    /// path doesn't exist (or HEAD is unborn).
+    #[tracing::instrument(name = "library.git.read_blob_at_head", skip_all, fields(%path))]
+    pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let Ok(head) = repo.head() else {
+                return Ok(None);
+            };
+            let tree = head
+                .peel_to_commit()
+                .and_then(|c| c.tree())
+                .map_err(|e| LibraryError::Git(format!("peel head tree: {e}")))?;
+            Self::read_blob_at(&repo, &tree, &path)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("read_blob_at_head join: {e}")))?
+    }
+
+    /// Lists immediate children of `dir_path` at HEAD's tree.
+    /// `Ok(None)` when the directory doesn't exist (or HEAD is unborn).
+    /// Empty `dir_path` lists the repo root.
+    #[tracing::instrument(name = "library.git.list_dir_at_head", skip_all, fields(%dir_path))]
+    pub async fn list_dir_at_head(
+        &self,
+        dir_path: &str,
+    ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let dir_path = dir_path.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Vec<DirEntry>>, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let Ok(head) = repo.head() else {
+                return Ok(None);
+            };
+            let root = head
+                .peel_to_commit()
+                .and_then(|c| c.tree())
+                .map_err(|e| LibraryError::Git(format!("peel head tree: {e}")))?;
+            let tree = if dir_path.is_empty() {
+                root
+            } else {
+                let entry = match root.get_path(Path::new(&dir_path)) {
+                    Ok(e) => e,
+                    Err(_) => return Ok(None),
+                };
+                if entry.kind() != Some(git2::ObjectType::Tree) {
+                    return Ok(None);
+                }
+                repo.find_tree(entry.id())
+                    .map_err(|e| LibraryError::Git(format!("find subtree: {e}")))?
+            };
+            let mut out = Vec::with_capacity(tree.iter().count());
+            for entry in tree.iter() {
+                let Some(name) = entry.name() else { continue };
+                out.push(DirEntry {
+                    name: name.to_string(),
+                    is_dir: entry.kind() == Some(git2::ObjectType::Tree),
+                });
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(Some(out))
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("list_dir_at_head join: {e}")))?
+    }
+
+    /// Recursively walk every blob under `dir_path` at HEAD's tree.
+    /// Returns `(absolute_path, content)` pairs (paths relative to the
+    /// repo root). Empty `dir_path` walks the entire tree.
+    #[tracing::instrument(name = "library.git.walk_blobs_at_head", skip_all, fields(%dir_path))]
+    pub async fn walk_blobs_at_head(
+        &self,
+        dir_path: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let dir_path = dir_path.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let Ok(head) = repo.head() else {
+                return Ok(Vec::new());
+            };
+            let root = head
+                .peel_to_commit()
+                .and_then(|c| c.tree())
+                .map_err(|e| LibraryError::Git(format!("peel head tree: {e}")))?;
+            let (subtree, prefix) = if dir_path.is_empty() {
+                (root, String::new())
+            } else {
+                let entry = match root.get_path(Path::new(&dir_path)) {
+                    Ok(e) => e,
+                    Err(_) => return Ok(Vec::new()),
+                };
+                if entry.kind() != Some(git2::ObjectType::Tree) {
+                    return Ok(Vec::new());
+                }
+                let t = repo
+                    .find_tree(entry.id())
+                    .map_err(|e| LibraryError::Git(format!("find subtree: {e}")))?;
+                (t, format!("{dir_path}/"))
+            };
+            let mut out = Vec::new();
+            subtree
+                .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+                    if entry.kind() != Some(git2::ObjectType::Blob) {
+                        return git2::TreeWalkResult::Ok;
+                    }
+                    let Some(name) = entry.name() else {
+                        return git2::TreeWalkResult::Ok;
+                    };
+                    let rel = format!("{prefix}{dir}{name}");
+                    if let Ok(blob) = repo.find_blob(entry.id()) {
+                        out.push((rel, blob.content().to_vec()));
+                    }
+                    git2::TreeWalkResult::Ok
+                })
+                .map_err(|e| LibraryError::Git(format!("tree walk: {e}")))?;
+            Ok(out)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("walk_blobs_at_head join: {e}")))?
+    }
+
     #[tracing::instrument(name = "library.git.fetch_and_head", skip_all)]
     pub async fn fetch_and_head(&self) -> Result<Option<String>, LibraryError> {
         let _guard = self.write_lock.lock().await;
@@ -144,14 +278,9 @@ impl GitEngine {
         let path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
-            let repo = git2::Repository::open(&path)
-                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
             Self::fetch_origin(&repo, token.as_deref())?;
-            // Working tree mirrors HEAD so externally-pushed commits
-            // are visible to SpaceFs reads on the next tick.
-            if repo.head().is_ok() {
-                Self::checkout_head(&repo)?;
-            }
             let head = match repo.head() {
                 Ok(r) => r.target().map(|oid| oid.to_string()),
                 Err(_) => None,
@@ -191,8 +320,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -302,8 +431,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -390,8 +519,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -475,8 +604,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -679,10 +808,7 @@ impl GitEngine {
         po.remote_callbacks(Self::remote_callbacks(token));
         remote
             .push(&["refs/heads/main:refs/heads/main"], Some(&mut po))
-            .map_err(|e| LibraryError::Git(format!("push: {e}")))?;
-        // Working tree stale after tree-builder commit — sync to HEAD so
-        // SpaceFs's filesystem reads see the new content.
-        Self::checkout_head(repo)
+            .map_err(|e| LibraryError::Git(format!("push: {e}")))
     }
 
     fn reset_main_to_origin(repo: &git2::Repository) -> Result<(), LibraryError> {
@@ -713,10 +839,9 @@ impl GitEngine {
         path: &Path,
         token: Option<&str>,
     ) -> Result<git2::Repository, LibraryError> {
-        if let Ok(repo) = git2::Repository::open(path) {
+        if let Ok(repo) = git2::Repository::open_bare(path) {
             Self::fetch_origin(&repo, token)?;
             Self::reset_main_to_origin(&repo)?;
-            Self::checkout_head(&repo)?;
             return Ok(repo);
         }
 
@@ -735,18 +860,10 @@ impl GitEngine {
         fo.remote_callbacks(Self::remote_callbacks(token));
 
         git2::build::RepoBuilder::new()
+            .bare(true)
             .fetch_options(fo)
             .clone(url, path)
-            .map_err(|e| LibraryError::Git(format!("clone: {e}")))
-    }
-
-    /// Force checkout HEAD into the working tree. Called after every
-    /// commit/fetch/reset so the on-disk files always match HEAD.
-    fn checkout_head(repo: &git2::Repository) -> Result<(), LibraryError> {
-        let mut opts = git2::build::CheckoutBuilder::new();
-        opts.force();
-        repo.checkout_head(Some(&mut opts))
-            .map_err(|e| LibraryError::Git(format!("checkout head: {e}")))
+            .map_err(|e| LibraryError::Git(format!("clone bare: {e}")))
     }
 
     fn fetch_origin(repo: &git2::Repository, token: Option<&str>) -> Result<(), LibraryError> {

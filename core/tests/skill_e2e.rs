@@ -1,18 +1,32 @@
 #![recursion_limit = "256"]
-//! End-to-end test for the skill forward-sync pipeline:
-//! Skills::create → SkillRepo post_persist_hook → Library::sync_entity_in_op
-//! → drua_library projection (SearchableFields + WriteOp) → search row in
-//! pre_commit hook → search index hit + git commit pushed upstream.
+//! End-to-end test of the skill forward-sync pipeline through the
+//! full `App` stack. Exercises:
+//!   App::init
+//!     → Projects::create        (project row + project_lead agent +
+//!                                runtime/projects/<name>/.gitkeep batch)
+//!     → Skills::create          (skill row)
+//!         → SkillRepo post_persist_hook = sync_to_library
+//!             → Library::sync_entity_in_op
+//!                 → drua_library: search row in pre_commit hook +
+//!                                LibraryWriteJob spawned
+//!                     → upstream commit + push
+//!
+//! Asserts:
+//!   1. `library.search(...)` returns the new skill immediately after
+//!      `Skills::create` returns (search row is written synchronously
+//!      in the commit hook).
+//!   2. The canonical markdown file lands in the bare upstream's HEAD
+//!      tree within a generous timeout (write job is async).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use drua_core::library::{DocType, Library, LibraryConfig};
-use drua_core::primitives::{AuthSubject, ContextGeneration, ProjectId, UserId};
-use drua_core::sandbox::{SandboxConfig, Sandboxes};
-use drua_core::skill::Skills;
+use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
+use drua_core::library::{DocType, LibraryConfig};
+use drua_core::primitives::{AuthSubject, UserId};
+use drua_core::{App, AppConfig};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
@@ -52,7 +66,8 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {cwd:?}");
 }
 
-/// Bare upstream — Library clones from this and pushes back to it.
+/// Bare upstream seeded with an initial commit so libgit2's first
+/// fetch finds a HEAD ref.
 fn init_bare_upstream() -> PathBuf {
     let upstream = fresh_dir("upstream").with_extension("git");
     std::fs::create_dir_all(&upstream).expect("create upstream");
@@ -61,8 +76,6 @@ fn init_bare_upstream() -> PathBuf {
         &["init", "--bare", "--quiet", "--initial-branch=main"],
     );
 
-    // Seed with an initial commit so the bare repo has a HEAD; otherwise
-    // libgit2's initial fetch finds no refs.
     let work = fresh_dir("seed");
     std::fs::create_dir_all(&work).expect("create work");
     git(&work, &["init", "--quiet", "--initial-branch=main"]);
@@ -81,20 +94,55 @@ fn init_bare_upstream() -> PathBuf {
 }
 
 async fn reset_db(pool: &sqlx::PgPool) {
-    for q in [
-        "DELETE FROM job_executions",
-        "DELETE FROM job_events",
-        "DELETE FROM jobs",
-        "DELETE FROM library_documents",
-        "DELETE FROM skill_events",
-        "DELETE FROM skills",
-        "DELETE FROM space_events",
-        "DELETE FROM spaces",
-    ] {
-        sqlx::query(q)
-            .execute(pool)
-            .await
-            .unwrap_or_else(|e| panic!("{q} failed: {e}"));
+    // CASCADE so we don't have to enumerate FK order; RESTART IDENTITY
+    // for cleanliness. The list covers everything App::init touches.
+    let stmt = "TRUNCATE TABLE \
+            jobs, job_events, job_executions, \
+            library_documents, \
+            skills, skill_events, \
+            spaces, space_events, \
+            session_threads, session_thread_events, \
+            agent_sessions, agent_session_events, \
+            agents, agent_events, \
+            projects, project_events \
+        RESTART IDENTITY CASCADE";
+    sqlx::query(stmt)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("reset_db failed: {e}"));
+}
+
+/// Minimal `AgentsConfig` satisfying `validate()` — `App::init`
+/// requires `ProjectLead` + `Agent` roles and a matching model entry.
+fn agents_config_for_tests() -> AgentsConfig {
+    let model = "test-model".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            model: model.clone(),
+            compaction: Default::default(),
+        },
+    );
+    builtin_roles.insert(
+        AgentRole::Agent,
+        RoleConfig {
+            model: model.clone(),
+            compaction: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    models.insert(
+        model.clone(),
+        ModelDefaults {
+            model,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+        },
+    );
+    AgentsConfig {
+        builtin_roles,
+        models,
     }
 }
 
@@ -107,55 +155,38 @@ async fn skill_create_propagates_to_search_and_upstream() {
     let upstream = init_bare_upstream();
     let data_dir = fresh_dir("library-data");
 
-    let embedder = Arc::new(
-        code_assistant_core::embedder::Embedder::new().expect("embedder init"),
-    );
-
-    let job_config = job::JobSvcConfig::builder()
-        .pool(pool.clone())
-        .build()
-        .expect("job config");
-    let mut jobs = job::Jobs::init(job_config).await.expect("jobs init");
-
-    let library_config = LibraryConfig {
-        data_dir: Some(data_dir.to_string_lossy().into_owned()),
-        repo_url: Some(upstream.to_string_lossy().into_owned()),
-        skill_sync_interval_secs: 1,
+    let config = AppConfig {
+        agents: agents_config_for_tests(),
+        library: LibraryConfig {
+            data_dir: Some(data_dir.to_string_lossy().into_owned()),
+            repo_url: Some(upstream.to_string_lossy().into_owned()),
+            // 1s is plenty short for the test; the forward-sync hook
+            // doesn't depend on the fetch tick — only the inbound
+            // (reverse) sync would.
+            skill_sync_interval_secs: 1,
+        },
+        ..Default::default()
     };
-    let library = Library::init(&library_config, &pool, embedder.clone(), &mut jobs, None)
-        .await
-        .expect("library init");
-
-    let sandboxes = Arc::new(
-        Sandboxes::init(&pool, SandboxConfig::default(), None)
-            .await
-            .expect("init sandboxes"),
-    );
-    let skills = Skills::new(
-        &pool,
-        Arc::clone(&sandboxes),
-        library.clone(),
-        ContextGeneration::new(),
-    );
-
-    jobs.start_poll().await.expect("start poll");
+    let app = App::init(&pool, config).await.expect("App::init");
 
     let sub = AuthSubject::User(UserId::new());
-    let project_id = ProjectId::new();
-    let project_name = "alpha";
-    // Skills.project_id has a FK to projects(id); seed the row so the
-    // post_persist_hook → forward_sync chain isn't blocked by a 23503.
-    sqlx::query("INSERT INTO projects (id, name, created_at) VALUES ($1, $2, NOW())")
-        .bind(uuid::Uuid::from(project_id))
-        .bind(project_name)
-        .execute(&pool)
+
+    // Create a real project — drives Projects::create which builds the
+    // project_lead agent and queues a `runtime/projects/<name>/.gitkeep`
+    // scaffold commit through the same forward-sync pipeline.
+    let project = app
+        .projects()
+        .create(&sub, "alpha", None)
         .await
-        .expect("insert project");
-    let skill = skills
+        .expect("create project");
+
+    // Create the skill we'll then assert on.
+    let skill = app
+        .skills()
         .create(
             &sub,
-            project_id,
-            project_name,
+            project.id,
+            &project.name,
             "Deploy Prod".into(),
             "Deploys the app to production".into(),
             "#!/bin/bash\necho deploy".into(),
@@ -163,12 +194,13 @@ async fn skill_create_propagates_to_search_and_upstream() {
         .await
         .expect("create skill");
 
-    // Forward sync: search row is written synchronously in the
-    // SkillRepo post_persist_hook → LibrarySyncHook pre_commit, so it
-    // must be visible immediately after Skills::create returns.
-    let hits = library
+    // 1. Search row written synchronously in the SkillRepo
+    // post_persist_hook → LibrarySyncHook pre_commit. Visible
+    // immediately, no waiting.
+    let hits = app
+        .library()
         .search(
-            uuid::Uuid::from(project_id),
+            uuid::Uuid::from(project.id),
             "deploy",
             Some(DocType::Skill),
             10,
@@ -178,16 +210,16 @@ async fn skill_create_propagates_to_search_and_upstream() {
     let hit = hits
         .iter()
         .find(|h| h.doc_id == uuid::Uuid::from(skill.id))
-        .unwrap_or_else(|| panic!("skill not found in search; got {hits:#?}"));
+        .unwrap_or_else(|| panic!("skill not in search index; got {hits:#?}"));
     assert_eq!(hit.doc_type, DocType::Skill);
     assert_eq!(hit.title, "Deploy Prod");
 
-    // Upstream commit lands asynchronously via the LibraryWriteJob.
+    // 2. Upstream commit lands asynchronously via the LibraryWriteJob.
     // Poll until the canonical path appears in the bare upstream's HEAD
     // tree (or fail after a generous timeout).
     let id_prefix = &uuid::Uuid::from(skill.id).to_string()[..8];
     let canonical_path =
-        format!("runtime/projects/{project_name}/skills/deploy-prod-{id_prefix}.md");
+        format!("runtime/projects/{}/skills/deploy-prod-{id_prefix}.md", project.name);
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

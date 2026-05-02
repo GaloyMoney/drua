@@ -220,6 +220,68 @@ impl Spaces {
         Ok(map.into_values().collect())
     }
 
+    /// Reads a blob at `spaces/<slug>/<rel_path>` from HEAD's tree.
+    /// `Ok(None)` when the file doesn't exist (or the repo is unborn).
+    #[tracing::instrument(name = "library.spaces.read_file", skip_all, fields(%slug, %rel_path))]
+    pub async fn read_file(
+        &self,
+        slug: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, SpaceError> {
+        let path = format!("spaces/{slug}/{rel_path}");
+        self.git
+            .read_blob_at_head(&path)
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))
+    }
+
+    /// Lists immediate children under `spaces/<slug>/<rel_path>` at
+    /// HEAD. `Ok(None)` when the directory doesn't exist. Empty
+    /// `rel_path` lists the space's root.
+    #[tracing::instrument(name = "library.spaces.list_dir", skip_all, fields(%slug, %rel_path))]
+    pub async fn list_dir(
+        &self,
+        slug: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<crate::git::DirEntry>>, SpaceError> {
+        let path = if rel_path.is_empty() {
+            format!("spaces/{slug}")
+        } else {
+            format!("spaces/{slug}/{rel_path}")
+        };
+        self.git
+            .list_dir_at_head(&path)
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))
+    }
+
+    /// Recursively walks every blob under `spaces/<slug>/<rel_path>`.
+    /// Returned paths are relative to `spaces/<slug>/` (not the repo root).
+    #[tracing::instrument(name = "library.spaces.walk", skip_all, fields(%slug, %rel_path))]
+    pub async fn walk(
+        &self,
+        slug: &str,
+        rel_path: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, SpaceError> {
+        let path = if rel_path.is_empty() {
+            format!("spaces/{slug}")
+        } else {
+            format!("spaces/{slug}/{rel_path}")
+        };
+        let strip = format!("spaces/{slug}/");
+        let mut blobs = self
+            .git
+            .walk_blobs_at_head(&path)
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))?;
+        for (p, _) in blobs.iter_mut() {
+            if let Some(rest) = p.strip_prefix(&strip) {
+                *p = rest.to_string();
+            }
+        }
+        Ok(blobs)
+    }
+
     /// Lists every space, paginated through the `slug` list_by index.
     #[tracing::instrument(name = "library.spaces.list_all", skip_all)]
     pub async fn list_all(&self) -> Result<Vec<Space>, SpaceError> {

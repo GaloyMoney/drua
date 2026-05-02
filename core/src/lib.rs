@@ -16,6 +16,7 @@ pub mod project_secret;
 pub mod prompt_executor;
 pub mod sandbox;
 pub mod skill;
+pub mod space_fs;
 pub mod toolset;
 pub mod tunnel;
 pub mod user;
@@ -238,8 +239,8 @@ impl App {
         // five read tools branch on the `space:` prefix and dispatch
         // through here when present; otherwise they fall through to
         // the existing sandbox `/execute` path.
-        let space_fs = Arc::new(library::SpaceFs::new(
-            Arc::clone(&library),
+        let space_fs = Arc::new(space_fs::SpaceFs::new(
+            Arc::new(library.spaces().clone()),
             Arc::clone(&projects),
         ));
         toolsets.register_top_level(TextEditor::new(

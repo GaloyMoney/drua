@@ -24,6 +24,7 @@ pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces};
 pub use synced::LibrarySynced;
 
+pub use self::git::DirEntry;
 use self::git::GitEngine;
 use self::job::{
     CommitTick, ImporterRegistry, LibraryEmbedJobInitializer, LibrarySyncConfig,
@@ -150,10 +151,36 @@ impl Library {
         &self.search
     }
 
-    /// Working-tree root of the library clone — `<repo_path>/spaces/<slug>/`
-    /// is where space files live on disk.
+    /// Bare-clone path. Callers should prefer `read_blob_at_head`,
+    /// `list_dir_at_head`, and `walk_blobs_at_head` over poking at the
+    /// filesystem directly — bare clones don't materialise files.
     pub fn repo_path(&self) -> &std::path::Path {
         self.git.repo_path()
+    }
+
+    /// Read a blob's bytes at HEAD. `Ok(None)` when the path doesn't
+    /// exist (or HEAD is unborn).
+    pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
+        self.git.read_blob_at_head(path).await
+    }
+
+    /// List immediate children of a tree path at HEAD. `Ok(None)` when
+    /// the directory doesn't exist. Empty `dir_path` lists the repo
+    /// root.
+    pub async fn list_dir_at_head(
+        &self,
+        dir_path: &str,
+    ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
+        self.git.list_dir_at_head(dir_path).await
+    }
+
+    /// Recursively walk every blob under `dir_path` at HEAD. Returns
+    /// `(path, content)` pairs (paths relative to repo root).
+    pub async fn walk_blobs_at_head(
+        &self,
+        dir_path: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+        self.git.walk_blobs_at_head(dir_path).await
     }
 
     /// Per-repo `post_persist_hook` body collapses to a one-liner over
