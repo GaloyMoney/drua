@@ -1394,6 +1394,7 @@ dependencies = [
  "code-assistant-core",
  "concourse-client",
  "derive_builder",
+ "drua-library",
  "es-entity",
  "futures",
  "hex",

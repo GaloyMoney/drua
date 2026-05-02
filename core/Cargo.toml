@@ -12,6 +12,7 @@ graphql = ["es-entity/graphql", "dep:async-graphql"]
 async-graphql = { version = "8.0.0-rc.4", optional = true, default-features = false }
 anthropic-client = { workspace = true }
 code-assistant-core = { workspace = true }
+drua-library = { path = "crates/library" }
 openai-client = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
