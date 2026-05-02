@@ -52,7 +52,7 @@ async fn init_clones_and_resyncs_fixture_repo() {
 
     jobs.start_poll().await.expect("start poll");
 
-    let repo = git2::Repository::open_bare(&data_dir).expect("open bare clone");
+    let repo = git2::Repository::open(&data_dir).expect("open library clone");
     assert_eq!(
         read_blob(&repo, "spaces/test/dummy.md").as_deref(),
         Some(&b"hello\n"[..]),
@@ -65,7 +65,7 @@ async fn init_clones_and_resyncs_fixture_repo() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let repo = git2::Repository::open_bare(&data_dir).expect("open bare clone");
+        let repo = git2::Repository::open(&data_dir).expect("open library clone");
         if read_blob(&repo, "spaces/test/dummy2.md").as_deref() == Some(&b"world\n"[..]) {
             break;
         }

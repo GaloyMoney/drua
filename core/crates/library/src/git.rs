@@ -27,6 +27,12 @@ pub struct GitEngine {
 }
 
 impl GitEngine {
+    /// Working-tree root. `<repo_path>/spaces/<slug>/...` is where
+    /// SpaceFs reads land.
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
+    }
+
     #[tracing::instrument(name = "library.git.init", skip_all)]
     pub async fn init(
         repo_url: &str,
@@ -41,7 +47,7 @@ impl GitEngine {
         let path = repo_path.clone();
         let url = repo_url.to_string();
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            Self::open_or_clone_bare(&url, &path, token.as_deref()).map(|_| ())
+            Self::open_or_clone(&url, &path, token.as_deref()).map(|_| ())
         })
         .await
         .map_err(|e| LibraryError::Git(format!("init join: {e}")))??;
@@ -67,8 +73,8 @@ impl GitEngine {
         let to = to.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<CommitDelta>, LibraryError> {
-            let repo = git2::Repository::open_bare(&path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let repo = git2::Repository::open(&path)
+                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
 
             let to_oid = git2::Oid::from_str(&to)
                 .map_err(|e| LibraryError::Git(format!("parse to oid: {e}")))?;
@@ -138,9 +144,14 @@ impl GitEngine {
         let path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
-            let repo = git2::Repository::open_bare(&path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let repo = git2::Repository::open(&path)
+                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
             Self::fetch_origin(&repo, token.as_deref())?;
+            // Working tree mirrors HEAD so externally-pushed commits
+            // are visible to SpaceFs reads on the next tick.
+            if repo.head().is_ok() {
+                Self::checkout_head(&repo)?;
+            }
             let head = match repo.head() {
                 Ok(r) => r.target().map(|oid| oid.to_string()),
                 Err(_) => None,
@@ -180,8 +191,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let repo = git2::Repository::open(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -291,8 +302,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let repo = git2::Repository::open(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -379,8 +390,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let repo = git2::Repository::open(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -464,8 +475,8 @@ impl GitEngine {
         let repo_path = self.repo_path.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let repo = git2::Repository::open(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open repo: {e}")))?;
 
             const MAX_ATTEMPTS: u32 = 2;
             let mut attempt = 0;
@@ -668,7 +679,10 @@ impl GitEngine {
         po.remote_callbacks(Self::remote_callbacks(token));
         remote
             .push(&["refs/heads/main:refs/heads/main"], Some(&mut po))
-            .map_err(|e| LibraryError::Git(format!("push: {e}")))
+            .map_err(|e| LibraryError::Git(format!("push: {e}")))?;
+        // Working tree stale after tree-builder commit — sync to HEAD so
+        // SpaceFs's filesystem reads see the new content.
+        Self::checkout_head(repo)
     }
 
     fn reset_main_to_origin(repo: &git2::Repository) -> Result<(), LibraryError> {
@@ -694,13 +708,15 @@ impl GitEngine {
         }
     }
 
-    fn open_or_clone_bare(
+    fn open_or_clone(
         url: &str,
         path: &Path,
         token: Option<&str>,
     ) -> Result<git2::Repository, LibraryError> {
-        if let Ok(repo) = git2::Repository::open_bare(path) {
+        if let Ok(repo) = git2::Repository::open(path) {
             Self::fetch_origin(&repo, token)?;
+            Self::reset_main_to_origin(&repo)?;
+            Self::checkout_head(&repo)?;
             return Ok(repo);
         }
 
@@ -719,10 +735,18 @@ impl GitEngine {
         fo.remote_callbacks(Self::remote_callbacks(token));
 
         git2::build::RepoBuilder::new()
-            .bare(true)
             .fetch_options(fo)
             .clone(url, path)
-            .map_err(|e| LibraryError::Git(format!("clone bare: {e}")))
+            .map_err(|e| LibraryError::Git(format!("clone: {e}")))
+    }
+
+    /// Force checkout HEAD into the working tree. Called after every
+    /// commit/fetch/reset so the on-disk files always match HEAD.
+    fn checkout_head(repo: &git2::Repository) -> Result<(), LibraryError> {
+        let mut opts = git2::build::CheckoutBuilder::new();
+        opts.force();
+        repo.checkout_head(Some(&mut opts))
+            .map_err(|e| LibraryError::Git(format!("checkout head: {e}")))
     }
 
     fn fetch_origin(repo: &git2::Repository, token: Option<&str>) -> Result<(), LibraryError> {

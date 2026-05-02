@@ -15,7 +15,7 @@ async fn pool() -> sqlx::PgPool {
 }
 
 fn read_blob(repo_path: &Path, path: &str) -> Option<Vec<u8>> {
-    let repo = git2::Repository::open_bare(repo_path).ok()?;
+    let repo = git2::Repository::open(repo_path).ok()?;
     let head = repo.head().ok()?.peel_to_commit().ok()?;
     let tree = head.tree().ok()?;
     let entry = tree.get_path(std::path::Path::new(path)).ok()?;
@@ -24,7 +24,7 @@ fn read_blob(repo_path: &Path, path: &str) -> Option<Vec<u8>> {
 }
 
 fn path_exists(repo_path: &Path, path: &str) -> bool {
-    let Ok(repo) = git2::Repository::open_bare(repo_path) else {
+    let Ok(repo) = git2::Repository::open(repo_path) else {
         return false;
     };
     let Ok(head) = repo.head().and_then(|h| h.peel_to_commit()) else {

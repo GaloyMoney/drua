@@ -149,6 +149,12 @@ impl Library {
         &self.search
     }
 
+    /// Working-tree root of the library clone — `<repo_path>/spaces/<slug>/`
+    /// is where space files live on disk.
+    pub fn repo_path(&self) -> &std::path::Path {
+        self.git.repo_path()
+    }
+
     /// Per-repo `post_persist_hook` body collapses to a one-liner over
     /// this: projects the entity into a write op and registers the
     /// commit hook when at least one persisted event was a content

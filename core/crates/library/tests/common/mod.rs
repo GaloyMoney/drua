@@ -47,6 +47,14 @@ pub async fn reset_library_db_state(pool: &sqlx::PgPool) {
         .execute(pool)
         .await
         .expect("delete library_documents");
+    sqlx::query("DELETE FROM space_events")
+        .execute(pool)
+        .await
+        .expect("delete space_events");
+    sqlx::query("DELETE FROM spaces")
+        .execute(pool)
+        .await
+        .expect("delete spaces");
 }
 
 fn fixtures_root() -> PathBuf {
