@@ -1,9 +1,11 @@
 mod entity;
 pub mod error;
 pub mod file;
+pub mod importer;
 pub(crate) mod repo;
 
 pub use file::{name_from_filename, parse_skill_markdown, ParsedSkill};
+pub use importer::SkillsImporter;
 
 use std::sync::Arc;
 
@@ -433,6 +435,61 @@ impl Skills {
             .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
+    }
+
+    /// Reverse-sync entry point: persist a `ParsedSkill` produced by
+    /// the library importer. Creates or updates depending on whether
+    /// the skill already exists. Returns the `Skill` so the caller
+    /// (importer) can build a search row from it.
+    pub(crate) async fn import_from_library<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        parsed: ParsedSkill,
+        project_id: Option<ProjectId>,
+    ) -> Result<Skill, SkillError> {
+        let file_hash = crate::library::GitFileHash::new(crate::skill::file::render_skill_markdown(
+            uuid::Uuid::from(parsed.skill_id),
+            &parsed.name,
+            &parsed.description,
+            &parsed.body,
+            &parsed.created_at,
+            &parsed.updated_at,
+        ));
+
+        if let Some(mut existing) = self.repo.maybe_find_by_id_in_op(&mut *op, parsed.skill_id).await? {
+            if existing
+                .update(
+                    Some(parsed.name.clone()),
+                    Some(parsed.description.clone()),
+                    Some(parsed.body.clone()),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                self.repo.update_in_op(op, &mut existing).await?;
+            }
+            self.register_context_bump(op, project_id);
+            return Ok(existing);
+        }
+
+        let mut builder = NewSkill::builder()
+            .id(parsed.skill_id)
+            .name(parsed.name)
+            .description(parsed.description)
+            .body(parsed.body)
+            .original_path(parsed.original_path);
+        if let Some(project_id) = project_id {
+            builder = builder.project_id(project_id);
+        }
+        if let Some(name) = parsed.project_name {
+            builder = builder.project_name(name);
+        }
+        let new = builder
+            .build()
+            .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+        let skill = self.repo.create_in_op(op, new).await?;
+        self.register_context_bump(op, project_id);
+        Ok(skill)
     }
 
     /// Constructor without library sync — for tests or contexts where

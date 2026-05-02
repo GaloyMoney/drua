@@ -2,10 +2,13 @@ pub mod definition;
 pub mod entity;
 pub mod error;
 pub mod executor;
+pub mod importer;
 pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
 pub mod yaml;
+
+pub use importer::WorkflowsImporter;
 
 use std::sync::Arc;
 
@@ -54,6 +57,77 @@ impl Workflows {
             execute_run_spawner,
             jobs: jobs.clone(),
         }
+    }
+
+    /// Reverse-sync entry point: persist a `ParsedWorkflow` produced
+    /// by the library importer. Creates or updates depending on
+    /// whether the workflow already exists.
+    pub(crate) async fn import_from_library<OP: es_entity::AtomicOperation>(
+        &self,
+        op: &mut OP,
+        parsed: yaml::ParsedWorkflow,
+        project_id: ProjectId,
+    ) -> Result<WorkflowDefinition, WorkflowError> {
+        let yaml::ParsedWorkflow {
+            workflow_id,
+            project_name,
+            name,
+            description,
+            trigger,
+            steps,
+            sandboxes,
+            original_path,
+            rendered,
+            ..
+        } = parsed;
+
+        let file_hash = crate::library::GitFileHash::new(rendered);
+
+        if let Some(mut existing) = self.repo.maybe_find_by_id(workflow_id).await? {
+            if existing
+                .update_from_library(
+                    Some(name.clone()),
+                    Some(description.clone()),
+                    Some(trigger),
+                    Some(steps),
+                    Some(sandboxes),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                self.repo.update_in_op(op, &mut existing).await?;
+            }
+            return Ok(existing);
+        }
+
+        let trigger = match trigger {
+            WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
+                WorkflowTrigger::Webhook {
+                    provider,
+                    secret: Self::generate_webhook_secret(),
+                }
+            }
+            other => other,
+        };
+
+        let mut builder = NewWorkflowDefinition::builder()
+            .id(workflow_id)
+            .project_id(project_id)
+            .name(name)
+            .trigger(trigger)
+            .steps(steps)
+            .sandboxes(sandboxes);
+        if let Some(project) = project_name {
+            builder = builder.project_name(project);
+        }
+        if let Some(desc) = description {
+            builder = builder.description(desc);
+        }
+        builder = builder.original_path(original_path);
+        let new = builder
+            .build()
+            .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
+        Ok(self.repo.create_in_op(op, new).await?)
     }
 
     /// No git sync — for tests.

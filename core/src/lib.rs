@@ -277,11 +277,23 @@ impl App {
             Arc::clone(&library),
         ));
 
-        // Reverse-sync (file → entity) for skills + workflows lives in
-        // drua_library now and runs from a single tick-driven job; the
-        // Spaces importer is wired by drua_library::Library::init.
-        // Skill/Workflow importers are TODO: register via
-        // `library.register_importer(...)` once the importer impls land.
+        // Reverse-sync (file → entity) for skills + workflows runs
+        // through drua_library's tick-driven importer registry. The
+        // Spaces importer is wired by drua_library::Library::init;
+        // SkillsImporter / WorkflowsImporter are appended here so the
+        // next CommitTick routes their paths into core's services.
+        library
+            .register_importer(Arc::new(skill::SkillsImporter::new(
+                Arc::clone(&skills),
+                Arc::clone(&projects),
+            )))
+            .await;
+        library
+            .register_importer(Arc::new(workflow::WorkflowsImporter::new(
+                Arc::clone(&workflows),
+                Arc::clone(&projects),
+            )))
+            .await;
 
         jobs.start_poll()
             .await

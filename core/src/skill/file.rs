@@ -26,6 +26,7 @@ pub fn render_skill_markdown(
 /// importer should re-render to canonical form (legacy/imported
 /// formats normalise on first sync).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ParsedSkill {
     pub skill_id: SkillId,
     pub project_name: Option<String>,
