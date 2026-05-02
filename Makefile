@@ -22,7 +22,7 @@ setup-db:
 reset-deps: clean-deps start-deps setup-db
 
 sqlx-prepare:
-	DATABASE_URL=$(PG_CON) cargo sqlx prepare --project -- --all-targets
+	DATABASE_URL=$(PG_CON) cargo sqlx prepare --workspace -- --all-targets
 
 build-sandbox:
 	cargo build -p sandbox-tool-server
