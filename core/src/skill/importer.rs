@@ -30,19 +30,10 @@ impl LibraryImporter for SkillsImporter {
             return false;
         }
         let parts: Vec<&str> = path.split('/').collect();
-        // runtime/skills/*.md
-        if parts.len() == 3 && parts[0] == "runtime" && parts[1] == "skills" {
-            return true;
-        }
-        // runtime/projects/*/skills/*.md
-        if parts.len() == 5
-            && parts[0] == "runtime"
-            && parts[1] == "projects"
-            && parts[3] == "skills"
-        {
-            return true;
-        }
-        false
+        matches!(
+            parts.as_slice(),
+            ["runtime", "skills", _] | ["runtime", "projects", _, "skills", _]
+        )
     }
 
     fn doc_type(&self) -> DruaDocType {

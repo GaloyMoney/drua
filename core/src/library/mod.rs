@@ -87,6 +87,31 @@ impl AuthedSpaces {
         Ok(space)
     }
 
+    /// Composable variant of [`Self::create`] — takes the caller's
+    /// transaction so the space-create can be bundled with other
+    /// writes atomically. The upstream `.gitkeep` push is *not*
+    /// transactional with the DB op; on a successful op-commit the
+    /// space exists locally and remotely, but a rolled-back op will
+    /// not undo the upstream commit.
+    #[tracing::instrument(name = "library.spaces.create_in_op", skip(self, op, sub))]
+    pub async fn create_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        sub: &AuthSubject,
+        slug: impl Into<String> + std::fmt::Debug,
+        description: Option<String>,
+    ) -> Result<Space, LibraryError> {
+        sub.can(AuthVerb::Create, AuthResource::Space(None))?;
+        Audit::record_action_if_unset("library.spaces.create");
+        let space = self
+            .inner
+            .create_in_op(op, slug.into(), description)
+            .await?;
+        Audit::record_space_id(space.id);
+        tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created in op");
+        Ok(space)
+    }
+
     /// Lists every space, paginated. Soft-deleted spaces drop out at
     /// the SQL layer.
     #[tracing::instrument(name = "library.spaces.list_all", skip(self, sub))]

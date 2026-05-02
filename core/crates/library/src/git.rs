@@ -378,7 +378,6 @@ impl GitEngine {
         let (rename_to, new_content) = update(path, current_content.as_deref())?;
         let new_path: &str = rename_to.as_deref().unwrap_or(path);
 
-        // Step 1: remove old path if it's a move
         let intermediate_oid = if new_path == path {
             head_tree.id()
         } else {
@@ -388,7 +387,6 @@ impl GitEngine {
             .find_tree(intermediate_oid)
             .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
 
-        // Step 2: insert/delete at new path
         let final_oid = Self::apply_edit(repo, &intermediate_tree, new_path, new_content)?;
         if final_oid == head_tree.id() {
             tracing::debug!("update_file: tree unchanged, skipping commit");

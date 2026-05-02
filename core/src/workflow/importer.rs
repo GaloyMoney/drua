@@ -32,19 +32,10 @@ impl LibraryImporter for WorkflowsImporter {
             return false;
         }
         let parts: Vec<&str> = path.split('/').collect();
-        // runtime/workflows/*.yml
-        if parts.len() == 3 && parts[0] == "runtime" && parts[1] == "workflows" {
-            return true;
-        }
-        // runtime/projects/*/workflows/*.yml
-        if parts.len() == 5
-            && parts[0] == "runtime"
-            && parts[1] == "projects"
-            && parts[3] == "workflows"
-        {
-            return true;
-        }
-        false
+        matches!(
+            parts.as_slice(),
+            ["runtime", "workflows", _] | ["runtime", "projects", _, "workflows", _]
+        )
     }
 
     fn doc_type(&self) -> DruaDocType {
