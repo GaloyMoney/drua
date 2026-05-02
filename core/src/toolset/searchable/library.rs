@@ -1,14 +1,72 @@
 use std::sync::{Arc, LazyLock};
 
+use drua_library::{DocType, SearchHit, SearchableFields};
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{DocType, GlobalSearchHit, Library, LibraryFile};
+use crate::library::AuthedSearch;
+use crate::note::NOTE_DOC_TYPE;
+use crate::skill::SKILL_DOC_TYPE;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
+
+const SPACE_FILE_DOC_TYPE_STR: &str = "space_file";
+
+/// Tool-shaped global search hit. Translated from `drua_library::SearchHit`
+/// at the toolset boundary.
+#[derive(Debug, Clone)]
+struct GlobalSearchHit {
+    doc_id: uuid::Uuid,
+    doc_type: DocType,
+    title: String,
+    content: String,
+    score: f64,
+}
+
+/// Tool-shaped fetched library file. Translated from
+/// `drua_library::SearchableFields` at the toolset boundary.
+#[derive(Debug, Clone)]
+struct LibraryFile {
+    doc_id: uuid::Uuid,
+    doc_type: DocType,
+    title: String,
+    body: String,
+    /// `None` for unscoped/global content (e.g. global skills).
+    project_id: Option<uuid::Uuid>,
+    space_slug: Option<String>,
+    relative_path: Option<String>,
+}
+
+fn hit_to_global(hit: SearchHit) -> GlobalSearchHit {
+    GlobalSearchHit {
+        doc_id: hit.fields.doc_id,
+        doc_type: hit.fields.doc_type,
+        title: hit.fields.name,
+        content: hit.fields.content,
+        score: hit.score,
+    }
+}
+
+fn fields_to_file(fields: SearchableFields) -> LibraryFile {
+    let is_space = fields.doc_type.as_str() == SPACE_FILE_DOC_TYPE_STR;
+    let (space_slug, relative_path, project_id) = if is_space {
+        (fields.scope_slug, fields.path, None)
+    } else {
+        (None, None, fields.scope_id)
+    };
+    LibraryFile {
+        doc_id: fields.doc_id,
+        doc_type: fields.doc_type,
+        title: fields.name,
+        body: fields.content,
+        project_id,
+        space_slug,
+        relative_path,
+    }
+}
 
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 const MAX_SEARCH_LIMIT: usize = 200;
@@ -65,22 +123,22 @@ enum LibraryFileType {
 impl From<LibraryFileType> for DocType {
     fn from(t: LibraryFileType) -> Self {
         match t {
-            LibraryFileType::Skill => DocType::Skill,
-            LibraryFileType::Note => DocType::Note,
-            LibraryFileType::SpaceFile => DocType::SpaceFile,
+            LibraryFileType::Skill => SKILL_DOC_TYPE,
+            LibraryFileType::Note => NOTE_DOC_TYPE,
+            LibraryFileType::SpaceFile => DocType::new(SPACE_FILE_DOC_TYPE_STR),
         }
     }
 }
 
-/// `Workflow` rows can't reach this conversion in practice —
-/// `Library::search_global` drops them before fusion. Default to Note
-/// as a defensive fallback.
+/// Workflow rows are filtered out of the search before reaching the
+/// toolset; non-recognised doc types default to Note as a defensive
+/// fallback.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
-        match t {
-            DocType::Skill => LibraryFileType::Skill,
-            DocType::SpaceFile => LibraryFileType::SpaceFile,
-            DocType::Note | DocType::Workflow => LibraryFileType::Note,
+        match t.as_str() {
+            "skill" => LibraryFileType::Skill,
+            "space_file" => LibraryFileType::SpaceFile,
+            _ => LibraryFileType::Note,
         }
     }
 }
@@ -138,7 +196,7 @@ impl From<GlobalSearchHit> for LibrarySearchHit {
             title: hit.title,
             snippet: make_snippet(&hit.content, SNIPPET_CHARS),
             score: hit.score,
-            tags: hit.tags,
+            tags: Vec::new(),
         }
     }
 }
@@ -164,18 +222,13 @@ struct LibraryFileOutput {
 
 impl From<LibraryFile> for LibraryFileOutput {
     fn from(f: LibraryFile) -> Self {
-        let project_id = if f.project_id.is_nil() {
-            None
-        } else {
-            Some(f.project_id.to_string())
-        };
         Self {
             id: f.doc_id.to_string(),
             r#type: f.doc_type.into(),
             title: f.title,
             body: f.body,
-            tags: f.tags,
-            project_id,
+            tags: Vec::new(),
+            project_id: f.project_id.map(|id| id.to_string()),
             space_slug: f.space_slug,
             relative_path: f.relative_path,
         }
@@ -229,12 +282,12 @@ fn tool_entry(
 }
 
 pub struct LibraryToolSet {
-    library: Arc<Library>,
+    search: Arc<AuthedSearch>,
     tools: Vec<ToolSetEntry>,
 }
 
 impl LibraryToolSet {
-    pub fn new(library: Arc<Library>) -> Self {
+    pub fn new(search: Arc<AuthedSearch>) -> Self {
         let tools = vec![
             tool_entry(
                 "search",
@@ -257,7 +310,7 @@ impl LibraryToolSet {
                 (*GET_FILES_OUTPUT_SCHEMA).clone(),
             ),
         ];
-        Self { library, tools }
+        Self { search, tools }
     }
 
     async fn search(
@@ -269,20 +322,31 @@ impl LibraryToolSet {
         Audit::record_action("library.search");
 
         let limit = params.limit.clamp(1, MAX_SEARCH_LIMIT);
-        let doc_types: Vec<DocType> = params
-            .types
-            .unwrap_or_default()
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        // Workflows are git-synced but not search-indexed; if the
+        // caller passed an empty filter we expand it to the indexed
+        // doc types only so future workflow rows would still get
+        // dropped here defensively.
+        let doc_types: Vec<DocType> = if let Some(types) = params.types {
+            types.into_iter().map(Into::into).collect()
+        } else {
+            vec![
+                SKILL_DOC_TYPE,
+                NOTE_DOC_TYPE,
+                DocType::new(SPACE_FILE_DOC_TYPE_STR),
+            ]
+        };
 
-        let hits = self
-            .library
-            .search_global(subject, &[], &params.query, &doc_types, limit)
+        let raw = self
+            .search
+            .search(subject, &[], &params.query, &doc_types, limit)
             .await?;
 
+        let hits: Vec<LibrarySearchHit> = raw
+            .into_iter()
+            .map(hit_to_global)
+            .map(LibrarySearchHit::from)
+            .collect();
         let total = hits.len();
-        let hits: Vec<LibrarySearchHit> = hits.into_iter().map(LibrarySearchHit::from).collect();
 
         let text = if hits.is_empty() {
             "No library files found matching your query.".to_string()
@@ -330,7 +394,8 @@ impl LibraryToolSet {
             )));
         }
 
-        let files = self.library.get_files(subject, &params.ids).await?;
+        let raw = self.search.find_by_ids(subject, &params.ids).await?;
+        let files: Vec<LibraryFile> = raw.into_iter().map(fields_to_file).collect();
 
         let returned: std::collections::HashSet<uuid::Uuid> =
             files.iter().map(|f| f.doc_id).collect();
@@ -503,14 +568,13 @@ mod tests {
     }
 
     #[test]
-    fn library_file_output_omits_nil_project() {
+    fn library_file_output_omits_global_project() {
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
-            doc_type: DocType::Skill,
-            project_id: uuid::Uuid::nil(),
+            doc_type: SKILL_DOC_TYPE,
+            project_id: None,
             title: "global skill".into(),
             body: "body".into(),
-            tags: vec![],
             space_slug: None,
             relative_path: None,
         };
@@ -525,11 +589,10 @@ mod tests {
         let project = uuid::Uuid::new_v4();
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
-            doc_type: DocType::Note,
-            project_id: project,
+            doc_type: NOTE_DOC_TYPE,
+            project_id: Some(project),
             title: "scoped note".into(),
             body: "body".into(),
-            tags: vec!["t1".into()],
             space_slug: None,
             relative_path: None,
         };
@@ -544,11 +607,10 @@ mod tests {
     fn library_file_output_carries_space_metadata() {
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
-            doc_type: DocType::SpaceFile,
-            project_id: uuid::Uuid::nil(),
+            doc_type: DocType::new(SPACE_FILE_DOC_TYPE_STR),
+            project_id: None,
             title: "Incident playbook".into(),
             body: "body".into(),
-            tags: vec![],
             space_slug: Some("oncall".into()),
             relative_path: Some("runbooks/incident-foo.md".into()),
         };
@@ -630,8 +692,8 @@ mod tests {
 
     #[test]
     fn searchable_doc_type_roundtrip() {
-        for t in [DocType::Skill, DocType::Note] {
-            let lft: LibraryFileType = t.into();
+        for t in [SKILL_DOC_TYPE, NOTE_DOC_TYPE] {
+            let lft: LibraryFileType = t.clone().into();
             let back: DocType = lft.into();
             assert_eq!(t.as_str(), back.as_str());
         }
@@ -639,7 +701,7 @@ mod tests {
 
     #[test]
     fn workflow_doc_type_collapses_to_note() {
-        let lft: LibraryFileType = DocType::Workflow.into();
+        let lft: LibraryFileType = DocType::new("workflow").into();
         assert!(matches!(lft, LibraryFileType::Note));
     }
 }

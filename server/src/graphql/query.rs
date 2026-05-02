@@ -158,8 +158,8 @@ impl Query {
         };
 
         let hits = app
-            .library()
-            .search_global(sub, &project_ids, &input.query, &doc_types, limit)
+            .search()
+            .search(sub, &project_ids, &input.query, &doc_types, limit)
             .await?;
 
         Ok(hits

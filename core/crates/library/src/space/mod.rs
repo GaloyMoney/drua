@@ -292,10 +292,7 @@ impl Spaces {
             let page = self
                 .repo
                 .list_by_slug(
-                    es_entity::PaginatedQueryArgs {
-                        first: 200,
-                        after,
-                    },
+                    es_entity::PaginatedQueryArgs { first: 200, after },
                     ListDirection::Ascending,
                 )
                 .await?;

@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub struct LibraryConfig {
     pub data_dir: String,
     pub repo_url: String,

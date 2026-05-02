@@ -2,9 +2,9 @@
 //! `library/`) because the schema is workflow-specific; the library
 //! only owns transport (`WriteOp`).
 
-use crate::library::slugify;
 use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
@@ -355,7 +355,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
     })
 }
 
-fn canonical_workflow_path(
+pub fn canonical_workflow_path(
     id: WorkflowDefinitionId,
     name: &str,
     project_name: Option<&str>,
@@ -383,7 +383,6 @@ pub fn project_name_from_workflow_path(relative_path: &str) -> Option<String> {
         None
     }
 }
-
 
 #[cfg(test)]
 mod tests {

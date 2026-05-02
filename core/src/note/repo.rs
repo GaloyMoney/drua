@@ -2,7 +2,6 @@ use sqlx::PgPool;
 
 use es_entity::*;
 
-use crate::library::Library;
 use crate::primitives::*;
 
 use super::entity::*;
@@ -15,16 +14,16 @@ use super::entity::*;
         pinned(ty = "bool"),
     ),
     delete = "soft_without_queries",
-    post_persist_hook(method = "sync_to_library", error = "crate::library::LibraryError")
+    post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")
 )]
 pub struct NoteRepo {
     #[allow(dead_code)]
     pool: PgPool,
-    library: Library,
+    library: drua_library::Library,
 }
 
 impl NoteRepo {
-    pub fn new(pool: &PgPool, library: Library) -> Self {
+    pub fn new(pool: &PgPool, library: drua_library::Library) -> Self {
         Self {
             pool: pool.clone(),
             library,
@@ -51,7 +50,7 @@ impl NoteRepo {
         op: &mut OP,
         entity: &Note,
         mut new_events: es_entity::LastPersisted<'_, NoteEvent>,
-    ) -> Result<(), crate::library::LibraryError> {
+    ) -> Result<(), drua_library::LibraryError> {
         self.library
             .sync_entity_in_op(op, entity, &mut new_events)
             .await

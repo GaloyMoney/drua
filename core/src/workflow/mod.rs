@@ -16,10 +16,11 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
-use crate::library::Library;
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+
+pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
@@ -45,7 +46,7 @@ pub struct Workflows {
 impl Workflows {
     pub fn new(
         pool: &sqlx::PgPool,
-        library: Library,
+        library: drua_library::Library,
         skills: Arc<Skills>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
         jobs: &::job::Jobs,
@@ -81,7 +82,7 @@ impl Workflows {
             ..
         } = parsed;
 
-        let file_hash = crate::library::GitFileHash::new(rendered);
+        let file_hash = drua_library::GitFileHash::new(rendered);
 
         if let Some(mut existing) = self.repo.maybe_find_by_id(workflow_id).await? {
             if existing

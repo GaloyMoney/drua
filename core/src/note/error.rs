@@ -21,4 +21,6 @@ pub enum NoteError {
     Authorization(#[from] crate::primitives::AuthorizationError),
     #[error("NoteError - Library: {0}")]
     Library(#[from] crate::library::LibraryError),
+    #[error("NoteError - Drua: {0}")]
+    Drua(#[from] drua_library::LibraryError),
 }

@@ -24,8 +24,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
-use drua_core::library::{DocType, LibraryConfig};
+use drua_core::library::LibraryConfig;
 use drua_core::primitives::{AuthSubject, UserId};
+use drua_core::skill::SKILL_DOC_TYPE;
 use drua_core::{App, AppConfig};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
@@ -199,27 +200,25 @@ async fn skill_create_propagates_to_search_and_upstream() {
     // immediately, no waiting.
     let hits = app
         .library()
-        .search(
-            uuid::Uuid::from(project.id),
-            "deploy",
-            Some(DocType::Skill),
-            10,
-        )
+        .search()
+        .search("deploy", None, &[], &[SKILL_DOC_TYPE], 10)
         .await
         .expect("search");
     let hit = hits
         .iter()
-        .find(|h| h.doc_id == uuid::Uuid::from(skill.id))
+        .find(|h| h.fields.doc_id == uuid::Uuid::from(skill.id))
         .unwrap_or_else(|| panic!("skill not in search index; got {hits:#?}"));
-    assert_eq!(hit.doc_type, DocType::Skill);
-    assert_eq!(hit.title, "Deploy Prod");
+    assert_eq!(hit.fields.doc_type, SKILL_DOC_TYPE);
+    assert_eq!(hit.fields.name, "Deploy Prod");
 
     // 2. Upstream commit lands asynchronously via the LibraryWriteJob.
     // Poll until the canonical path appears in the bare upstream's HEAD
     // tree (or fail after a generous timeout).
     let id_prefix = &uuid::Uuid::from(skill.id).to_string()[..8];
-    let canonical_path =
-        format!("runtime/projects/{}/skills/deploy-prod-{id_prefix}.md", project.name);
+    let canonical_path = format!(
+        "runtime/projects/{}/skills/deploy-prod-{id_prefix}.md",
+        project.name
+    );
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

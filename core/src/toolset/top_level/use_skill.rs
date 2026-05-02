@@ -175,7 +175,7 @@ impl TopLevelTool for UseSkillTool {
 
                 let text = results
                     .iter()
-                    .map(|r| format!("- {} — {}", r.title, truncate(&r.content, 200)))
+                    .map(|r| format!("- {} — {}", r.fields.name, truncate(&r.fields.content, 200)))
                     .collect::<Vec<_>>()
                     .join("\n");
                 Ok(CallToolResult::success(vec![Content::text(format!(

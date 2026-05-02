@@ -7,12 +7,14 @@ pub(crate) mod repo;
 pub use file::{name_from_filename, parse_skill_markdown, ParsedSkill};
 pub use importer::SkillsImporter;
 
+pub const SKILL_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("skill");
+
 use std::sync::Arc;
 
+use drua_library::SearchHit;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
-use crate::library::{DocType, Library, SearchResult};
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 pub use entity::*;
@@ -27,7 +29,7 @@ const MAX_DESCRIPTION_LEN: usize = 200;
 pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
-    library: Option<Library>,
+    library: Option<drua_library::Library>,
     /// Held for context-bump hooks fired from reverse-sync importers
     /// (registered in App init); unused on the forward-only paths.
     #[allow(dead_code)]
@@ -40,7 +42,7 @@ impl Skills {
     pub fn new(
         pool: &sqlx::PgPool,
         sandboxes: Arc<Sandboxes>,
-        library: Library,
+        library: drua_library::Library,
         context_generation: ContextGeneration,
     ) -> Self {
         let repo = SkillRepo::new(pool, library.clone());
@@ -230,22 +232,16 @@ impl Skills {
         project_id: ProjectId,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<SearchResult>, SkillError> {
+    ) -> Result<Vec<SearchHit>, SkillError> {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
         let library = self
             .library
             .as_ref()
             .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
-        // SearchStore::search() includes globals (sentinel nil UUID).
-        library
-            .search(
-                uuid::Uuid::from(project_id),
-                query,
-                Some(DocType::Skill),
-                limit,
-            )
-            .await
-            .map_err(SkillError::from)
+        Ok(library
+            .search()
+            .search(query, None, &[], &[SKILL_DOC_TYPE], limit)
+            .await?)
     }
 
     /// Build skills context for system prompt injection.
@@ -447,7 +443,7 @@ impl Skills {
         parsed: ParsedSkill,
         project_id: Option<ProjectId>,
     ) -> Result<Skill, SkillError> {
-        let file_hash = crate::library::GitFileHash::new(crate::skill::file::render_skill_markdown(
+        let file_hash = drua_library::GitFileHash::new(crate::skill::file::render_skill_markdown(
             uuid::Uuid::from(parsed.skill_id),
             &parsed.name,
             &parsed.description,
@@ -456,7 +452,11 @@ impl Skills {
             &parsed.updated_at,
         ));
 
-        if let Some(mut existing) = self.repo.maybe_find_by_id_in_op(&mut *op, parsed.skill_id).await? {
+        if let Some(mut existing) = self
+            .repo
+            .maybe_find_by_id_in_op(&mut *op, parsed.skill_id)
+            .await?
+        {
             if existing
                 .update(
                     Some(parsed.name.clone()),

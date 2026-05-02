@@ -3,6 +3,7 @@ pub mod error;
 pub mod file;
 pub(crate) mod repo;
 
+use drua_library::SearchHit;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
@@ -11,15 +12,16 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
+pub const NOTE_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("note");
+
 use crate::auth::AuthSubject;
-use crate::library::{DocType, Library, SearchResult};
 use crate::note::file::render_note_markdown;
 use crate::primitives::*;
 
 #[derive(Clone)]
 pub struct Notes {
     repo: NoteRepo,
-    library: Library,
+    library: drua_library::Library,
     pool: sqlx::PgPool,
     context_generation: ContextGeneration,
 }
@@ -27,7 +29,7 @@ pub struct Notes {
 impl Notes {
     pub fn new(
         pool: &sqlx::PgPool,
-        library: Library,
+        library: drua_library::Library,
         context_generation: ContextGeneration,
     ) -> Self {
         Self {
@@ -80,7 +82,7 @@ impl Notes {
             &created_at,
             &created_at,
         );
-        let file_hash = crate::library::GitFileHash::new(rendered);
+        let file_hash = drua_library::GitFileHash::new(rendered);
 
         let new_note = NewNote::builder()
             .id(note_id)
@@ -135,7 +137,7 @@ impl Notes {
             &created_at,
             &updated_at,
         );
-        let file_hash = crate::library::GitFileHash::new(rendered);
+        let file_hash = drua_library::GitFileHash::new(rendered);
 
         if note.update(title, content, tags, file_hash).did_execute() {
             self.repo.update_in_op(&mut op, &mut note).await?;
@@ -268,17 +270,19 @@ impl Notes {
         project_id: ProjectId,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<SearchResult>, NoteError> {
+    ) -> Result<Vec<SearchHit>, NoteError> {
         sub.can(AuthVerb::Read, AuthResource::Note(project_id, None))?;
-        self.library
+        Ok(self
+            .library
+            .search()
             .search(
-                uuid::Uuid::from(project_id),
                 query,
-                Some(DocType::Note),
+                None,
+                &[uuid::Uuid::from(project_id)],
+                &[NOTE_DOC_TYPE],
                 limit,
             )
-            .await
-            .map_err(NoteError::from)
+            .await?)
     }
 
     #[instrument(name = "note.list", skip(self))]

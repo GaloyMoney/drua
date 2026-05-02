@@ -13,9 +13,11 @@ use entity::*;
 pub use error::*;
 use repo::*;
 
+use drua_library::{Space, SpaceError, WriteOp};
+
 use crate::agent::Agents;
 use crate::audit::Audit;
-use crate::library::{Library, Space, SpaceError};
+use crate::library::AuthedSpaces;
 use crate::note::Notes;
 use crate::primitives::*;
 use crate::project_secret::ProjectSecrets;
@@ -33,7 +35,8 @@ pub struct Projects {
     notes: Arc<Notes>,
     secrets: ProjectSecrets,
     workflows: Arc<Workflows>,
-    library: Library,
+    library: drua_library::Library,
+    spaces: AuthedSpaces,
     context_generation: ContextGeneration,
 }
 
@@ -47,7 +50,8 @@ impl Projects {
         notes: Arc<Notes>,
         secrets: ProjectSecrets,
         workflows: Arc<Workflows>,
-        library: Library,
+        library: drua_library::Library,
+        spaces: AuthedSpaces,
         context_generation: ContextGeneration,
     ) -> Self {
         let repo = ProjectRepo::new(pool);
@@ -61,6 +65,7 @@ impl Projects {
             secrets,
             workflows,
             library,
+            spaces,
             context_generation,
         }
     }
@@ -105,8 +110,23 @@ impl Projects {
             .create_project_lead_in_op(&mut op, lead_agent_id, project_id, "lead", &name)
             .await?;
 
+        let scaffold = ["notes", "skills", "workflows"]
+            .iter()
+            .map(|sub| {
+                (
+                    format!("runtime/projects/{name}/{sub}/.gitkeep"),
+                    Some(Vec::new()),
+                )
+            })
+            .collect::<Vec<_>>();
         self.library
-            .sync_project_folder_in_op(&mut op, &name)
+            .enqueue_write_in_op(
+                &mut op,
+                WriteOp::Batch {
+                    changes: scaffold,
+                    message: format!("project: init {name}"),
+                },
+            )
             .await?;
 
         op.commit().await?;
@@ -237,7 +257,12 @@ impl Projects {
 
         if let Err(e) = self
             .library
-            .cleanup_project_in_op(op, uuid::Uuid::from(id), &project.name)
+            .cleanup_for_scope_in_op(
+                op,
+                uuid::Uuid::from(id),
+                format!("runtime/projects/{}", project.name),
+                format!("project: delete {}", project.name),
+            )
             .await
         {
             tracing::warn!(error = %e, "failed to clean up library during project delete");
@@ -271,8 +296,8 @@ impl Projects {
         slug: &str,
     ) -> Result<Space, ProjectError> {
         let space = self
-            .library
-            .find_space_by_slug(slug)
+            .spaces
+            .find_by_slug(slug)
             .await?
             .ok_or_else(|| SpaceError::NotFound {
                 slug: slug.to_string(),
@@ -326,7 +351,7 @@ impl Projects {
         Audit::record_action_if_unset("project.create_and_mount_space");
         Audit::record_project_id(project_id);
 
-        let space = self.library.create_space(sub, slug, description).await?;
+        let space = self.spaces.create(sub, slug, description).await?;
 
         let mut op = self.repo.begin_op().await?;
         self.mount_space_in_op(&mut op, sub, project_id, space.id)
@@ -392,10 +417,7 @@ impl Projects {
         if project.mounted_spaces.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self
-            .library
-            .find_spaces_by_ids(&project.mounted_spaces)
-            .await?)
+        Ok(self.spaces.find_by_ids(&project.mounted_spaces).await?)
     }
 
     /// Central authorization primitive for sandboxless space access.
@@ -413,8 +435,8 @@ impl Projects {
             .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
 
         let space = self
-            .library
-            .find_space_by_slug(slug)
+            .spaces
+            .find_by_slug(slug)
             .await?
             .ok_or_else(|| SpaceError::NotFound {
                 slug: slug.to_string(),
@@ -428,6 +450,7 @@ impl Projects {
             }
             .into());
         }
+        Audit::record_space_id(space.id);
         Ok(space)
     }
 
@@ -446,10 +469,7 @@ impl Projects {
             return Ok(None);
         }
 
-        let spaces = self
-            .library
-            .find_spaces_by_ids(&project.mounted_spaces)
-            .await?;
+        let spaces = self.spaces.find_by_ids(&project.mounted_spaces).await?;
         if spaces.is_empty() {
             return Ok(None);
         }

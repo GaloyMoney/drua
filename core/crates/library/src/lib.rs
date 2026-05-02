@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 
 pub use config::LibraryConfig;
 pub use error::LibraryError;
-pub use primitives::SpaceId;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 pub use job::WriteOp;
+pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces};
 pub use synced::LibrarySynced;
@@ -33,6 +33,7 @@ use self::job::{
 use self::synced::{HookEntry, LibrarySyncHook};
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct Library {
     config: LibraryConfig,
     pool: sqlx::PgPool,
@@ -43,7 +44,10 @@ pub struct Library {
     spaces: Spaces,
     importers: ImporterRegistry,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
-    _fetcher: tokio::task::JoinHandle<()>,
+    /// Fetcher task handle is wrapped in `Arc` so the `Library` itself
+    /// can be `Clone` (consumers store it directly rather than via a
+    /// further `Arc` wrapper).
+    _fetcher: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl Library {
@@ -74,9 +78,10 @@ impl Library {
             Duration::from_millis(config.fetch_interval_ms),
         );
 
-        let importers: ImporterRegistry = Arc::new(tokio::sync::RwLock::new(vec![
-            Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>,
-        ]));
+        let importers: ImporterRegistry =
+            Arc::new(tokio::sync::RwLock::new(vec![
+                Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>
+            ]));
 
         let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
@@ -103,7 +108,7 @@ impl Library {
             spaces,
             importers,
             write_spawner,
-            _fetcher: fetcher,
+            _fetcher: Arc::new(fetcher),
         })
     }
 

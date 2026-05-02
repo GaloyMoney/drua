@@ -5,7 +5,6 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::SearchResult;
 use crate::note::Notes;
 use crate::primitives::NoteId;
 use crate::project::Projects;
@@ -261,33 +260,39 @@ impl TopLevelTool for NotesTool {
             }
 
             NotesParams::Search { query, limit } => {
-                let results: Vec<SearchResult> = self
+                let hits = self
                     .notes
                     .search(subject, project_id, &query, limit)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                let text = if results.is_empty() {
+                let text = if hits.is_empty() {
                     "No notes found matching your query.".to_string()
                 } else {
-                    let body = results
+                    let body = hits
                         .iter()
-                        .map(|r| r.to_string())
+                        .map(|h| {
+                            format!(
+                                "id: {}\ntitle: {}\npreview: {}",
+                                h.fields.doc_id,
+                                h.fields.name,
+                                h.fields.content.chars().take(200).collect::<String>(),
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("---\n");
-                    format!("Found {} note(s):\n\n{body}", results.len())
+                    format!("Found {} note(s):\n\n{body}", hits.len())
                 };
                 let out = NotesOutput {
                     command: "search".to_string(),
                     results: Some(
-                        results
-                            .iter()
-                            .map(|r| NoteResultOutput {
-                                note_id: r.doc_id.to_string(),
-                                title: r.title.clone(),
-                                preview: r.content.chars().take(200).collect(),
-                                tags: r.tags.clone(),
-                                score: Some(r.score),
+                        hits.iter()
+                            .map(|h| NoteResultOutput {
+                                note_id: h.fields.doc_id.to_string(),
+                                title: h.fields.name.clone(),
+                                preview: h.fields.content.chars().take(200).collect(),
+                                tags: Vec::new(),
+                                score: Some(h.score),
                             })
                             .collect(),
                     ),
@@ -337,29 +342,34 @@ impl TopLevelTool for NotesTool {
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
 
-                let results: Vec<SearchResult> =
-                    notes.into_iter().map(SearchResult::from).collect();
-
-                let text = if results.is_empty() {
+                let text = if notes.is_empty() {
                     "No notes in this project yet.".to_string()
                 } else {
-                    let body = results
+                    let body = notes
                         .iter()
-                        .map(|r| r.to_string())
+                        .map(|n| {
+                            let mut s = format!("id: {}\ntitle: {}", n.id, n.title());
+                            if !n.tags().is_empty() {
+                                s.push_str(&format!("\n  tags: {}", n.tags().join(", ")));
+                            }
+                            let preview: String = n.body().chars().take(200).collect();
+                            s.push_str(&format!("\npreview: {preview}"));
+                            s
+                        })
                         .collect::<Vec<_>>()
                         .join("---\n");
-                    format!("{} note(s):\n\n{body}", results.len())
+                    format!("{} note(s):\n\n{body}", notes.len())
                 };
                 let out = NotesOutput {
                     command: "list".to_string(),
                     results: Some(
-                        results
+                        notes
                             .iter()
-                            .map(|r| NoteResultOutput {
-                                note_id: r.doc_id.to_string(),
-                                title: r.title.clone(),
-                                preview: r.content.chars().take(200).collect(),
-                                tags: r.tags.clone(),
+                            .map(|n| NoteResultOutput {
+                                note_id: n.id.to_string(),
+                                title: n.title().to_string(),
+                                preview: n.body().chars().take(200).collect(),
+                                tags: n.tags().to_vec(),
                                 score: None,
                             })
                             .collect(),

@@ -22,6 +22,8 @@ pub enum SkillError {
     BuildEntity(String),
     #[error("SkillError - Library: {0}")]
     Library(#[from] crate::library::LibraryError),
+    #[error("SkillError - Drua: {0}")]
+    Drua(#[from] drua_library::LibraryError),
     #[error("SkillError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
 }

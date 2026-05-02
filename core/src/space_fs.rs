@@ -20,8 +20,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::instrument;
 
+use drua_library::{Space, SpaceError, Spaces};
+
 use crate::auth::AuthSubject;
-use crate::library::{Space, SpaceError, Spaces};
 use crate::project::{ProjectError, Projects};
 
 /// Soft cap on `view_file` to keep tool responses bounded. Larger than

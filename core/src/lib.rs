@@ -30,7 +30,7 @@ use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
 use github_app::GitHubAppTokenProvider;
-use library::Library;
+use library::{AuthedSearch, AuthedSpaces};
 use mcp_creds::McpCredentials;
 use note::Notes;
 use primitives::ContextGeneration;
@@ -64,7 +64,9 @@ pub struct App {
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
-    library: Arc<Library>,
+    library: drua_library::Library,
+    spaces: Arc<AuthedSpaces>,
+    search: Arc<AuthedSearch>,
     notes: Arc<Notes>,
     jobs: Arc<job::Jobs>,
     /// Held so the executor's worker task lives as long as `App`.
@@ -149,17 +151,18 @@ impl App {
         let mut jobs = job::Jobs::init(job_config)
             .await
             .map_err(|e| AppError::Job(e.to_string()))?;
-        let library = Arc::new(
-            Library::init(
-                &config.library,
-                pool,
-                embedder.clone(),
-                &mut jobs,
-                github_app.clone(),
-            )
-            .await
-            .map_err(|e| AppError::Library(e.to_string()))?,
-        );
+        let drua_config = config.library.clone().into_drua();
+        let library = drua_library::Library::init(
+            pool,
+            &drua_config,
+            embedder.clone(),
+            &mut jobs,
+            github_app.clone(),
+        )
+        .await
+        .map_err(|e| AppError::Library(e.to_string()))?;
+        let spaces = Arc::new(AuthedSpaces::new(library.spaces().clone()));
+        let search = Arc::new(AuthedSearch::new(library.search().clone()));
 
         // Bumped by Notes/Skills mutations (local) and PG NOTIFY (peers).
         // Read on the hot path of `Agents::send_message` to skip DB
@@ -171,7 +174,7 @@ impl App {
         let skills = Arc::new(Skills::new(
             pool,
             Arc::clone(&sandboxes),
-            (*library).clone(),
+            library.clone(),
             context_generation.clone(),
         ));
 
@@ -187,7 +190,7 @@ impl App {
         // system prompts at creation time.
         let notes = Arc::new(Notes::new(
             pool,
-            (*library).clone(),
+            library.clone(),
             context_generation.clone(),
         ));
 
@@ -214,7 +217,7 @@ impl App {
 
         let workflows = Arc::new(Workflows::new(
             pool,
-            (*library).clone(),
+            library.clone(),
             Arc::clone(&skills),
             execute_run_spawner,
             &jobs,
@@ -228,7 +231,8 @@ impl App {
             Arc::clone(&notes),
             project_secrets.clone(),
             Arc::clone(&workflows),
-            (*library).clone(),
+            library.clone(),
+            (*spaces).clone(),
             context_generation.clone(),
         ));
         // Late-binding: Agents needs Projects to render the dynamic
@@ -254,7 +258,7 @@ impl App {
         toolsets.register_top_level(MoveFile::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
         toolsets.register_top_level(Delete::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
 
-        toolsets.register_top_level(SpacesTool::new(Arc::clone(&library), Arc::clone(&projects)));
+        toolsets.register_top_level(SpacesTool::new(Arc::clone(&spaces), Arc::clone(&projects)));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
@@ -267,7 +271,7 @@ impl App {
 
         // Read-only library lookup lives behind progressive disclosure;
         // notes/skill tools cover project-scoped writes.
-        toolsets.register_searchable(LibraryToolSet::new(Arc::clone(&library)));
+        toolsets.register_searchable(LibraryToolSet::new(Arc::clone(&search)));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
@@ -275,7 +279,7 @@ impl App {
             Arc::clone(&sandboxes),
             Arc::clone(&audit),
             Arc::clone(&projects),
-            Arc::clone(&library),
+            Arc::clone(&spaces),
         ));
 
         // Reverse-sync (file → entity) for skills + workflows runs
@@ -316,6 +320,8 @@ impl App {
             github_app,
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
+            spaces,
+            search,
             notes,
             jobs,
             _prompt_executor: prompt_executor,
@@ -374,8 +380,16 @@ impl App {
         &self.tunnels
     }
 
-    pub fn library(&self) -> &Library {
+    pub fn library(&self) -> &drua_library::Library {
         &self.library
+    }
+
+    pub fn spaces(&self) -> &AuthedSpaces {
+        &self.spaces
+    }
+
+    pub fn search(&self) -> &AuthedSearch {
+        &self.search
     }
 
     pub fn notes(&self) -> &Notes {

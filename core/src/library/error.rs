@@ -1,6 +1,5 @@
-/// Crate-local Library error. Wraps drua_library's error type and
-/// folds in auth + space repo errors that surface through the library
-/// API.
+/// Wraps drua_library's error types and folds in auth + space-init
+/// failures that surface through the auth-gated wrappers.
 #[derive(thiserror::Error, Debug)]
 pub enum LibraryError {
     #[error("LibraryError - drua_library: {0}")]
@@ -13,10 +12,4 @@ pub enum LibraryError {
     Space(#[from] drua_library::SpaceError),
     #[error("LibraryError - Job: {0}")]
     Job(#[from] ::job::error::JobError),
-    #[error(
-        "LibraryError - SpaceInitFailed: scaffolding commit for space {slug:?} did not complete"
-    )]
-    SpaceInitFailed { slug: String },
-    #[error("LibraryError - SpaceOpFailed: upstream operation on space {slug:?} did not complete")]
-    SpaceOpFailed { slug: String },
 }

@@ -1,12 +1,15 @@
 use derive_builder::Builder;
+use drua_library::{GitFileHash, SearchableFields, WriteOp};
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use crate::library::GitFileHash;
 use crate::primitives::*;
+use crate::skill::file::slugify;
+use crate::workflow::WORKFLOW_DOC_TYPE;
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
+use super::yaml::{canonical_workflow_path, render_workflow_yaml};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -73,7 +76,16 @@ impl WorkflowDefinition {
 
     /// Canonical on-disk content (YAML).
     pub(crate) fn rendered(&self) -> String {
-        <Self as crate::library::LibrarySynced>::render(self)
+        render_workflow_yaml(
+            self.id,
+            &self.name,
+            self.description.as_deref(),
+            &self.trigger,
+            &self.steps,
+            &self.sandboxes,
+            &self.created_at().to_rfc3339(),
+            &self.updated_at().to_rfc3339(),
+        )
     }
 
     /// Computed (not stored) so it matches what `WriteToRuntime` writes;
@@ -143,9 +155,8 @@ impl core::fmt::Display for WorkflowDefinition {
     }
 }
 
-impl crate::library::LibrarySynced for WorkflowDefinition {
+impl drua_library::LibrarySynced for WorkflowDefinition {
     type Event = WorkflowDefinitionEvent;
-    const DOC_TYPE: crate::library::DocType = crate::library::DocType::Workflow;
 
     fn is_content_event(ev: &WorkflowDefinitionEvent) -> bool {
         matches!(
@@ -154,50 +165,41 @@ impl crate::library::LibrarySynced for WorkflowDefinition {
         )
     }
 
-    fn project(&self) -> Option<(ProjectId, &str)> {
-        self.project_name.as_deref().map(|n| (self.project_id, n))
+    fn searchable_fields(&self) -> SearchableFields {
+        let project_name = self.project_name.as_deref();
+        SearchableFields {
+            doc_id: self.id.into(),
+            doc_type: WORKFLOW_DOC_TYPE,
+            scope_id: Some(self.project_id.into()),
+            scope_slug: project_name.map(str::to_string),
+            name: self.name.clone(),
+            path: Some(canonical_workflow_path(self.id, &self.name, project_name)),
+            content: self.description.clone().unwrap_or_default(),
+        }
     }
 
-    fn id(&self) -> uuid::Uuid {
-        self.id.into()
-    }
-
-    fn display_name(&self) -> &str {
-        &self.name
-    }
-
-    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.events
-            .entity_first_persisted_at()
-            .unwrap_or_else(chrono::Utc::now)
-    }
-
-    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.events
-            .entity_last_modified_at()
-            .or_else(|| self.events.entity_first_persisted_at())
-            .unwrap_or_else(chrono::Utc::now)
-    }
-
-    fn original_path(&self) -> Option<&str> {
-        self.original_path.as_deref()
-    }
-
-    fn index_body(&self) -> &str {
-        self.description.as_deref().unwrap_or("")
-    }
-
-    fn render(&self) -> String {
-        super::yaml::render_workflow_yaml(
-            self.id,
-            &self.name,
-            self.description.as_deref(),
-            &self.trigger,
-            &self.steps,
-            &self.sandboxes,
-            &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
-            &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
-        )
+    fn write_op(&self) -> WriteOp {
+        let canonical = canonical_workflow_path(self.id, &self.name, self.project_name.as_deref());
+        let content = self.rendered().into_bytes();
+        let id_uuid: uuid::Uuid = self.id.into();
+        let message = format!(
+            "workflow: {}-{}",
+            slugify(&self.name),
+            &id_uuid.to_string()[..8]
+        );
+        match self.original_path.as_deref() {
+            Some(orig) if orig != canonical => WriteOp::WriteFileWithRename {
+                old_path: orig.to_string(),
+                new_path: canonical,
+                content,
+                message,
+            },
+            _ => WriteOp::WriteFile {
+                path: canonical,
+                content,
+                message,
+            },
+        }
     }
 }
 

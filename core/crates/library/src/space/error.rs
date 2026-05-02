@@ -30,10 +30,7 @@ pub enum SpaceError {
         project_id: uuid::Uuid,
     },
     #[error("SpaceError - CrossSpaceMove: cannot move {from_slug:?} → {to_slug:?} across spaces")]
-    CrossSpaceMove {
-        from_slug: String,
-        to_slug: String,
-    },
+    CrossSpaceMove { from_slug: String, to_slug: String },
     #[error("SpaceError - Io: {0}")]
     Io(String),
     #[error("SpaceError - InvalidRelPath: {path:?} ({reason})")]
