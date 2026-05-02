@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use job::{CurrentJob, Job, JobCompletion, JobId, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use super::LibraryEmbedConfig;
 use crate::git::{CommitDelta, DeltaKind, GitEngine};
@@ -24,11 +24,13 @@ struct LibrarySyncState {
     last_processed_head: Option<String>,
 }
 
+pub(crate) type ImporterRegistry = Arc<RwLock<Vec<Arc<dyn LibraryImporter>>>>;
+
 pub(crate) struct LibrarySyncJobInitializer {
     rx: Arc<Mutex<mpsc::Receiver<CommitTick>>>,
     git: Arc<GitEngine>,
     search: SearchStore,
-    importers: Vec<Arc<dyn LibraryImporter>>,
+    importers: ImporterRegistry,
     embed_spawner: JobSpawner<LibraryEmbedConfig>,
 }
 
@@ -37,7 +39,7 @@ impl LibrarySyncJobInitializer {
         rx: mpsc::Receiver<CommitTick>,
         git: Arc<GitEngine>,
         search: SearchStore,
-        importers: Vec<Arc<dyn LibraryImporter>>,
+        importers: ImporterRegistry,
         embed_spawner: JobSpawner<LibraryEmbedConfig>,
     ) -> Self {
         Self {
@@ -66,7 +68,7 @@ impl JobInitializer for LibrarySyncJobInitializer {
             rx: Arc::clone(&self.rx),
             git: Arc::clone(&self.git),
             search: self.search.clone(),
-            importers: self.importers.clone(),
+            importers: Arc::clone(&self.importers),
             embed_spawner: self.embed_spawner.clone(),
         }))
     }
@@ -76,7 +78,7 @@ struct LibrarySyncRunner {
     rx: Arc<Mutex<mpsc::Receiver<CommitTick>>>,
     git: Arc<GitEngine>,
     search: SearchStore,
-    importers: Vec<Arc<dyn LibraryImporter>>,
+    importers: ImporterRegistry,
     embed_spawner: JobSpawner<LibraryEmbedConfig>,
 }
 
@@ -132,8 +134,9 @@ impl LibrarySyncRunner {
             }
         };
 
+        let importers = self.importers.read().await;
         for delta in deltas {
-            let importer = match self.importers.iter().find(|i| i.matches(&delta.path)) {
+            let importer = match importers.iter().find(|i| i.matches(&delta.path)) {
                 Some(i) => i,
                 None => continue,
             };

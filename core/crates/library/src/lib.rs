@@ -25,8 +25,8 @@ pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
 use self::job::{
-    CommitTick, LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer,
-    LibraryWriteConfig, LibraryWriteJobInitializer,
+    CommitTick, ImporterRegistry, LibraryEmbedJobInitializer, LibrarySyncConfig,
+    LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
 };
 use self::synced::{HookEntry, LibrarySyncHook};
 
@@ -39,6 +39,7 @@ pub struct Library {
     git: Arc<GitEngine>,
     search: SearchStore,
     spaces: Spaces,
+    importers: ImporterRegistry,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
     _fetcher: tokio::task::JoinHandle<()>,
 }
@@ -71,13 +72,15 @@ impl Library {
             Duration::from_millis(config.fetch_interval_ms),
         );
 
-        let importers: Vec<Arc<dyn LibraryImporter>> = vec![Arc::new(spaces.clone())];
+        let importers: ImporterRegistry = Arc::new(tokio::sync::RwLock::new(vec![
+            Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>,
+        ]));
 
         let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
             Arc::clone(&git),
             search.clone(),
-            importers,
+            Arc::clone(&importers),
             embed_spawner,
         ));
         spawner
@@ -96,9 +99,16 @@ impl Library {
             git,
             search,
             spaces,
+            importers,
             write_spawner,
             _fetcher: fetcher,
         })
+    }
+
+    /// Append an importer post-init. The next CommitTick (and all later
+    /// ones) will route matching paths to this importer.
+    pub async fn register_importer(&self, importer: Arc<dyn LibraryImporter>) {
+        self.importers.write().await.push(importer);
     }
 
     fn spawn_fetcher(
