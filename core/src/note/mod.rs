@@ -1,5 +1,6 @@
 mod entity;
 pub mod error;
+pub mod file;
 pub(crate) mod repo;
 
 use es_entity::AtomicOperation;
