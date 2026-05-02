@@ -1397,6 +1397,7 @@ dependencies = [
  "drua-library",
  "es-entity",
  "futures",
+ "github-app",
  "hex",
  "http",
  "job",

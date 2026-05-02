@@ -250,7 +250,9 @@ impl Projects {
     }
 
     /// Look up a project by name (internal, no auth check).
-    /// Returns `Ok(None)` when no project matches.
+    /// Returns `Ok(None)` when no project matches. Used by reverse-sync
+    /// importers (registered post-init via Library::register_importer).
+    #[allow(dead_code)]
     #[instrument(name = "domain.project.find_by_name", skip(self))]
     pub(crate) async fn find_by_name(&self, name: &str) -> Result<Option<Project>, ProjectError> {
         Ok(self.repo.maybe_find_by_name(name).await?)
@@ -422,7 +424,7 @@ impl Projects {
         if !project.is_space_mounted(space.id) {
             return Err(SpaceError::NotMounted {
                 slug: space.slug.clone(),
-                project_id,
+                project_id: project_id.into(),
             }
             .into());
         }

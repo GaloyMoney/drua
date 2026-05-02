@@ -71,17 +71,16 @@ impl WorkflowDefinition {
             .expect("entity should have at least one persisted timestamp")
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
-        crate::library::UpstreamOp::WriteFile(Box::new(
-            <Self as crate::library::LibrarySynced>::to_synced_file(self),
-        ))
+    /// Canonical on-disk content (YAML).
+    pub(crate) fn rendered(&self) -> String {
+        <Self as crate::library::LibrarySynced>::render(self)
     }
 
     /// Computed (not stored) so it matches what `WriteToRuntime` writes;
     /// otherwise reverse-sync drifts and re-emits commits in a loop
     /// (mirrors `Skill::file_hash`, drua commit f6dd821).
     pub(crate) fn file_hash(&self) -> GitFileHash {
-        self.as_runtime_file().file_hash()
+        GitFileHash::new(self.rendered())
     }
 
     /// Webhook secrets stay DB-only — the splice below replays the

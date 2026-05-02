@@ -5,6 +5,7 @@ use es_entity::*;
 
 use crate::library::GitFileHash;
 use crate::primitives::*;
+use crate::skill::file::render_skill_markdown;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -53,16 +54,15 @@ impl Skill {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
-        crate::library::UpstreamOp::WriteFile(Box::new(
-            <Self as crate::library::LibrarySynced>::to_synced_file(self),
-        ))
+    /// Canonical on-disk form (markdown w/ frontmatter).
+    pub(crate) fn rendered(&self) -> String {
+        <Self as crate::library::LibrarySynced>::render(self)
     }
 
-    /// Hash of the canonical runtime form (matches what `WriteToRuntime`
-    /// writes), so reverse-sync compares against on-disk hash without drift.
+    /// Hash of the canonical runtime form, used for reverse-sync
+    /// idempotency comparisons.
     pub(crate) fn file_hash(&self) -> GitFileHash {
-        self.as_runtime_file().file_hash()
+        GitFileHash::new(self.rendered())
     }
 
     pub fn update(
@@ -177,7 +177,7 @@ impl crate::library::LibrarySynced for Skill {
     }
 
     fn render(&self) -> String {
-        crate::library::render_skill_markdown(
+        render_skill_markdown(
             self.id.into(),
             &self.name,
             &self.description,

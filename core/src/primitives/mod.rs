@@ -9,6 +9,9 @@ pub use crate::auth::{error::AuthorizationError, AuthResource, AuthScope, AuthSu
 pub use chat_output_event::ChatOutputEvent;
 pub use context_generation::{ContextBumpHook, ContextGeneration};
 
+// Re-export SpaceId from drua_library so there's a single canonical type.
+pub use drua_library::SpaceId;
+
 es_entity::entity_id! {
     UserId,
     AgentId,
@@ -19,7 +22,6 @@ es_entity::entity_id! {
     ProjectSecretId,
     SkillId,
     NoteId,
-    SpaceId,
     WorkflowDefinitionId,
     WorkflowRunId;
 

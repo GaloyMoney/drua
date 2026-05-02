@@ -200,6 +200,52 @@ impl Spaces {
             })
     }
 
+    /// Lookup by slug; soft-deleted entries drop out at the SQL layer.
+    #[tracing::instrument(name = "library.spaces.maybe_find_by_slug", skip_all, fields(%slug))]
+    pub async fn maybe_find_by_slug(&self, slug: &str) -> Result<Option<Space>, SpaceError> {
+        Ok(self.repo.maybe_find_by_slug(slug).await?)
+    }
+
+    /// Bulk hydration. Soft-deleted ids silently drop out. Order of the
+    /// returned `Vec` is not aligned with the input slice.
+    #[tracing::instrument(name = "library.spaces.find_by_ids", skip_all, fields(count = ids.len()))]
+    pub async fn find_by_ids(
+        &self,
+        ids: &[crate::primitives::SpaceId],
+    ) -> Result<Vec<Space>, SpaceError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let map = self.repo.find_all::<Space>(ids).await?;
+        Ok(map.into_values().collect())
+    }
+
+    /// Lists every space, paginated through the `slug` list_by index.
+    #[tracing::instrument(name = "library.spaces.list_all", skip_all)]
+    pub async fn list_all(&self) -> Result<Vec<Space>, SpaceError> {
+        use es_entity::ListDirection;
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .repo
+                .list_by_slug(
+                    es_entity::PaginatedQueryArgs {
+                        first: 200,
+                        after,
+                    },
+                    ListDirection::Ascending,
+                )
+                .await?;
+            out.extend(page.entities);
+            if !page.has_next_page {
+                break;
+            }
+            after = page.end_cursor;
+        }
+        Ok(out)
+    }
+
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
     /// `from` is missing or `to` already exists.
     #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to))]

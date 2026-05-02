@@ -277,65 +277,11 @@ impl App {
             Arc::clone(&library),
         ));
 
-        // Reverse-sync (file → entity) for every service that implements
-        // `LibraryImporter`. Uses library-lock queue to serialise with
-        // forward-sync writes; `merge()` collapses bursts into one batch.
-        {
-            let sync_init = library::SyncFromLibraryJobInitializer::<skill::Skills>::new(
-                Arc::clone(&library),
-                Arc::clone(&skills),
-                Arc::clone(&projects),
-            );
-            let sync_spawner = jobs.add_initializer(sync_init);
-            sync_spawner
-                .spawn_with_queue_id(
-                    job::JobId::new(),
-                    library::SyncFromLibraryConfig {
-                        sync_interval_secs: config.library.skill_sync_interval_secs,
-                        last_sync_commit: None,
-                    },
-                    library::LIBRARY_LOCK_QUEUE,
-                )
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
-
-        {
-            let sync_init = library::SyncFromLibraryJobInitializer::<workflow::Workflows>::new(
-                Arc::clone(&library),
-                Arc::clone(&workflows),
-                Arc::clone(&projects),
-            );
-            let sync_spawner = jobs.add_initializer(sync_init);
-            sync_spawner
-                .spawn_with_queue_id(
-                    job::JobId::new(),
-                    library::SyncFromLibraryConfig {
-                        sync_interval_secs: config.library.skill_sync_interval_secs,
-                        last_sync_commit: None,
-                    },
-                    library::LIBRARY_LOCK_QUEUE,
-                )
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
-
-        {
-            let sync_init =
-                library::space::file_sync::SpaceFilesSyncJobInitializer::new(Arc::clone(&library));
-            let sync_spawner = jobs.add_initializer(sync_init);
-            sync_spawner
-                .spawn_with_queue_id(
-                    job::JobId::new(),
-                    library::space::file_sync::SpaceFilesSyncConfig {
-                        sync_interval_secs: config.library.skill_sync_interval_secs,
-                        last_sync_commit: None,
-                    },
-                    library::LIBRARY_LOCK_QUEUE,
-                )
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
+        // Reverse-sync (file → entity) for skills + workflows lives in
+        // drua_library now and runs from a single tick-driven job; the
+        // Spaces importer is wired by drua_library::Library::init.
+        // Skill/Workflow importers are TODO: register via
+        // `library.register_importer(...)` once the importer impls land.
 
         jobs.start_poll()
             .await

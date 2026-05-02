@@ -226,7 +226,7 @@ impl SpaceFs {
             return Ok(None);
         }
         if from_is_space != to_is_space {
-            return Err(super::space::SpaceError::CrossSpaceMove {
+            return Err(super::SpaceError::CrossSpaceMove {
                 from_slug: space_path::parse(from)
                     .map(|r| r.slug.to_string())
                     .unwrap_or_else(|| "<sandbox>".to_string()),
@@ -243,7 +243,7 @@ impl SpaceFs {
             return Ok(None);
         };
         if from_resolved.space.slug != to_ref.slug {
-            return Err(super::space::SpaceError::CrossSpaceMove {
+            return Err(super::SpaceError::CrossSpaceMove {
                 from_slug: from_resolved.space.slug.clone(),
                 to_slug: to_ref.slug.to_string(),
             }
@@ -415,8 +415,8 @@ async fn read_dir_names(full: &std::path::Path) -> Result<Vec<String>, ProjectEr
     Ok(names)
 }
 
-fn io_err(msg: String) -> super::space::SpaceError {
-    super::space::SpaceError::Io(msg)
+fn io_err(msg: String) -> super::SpaceError {
+    super::SpaceError::Io(msg)
 }
 
 /// Slice `content` to the requested 1-based, inclusive line range.

@@ -12,7 +12,8 @@ pub use error::*;
 use repo::*;
 
 use crate::auth::AuthSubject;
-use crate::library::{DocType, Library, SearchResult, UpstreamOp};
+use crate::library::{DocType, Library, SearchResult};
+use crate::note::file::render_note_markdown;
 use crate::primitives::*;
 
 #[derive(Clone)]
@@ -71,17 +72,15 @@ impl Notes {
 
         let note_id = NoteId::new();
         let created_at = op.now().to_rfc3339();
-        let runtime_file = UpstreamOp::for_note(
-            note_id,
-            project_id,
-            project_name,
+        let rendered = render_note_markdown(
+            note_id.into(),
             &title,
             &content,
             &tags,
             &created_at,
             &created_at,
         );
-        let file_hash = runtime_file.file_hash();
+        let file_hash = crate::library::GitFileHash::new(rendered);
 
         let new_note = NewNote::builder()
             .id(note_id)
@@ -128,17 +127,15 @@ impl Notes {
         let updated_at = op.now().to_rfc3339();
 
         let created_at = note.created_at();
-        let runtime_file = UpstreamOp::for_note(
-            note.id,
-            note.project_id,
-            &note.project_name,
+        let rendered = render_note_markdown(
+            note.id.into(),
             &title,
             &content,
             &tags,
             &created_at,
             &updated_at,
         );
-        let file_hash = runtime_file.file_hash();
+        let file_hash = crate::library::GitFileHash::new(rendered);
 
         if note.update(title, content, tags, file_hash).did_execute() {
             self.repo.update_in_op(&mut op, &mut note).await?;

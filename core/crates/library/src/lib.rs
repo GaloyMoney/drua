@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 
 pub use config::LibraryConfig;
 pub use error::LibraryError;
+pub use primitives::SpaceId;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 pub use job::WriteOp;
@@ -199,6 +200,31 @@ impl Library {
                 fields: None,
                 deletes: Vec::new(),
                 write_op: Some(write_op),
+            },
+        )
+        .await
+    }
+
+    /// Full-control enqueue used by external crates that compute the
+    /// `(fields, deletes, write_op)` projection themselves rather than
+    /// implementing [`LibrarySynced`].
+    #[tracing::instrument(name = "library.enqueue_full_in_op", skip_all)]
+    pub async fn enqueue_full_in_op(
+        &self,
+        op: &mut impl es_entity::AtomicOperation,
+        fields: Option<SearchableFields>,
+        deletes: Vec<(uuid::Uuid, DocType)>,
+        write_op: Option<WriteOp>,
+    ) -> Result<(), LibraryError> {
+        if fields.is_none() && deletes.is_empty() && write_op.is_none() {
+            return Ok(());
+        }
+        self.enqueue_in_op(
+            op,
+            HookEntry {
+                fields,
+                deletes,
+                write_op,
             },
         )
         .await

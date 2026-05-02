@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 
 use crate::library::GitFileHash;
+use crate::note::file::render_note_markdown;
 use crate::primitives::*;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +47,7 @@ pub struct Note {
 impl Note {
     /// Document content with frontmatter, as stored in the library.
     pub fn content(&self) -> String {
-        self.as_runtime_file().content()
+        self.rendered()
     }
 
     /// Note title (first line / heading).
@@ -77,10 +78,9 @@ impl Note {
             .unwrap_or_default()
     }
 
-    pub(super) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
-        crate::library::UpstreamOp::WriteFile(Box::new(
-            <Self as crate::library::LibrarySynced>::to_synced_file(self),
-        ))
+    /// Canonical on-disk content (markdown w/ frontmatter).
+    pub(super) fn rendered(&self) -> String {
+        <Self as crate::library::LibrarySynced>::render(self)
     }
 
     pub fn pin(&mut self) -> Idempotent<()> {
@@ -174,7 +174,7 @@ impl crate::library::LibrarySynced for Note {
     }
 
     fn render(&self) -> String {
-        crate::library::render_note_markdown(
+        render_note_markdown(
             self.id.into(),
             &self.title,
             &self.content,
@@ -315,17 +315,16 @@ mod tests {
     use super::{NewNote, Note};
 
     fn test_hash() -> GitFileHash {
-        let rf = crate::library::UpstreamOp::for_note(
-            NoteId::new(),
-            ProjectId::new(),
-            "test",
+        let id = NoteId::new();
+        let rendered = super::render_note_markdown(
+            id.into(),
             "Test Note",
             "Some content here",
             &["tag1".into(), "tag2".into()],
             "",
             "",
         );
-        rf.file_hash()
+        GitFileHash::new(rendered)
     }
 
     fn new_note() -> Note {

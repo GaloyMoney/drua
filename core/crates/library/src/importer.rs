@@ -31,7 +31,8 @@ impl std::fmt::Display for DocType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GitFileHash(pub String);
 
 impl GitFileHash {
@@ -41,6 +42,12 @@ impl GitFileHash {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Display for GitFileHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

@@ -1,44 +1,18 @@
 mod error;
-mod file;
-mod inbox;
-mod job;
-mod search;
-pub mod space;
-mod space_fs;
-mod space_path;
-mod synced;
-mod upstream;
+pub mod space_fs;
+pub(crate) mod space_path;
 
 use std::sync::Arc;
 
-use es_entity::operation::hooks::CommitHook as _;
+use es_entity::AtomicOperation;
+
+pub use drua_library::{
+    GitFileHash, NewSpace, SearchableFields, Space, SpaceError, SpaceEvent, WriteOp,
+};
+pub use error::LibraryError;
+pub use space_fs::{FileView, SpaceFs};
 
 use crate::github_app::GitHubAppTokenProvider;
-
-use self::inbox::LibraryWriteHandler;
-use self::job::{WriteToRuntimeConfig, WriteToRuntimeJobInitializer};
-use self::search::SearchStore;
-use self::space::repo::SpaceRepo;
-use self::upstream::Upstream;
-pub use error::LibraryError;
-pub(crate) use file::name_from_filename;
-pub use file::{
-    parse_skill_markdown, render_note_markdown, render_skill_markdown, DocType, GitFileHash,
-    SearchableFields, UpstreamOp,
-};
-pub use job::LIBRARY_LOCK_QUEUE;
-pub use search::{GlobalSearchHit, LibraryFile, SearchResult};
-pub use space::{NewSpace, Space, SpaceError, SpaceEvent};
-pub use space_fs::{FileView, SpaceFs};
-pub(crate) use synced::slugify;
-pub use synced::{
-    Changes, LibraryImporter, LibrarySynced, ParsedFile, SyncFromLibraryConfig,
-    SyncFromLibraryJobInitializer, SyncedFile, UpsertError,
-};
-pub use upstream::SpaceFileChange;
-
-const LIBRARY_WRITE_JOB: &str = "library.write";
-const WRITE_TO_RUNTIME_JOB: &str = "library.write-to-runtime";
 
 const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 20;
 
@@ -49,7 +23,7 @@ pub struct LibraryConfig {
     pub data_dir: Option<String>,
     #[serde(default)]
     pub repo_url: Option<String>,
-    /// Default 20s.
+    /// Default 20s. Reused as the upstream-fetch interval.
     #[serde(default = "default_skill_sync_interval_secs")]
     pub skill_sync_interval_secs: u64,
 }
@@ -77,21 +51,286 @@ impl LibraryConfig {
     }
 }
 
+/// Closed enum of doc types this codebase emits. drua_library uses an
+/// open string type; the conversions are trivial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocType {
+    Note,
+    Skill,
+    Workflow,
+    SpaceFile,
+}
+
+impl DocType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DocType::Note => "note",
+            DocType::Skill => "skill",
+            DocType::Workflow => "workflow",
+            DocType::SpaceFile => "space_file",
+        }
+    }
+
+    pub fn subdir(&self) -> &'static str {
+        match self {
+            DocType::Note => "notes",
+            DocType::Skill => "skills",
+            DocType::Workflow => "workflows",
+            DocType::SpaceFile => "spaces",
+        }
+    }
+
+    pub fn ext(&self) -> &'static str {
+        match self {
+            DocType::Note => "md",
+            DocType::Skill => "md",
+            DocType::Workflow => "yml",
+            DocType::SpaceFile => "md",
+        }
+    }
+}
+
+impl From<DocType> for drua_library::DocType {
+    fn from(d: DocType) -> Self {
+        drua_library::DocType::new(d.as_str())
+    }
+}
+
+impl TryFrom<&str> for DocType {
+    type Error = String;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "note" => Ok(DocType::Note),
+            "skill" => Ok(DocType::Skill),
+            "workflow" => Ok(DocType::Workflow),
+            "space_file" => Ok(DocType::SpaceFile),
+            other => Err(format!("unknown doc_type: {other}")),
+        }
+    }
+}
+
+/// Implemented on entity types whose mutations should sync to the
+/// library repo. `core::library::Library::sync_entity_in_op` projects
+/// an `E: LibrarySynced` into the underlying `drua_library` write
+/// pipeline (search row + upstream commit) without leaking `WriteOp`
+/// or `SearchableFields` to the entity layer.
+pub trait LibrarySynced: Sized + Send + Sync + 'static {
+    type Event: es_entity::EsEvent + 'static;
+
+    const DOC_TYPE: DocType;
+
+    /// Sync only fires when one of these event variants was just persisted.
+    fn is_content_event(ev: &Self::Event) -> bool;
+
+    /// `None` means "global" file (not project-scoped).
+    fn project(&self) -> Option<(crate::primitives::ProjectId, &str)>;
+
+    fn id(&self) -> uuid::Uuid;
+
+    /// Display name → searchable `title` and slug source.
+    fn display_name(&self) -> &str;
+
+    fn created_at(&self) -> chrono::DateTime<chrono::Utc>;
+    fn updated_at(&self) -> chrono::DateTime<chrono::Utc>;
+    fn original_path(&self) -> Option<&str> {
+        None
+    }
+
+    /// Searchable body projection.
+    fn index_body(&self) -> &str;
+
+    fn index_tags(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Render the canonical on-disk content. Must be deterministic so
+    /// the upstream write's hash short-circuit doesn't loop.
+    fn render(&self) -> String;
+}
+
+pub fn slugify(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// `runtime/projects/{project}/{subdir}/{slug}-{id_prefix}.{ext}` when scoped,
+/// else `runtime/{subdir}/{slug}-{id_prefix}.{ext}` (Skill/Workflow only).
+fn relative_path_for<E: LibrarySynced>(entity: &E) -> String {
+    let id = entity.id();
+    let id_prefix = &id.to_string()[..8];
+    let slug = slugify(entity.display_name());
+    let subdir = E::DOC_TYPE.subdir();
+    let ext = E::DOC_TYPE.ext();
+    match entity.project() {
+        Some((_, project_name)) => {
+            format!("runtime/projects/{project_name}/{subdir}/{slug}-{id_prefix}.{ext}")
+        }
+        None => format!("runtime/{subdir}/{slug}-{id_prefix}.{ext}"),
+    }
+}
+
+fn project_searchable<E: LibrarySynced>(entity: &E) -> SearchableFields {
+    let project = entity.project();
+    SearchableFields {
+        doc_id: entity.id(),
+        doc_type: E::DOC_TYPE.into(),
+        scope_id: project.map(|(id, _)| id.into()),
+        scope_slug: project.map(|(_, name)| name.to_string()),
+        name: entity.display_name().to_string(),
+        path: Some(relative_path_for(entity)),
+        content: entity.index_body().to_string(),
+    }
+}
+
+fn project_write_op<E: LibrarySynced>(entity: &E) -> WriteOp {
+    let canonical_path = relative_path_for(entity);
+    let content = entity.render().into_bytes();
+    let message = format!(
+        "{}: {}-{}",
+        E::DOC_TYPE.as_str(),
+        slugify(entity.display_name()),
+        &entity.id().to_string()[..8],
+    );
+    match entity.original_path() {
+        Some(orig) if orig != canonical_path => WriteOp::WriteFileWithRename {
+            old_path: orig.to_string(),
+            new_path: canonical_path,
+            content,
+            message,
+        },
+        _ => WriteOp::WriteFile {
+            path: canonical_path,
+            content,
+            message,
+        },
+    }
+}
+
+/// Search-result shapes returned by `Library::search`/`search_global`/`get_files`.
+/// Tags are dropped (the new schema folds them into the FTS-indexed content);
+/// `project_id` is preserved as the nil UUID for global / unscoped docs.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub doc_id: uuid::Uuid,
+    pub doc_type: DocType,
+    pub title: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub score: f64,
+}
+
+impl std::fmt::Display for SearchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "id: {}\ntitle: {}\n", self.doc_id, self.title)?;
+        if !self.tags.is_empty() {
+            writeln!(f, "  tags: {}", self.tags.join(", "))?;
+        }
+        let preview: String = self.content.chars().take(200).collect();
+        write!(f, "preview: {preview}")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalSearchHit {
+    pub doc_id: uuid::Uuid,
+    pub doc_type: DocType,
+    pub project_id: uuid::Uuid,
+    pub title: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub score: f64,
+    pub space_slug: Option<String>,
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryFile {
+    pub doc_id: uuid::Uuid,
+    pub doc_type: DocType,
+    pub project_id: uuid::Uuid,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub space_slug: Option<String>,
+    pub relative_path: Option<String>,
+}
+
+fn hit_to_result(hit: drua_library::SearchHit) -> Option<SearchResult> {
+    let doc_type = DocType::try_from(hit.fields.doc_type.as_str()).ok()?;
+    Some(SearchResult {
+        doc_id: hit.fields.doc_id,
+        doc_type,
+        title: hit.fields.name,
+        content: hit.fields.content,
+        tags: Vec::new(),
+        score: hit.score,
+    })
+}
+
+fn hit_to_global(hit: drua_library::SearchHit) -> Option<GlobalSearchHit> {
+    let doc_type = DocType::try_from(hit.fields.doc_type.as_str()).ok()?;
+    let space_slug = if matches!(doc_type, DocType::SpaceFile) {
+        hit.fields.scope_slug.clone()
+    } else {
+        None
+    };
+    let relative_path = if matches!(doc_type, DocType::SpaceFile) {
+        hit.fields.path.clone()
+    } else {
+        None
+    };
+    Some(GlobalSearchHit {
+        doc_id: hit.fields.doc_id,
+        doc_type,
+        project_id: hit.fields.scope_id.unwrap_or_else(uuid::Uuid::nil),
+        title: hit.fields.name,
+        content: hit.fields.content,
+        tags: Vec::new(),
+        score: hit.score,
+        space_slug,
+        relative_path,
+    })
+}
+
+fn fields_to_library_file(fields: SearchableFields) -> Option<LibraryFile> {
+    let doc_type = DocType::try_from(fields.doc_type.as_str()).ok()?;
+    let space_slug = if matches!(doc_type, DocType::SpaceFile) {
+        fields.scope_slug.clone()
+    } else {
+        None
+    };
+    let relative_path = if matches!(doc_type, DocType::SpaceFile) {
+        fields.path.clone()
+    } else {
+        None
+    };
+    Some(LibraryFile {
+        doc_id: fields.doc_id,
+        doc_type,
+        project_id: fields.scope_id.unwrap_or_else(uuid::Uuid::nil),
+        title: fields.name,
+        body: fields.content,
+        tags: Vec::new(),
+        space_slug,
+        relative_path,
+    })
+}
+
+/// Auth-gated facade over `drua_library::Library`. Repos call
+/// `sync_entity_in_op` from their `post_persist_hook`; tools call
+/// `search`/`search_global`/`get_files`; spaces work via the dedicated
+/// space-file methods or `SpaceFs`.
 #[derive(Clone)]
 pub struct Library {
-    search: SearchStore,
-    inbox: obix::Inbox,
-    embedder: Arc<code_assistant_core::embedder::Embedder>,
-    upstream: Upstream,
-    space_repo: SpaceRepo,
-    /// Direct handle to the `WriteToRuntime` spawner so `create_space`
-    /// can fire-and-await its scaffolding commit with a known `JobId`
-    /// (the inbox path uses random `JobId::new()` and we need to
-    /// `await_completions` on that specific job).
-    write_spawner: ::job::JobSpawner<WriteToRuntimeConfig>,
-    /// Cloned out of `Jobs::init` so `Library` can `await_completions`
-    /// without plumbing `Arc<Jobs>` everywhere.
-    jobs: ::job::Jobs,
+    inner: Arc<drua_library::Library>,
 }
 
 impl Library {
@@ -102,32 +341,28 @@ impl Library {
         jobs: &mut ::job::Jobs,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
-        let upstream =
-            Upstream::init(config.repo_url.as_deref(), config.repo_path(), github_app).await?;
-        let search = SearchStore::new(pool);
-
-        let write_init = WriteToRuntimeJobInitializer::new(upstream.clone());
-        let write_spawner = jobs.add_initializer(write_init);
-
-        let handler =
-            LibraryWriteHandler::new(search.clone(), embedder.clone(), write_spawner.clone());
-        let inbox_config = obix::InboxConfig::new(::job::JobType::new(LIBRARY_WRITE_JOB));
-        let inbox = obix::Inbox::new(pool, jobs, inbox_config, handler);
-
+        let repo_url = config.repo_url.clone().unwrap_or_default();
+        let data_dir = config.repo_path().to_string_lossy().into_owned();
+        let drua_config = drua_library::LibraryConfig {
+            data_dir,
+            repo_url,
+            fetch_interval_ms: config
+                .skill_sync_interval_secs
+                .saturating_mul(1000)
+                .max(1000),
+        };
+        let inner = drua_library::Library::init(pool, &drua_config, embedder, jobs, github_app)
+            .await
+            .map_err(LibraryError::Drua)?;
         Ok(Self {
-            search,
-            inbox,
-            embedder,
-            upstream,
-            space_repo: SpaceRepo::new(pool),
-            write_spawner,
-            jobs: jobs.clone(),
+            inner: Arc::new(inner),
         })
     }
 
-    /// Per-repo `post_persist_hook` body collapses to a one-liner over this:
-    /// projects the entity into a `SyncedFile` and registers the write hook
-    /// when at least one persisted event was a content event.
+    /// Per-repo `post_persist_hook` body: project the entity into a
+    /// `(SearchableFields, WriteOp)` pair and enqueue both on the
+    /// per-transaction batch (search row inline; write job spawned via
+    /// `spawn_in_op`).
     #[tracing::instrument(
         name = "library.sync_entity_in_op",
         skip_all,
@@ -141,48 +376,71 @@ impl Library {
     ) -> Result<(), LibraryError>
     where
         E: LibrarySynced,
-        OP: es_entity::AtomicOperation,
+        OP: AtomicOperation,
     {
         if !new_events.any(|p| E::is_content_event(&p.event)) {
             return Ok(());
         }
-        let file = UpstreamOp::WriteFile(Box::new(entity.to_synced_file()));
-        self.enqueue_write(op, file.clone()).await?;
+        let fields = project_searchable(entity);
+        let write_op = project_write_op(entity);
+        self.inner
+            .enqueue_full_in_op(op, Some(fields), Vec::new(), Some(write_op))
+            .await?;
         Ok(())
     }
 
-    async fn enqueue_write<OP: es_entity::AtomicOperation>(
-        &self,
-        op: &mut OP,
-        file: UpstreamOp,
-    ) -> Result<(), sqlx::Error> {
-        let hook = synced::LibrarySyncHook::new(self.inbox.clone(), self.search.clone(), file);
-        if let Err(hook) = op.add_commit_hook(hook) {
-            let _ = hook.force_execute_pre_commit(op).await?;
-        }
-        Ok(())
-    }
-
-    /// Queues a single `ProjectInit` op — `notes/`, `skills/`,
-    /// `workflows/` `.gitkeep` markers all land in one commit + push.
+    /// Queues a single batched commit that materialises `notes/`,
+    /// `skills/`, `workflows/` `.gitkeep` markers under the project's
+    /// runtime dir.
     #[tracing::instrument(name = "library.sync_project_folder_in_op", skip_all)]
     pub async fn sync_project_folder_in_op(
         &self,
-        op: &mut impl es_entity::AtomicOperation,
+        op: &mut impl AtomicOperation,
         project_name: &str,
     ) -> Result<(), LibraryError> {
-        let file = UpstreamOp::ProjectInit {
-            project_name: project_name.to_string(),
-        };
-        self.enqueue_write(op, file).await?;
+        let changes = ["notes", "skills", "workflows"]
+            .iter()
+            .map(|sub| {
+                (
+                    format!("runtime/projects/{project_name}/{sub}/.gitkeep"),
+                    Some(Vec::new()),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.inner
+            .enqueue_write_in_op(
+                op,
+                WriteOp::Batch {
+                    changes,
+                    message: format!("project: init {project_name}"),
+                },
+            )
+            .await?;
         Ok(())
     }
 
-    /// Persists a new `Space` and queues `spaces/<slug>/.gitkeep` for
-    /// upstream commit in the same transaction. Mounting is decoupled
-    /// from creation — callers that want the creating project to see
-    /// the space follow up with `Projects::mount_space` (or use the
-    /// combined `Projects::create_and_mount_space`).
+    /// Removes search-index rows for the project + queues `git rm -rf
+    /// runtime/projects/{name}/`. Run inside the project delete txn.
+    #[tracing::instrument(name = "library.cleanup_project_in_op", skip_all)]
+    pub async fn cleanup_project_in_op(
+        &self,
+        op: &mut impl AtomicOperation,
+        project_id: uuid::Uuid,
+        project_name: &str,
+    ) -> Result<(), LibraryError> {
+        self.inner
+            .cleanup_for_scope_in_op(
+                op,
+                project_id,
+                format!("runtime/projects/{project_name}"),
+                format!("project: delete {project_name}"),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Persists a new `Space`, scaffolds `spaces/<slug>/.gitkeep` upstream,
+    /// and waits for the upstream commit to land.
     #[tracing::instrument(name = "library.create_space", skip(self, sub))]
     pub async fn create_space(
         &self,
@@ -195,199 +453,17 @@ impl Library {
             crate::auth::AuthResource::Space(None),
         )?;
         crate::audit::Audit::record_action_if_unset("space.create");
-
-        let mut op = self.space_repo.begin_op().await?;
-        let mut builder = NewSpace::builder().slug(slug.into());
-        if let Some(desc) = description {
-            builder = builder.description(desc);
-        }
-        let new_space = builder.build()?;
-        let space = self.space_repo.create_in_op(&mut op, new_space).await?;
-
-        // Spawn the upstream `.gitkeep` commit with a known `JobId`.
-        // Persisted in the same `op`, so the spawn is durable: a crash
-        // before commit drops both the entity and the job; a crash
-        // after picks the job up from the persisted queue.
-        let job_id = ::job::JobId::new();
-        let config = WriteToRuntimeConfig {
-            file: UpstreamOp::SpaceInit {
-                slug: space.slug.clone(),
-            },
-        };
-        self.write_spawner
-            .spawn_with_queue_id_in_op(&mut op, job_id, config, LIBRARY_LOCK_QUEUE)
+        let space = self
+            .inner
+            .spaces()
+            .create(slug.into(), description)
             .await?;
-        op.commit().await?;
-
-        // Block until the upstream `spaces/<slug>/.gitkeep` commit
-        // lands so callers can rely on the directory existing once
-        // `create_space` returns.
-        const SPACE_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let outcomes = self
-            .jobs
-            .await_completions(&[job_id], Some(SPACE_INIT_TIMEOUT))
-            .await?;
-        if !outcomes.iter().all(|o| o.is_completed()) {
-            return Err(LibraryError::SpaceInitFailed {
-                slug: space.slug.clone(),
-            });
-        }
-
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
         Ok(space)
     }
 
-    /// Blind overwrite of `spaces/<slug>/<relative_path>`. Awaits the
-    /// upstream push so callers can rely on the file being at the
-    /// remote when this returns.
-    ///
-    /// Trusted-caller: mount-membership authz lives in `Projects`
-    /// (`Project.mounted_spaces`), not on `AuthScope`. `SpaceFs` is
-    /// the public boundary and gates every call via
-    /// `Projects::space_for_subject`. Visibility is `pub(in crate::library)`
-    /// so external code can't bypass that gate.
-    #[tracing::instrument(name = "library.write_space_file", skip(self, space, content), fields(slug = %space.slug))]
-    pub(in crate::library) async fn write_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-        content: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.write_file");
-        self.spawn_and_await_space_op(
-            &space.slug,
-            UpstreamOp::SpaceFileWrite {
-                slug: space.slug.clone(),
-                relative_path,
-                content,
-            },
-        )
-        .await
-    }
-
-    /// Removes `spaces/<slug>/<relative_path>` from the library repo.
-    /// No-op if the file doesn't exist on disk. Trusted-caller — see
-    /// [`Library::write_space_file`].
-    #[tracing::instrument(name = "library.delete_space_file", skip(self, space), fields(slug = %space.slug))]
-    pub(in crate::library) async fn delete_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.delete_file");
-        self.spawn_and_await_space_op(
-            &space.slug,
-            UpstreamOp::SpaceFileDelete {
-                slug: space.slug.clone(),
-                relative_path,
-            },
-        )
-        .await
-    }
-
-    /// Read–modify–write at the worker. Verifies `old_str` appears
-    /// exactly once on the freshest disk state before substituting.
-    /// Trusted-caller — see [`Library::write_space_file`].
-    #[tracing::instrument(name = "library.str_replace_space_file", skip(self, space, old_str, new_str), fields(slug = %space.slug))]
-    pub(in crate::library) async fn str_replace_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-        old_str: String,
-        new_str: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.str_replace");
-        self.spawn_and_await_space_op(
-            &space.slug,
-            UpstreamOp::SpaceFileStrReplace {
-                slug: space.slug.clone(),
-                relative_path,
-                old_str,
-                new_str,
-            },
-        )
-        .await
-    }
-
-    /// Read–modify–write at the worker. Inserts `text` after
-    /// `line_number` (1-based, `0` = beginning of file). Out-of-range
-    /// line numbers append at EOF. Trusted-caller — see
-    /// [`Library::write_space_file`].
-    #[tracing::instrument(name = "library.insert_space_file", skip(self, space, text), fields(slug = %space.slug))]
-    pub(in crate::library) async fn insert_space_file(
-        &self,
-        space: &Space,
-        relative_path: String,
-        line_number: usize,
-        text: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.insert");
-        self.spawn_and_await_space_op(
-            &space.slug,
-            UpstreamOp::SpaceFileInsert {
-                slug: space.slug.clone(),
-                relative_path,
-                line_number,
-                text,
-            },
-        )
-        .await
-    }
-
-    /// Renames `spaces/<slug>/<from>` → `spaces/<slug>/<to>`. Worker
-    /// rejects same-path, missing src, or existing dest. Cross-space
-    /// moves are blocked at `SpaceFs::move_file` — both sides must
-    /// resolve to the same `Space`. Trusted-caller — see
-    /// [`Library::write_space_file`].
-    #[tracing::instrument(name = "library.move_space_file", skip(self, space), fields(slug = %space.slug))]
-    pub(in crate::library) async fn move_space_file(
-        &self,
-        space: &Space,
-        from_relative_path: String,
-        to_relative_path: String,
-    ) -> Result<(), LibraryError> {
-        crate::audit::Audit::record_action_if_unset("space.move_file");
-        self.spawn_and_await_space_op(
-            &space.slug,
-            UpstreamOp::SpaceFileMove {
-                slug: space.slug.clone(),
-                from_relative_path,
-                to_relative_path,
-            },
-        )
-        .await
-    }
-
-    /// Spawns a single space-related `UpstreamOp` on the
-    /// `LIBRARY_LOCK_QUEUE` and blocks until it completes (or the
-    /// 30s timeout fires). Used by the four space-file write helpers
-    /// so callers can rely on "returned == pushed".
-    async fn spawn_and_await_space_op(
-        &self,
-        slug: &str,
-        op: UpstreamOp,
-    ) -> Result<(), LibraryError> {
-        const SPACE_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let job_id = ::job::JobId::new();
-        let config = WriteToRuntimeConfig { file: op };
-        self.write_spawner
-            .spawn_with_queue_id(job_id, config, LIBRARY_LOCK_QUEUE)
-            .await?;
-        let outcomes = self
-            .jobs
-            .await_completions(&[job_id], Some(SPACE_OP_TIMEOUT))
-            .await?;
-        if !outcomes.iter().all(|o| o.is_completed()) {
-            return Err(LibraryError::SpaceOpFailed {
-                slug: slug.to_string(),
-            });
-        }
-        Ok(())
-    }
-
     /// Lists every space, paginated. Soft-deleted spaces drop out
-    /// at the SQL layer (`delete = "soft_without_queries"`). Used by
-    /// admin tools and the `spaces` `list { all: true }` flag.
+    /// at the SQL layer.
     #[tracing::instrument(name = "library.list_all_spaces", skip(self, sub))]
     pub async fn list_all_spaces(
         &self,
@@ -398,44 +474,18 @@ impl Library {
             crate::auth::AuthResource::Space(None),
         )?;
         crate::audit::Audit::record_action_if_unset("space.list_all");
-        Ok(self.space_repo.list_all().await?)
+        Ok(self.inner.spaces().list_all().await?)
     }
 
-    /// Internal access to the search/upstream/embedder primitives so
-    /// `space::file_sync` can drive its index job without leaking
-    /// `Library`'s privates to the rest of the crate.
-    pub(in crate::library) fn search_store(&self) -> &SearchStore {
-        &self.search
-    }
-
-    pub(in crate::library) fn embedder(&self) -> &Arc<code_assistant_core::embedder::Embedder> {
-        &self.embedder
-    }
-
-    pub(in crate::library) fn upstream(&self) -> &Upstream {
-        &self.upstream
-    }
-
-    /// On-disk root for `spaces/<slug>/` inside the library clone.
-    /// `SpaceFs` reads from here directly; the path is not validated
-    /// against `Space` existence — callers must run
-    /// `Projects::space_for_subject` first.
     pub fn space_root(&self, slug: &str) -> std::path::PathBuf {
-        self.upstream.repo_path().join("spaces").join(slug)
+        self.inner.repo_path().join("spaces").join(slug)
     }
 
-    /// No-auth slug → `Space` lookup. Soft-deleted entries are filtered
-    /// by the underlying repo. Authorization in the spaces model lives
-    /// on `Project.mounted_spaces`, not the space row — callers must
-    /// enforce mount membership via `Projects::space_for_subject`
-    /// before treating the result as visible to a subject.
     #[tracing::instrument(name = "library.find_space_by_slug", skip(self))]
     pub async fn find_space_by_slug(&self, slug: &str) -> Result<Option<Space>, LibraryError> {
-        Ok(self.space_repo.maybe_find_by_slug(slug).await?)
+        Ok(self.inner.spaces().maybe_find_by_slug(slug).await?)
     }
 
-    /// Bulk hydration. Soft-deleted ids silently drop out. Order of
-    /// the returned `Vec` is not aligned with the input slice.
     #[tracing::instrument(name = "library.find_spaces_by_ids", skip(self, ids))]
     pub async fn find_spaces_by_ids(
         &self,
@@ -444,114 +494,108 @@ impl Library {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let map = self.space_repo.find_all::<Space>(ids).await?;
-        Ok(map.into_values().collect())
+        Ok(self.inner.spaces().find_by_ids(ids).await?)
     }
 
-    /// Removes search data and queues a job to delete
-    /// `runtime/projects/<name>/` from the library repo. Call inside the
-    /// project delete transaction for atomicity.
-    #[tracing::instrument(name = "library.cleanup_project_in_op", skip_all)]
-    pub async fn cleanup_project_in_op(
+    /// Trusted-caller — `SpaceFs::write` is the public boundary;
+    /// mount-membership authz lives in `Projects`.
+    #[tracing::instrument(name = "library.write_space_file", skip(self, space, content), fields(slug = %space.slug))]
+    pub(in crate::library) async fn write_space_file(
         &self,
-        op: &mut impl es_entity::AtomicOperation,
-        project_id: uuid::Uuid,
-        project_name: &str,
+        space: &Space,
+        relative_path: String,
+        content: String,
     ) -> Result<(), LibraryError> {
-        self.search.delete_for_project_in_op(op, project_id).await?;
-
-        let file = UpstreamOp::ProjectCleanup {
-            project_name: project_name.to_string(),
-        };
-        self.enqueue_write(op, file).await?;
+        crate::audit::Audit::record_action_if_unset("space.write_file");
+        self.inner
+            .spaces()
+            .write_file(&space.slug, &relative_path, content)
+            .await?;
         Ok(())
     }
 
-    /// Generic reverse-sync. Returns parsed `ParsedFile`s for every changed
-    /// file under `S::Entity::DOC_TYPE`'s subdir since `last_sync_commit`.
-    /// On first run (`None`), returns all tracked files. Empty `files` when
-    /// HEAD hasn't moved.
-    #[tracing::instrument(name = "library.find_changes", skip(self))]
-    pub async fn find_changes<S: LibraryImporter>(
+    #[tracing::instrument(name = "library.delete_space_file", skip(self, space), fields(slug = %space.slug))]
+    pub(in crate::library) async fn delete_space_file(
         &self,
-        last_sync_commit: Option<&str>,
-    ) -> Result<Changes, LibraryError> {
-        self.upstream.pull().await?;
-
-        let head = self.upstream.head_commit_hash().await?;
-        let head = match head {
-            Some(h) => h,
-            None => {
-                tracing::debug!("no commits in library repo");
-                return Ok(Changes {
-                    head_commit: String::new(),
-                    files: Vec::new(),
-                });
-            }
-        };
-
-        if last_sync_commit == Some(head.as_str()) {
-            return Ok(Changes {
-                head_commit: head,
-                files: Vec::new(),
-            });
-        }
-
-        let doc_type = <S::Entity as LibrarySynced>::DOC_TYPE;
-        let changed = self
-            .upstream
-            .changed_files(last_sync_commit, doc_type.subdir(), doc_type.ext())
+        space: &Space,
+        relative_path: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.delete_file");
+        self.inner
+            .spaces()
+            .delete_file(&space.slug, &relative_path)
             .await?;
+        Ok(())
+    }
 
-        let mut files = Vec::with_capacity(changed.len());
-        for (path, content) in &changed {
-            match S::parse(content, path) {
-                Some(parsed) => files.push(parsed),
-                None => {
-                    tracing::warn!(
-                        path = %path,
-                        doc_type = doc_type.as_str(),
-                        "failed to parse library file, skipping"
-                    );
-                }
-            }
-        }
+    #[tracing::instrument(name = "library.str_replace_space_file", skip(self, space, old_str, new_str), fields(slug = %space.slug))]
+    pub(in crate::library) async fn str_replace_space_file(
+        &self,
+        space: &Space,
+        relative_path: String,
+        old_str: String,
+        new_str: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.str_replace");
+        self.inner
+            .spaces()
+            .str_replace(&space.slug, &relative_path, old_str, new_str)
+            .await?;
+        Ok(())
+    }
 
-        Ok(Changes {
-            head_commit: head,
-            files,
-        })
+    #[tracing::instrument(name = "library.insert_space_file", skip(self, space, text), fields(slug = %space.slug))]
+    pub(in crate::library) async fn insert_space_file(
+        &self,
+        space: &Space,
+        relative_path: String,
+        line_number: usize,
+        text: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.insert");
+        self.inner
+            .spaces()
+            .insert(&space.slug, &relative_path, line_number, text)
+            .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "library.move_space_file", skip(self, space), fields(slug = %space.slug))]
+    pub(in crate::library) async fn move_space_file(
+        &self,
+        space: &Space,
+        from_relative_path: String,
+        to_relative_path: String,
+    ) -> Result<(), LibraryError> {
+        crate::audit::Audit::record_action_if_unset("space.move_file");
+        self.inner
+            .spaces()
+            .move_file(&space.slug, &from_relative_path, &to_relative_path)
+            .await?;
+        Ok(())
     }
 
     #[tracing::instrument(name = "library.search", skip(self))]
     pub async fn search(
         &self,
-        project_id: uuid::Uuid,
+        _project_id: uuid::Uuid,
         query: &str,
         doc_type: Option<DocType>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, LibraryError> {
-        let query_embedding = match self.embedder.embed_query(query).await {
-            Ok(emb) => Some(emb),
-            Err(e) => {
-                tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
-                None
-            }
-        };
-        self.search
-            .search(project_id, query, query_embedding, doc_type, limit)
-            .await
+        let doc_types: Vec<drua_library::DocType> = doc_type.into_iter().map(Into::into).collect();
+        let hits = self
+            .inner
+            .search()
+            .search(query, None, &[], &doc_types, limit)
+            .await?;
+        Ok(hits.into_iter().filter_map(hit_to_result).collect())
     }
 
     /// Cross-project search. Open to any non-anonymous subject;
     /// library content is globally discoverable. Empty `project_ids`
-    /// = no project filter (every project plus global content);
-    /// otherwise hits are restricted to the supplied ids (plus the nil
-    /// UUID for global, auto-appended).
-    ///
-    /// Workflows are hosted in the library repo but excluded from search:
-    /// passing an empty `doc_types` defaults to `[Skill, Note]`, and any
-    /// `Workflow` entry in `doc_types` is silently dropped.
+    /// = no project filter; otherwise hits are restricted to those
+    /// scope_ids (plus globals — null scope_id).
     #[tracing::instrument(name = "library.search_global", skip(self, sub, project_ids))]
     pub async fn search_global(
         &self,
@@ -565,7 +609,7 @@ impl Library {
             return Err(crate::auth::error::AuthorizationError::AuthenticationRequired.into());
         }
         crate::audit::Audit::record_action_if_unset("library.search");
-        let effective_types: Vec<DocType> = if doc_types.is_empty() {
+        let effective: Vec<DocType> = if doc_types.is_empty() {
             vec![DocType::Skill, DocType::Note, DocType::SpaceFile]
         } else {
             doc_types
@@ -574,25 +618,19 @@ impl Library {
                 .filter(|d| !matches!(d, DocType::Workflow))
                 .collect()
         };
-        if effective_types.is_empty() {
+        if effective.is_empty() {
             return Ok(Vec::new());
         }
-        let query_embedding = match self.embedder.embed_query(query).await {
-            Ok(emb) => Some(emb),
-            Err(e) => {
-                tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
-                None
-            }
-        };
-        self.search
-            .search_global(project_ids, query, query_embedding, &effective_types, limit)
-            .await
+        let drua_types: Vec<drua_library::DocType> =
+            effective.into_iter().map(Into::into).collect();
+        let hits = self
+            .inner
+            .search()
+            .search(query, None, project_ids, &drua_types, limit)
+            .await?;
+        Ok(hits.into_iter().filter_map(hit_to_global).collect())
     }
 
-    /// Bulk lookup by id — returns full title + body for each match.
-    /// Open to any non-anonymous subject (library content is globally
-    /// discoverable). Missing ids are silently dropped; caller compares
-    /// returned count to requested.
     #[tracing::instrument(name = "library.get_files", skip(self, sub, ids))]
     pub async fn get_files(
         &self,
@@ -603,6 +641,14 @@ impl Library {
             return Err(crate::auth::error::AuthorizationError::AuthenticationRequired.into());
         }
         crate::audit::Audit::record_action_if_unset("library.get_files");
-        self.search.find_by_ids(ids).await
+        let rows = self.inner.search().find_by_ids(ids).await?;
+        Ok(rows.into_iter().filter_map(fields_to_library_file).collect())
+    }
+
+    /// Append a custom `LibraryImporter` (skills, workflows, …). Called
+    /// by `App::init` once the service repos exist; the next CommitTick
+    /// routes matching paths to the new importer.
+    pub async fn register_importer(&self, importer: Arc<dyn drua_library::LibraryImporter>) {
+        self.inner.register_importer(importer).await;
     }
 }

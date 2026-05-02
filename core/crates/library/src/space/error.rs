@@ -22,6 +22,22 @@ pub enum SpaceError {
     Git(String),
     #[error("SpaceError - Validation: {0}")]
     Validation(String),
+    #[error("SpaceError - NotFound: space {slug:?} does not exist")]
+    NotFound { slug: String },
+    #[error("SpaceError - NotMounted: space {slug:?} is not mounted in project {project_id:?}")]
+    NotMounted {
+        slug: String,
+        project_id: uuid::Uuid,
+    },
+    #[error("SpaceError - CrossSpaceMove: cannot move {from_slug:?} → {to_slug:?} across spaces")]
+    CrossSpaceMove {
+        from_slug: String,
+        to_slug: String,
+    },
+    #[error("SpaceError - Io: {0}")]
+    Io(String),
+    #[error("SpaceError - InvalidRelPath: {path:?} ({reason})")]
+    InvalidRelPath { path: String, reason: String },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {

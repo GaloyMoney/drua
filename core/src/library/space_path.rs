@@ -1,7 +1,7 @@
 //! Parser + validator for `space:<slug>/<rel>` paths used by the
 //! sandboxless space read tools.
 
-use super::space::SpaceError;
+use super::SpaceError;
 
 /// Parsed view of a `space:<slug>` or `space:<slug>/<rel>` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +48,8 @@ pub fn validate_rel_path(rel: &str) -> Result<(), SpaceError> {
 
 fn invalid(rel: &str) -> SpaceError {
     SpaceError::InvalidRelPath {
-        rel_path: rel.to_string(),
+        path: rel.to_string(),
+        reason: "must be relative; no '..', leading '/', empty segments, or NUL bytes".into(),
     }
 }
 
