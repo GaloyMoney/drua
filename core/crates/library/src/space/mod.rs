@@ -332,11 +332,14 @@ impl Spaces {
                     Ok(())
                 }
                 SpaceOpKind::Delete => {
-                    state
-                        .entry(full.clone())
-                        .or_insert_with(FileState::new_unread)
-                        .set_current(None);
-                    Ok(())
+                    self.read_into(&mut state, &full).await;
+                    let entry = state.get_mut(&full).expect("read_into populated this path");
+                    if let Some(msg) = entry.read_error.as_ref() {
+                        Err(SpaceError::Validation(msg.clone()))
+                    } else {
+                        entry.set_current(None);
+                        Ok(())
+                    }
                 }
                 SpaceOpKind::StrReplace { old_str, new_str } => {
                     self.read_into(&mut state, &full).await;

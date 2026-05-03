@@ -8,7 +8,14 @@ use std::sync::Once;
 
 static WIPE_ARTIFACTS: Once = Once::new();
 
+/// Per-test scratch root. Prefers `CARGO_TARGET_TMPDIR` (Cargo's writable
+/// integration-test scratch dir) so tests work inside the Nix flake-check
+/// sandbox where the source tree is read-only. Falls back to
+/// `tests/` next to the crate when running outside cargo (e.g. some IDEs).
 fn tests_dir() -> PathBuf {
+    if let Some(dir) = option_env!("CARGO_TARGET_TMPDIR") {
+        return PathBuf::from(dir);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
