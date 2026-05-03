@@ -104,14 +104,34 @@ impl JobRunner for LibrarySyncRunner {
                                 continue;
                             }
                             tracing::debug!(head = %tick.head, "library.sync: processing tick");
-                            self.process_tick(
-                                &current_job,
-                                state.last_processed_head.as_deref(),
-                                &tick.head,
-                            )
-                            .await;
-                            state.last_processed_head = Some(tick.head);
-                            current_job.update_execution_state(state.clone()).await?;
+                            // Advance `last_processed_head` only if the tick was
+                            // actually processed. If `process_tick` fails before
+                            // computing deltas (e.g. `changes_since` errors), the
+                            // next tick must diff forward from the same start
+                            // point or we'd lose every change in this commit
+                            // range.
+                            match self
+                                .process_tick(
+                                    &current_job,
+                                    state.last_processed_head.as_deref(),
+                                    &tick.head,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    state.last_processed_head = Some(tick.head);
+                                    current_job.update_execution_state(state.clone()).await?;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        head = %tick.head,
+                                        "library.sync: tick processing failed; \
+                                         leaving last_processed_head unchanged \
+                                         so the next tick reprocesses this range"
+                                    );
+                                }
+                            }
                         }
                         None => {
                             tracing::debug!("library.sync: tick channel closed, rescheduling");
@@ -125,14 +145,19 @@ impl JobRunner for LibrarySyncRunner {
 }
 
 impl LibrarySyncRunner {
-    async fn process_tick(&self, current_job: &CurrentJob, from: Option<&str>, to: &str) {
-        let deltas = match self.git.changes_since(from, to).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(error = %e, ?from, to, "changes_since failed");
-                return;
-            }
-        };
+    /// Returns `Err` only when the diff itself failed and no deltas could
+    /// be computed. Per-delta dispatch failures are logged and swallowed
+    /// (importers are idempotent), so they don't block the head advance.
+    async fn process_tick(
+        &self,
+        current_job: &CurrentJob,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<(), crate::LibraryError> {
+        let deltas = self.git.changes_since(from, to).await.map_err(|e| {
+            tracing::warn!(error = %e, ?from, to, "changes_since failed");
+            e
+        })?;
 
         let importers = self.importers.read().await;
         for delta in deltas {
@@ -144,6 +169,7 @@ impl LibrarySyncRunner {
                 tracing::warn!(error = %e, path = %delta.path, "library.sync: dispatch failed");
             }
         }
+        Ok(())
     }
 
     async fn dispatch(

@@ -8,15 +8,17 @@ use std::sync::Once;
 
 static WIPE_ARTIFACTS: Once = Once::new();
 
-/// Per-test scratch root. Prefers `CARGO_TARGET_TMPDIR` (Cargo's writable
-/// integration-test scratch dir) so tests work inside the Nix flake-check
-/// sandbox where the source tree is read-only. Falls back to
-/// `tests/` next to the crate when running outside cargo (e.g. some IDEs).
+/// Per-test scratch root. Resolved at runtime so the path stays valid
+/// even when the test binary was built inside a Nix sandbox: prefer
+/// `$CARGO_TARGET_TMPDIR` (set by cargo when running integration
+/// tests), then `$TMPDIR`, finally `std::env::temp_dir()`. We don't
+/// touch `CARGO_MANIFEST_DIR` — under `nix flake check` it points at
+/// the read-only source copy.
 fn tests_dir() -> PathBuf {
-    if let Some(dir) = option_env!("CARGO_TARGET_TMPDIR") {
-        return PathBuf::from(dir);
+    if let Ok(dir) = std::env::var("CARGO_TARGET_TMPDIR") {
+        return PathBuf::from(dir).join("drua-library");
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
+    std::env::temp_dir().join("drua-library-tests")
 }
 
 fn ensure_artifacts_wiped() {
