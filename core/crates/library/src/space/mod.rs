@@ -2,6 +2,7 @@ mod entity;
 pub mod error;
 pub(crate) mod repo;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use entity::{NewSpace, Space, SpaceEvent};
@@ -305,6 +306,96 @@ impl Spaces {
         Ok(out)
     }
 
+    /// Apply N space ops in a single git commit. Per-op validation
+    /// (`str_replace` uniqueness, file-exists for RMW commands, etc.) runs
+    /// against an in-memory accumulator rooted at HEAD; failed ops are
+    /// excluded from the commit but are reported in the returned vec
+    /// (which preserves input order). If the final commit/push fails,
+    /// every op that survived validation is downgraded to `Err(Git)`.
+    #[tracing::instrument(name = "library.spaces.apply_batch", skip_all, fields(n = ops.len()))]
+    pub async fn apply_batch(&self, ops: Vec<SpaceOp>) -> Vec<Result<(), SpaceError>> {
+        if ops.is_empty() {
+            return Vec::new();
+        }
+
+        let mut state: HashMap<String, FileState> = HashMap::new();
+        let mut results: Vec<Result<(), SpaceError>> = Vec::with_capacity(ops.len());
+
+        for op in &ops {
+            let full = format!("spaces/{}/{}", op.slug, op.rel_path);
+            let res = match &op.kind {
+                SpaceOpKind::Write { content } => {
+                    state
+                        .entry(full.clone())
+                        .or_insert_with(FileState::new_unread)
+                        .set_current(Some(content.clone()));
+                    Ok(())
+                }
+                SpaceOpKind::Delete => {
+                    state
+                        .entry(full.clone())
+                        .or_insert_with(FileState::new_unread)
+                        .set_current(None);
+                    Ok(())
+                }
+                SpaceOpKind::StrReplace { old_str, new_str } => {
+                    self.read_into(&mut state, &full).await;
+                    apply_str_replace(&mut state, &full, old_str, new_str)
+                }
+                SpaceOpKind::Insert { line_number, text } => {
+                    self.read_into(&mut state, &full).await;
+                    apply_insert(&mut state, &full, *line_number, text)
+                }
+                SpaceOpKind::Move { to_rel_path } => {
+                    let to_full = format!("spaces/{}/{}", op.slug, to_rel_path);
+                    self.read_into(&mut state, &full).await;
+                    self.read_into(&mut state, &to_full).await;
+                    apply_move(&mut state, &full, &to_full)
+                }
+            };
+            results.push(res);
+        }
+
+        let changes: Vec<(String, Option<Vec<u8>>)> = state
+            .into_iter()
+            .filter_map(|(path, st)| st.into_change(path))
+            .collect();
+
+        if changes.is_empty() {
+            return results;
+        }
+
+        let n_changes = changes.len();
+        let msg = format!("drua: batch ({n_changes} writes)");
+        if let Err(e) = self.git.commit_changes(changes, msg).await {
+            let reason = e.to_string();
+            for r in results.iter_mut() {
+                if r.is_ok() {
+                    *r = Err(SpaceError::BatchAborted {
+                        reason: reason.clone(),
+                    });
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Reads `path`'s blob from HEAD into `state` if not already cached.
+    /// Read failures (including `Validation` for tree-at-path) are
+    /// surfaced lazily via `state.head` so the next per-op step can
+    /// produce its own error.
+    async fn read_into(&self, state: &mut HashMap<String, FileState>, path: &str) {
+        if state.contains_key(path) {
+            return;
+        }
+        let entry = match self.git.read_blob_at_head(path).await {
+            Ok(opt) => FileState::from_head(opt),
+            Err(e) => FileState::read_error(e.to_string()),
+        };
+        state.insert(path.to_string(), entry);
+    }
+
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
     /// `from` is missing or `to` already exists.
     #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to))]
@@ -416,4 +507,190 @@ impl LibraryImporter for Spaces {
             format!("{slug}/{rel}").as_bytes(),
         )))
     }
+}
+
+/// One logical write against a space, queued into [`Spaces::apply_batch`].
+#[derive(Debug, Clone)]
+pub struct SpaceOp {
+    pub slug: String,
+    pub rel_path: String,
+    pub kind: SpaceOpKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum SpaceOpKind {
+    Write {
+        content: Vec<u8>,
+    },
+    Delete,
+    StrReplace {
+        old_str: String,
+        new_str: String,
+    },
+    Insert {
+        line_number: usize,
+        text: String,
+    },
+    /// Rename within the same space. `to_rel_path` is the destination
+    /// relative to `spaces/<slug>/`.
+    Move {
+        to_rel_path: String,
+    },
+}
+
+/// Per-path accumulator state. Tracks both the value at HEAD (so the
+/// final commit only includes paths that actually changed) and the
+/// current value as ops are layered on. `read_error` carries a
+/// `Validation` from libgit2 (e.g. path-is-a-directory) so the next
+/// RMW op against this path fails cleanly.
+struct FileState {
+    head: Option<Vec<u8>>,
+    current: Option<Vec<u8>>,
+    touched: bool,
+    read_error: Option<String>,
+}
+
+impl FileState {
+    fn new_unread() -> Self {
+        Self {
+            head: None,
+            current: None,
+            touched: false,
+            read_error: None,
+        }
+    }
+
+    fn from_head(bytes: Option<Vec<u8>>) -> Self {
+        Self {
+            head: bytes.clone(),
+            current: bytes,
+            touched: false,
+            read_error: None,
+        }
+    }
+
+    fn read_error(msg: String) -> Self {
+        Self {
+            head: None,
+            current: None,
+            touched: false,
+            read_error: Some(msg),
+        }
+    }
+
+    fn set_current(&mut self, content: Option<Vec<u8>>) {
+        self.current = content;
+        self.touched = true;
+    }
+
+    fn into_change(self, path: String) -> Option<(String, Option<Vec<u8>>)> {
+        if !self.touched || self.current == self.head {
+            None
+        } else {
+            Some((path, self.current))
+        }
+    }
+}
+
+fn apply_str_replace(
+    state: &mut HashMap<String, FileState>,
+    path: &str,
+    old_str: &str,
+    new_str: &str,
+) -> Result<(), SpaceError> {
+    let entry = state.get_mut(path).expect("read_into populated this path");
+    if let Some(msg) = entry.read_error.as_ref() {
+        return Err(SpaceError::Validation(msg.clone()));
+    }
+    let current = entry.current.as_ref().ok_or_else(|| {
+        SpaceError::Validation(format!("str_replace: file does not exist: {path}"))
+    })?;
+    let current_str = std::str::from_utf8(current).map_err(|e| {
+        SpaceError::Validation(format!("str_replace: non-utf8 content in {path}: {e}"))
+    })?;
+    let count = current_str.matches(old_str).count();
+    if count == 0 {
+        return Err(SpaceError::Validation(format!(
+            "str_replace: old_str not found in {path}"
+        )));
+    }
+    if count > 1 {
+        return Err(SpaceError::Validation(format!(
+            "str_replace: old_str appears {count} times in {path}; must be unique"
+        )));
+    }
+    let new_content = current_str.replacen(old_str, new_str, 1).into_bytes();
+    entry.set_current(Some(new_content));
+    Ok(())
+}
+
+fn apply_move(
+    state: &mut HashMap<String, FileState>,
+    from: &str,
+    to: &str,
+) -> Result<(), SpaceError> {
+    if from == to {
+        return Err(SpaceError::Validation(format!(
+            "move: src and dest are the same: {from}"
+        )));
+    }
+    let from_bytes = {
+        let from_entry = state.get(from).expect("read_into populated this path");
+        if let Some(msg) = from_entry.read_error.as_ref() {
+            return Err(SpaceError::Validation(msg.clone()));
+        }
+        from_entry
+            .current
+            .clone()
+            .ok_or_else(|| SpaceError::Validation(format!("move: src does not exist: {from}")))?
+    };
+    {
+        let to_entry = state.get(to).expect("read_into populated this path");
+        if let Some(msg) = to_entry.read_error.as_ref() {
+            return Err(SpaceError::Validation(msg.clone()));
+        }
+        if to_entry.current.is_some() {
+            return Err(SpaceError::Validation(format!(
+                "move: dest already exists: {to}"
+            )));
+        }
+    }
+    state
+        .get_mut(from)
+        .expect("read_into populated this path")
+        .set_current(None);
+    state
+        .get_mut(to)
+        .expect("read_into populated this path")
+        .set_current(Some(from_bytes));
+    Ok(())
+}
+
+fn apply_insert(
+    state: &mut HashMap<String, FileState>,
+    path: &str,
+    line_number: usize,
+    text: &str,
+) -> Result<(), SpaceError> {
+    let entry = state.get_mut(path).expect("read_into populated this path");
+    if let Some(msg) = entry.read_error.as_ref() {
+        return Err(SpaceError::Validation(msg.clone()));
+    }
+    let current = entry
+        .current
+        .as_ref()
+        .ok_or_else(|| SpaceError::Validation(format!("insert: file does not exist: {path}")))?;
+    let current_str = std::str::from_utf8(current)
+        .map_err(|e| SpaceError::Validation(format!("insert: non-utf8 content in {path}: {e}")))?;
+    let mut lines: Vec<String> = current_str.lines().map(String::from).collect();
+    let idx = line_number.min(lines.len());
+    for (offset, t) in text.lines().enumerate() {
+        lines.insert(idx + offset, t.to_string());
+    }
+    let mut new_content = lines.join("\n");
+    if current_str.ends_with('\n') {
+        new_content.push('\n');
+    }
+    entry.set_current(Some(new_content.into_bytes()));
+    Ok(())
 }

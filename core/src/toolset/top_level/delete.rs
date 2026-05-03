@@ -20,7 +20,7 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
-use crate::space_fs::SpaceFs;
+use crate::space_fs::{BatchedSpaceWrite, BatchedSpaceWriteKind, SpaceFs};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -64,7 +64,8 @@ impl TopLevelTool for Delete {
     fn description(&self) -> &str {
         "Delete a file. Accepts an in-sandbox absolute path or a \
          `space:<slug>/...` path from a mounted space. Idempotent — \
-         succeeds even if the file is already absent."
+         succeeds even if the file is already absent. Independent \
+         Delete calls in one turn commit atomically."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -124,5 +125,56 @@ impl TopLevelTool for Delete {
                 "sandbox /execute call failed: {e}"
             ))])),
         }
+    }
+
+    /// Coalesce concurrent space deletes from a single agent turn into
+    /// one git commit. Sandbox deletes are not batched here — they
+    /// return `None` from `batch_key` and go through `call`.
+    fn batch_key(&self, arguments: Option<&JsonObject>) -> Option<&'static str> {
+        let path = arguments?.get("path")?.as_str()?;
+        if SpaceFs::is_space_path(path) {
+            Some("Delete:space")
+        } else {
+            None
+        }
+    }
+
+    async fn call_batch(
+        &self,
+        subject: &AuthSubject,
+        inputs: Vec<Option<JsonObject>>,
+    ) -> Vec<Result<CallToolResult, ToolSetsError>> {
+        let mut writes: Vec<BatchedSpaceWrite> = Vec::with_capacity(inputs.len());
+        for args in &inputs {
+            let path = args
+                .as_ref()
+                .and_then(|a| a.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            writes.push(BatchedSpaceWrite {
+                path,
+                kind: BatchedSpaceWriteKind::Delete,
+            });
+        }
+        let outcomes = self.space_fs.apply_batch(subject, writes.clone()).await;
+        outcomes
+            .into_iter()
+            .zip(writes)
+            .map(|(outcome, w)| match outcome {
+                Ok(Some(())) => {
+                    let summary = format!("Deleted {}", w.path);
+                    let out = TextOutput {
+                        output: summary.clone(),
+                    };
+                    Ok(DELETE_OUTPUT.success(summary, &out))
+                }
+                Ok(None) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "space path did not resolve: {}",
+                    w.path
+                ))])),
+                Err(e) => Err(ToolSetsError::from(e)),
+            })
+            .collect()
     }
 }

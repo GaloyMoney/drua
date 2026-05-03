@@ -25,7 +25,7 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
-use crate::space_fs::{FileView, SpaceFs};
+use crate::space_fs::{BatchedSpaceWrite, BatchedSpaceWriteKind, FileView, SpaceFs};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -75,7 +75,7 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "old_str": {
                 "type": "string",
-                "description": "Substring to replace for `str_replace`. Must appear exactly once."
+                "description": "Substring to replace for `str_replace`. Must match the file byte-for-byte and appear exactly once. `view` the file first if you don't have its current content in context."
             },
             "new_str": {
                 "type": "string",
@@ -142,7 +142,14 @@ impl TopLevelTool for TextEditor {
          directory), `create` (write a new file), `str_replace` (replace a \
          unique substring), `insert` (insert text at a line). Accepts both \
          in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
-         spaces — writes to spaces commit to the upstream library."
+         spaces — writes to spaces commit to the upstream library. \
+         Independent Edit calls in one turn commit atomically. \
+         Notes for `str_replace`: `old_str` must match the file byte-for-byte \
+         AND appear exactly once. If you don't already have the file content \
+         in context, `view` it first — guessing the surrounding text will \
+         fail. Notes for `create`: the path must point at a file, not a \
+         directory; to add a folder, create a file inside it (e.g. \
+         `<dir>/README.md`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -293,4 +300,104 @@ impl TopLevelTool for TextEditor {
             ))])),
         }
     }
+
+    /// Inputs the dispatcher routes here are guaranteed (by
+    /// [`Self::batch_key`]) to be space-write commands. Coalesce them
+    /// into a single git commit via `space_fs.apply_batch`. Reads /
+    /// sandbox-bound calls return `None` from `batch_key` and never
+    /// reach this path, so a write failure can never block them.
+    async fn call_batch(
+        &self,
+        subject: &AuthSubject,
+        inputs: Vec<Option<JsonObject>>,
+    ) -> Vec<Result<CallToolResult, ToolSetsError>> {
+        let mut writes: Vec<BatchedSpaceWrite> = Vec::with_capacity(inputs.len());
+        for args in &inputs {
+            // `batch_key` already vetted these; `parse_space_write` should
+            // always return Some here. If it doesn't (model emitted
+            // arguments that pass batch_key's superficial check but fail
+            // here), fall through to per-call dispatch for that input.
+            if let Some(w) = parse_space_write(args.as_ref()) {
+                writes.push(w);
+            } else {
+                writes.push(BatchedSpaceWrite {
+                    path: String::new(),
+                    kind: BatchedSpaceWriteKind::Delete,
+                });
+            }
+        }
+
+        let outcomes = self.space_fs.apply_batch(subject, writes.clone()).await;
+
+        outcomes
+            .into_iter()
+            .zip(writes)
+            .map(|(outcome, w)| match outcome {
+                Ok(Some(())) => {
+                    let summary = format_success(&w);
+                    let out = TextOutput {
+                        output: summary.clone(),
+                    };
+                    Ok(TEXT_EDITOR_OUTPUT.success(summary, &out))
+                }
+                Ok(None) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "space path did not resolve: {}",
+                    w.path
+                ))])),
+                Err(e) => Err(ToolSetsError::from(e)),
+            })
+            .collect()
+    }
+
+    /// Group all space-write commands into one batch; everything else
+    /// (view, sandbox paths) goes through `call`. The dispatcher uses
+    /// the returned key to coalesce calls — same key in one turn = one
+    /// git commit.
+    fn batch_key(&self, arguments: Option<&JsonObject>) -> Option<&'static str> {
+        parse_space_write(arguments).map(|_| "Edit:space_write")
+    }
+}
+
+fn format_success(w: &BatchedSpaceWrite) -> String {
+    match &w.kind {
+        BatchedSpaceWriteKind::Write { .. } => format!("Wrote {}", w.path),
+        BatchedSpaceWriteKind::Delete => format!("Deleted {}", w.path),
+        BatchedSpaceWriteKind::StrReplace { .. } => format!("Replaced text in {}", w.path),
+        BatchedSpaceWriteKind::Insert { line_number, .. } => {
+            format!("Inserted text at line {} of {}", line_number, w.path)
+        }
+        // Unreachable: text_editor never produces Move kinds (Move is its own tool).
+        BatchedSpaceWriteKind::Move { to_path } => format!("Moved {} -> {to_path}", w.path),
+    }
+}
+
+/// Returns `Some(BatchedSpaceWrite)` iff `arguments` is a well-formed
+/// space-write tool_use (create / str_replace / insert against a
+/// `space:<slug>/...` path with all required fields). Anything else
+/// returns `None` so the dispatcher falls through to per-call `call`.
+fn parse_space_write(arguments: Option<&JsonObject>) -> Option<BatchedSpaceWrite> {
+    let args = arguments?;
+    let command = args.get("command")?.as_str()?;
+    let path = args.get("path")?.as_str()?;
+    if !SpaceFs::is_space_path(path) {
+        return None;
+    }
+    let kind = match command {
+        "create" => BatchedSpaceWriteKind::Write {
+            content: args.get("file_text")?.as_str()?.to_string(),
+        },
+        "str_replace" => BatchedSpaceWriteKind::StrReplace {
+            old_str: args.get("old_str")?.as_str()?.to_string(),
+            new_str: args.get("new_str")?.as_str()?.to_string(),
+        },
+        "insert" => BatchedSpaceWriteKind::Insert {
+            line_number: args.get("insert_line")?.as_i64()?.max(0) as usize,
+            text: args.get("new_str")?.as_str()?.to_string(),
+        },
+        _ => return None,
+    };
+    Some(BatchedSpaceWrite {
+        path: path.to_string(),
+        kind,
+    })
 }

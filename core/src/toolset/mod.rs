@@ -343,6 +343,203 @@ impl ToolSets {
         .with_event_context(seed)
         .await
     }
+
+    /// Batch dispatch for the agent loop. Looks up `name` once, then
+    /// asks each input for its [`TopLevelTool::batch_key`]: inputs with
+    /// the same `Some(key)` go through [`TopLevelTool::call_batch`] as
+    /// a unit; `None` keys go through [`TopLevelTool::call`] one at a
+    /// time. Either way the dispatcher emits exactly one audit row per
+    /// logical input — tools never deal with audit themselves.
+    pub async fn call_top_level_tool_batch(
+        &self,
+        subject: &AuthSubject,
+        name: &str,
+        inputs: Vec<Option<JsonObject>>,
+    ) -> Vec<Result<CallToolResult, ToolSetsError>> {
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+
+        let tool = {
+            let map = self.top_level.read().expect("top_level lock poisoned");
+            match map.get(name) {
+                Some(t) => Arc::clone(t),
+                None => {
+                    return inputs
+                        .into_iter()
+                        .map(|_| Err(ToolSetsError::ToolNotFound(name.to_string())))
+                        .collect();
+                }
+            }
+        };
+
+        let mut singleton_indices: Vec<usize> = Vec::new();
+        let mut batched: HashMap<&'static str, Vec<usize>> = HashMap::new();
+        for (i, args) in inputs.iter().enumerate() {
+            match tool.batch_key(args.as_ref()) {
+                Some(key) => batched.entry(key).or_default().push(i),
+                None => singleton_indices.push(i),
+            }
+        }
+
+        let mut singleton_futs = Vec::with_capacity(singleton_indices.len());
+        for i in &singleton_indices {
+            let tool = Arc::clone(&tool);
+            let subject = subject.clone();
+            let name = name.to_string();
+            let args = inputs[*i].clone();
+            let audit = self.audit.clone();
+            let idx = *i;
+            singleton_futs.push(async move {
+                let result = run_single_with_audit(&*tool, &subject, &name, args, audit).await;
+                vec![(idx, result)]
+            });
+        }
+
+        let mut batch_futs = Vec::with_capacity(batched.len());
+        for (_key, indices) in batched.into_iter() {
+            let tool = Arc::clone(&tool);
+            let subject = subject.clone();
+            let name = name.to_string();
+            let group_inputs: Vec<Option<JsonObject>> =
+                indices.iter().map(|i| inputs[*i].clone()).collect();
+            let audit = self.audit.clone();
+            batch_futs.push(async move {
+                run_batch_with_audit(&*tool, &subject, &name, indices, group_inputs, audit).await
+            });
+        }
+
+        let (singleton_groups, batch_groups) = tokio::join!(
+            futures::future::join_all(singleton_futs),
+            futures::future::join_all(batch_futs),
+        );
+
+        let mut by_index: Vec<Option<Result<CallToolResult, ToolSetsError>>> =
+            (0..inputs.len()).map(|_| None).collect();
+        for group in singleton_groups {
+            for (i, r) in group {
+                by_index[i] = Some(r);
+            }
+        }
+        for group in batch_groups {
+            for (i, r) in group {
+                by_index[i] = Some(r);
+            }
+        }
+
+        by_index
+            .into_iter()
+            .map(|slot| slot.expect("every input must produce a result"))
+            .collect()
+    }
+}
+
+/// One audit row + one `tool.call(...)` invocation. Mirrors the wrapping
+/// in [`ToolSets::call_top_level_tool`] so single-call semantics stay
+/// identical whether the agent dispatcher batches or not.
+async fn run_single_with_audit(
+    tool: &dyn TopLevelTool,
+    subject: &AuthSubject,
+    name: &str,
+    arguments: Option<JsonObject>,
+    audit: Option<Arc<Audit>>,
+) -> Result<CallToolResult, ToolSetsError> {
+    use es_entity::context::{EventContext, WithEventContext};
+
+    let seed = {
+        let ctx = EventContext::current();
+        ctx.data()
+    };
+    let metadata = serde_json::json!({
+        "tool_name": name,
+        "arguments": arguments
+            .as_ref()
+            .map(|a| serde_json::Value::Object(a.clone())),
+    });
+
+    async move {
+        Audit::record_subject(subject);
+        Audit::record_entrypoint(format!("mcp: {name}"));
+        Audit::record_interaction_type(crate::audit::primitives::InteractionType::McpCall);
+        Audit::record_action_if_unset(name);
+        Audit::record_metadata(metadata);
+
+        let start = std::time::Instant::now();
+        let result = tool.call(subject, arguments).await;
+        Audit::record_duration(start);
+        match &result {
+            Ok(r) => {
+                Audit::record_tokens(estimate_tokens(r));
+                Audit::record_success();
+            }
+            Err(e) => Audit::record_error(e.to_string()),
+        }
+        if let Some(audit) = audit.as_ref() {
+            audit.record_from_context();
+        }
+        result
+    }
+    .with_event_context(seed)
+    .await
+}
+
+/// One `tool.call_batch(...)` invocation + N audit rows (one per
+/// logical input). Tools never see the audit context — the dispatcher
+/// records subject/entrypoint/duration/tokens/error around each result.
+async fn run_batch_with_audit(
+    tool: &dyn TopLevelTool,
+    subject: &AuthSubject,
+    name: &str,
+    indices: Vec<usize>,
+    group_inputs: Vec<Option<JsonObject>>,
+    audit: Option<Arc<Audit>>,
+) -> Vec<(usize, Result<CallToolResult, ToolSetsError>)> {
+    use es_entity::context::{EventContext, WithEventContext};
+
+    let seed = {
+        let ctx = EventContext::current();
+        ctx.data()
+    };
+
+    let start = std::time::Instant::now();
+    let results = tool.call_batch(subject, group_inputs.clone()).await;
+
+    for (input, result) in group_inputs.iter().zip(&results) {
+        let metadata = serde_json::json!({
+            "tool_name": name,
+            "arguments": input
+                .as_ref()
+                .map(|a| serde_json::Value::Object(a.clone())),
+            "batched": true,
+        });
+        let result_summary = match result {
+            Ok(r) => Ok(estimate_tokens(r)),
+            Err(e) => Err(e.to_string()),
+        };
+        let audit = audit.clone();
+        async {
+            Audit::record_subject(subject);
+            Audit::record_entrypoint(format!("mcp: {name}"));
+            Audit::record_interaction_type(crate::audit::primitives::InteractionType::McpCall);
+            Audit::record_action_if_unset(name);
+            Audit::record_metadata(metadata);
+            Audit::record_duration(start);
+            match result_summary {
+                Ok(tokens) => {
+                    Audit::record_tokens(tokens);
+                    Audit::record_success();
+                }
+                Err(msg) => Audit::record_error(msg),
+            }
+            if let Some(audit) = audit.as_ref() {
+                audit.record_from_context();
+            }
+        }
+        .with_event_context(seed.clone())
+        .await;
+    }
+
+    indices.into_iter().zip(results).collect()
 }
 
 /// Estimate tokens from text content (~4 chars per token).

@@ -20,7 +20,7 @@ guessing.
 <use_parallel_tool_calls>
 If you intend to call multiple tools and there are no dependencies \
 between the tool calls, make all of the independent tool calls in \
-parallel. For example, when reading several files, read them all at \
+parallel. For example, when reading or editing several files, do them all at \
 once rather than one at a time.
 </use_parallel_tool_calls>
 

@@ -61,6 +61,33 @@ pub trait TopLevelTool: Send + Sync {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError>;
+
+    /// Optional grouping hint for the agent dispatcher. Invocations that
+    /// return the same `Some(key)` in a single agent turn are passed to
+    /// [`Self::call_batch`] as a unit (e.g. all space writes coalesce
+    /// into one git commit). `None` (default) means "run me individually
+    /// via `call`". Tools never see audit logic — the dispatcher emits
+    /// one audit row per logical invocation regardless of batching.
+    fn batch_key(&self, _arguments: Option<&JsonObject>) -> Option<&'static str> {
+        None
+    }
+
+    /// Called for inputs that share the same [`Self::batch_key`]. Output
+    /// order MUST match input order; per-op success/failure must be
+    /// preserved (no all-or-nothing). Default: sequential `call` —
+    /// tools that opt into batching by overriding `batch_key` should
+    /// also override this to actually coalesce work.
+    async fn call_batch(
+        &self,
+        subject: &AuthSubject,
+        inputs: Vec<Option<JsonObject>>,
+    ) -> Vec<Result<CallToolResult, ToolSetsError>> {
+        let mut out = Vec::with_capacity(inputs.len());
+        for args in inputs {
+            out.push(self.call(subject, args).await);
+        }
+        out
+    }
 }
 
 impl From<&dyn TopLevelTool> for llm::prompt::Tool {

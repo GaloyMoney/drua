@@ -44,9 +44,10 @@
           SQLX_OFFLINE = true;
           nativeBuildInputs = [
             pkgs.pkg-config
-            # `git2`'s `vendored-openssl` feature (pulled in by drua-library)
-            # builds OpenSSL from source via `openssl-src`, which shells out
-            # to perl during ./Configure.
+            # `git2`'s `vendored-openssl` feature (pulled in by
+            # drua-library) builds OpenSSL from source via
+            # `openssl-src`, which shells out to perl during
+            # ./Configure.
             pkgs.perl
           ];
           buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
@@ -451,6 +452,13 @@
             pkgs.sqlx-cli
             pkgs.postgresql
             pkgs.pkg-config
+            # `git2`'s `vendored-openssl` (drua-library) builds OpenSSL
+            # via `openssl-src`, which shells out to perl during
+            # ./Configure. Without perl the libgit2-sys build silently
+            # falls back to a libgit2 with no HTTPS transport, and
+            # https:// clones fail at runtime with "unsupported URL
+            # protocol" (libgit2 error class=Net 12).
+            pkgs.perl
             pkgs.docker-compose
             pkgs.podman
             pkgs.podman-compose

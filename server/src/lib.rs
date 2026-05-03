@@ -159,6 +159,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
     };
 
     let app = domain::App::init(&pool, app_config).await?;
+    let app_for_shutdown = app.clone();
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
     let server_config = server::ServerConfig {
@@ -203,11 +204,48 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
     tracing::info!("Starting server on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    tracing::info!("shutdown signal received; draining background jobs");
+    app_for_shutdown.shutdown().await;
 
     if let Err(e) = tracing_init::shutdown_tracer() {
         eprintln!("Error shutting down tracer: {e}");
     }
 
     Ok(())
+}
+
+/// Resolves on the first SIGINT (ctrl-c) or SIGTERM. axum stops accepting new
+/// connections; in-flight requests get to finish; then `App::shutdown` reschedules
+/// running jobs so the lost-job detector doesn't have to reap them.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %e, "failed to install ctrl_c handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

@@ -212,7 +212,16 @@ impl SearchStore {
             Vec::new()
         };
 
+        // Reciprocal Rank Fusion of FTS + vector hits, normalised to
+        // `[0, 1]`. With two lists, the per-list contribution at rank
+        // 0 is `1/(K+1)`, so a doc ranked first in both lists scores
+        // `2/(K+1)`. Dividing by that ceiling gives:
+        //   - rank 0 in both lists → 1.0
+        //   - rank 0 in one list   → 0.5
+        // Higher ranks decay as expected.
         const K: f64 = 60.0;
+        const N_LISTS: f64 = 2.0;
+        let max_score = N_LISTS / (K + 1.0);
         let mut scores: HashMap<(uuid::Uuid, DocType), f64> = HashMap::new();
         let mut by_key: HashMap<(uuid::Uuid, DocType), SearchableFields> = HashMap::new();
 
@@ -258,9 +267,10 @@ impl SearchStore {
         Ok(ranked
             .into_iter()
             .filter_map(|(key, score)| {
-                by_key
-                    .remove(&key)
-                    .map(|fields| SearchHit { fields, score })
+                by_key.remove(&key).map(|fields| SearchHit {
+                    fields,
+                    score: (score / max_score).clamp(0.0, 1.0),
+                })
             })
             .collect())
     }

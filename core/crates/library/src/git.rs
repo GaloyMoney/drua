@@ -717,6 +717,11 @@ impl GitEngine {
     ) -> Result<Option<Vec<u8>>, LibraryError> {
         match tree.get_path(Path::new(path)) {
             Ok(entry) => {
+                if entry.kind() != Some(git2::ObjectType::Blob) {
+                    return Err(LibraryError::Validation(format!(
+                        "path is a directory; create a file inside it: {path}"
+                    )));
+                }
                 let blob = repo
                     .find_blob(entry.id())
                     .map_err(|e| LibraryError::Git(format!("find blob: {e}")))?;
@@ -756,6 +761,13 @@ impl GitEngine {
             let name = segments[0];
             match content {
                 Some(bytes) => {
+                    if let Some(existing) = dir_tree.and_then(|t| t.get_name(name)) {
+                        if existing.kind() == Some(git2::ObjectType::Tree) {
+                            return Err(LibraryError::Validation(format!(
+                                "path is a directory; create a file inside it: {name}"
+                            )));
+                        }
+                    }
                     let blob = repo
                         .blob(&bytes)
                         .map_err(|e| LibraryError::Git(format!("blob: {e}")))?;
@@ -882,12 +894,62 @@ impl GitEngine {
 
     fn remote_callbacks(token: Option<&str>) -> git2::RemoteCallbacks<'static> {
         let mut cb = git2::RemoteCallbacks::new();
-        if let Some(t) = token {
-            let t = t.to_string();
-            cb.credentials(move |_url, _username, _allowed| {
-                git2::Cred::userpass_plaintext("x-access-token", &t)
-            });
-        }
+        let token = token.map(str::to_string);
+        // Auth strategy:
+        // - HTTPS with a token (GitHub App in prod): send as basic auth.
+        // - SSH (gitconfig insteadOf rewrites https→ssh in dev): try
+        //   ssh-agent first, then fall back to common `~/.ssh/id_*`
+        //   files. The agent is often empty on macOS even when SSH
+        //   itself works (lazy-loaded from Keychain), so the file
+        //   fallback is what makes "it just works" for dev without
+        //   requiring `ssh-add` first.
+        // libgit2 calls credentials() repeatedly until one succeeds or
+        // we return Err; we step through the strategies in order and
+        // bail when exhausted.
+        let mut ssh_attempt: usize = 0;
+        let mut tried_userpass = false;
+        cb.credentials(move |_url, username_from_url, allowed| {
+            if allowed.contains(git2::CredentialType::USERNAME) {
+                return git2::Cred::username(username_from_url.unwrap_or("git"));
+            }
+            if allowed.contains(git2::CredentialType::SSH_KEY) {
+                let username = username_from_url.unwrap_or("git");
+                if ssh_attempt == 0 {
+                    ssh_attempt = 1;
+                    return git2::Cred::ssh_key_from_agent(username);
+                }
+                // Agent failed (no keys, or no matching key). Walk the
+                // common `~/.ssh/id_*` paths and return the first one
+                // that exists. Skipping happens inline so libgit2 only
+                // sees credentials it can actually try.
+                let home = dirs::home_dir()
+                    .ok_or_else(|| git2::Error::from_str("could not determine home directory"))?;
+                let candidates = ["id_ed25519", "id_ecdsa", "id_rsa"];
+                while let Some(name) = candidates.get(ssh_attempt - 1) {
+                    ssh_attempt += 1;
+                    let key = home.join(".ssh").join(name);
+                    if key.exists() {
+                        return git2::Cred::ssh_key(username, None, &key, None);
+                    }
+                }
+                return Err(git2::Error::from_str(
+                    "ssh authentication failed (agent empty and no usable ~/.ssh/id_* keys; \
+                     run `ssh-add <your-key>` or configure a GitHub App)",
+                ));
+            }
+            if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+                if tried_userpass {
+                    return Err(git2::Error::from_str(
+                        "userpass authentication failed (token rejected)",
+                    ));
+                }
+                tried_userpass = true;
+                if let Some(t) = token.as_deref() {
+                    return git2::Cred::userpass_plaintext("x-access-token", t);
+                }
+            }
+            git2::Cred::default()
+        });
         cb
     }
 }
