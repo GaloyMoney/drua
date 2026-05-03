@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod filter;
 pub mod searchable;
+mod space_inspect;
 pub mod top_level;
 mod traits;
 

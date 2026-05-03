@@ -20,9 +20,10 @@ use crate::library::AuthedSpaces;
 use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
-use crate::space_fs::{FileView, SpaceFs};
+use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
+use super::super::space_inspect::{dispatch_inspect, require_space_op, InspectTool};
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -109,15 +110,6 @@ enum SandboxCommand {
 enum SandboxCreateMode {
     Scratch,
     Repo,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum InspectTool {
-    Grep,
-    Glob,
-    Read,
-    Ls,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -712,8 +704,7 @@ impl AdminToolSet {
                 })?;
                 let tool_args = params.tool_args.unwrap_or_default();
                 Audit::record_action("spaces.inspect");
-                self.execute_space_inspect(subject, &slug, tool, tool_args)
-                    .await
+                dispatch_inspect(&self.space_fs, subject, &slug, tool, tool_args).await
             }
 
             SpacesCommand::Write => {
@@ -728,9 +719,11 @@ impl AdminToolSet {
                 })?;
                 Audit::record_action("spaces.write");
                 let space_path = format!("space:{slug}/{path}");
-                self.space_fs
+                let result = self
+                    .space_fs
                     .write_file(subject, &space_path, content)
                     .await?;
+                require_space_op(result, "write")?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Wrote {space_path}"
                 ))]))
@@ -745,7 +738,8 @@ impl AdminToolSet {
                 })?;
                 Audit::record_action("spaces.delete");
                 let space_path = format!("space:{slug}/{path}");
-                self.space_fs.delete_file(subject, &space_path).await?;
+                let result = self.space_fs.delete_file(subject, &space_path).await?;
+                require_space_op(result, "delete")?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Deleted {space_path}"
                 ))]))
@@ -764,109 +758,17 @@ impl AdminToolSet {
                 Audit::record_action("spaces.move");
                 let from_path = format!("space:{slug}/{from}");
                 let to_path = format!("space:{slug}/{to}");
-                self.space_fs
+                let result = self
+                    .space_fs
                     .move_file(subject, &from_path, &to_path)
                     .await?;
+                require_space_op(result, "move")?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Moved {from_path} -> {to_path}"
                 ))]))
             }
         }
     }
-
-    async fn execute_space_inspect(
-        &self,
-        subject: &AuthSubject,
-        slug: &str,
-        tool: InspectTool,
-        tool_args: JsonObject,
-    ) -> Result<CallToolResult, ToolSetsError> {
-        let path = tool_args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let space_path = format!("space:{slug}/{path}");
-
-        match tool {
-            InspectTool::Read => {
-                let view_range = parse_view_range(&tool_args);
-                let view = self
-                    .space_fs
-                    .view_file(subject, &space_path, view_range)
-                    .await?
-                    .ok_or_else(|| {
-                        ToolSetsError::Library(
-                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
-                        )
-                    })?;
-                let text = match view {
-                    FileView::File(text) => text,
-                    FileView::Dir(entries) => entries.join("\n"),
-                };
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            InspectTool::Ls => {
-                let entries = self
-                    .space_fs
-                    .view_dir(subject, &space_path)
-                    .await?
-                    .ok_or_else(|| {
-                        ToolSetsError::Library(
-                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
-                        )
-                    })?;
-                Ok(CallToolResult::success(vec![Content::text(
-                    entries.join("\n"),
-                )]))
-            }
-            InspectTool::Glob => {
-                let pattern = tool_args
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
-                let matches = self
-                    .space_fs
-                    .glob(subject, &space_path, pattern)
-                    .await?
-                    .ok_or_else(|| {
-                        ToolSetsError::Library(
-                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
-                        )
-                    })?;
-                Ok(CallToolResult::success(vec![Content::text(
-                    matches.join("\n"),
-                )]))
-            }
-            InspectTool::Grep => {
-                let args = serde_json::Value::Object(tool_args);
-                let out = self
-                    .space_fs
-                    .grep(subject, &space_path, &args)
-                    .await?
-                    .ok_or_else(|| {
-                        ToolSetsError::Library(
-                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
-                        )
-                    })?;
-                Ok(CallToolResult::success(vec![Content::text(out)]))
-            }
-        }
-    }
-}
-
-fn parse_view_range(args: &JsonObject) -> Option<(i64, i64)> {
-    let offset = args
-        .get("offset")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
-    if offset.is_none() && limit.is_none() {
-        return None;
-    }
-    let start = offset.unwrap_or(0) + 1;
-    let end = match limit {
-        Some(l) => start + l - 1,
-        None => -1,
-    };
-    Some((start, end))
 }
 
 async fn execute_inspect(
