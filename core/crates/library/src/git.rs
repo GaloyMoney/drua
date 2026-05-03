@@ -27,6 +27,39 @@ pub struct CommitDelta {
     pub content: Vec<u8>,
 }
 
+/// Closure used by [`BatchOpKind::Rmw`]. Receives the current bytes at
+/// the op's path (`None` if absent at HEAD) and returns the new content
+/// (`None` deletes the path, `Some(_)` writes/overwrites). Returning
+/// `Err(LibraryError::Validation(_))` aborts only this op; siblings in
+/// the batch keep going.
+pub type BatchRmwFn =
+    Box<dyn Fn(Option<&[u8]>) -> Result<Option<Vec<u8>>, LibraryError> + Send + Sync>;
+
+pub enum BatchOpKind {
+    Write {
+        path: String,
+        content: Vec<u8>,
+    },
+    Delete {
+        path: String,
+    },
+    Rmw {
+        path: String,
+        update: BatchRmwFn,
+    },
+    /// Same-tree rename. Errors with `Validation` if `from` is missing
+    /// or `to` already exists in the parent tree.
+    Move {
+        from: String,
+        to: String,
+    },
+}
+
+pub struct BatchOp {
+    pub commit_message: String,
+    pub kind: BatchOpKind,
+}
+
 pub struct GitEngine {
     repo_path: PathBuf,
     write_lock: tokio::sync::Mutex<()>,
@@ -409,6 +442,200 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
 
         Self::push_main(repo, token)
+    }
+
+    /// Apply N ops, each as its own commit, then push once. Holds the
+    /// write lock for the whole sequence. Per-op `Validation` errors
+    /// don't advance HEAD — the next op layers on the previous
+    /// successful commit. On non-FF push, fetches origin, resets local
+    /// main, and replays every op against the new HEAD; second push
+    /// failure surfaces as `Git("push failed: ...")` on every op that
+    /// committed locally so the caller can mark them as cascaded.
+    #[tracing::instrument(name = "library.git.commit_each_then_push", skip_all, fields(n = ops.len()))]
+    pub async fn commit_each_then_push(&self, ops: Vec<BatchOp>) -> Vec<Result<(), LibraryError>> {
+        if ops.is_empty() {
+            return Vec::new();
+        }
+        let _guard = self.write_lock.lock().await;
+        let token = Self::fresh_token(self.github_app.as_ref()).await;
+        let repo_path = self.repo_path.clone();
+        let n_ops = ops.len();
+
+        tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
+            let repo = match git2::Repository::open_bare(&repo_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = format!("open bare: {e}");
+                    return ops
+                        .iter()
+                        .map(|_| Err(LibraryError::Git(msg.clone())))
+                        .collect();
+                }
+            };
+
+            const MAX_ATTEMPTS: u32 = 2;
+            let initial_head_oid = match repo.head().and_then(|r| r.peel_to_commit()) {
+                Ok(c) => c.id(),
+                Err(e) => {
+                    let msg = format!("head: {e}");
+                    return ops
+                        .iter()
+                        .map(|_| Err(LibraryError::Git(msg.clone())))
+                        .collect();
+                }
+            };
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                let parent_oid_at_attempt_start = match repo.head().and_then(|r| r.peel_to_commit())
+                {
+                    Ok(c) => c.id(),
+                    Err(e) => {
+                        let msg = format!("head: {e}");
+                        return ops
+                            .iter()
+                            .map(|_| Err(LibraryError::Git(msg.clone())))
+                            .collect();
+                    }
+                };
+                let mut current_parent_oid = parent_oid_at_attempt_start;
+                let mut per_op: Vec<Result<(), LibraryError>> = Vec::with_capacity(ops.len());
+                for op in &ops {
+                    match Self::commit_one(&repo, current_parent_oid, op) {
+                        Ok(Some(new_oid)) => {
+                            per_op.push(Ok(()));
+                            current_parent_oid = new_oid;
+                        }
+                        Ok(None) => per_op.push(Ok(())),
+                        Err(e) => per_op.push(Err(e)),
+                    }
+                }
+
+                if current_parent_oid == parent_oid_at_attempt_start {
+                    return per_op;
+                }
+
+                match Self::push_main(&repo, token.as_deref()) {
+                    Ok(()) => return per_op,
+                    Err(e) if attempt < MAX_ATTEMPTS => {
+                        tracing::info!(
+                            error = %e, attempt,
+                            "commit_each_then_push: push failed, refetching and retrying"
+                        );
+                        if let Err(fe) = Self::fetch_origin(&repo, token.as_deref()) {
+                            let msg = fe.to_string();
+                            return ops
+                                .iter()
+                                .map(|_| Err(LibraryError::Git(msg.clone())))
+                                .collect();
+                        }
+                        if let Err(re) = Self::reset_main_to_origin(&repo) {
+                            let msg = re.to_string();
+                            return ops
+                                .iter()
+                                .map(|_| Err(LibraryError::Git(msg.clone())))
+                                .collect();
+                        }
+                    }
+                    Err(e) => {
+                        let _ = repo.reference(
+                            "refs/heads/main",
+                            initial_head_oid,
+                            true,
+                            "rollback after push failure",
+                        );
+                        let msg = format!("push failed: {e}");
+                        return per_op
+                            .into_iter()
+                            .map(|r| match r {
+                                Ok(()) => Err(LibraryError::Git(msg.clone())),
+                                Err(e) => Err(e),
+                            })
+                            .collect();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|e| {
+            let msg = format!("commit_each_then_push join: {e}");
+            (0..n_ops)
+                .map(|_| Err(LibraryError::Git(msg.clone())))
+                .collect()
+        })
+    }
+
+    /// One commit step inside [`Self::commit_each_then_push`].
+    /// `Ok(Some(oid))` = real commit; `Ok(None)` = tree unchanged;
+    /// `Err(_)` = per-op validation or git failure (skip, don't advance).
+    fn commit_one(
+        repo: &git2::Repository,
+        parent_oid: git2::Oid,
+        op: &BatchOp,
+    ) -> Result<Option<git2::Oid>, LibraryError> {
+        let parent_commit = repo
+            .find_commit(parent_oid)
+            .map_err(|e| LibraryError::Git(format!("find parent commit: {e}")))?;
+        let parent_tree = parent_commit
+            .tree()
+            .map_err(|e| LibraryError::Git(format!("parent tree: {e}")))?;
+
+        let new_tree_oid = match &op.kind {
+            BatchOpKind::Write { path, content } => {
+                Self::apply_edit(repo, &parent_tree, path, Some(content.clone()))?
+            }
+            BatchOpKind::Delete { path } => match Self::read_blob_at(repo, &parent_tree, path)? {
+                Some(_) => Self::apply_edit(repo, &parent_tree, path, None)?,
+                None => parent_tree.id(),
+            },
+            BatchOpKind::Rmw { path, update } => {
+                let current = Self::read_blob_at(repo, &parent_tree, path)?;
+                let new_content = update(current.as_deref())?;
+                Self::apply_edit(repo, &parent_tree, path, new_content)?
+            }
+            BatchOpKind::Move { from, to } => {
+                if from == to {
+                    return Err(LibraryError::Validation(format!(
+                        "move: src and dest are the same: {from}"
+                    )));
+                }
+                let from_content =
+                    Self::read_blob_at(repo, &parent_tree, from)?.ok_or_else(|| {
+                        LibraryError::Validation(format!("move: src does not exist: {from}"))
+                    })?;
+                if Self::read_blob_at(repo, &parent_tree, to)?.is_some() {
+                    return Err(LibraryError::Validation(format!(
+                        "move: dest already exists: {to}"
+                    )));
+                }
+                let intermediate_oid = Self::apply_edit(repo, &parent_tree, from, None)?;
+                let intermediate_tree = repo
+                    .find_tree(intermediate_oid)
+                    .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
+                Self::apply_edit(repo, &intermediate_tree, to, Some(from_content))?
+            }
+        };
+
+        if new_tree_oid == parent_tree.id() {
+            return Ok(None);
+        }
+
+        let new_tree = repo
+            .find_tree(new_tree_oid)
+            .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
+        let sig = git2::Signature::now("drua-library", "drua-library@local")
+            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
+        let commit_oid = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &op.commit_message,
+                &new_tree,
+                &[&parent_commit],
+            )
+            .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
+        Ok(Some(commit_oid))
     }
 
     /// Apply multiple file changes in a single commit + push.
