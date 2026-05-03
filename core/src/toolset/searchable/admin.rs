@@ -15,12 +15,12 @@ use drua_library::{Space, SpaceError};
 
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
-use crate::auth::AuthSubject;
-use crate::auth::{AuthResource, AuthVerb};
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::AuthedSpaces;
 use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
+use crate::space_fs::{FileView, SpaceFs};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
@@ -223,13 +223,23 @@ enum SpacesCommand {
     /// top-level `spaces` tool instead; this admin variant lets you
     /// reach into any project.
     Unmount,
+    /// Read-only file ops on a space. Mirrors sandbox admin's
+    /// `inspect`: pass `tool` (read|ls|grep|glob) and `tool_args`.
+    Inspect,
+    /// Blind overwrite of `space:<slug>/<path>` with `content`.
+    Write,
+    /// Delete `space:<slug>/<path>`.
+    Delete,
+    /// Rename / move `space:<slug>/<from>` → `space:<slug>/<to>`.
+    Move,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SpacesParams {
     command: SpacesCommand,
-    /// Slug for `create`, `get`, `mount`, `unmount`. Must match
-    /// `[a-z0-9-]+` with no leading / trailing / double hyphens.
+    /// Slug for `create`, `get`, `mount`, `unmount`, `inspect`,
+    /// `write`, `delete`, `move`. Must match `[a-z0-9-]+` with no
+    /// leading / trailing / double hyphens.
     slug: Option<String>,
     /// Optional human-readable summary, used by `create`.
     description: Option<String>,
@@ -237,6 +247,23 @@ struct SpacesParams {
     /// space to (or detach from).
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
+
+    /// Required for `inspect`. Selects the read-only sub-op.
+    tool: Option<InspectTool>,
+    /// Op-specific arguments for `inspect`. Shape mirrors the
+    /// equivalent top-level tool (`Read` / `LS` / `Grep` / `Glob`).
+    #[serde(default)]
+    tool_args: Option<JsonObject>,
+
+    /// Path required for `write` and `delete`; relative to
+    /// `spaces/<slug>/`.
+    path: Option<String>,
+    /// Required for `write`.
+    content: Option<String>,
+    /// Required for `move` (source path within the space).
+    from: Option<String>,
+    /// Required for `move` (destination path within the space).
+    to: Option<String>,
 }
 
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
@@ -289,7 +316,12 @@ static TOOLS: &[ToolDef] = &[
                        `list` (no args; every space in the library), \
                        `get` (requires `slug`), \
                        `mount` (requires `slug` and `project_id`; idempotent), \
-                       `unmount` (requires `slug` and `project_id`; idempotent).",
+                       `unmount` (requires `slug` and `project_id`; idempotent), \
+                       `inspect` (read-only file ops; requires `slug`, `tool` \
+                       (read|ls|grep|glob), `tool_args`), \
+                       `write` (requires `slug`, `path`, `content`), \
+                       `delete` (requires `slug`, `path`), \
+                       `move` (requires `slug`, `from`, `to`).",
         schema: &SPACES_SCHEMA,
     },
 ];
@@ -301,6 +333,7 @@ pub struct AdminToolSet {
     audit: Arc<Audit>,
     projects: Arc<Projects>,
     spaces: Arc<AuthedSpaces>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl AdminToolSet {
@@ -310,6 +343,7 @@ impl AdminToolSet {
         audit: Arc<Audit>,
         projects: Arc<Projects>,
         spaces: Arc<AuthedSpaces>,
+        space_fs: Arc<SpaceFs>,
     ) -> Self {
         let entries = TOOLS
             .iter()
@@ -331,6 +365,7 @@ impl AdminToolSet {
             audit,
             projects,
             spaces,
+            space_fs,
         }
     }
 }
@@ -667,8 +702,171 @@ impl AdminToolSet {
                     space.slug, space.id,
                 ))]))
             }
+
+            SpacesCommand::Inspect => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for inspect".to_string())
+                })?;
+                let tool = params.tool.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("tool is required for inspect".to_string())
+                })?;
+                let tool_args = params.tool_args.unwrap_or_default();
+                Audit::record_action("spaces.inspect");
+                self.execute_space_inspect(subject, &slug, tool, tool_args)
+                    .await
+            }
+
+            SpacesCommand::Write => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for write".to_string())
+                })?;
+                let path = params.path.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("path is required for write".to_string())
+                })?;
+                let content = params.content.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("content is required for write".to_string())
+                })?;
+                Audit::record_action("spaces.write");
+                let space_path = format!("space:{slug}/{path}");
+                self.space_fs
+                    .write_file(subject, &space_path, content)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Wrote {space_path}"
+                ))]))
+            }
+
+            SpacesCommand::Delete => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for delete".to_string())
+                })?;
+                let path = params.path.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("path is required for delete".to_string())
+                })?;
+                Audit::record_action("spaces.delete");
+                let space_path = format!("space:{slug}/{path}");
+                self.space_fs.delete_file(subject, &space_path).await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Deleted {space_path}"
+                ))]))
+            }
+
+            SpacesCommand::Move => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for move".to_string())
+                })?;
+                let from = params.from.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("from is required for move".to_string())
+                })?;
+                let to = params.to.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("to is required for move".to_string())
+                })?;
+                Audit::record_action("spaces.move");
+                let from_path = format!("space:{slug}/{from}");
+                let to_path = format!("space:{slug}/{to}");
+                self.space_fs
+                    .move_file(subject, &from_path, &to_path)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Moved {from_path} -> {to_path}"
+                ))]))
+            }
         }
     }
+
+    async fn execute_space_inspect(
+        &self,
+        subject: &AuthSubject,
+        slug: &str,
+        tool: InspectTool,
+        tool_args: JsonObject,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let path = tool_args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let space_path = format!("space:{slug}/{path}");
+
+        match tool {
+            InspectTool::Read => {
+                let view_range = parse_view_range(&tool_args);
+                let view = self
+                    .space_fs
+                    .view_file(subject, &space_path, view_range)
+                    .await?
+                    .ok_or_else(|| {
+                        ToolSetsError::Library(
+                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
+                        )
+                    })?;
+                let text = match view {
+                    FileView::File(text) => text,
+                    FileView::Dir(entries) => entries.join("\n"),
+                };
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            InspectTool::Ls => {
+                let entries = self
+                    .space_fs
+                    .view_dir(subject, &space_path)
+                    .await?
+                    .ok_or_else(|| {
+                        ToolSetsError::Library(
+                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
+                        )
+                    })?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    entries.join("\n"),
+                )]))
+            }
+            InspectTool::Glob => {
+                let pattern = tool_args
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
+                let matches = self
+                    .space_fs
+                    .glob(subject, &space_path, pattern)
+                    .await?
+                    .ok_or_else(|| {
+                        ToolSetsError::Library(
+                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
+                        )
+                    })?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    matches.join("\n"),
+                )]))
+            }
+            InspectTool::Grep => {
+                let args = serde_json::Value::Object(tool_args);
+                let out = self
+                    .space_fs
+                    .grep(subject, &space_path, &args)
+                    .await?
+                    .ok_or_else(|| {
+                        ToolSetsError::Library(
+                            SpaceError::Io(format!("invalid space path: {space_path}")).into(),
+                        )
+                    })?;
+                Ok(CallToolResult::success(vec![Content::text(out)]))
+            }
+        }
+    }
+}
+
+fn parse_view_range(args: &JsonObject) -> Option<(i64, i64)> {
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+    if offset.is_none() && limit.is_none() {
+        return None;
+    }
+    let start = offset.unwrap_or(0) + 1;
+    let end = match limit {
+        Some(l) => start + l - 1,
+        None => -1,
+    };
+    Some((start, end))
 }
 
 async fn execute_inspect(
@@ -1077,6 +1275,107 @@ mod tests {
         assert!(s.contains("\"get\""));
         assert!(s.contains("\"mount\""));
         assert!(s.contains("\"unmount\""));
+        assert!(s.contains("\"inspect\""));
+        assert!(s.contains("\"write\""));
+        assert!(s.contains("\"delete\""));
+        assert!(s.contains("\"move\""));
+    }
+
+    #[test]
+    fn spaces_inspect_parses_full_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "inspect",
+            "slug": "oncall",
+            "tool": "read",
+            "tool_args": { "path": "runbooks/foo.md" },
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Inspect));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+        assert!(matches!(p.tool, Some(InspectTool::Read)));
+        assert_eq!(
+            p.tool_args
+                .as_ref()
+                .and_then(|a| a.get("path").and_then(|v| v.as_str())),
+            Some("runbooks/foo.md")
+        );
+    }
+
+    #[test]
+    fn spaces_inspect_parses_grep_tool() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "inspect",
+            "slug": "oncall",
+            "tool": "grep",
+            "tool_args": { "pattern": "TODO", "output_mode": "content", "-n": true },
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Inspect));
+        assert!(matches!(p.tool, Some(InspectTool::Grep)));
+    }
+
+    #[test]
+    fn spaces_inspect_parses_glob_tool() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "inspect",
+            "slug": "oncall",
+            "tool": "glob",
+            "tool_args": { "pattern": "**/*.md" },
+        })))
+        .expect("parse");
+        assert!(matches!(p.tool, Some(InspectTool::Glob)));
+    }
+
+    #[test]
+    fn spaces_inspect_parses_ls_tool() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "inspect",
+            "slug": "oncall",
+            "tool": "ls",
+            "tool_args": { "path": "" },
+        })))
+        .expect("parse");
+        assert!(matches!(p.tool, Some(InspectTool::Ls)));
+    }
+
+    #[test]
+    fn spaces_write_parses_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "write",
+            "slug": "oncall",
+            "path": "notes/x.md",
+            "content": "hello",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Write));
+        assert_eq!(p.path.as_deref(), Some("notes/x.md"));
+        assert_eq!(p.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn spaces_delete_parses_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "delete",
+            "slug": "oncall",
+            "path": "notes/x.md",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Delete));
+        assert_eq!(p.path.as_deref(), Some("notes/x.md"));
+    }
+
+    #[test]
+    fn spaces_move_parses_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "move",
+            "slug": "oncall",
+            "from": "a.md",
+            "to": "b.md",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Move));
+        assert_eq!(p.from.as_deref(), Some("a.md"));
+        assert_eq!(p.to.as_deref(), Some("b.md"));
     }
 
     #[test]
