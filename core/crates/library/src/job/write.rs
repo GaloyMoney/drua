@@ -98,13 +98,8 @@ impl JobRunner for LibraryWriteRunner {
                 content,
                 message,
             } => {
-                let bytes = content.clone();
                 self.git
-                    .update_file(
-                        path.clone(),
-                        move |_, _| Ok((None, Some(bytes.clone()))),
-                        message.clone(),
-                    )
+                    .write_file(path.clone(), content.clone(), message.clone())
                     .await?;
             }
             WriteOp::WriteFileWithRename {
@@ -113,20 +108,17 @@ impl JobRunner for LibraryWriteRunner {
                 content,
                 message,
             } => {
-                let bytes = content.clone();
-                let new_path = new_path.clone();
                 self.git
-                    .update_file(
+                    .write_with_rename(
                         old_path.clone(),
-                        move |_, _| Ok((Some(new_path.clone()), Some(bytes.clone()))),
+                        new_path.clone(),
+                        content.clone(),
                         message.clone(),
                     )
                     .await?;
             }
             WriteOp::DeleteFile { path, message } => {
-                self.git
-                    .update_file(path.clone(), |_, _| Ok((None, None)), message.clone())
-                    .await?;
+                self.git.delete_file(path.clone(), message.clone()).await?;
             }
             WriteOp::DeleteDir { path, message } => {
                 self.git.delete_dir(path.clone(), message.clone()).await?;

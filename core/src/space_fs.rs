@@ -20,7 +20,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::instrument;
 
-use drua_library::{Space, SpaceError, SpaceOp, SpaceOpKind, Spaces};
+use drua_library::{Space, SpaceError, Spaces};
 
 use crate::auth::AuthSubject;
 use crate::project::{ProjectError, Projects};
@@ -310,103 +310,6 @@ impl SpaceFs {
         Ok(Some(()))
     }
 
-    /// One write request inside a batch of space writes from the same
-    /// agent turn. The dispatcher resolves+auths each input upfront;
-    /// surviving ops are committed in a single git commit.
-    #[instrument(name = "library.space_fs.apply_batch", skip(self, sub, ops))]
-    pub async fn apply_batch(
-        &self,
-        sub: &AuthSubject,
-        ops: Vec<BatchedSpaceWrite>,
-    ) -> Vec<Result<Option<()>, ProjectError>> {
-        if ops.is_empty() {
-            return Vec::new();
-        }
-
-        let mut results: Vec<Option<Result<Option<()>, ProjectError>>> =
-            (0..ops.len()).map(|_| None).collect();
-        let mut to_commit: Vec<(usize, SpaceOp)> = Vec::with_capacity(ops.len());
-
-        for (idx, op) in ops.into_iter().enumerate() {
-            let resolved = match self.resolve(sub, &op.path).await {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    results[idx] = Some(Ok(None));
-                    continue;
-                }
-                Err(e) => {
-                    results[idx] = Some(Err(e));
-                    continue;
-                }
-            };
-            crate::audit::Audit::record_action_if_unset(op.kind.audit_action());
-            let space_op_kind = match op.kind {
-                BatchedSpaceWriteKind::Write { content } => SpaceOpKind::Write {
-                    content: content.into_bytes(),
-                },
-                BatchedSpaceWriteKind::Delete => SpaceOpKind::Delete,
-                BatchedSpaceWriteKind::StrReplace { old_str, new_str } => {
-                    SpaceOpKind::StrReplace { old_str, new_str }
-                }
-                BatchedSpaceWriteKind::Insert { line_number, text } => {
-                    SpaceOpKind::Insert { line_number, text }
-                }
-                BatchedSpaceWriteKind::Move { to_path } => {
-                    let to_ref = match parse_space_path(&to_path) {
-                        Some(r) => r,
-                        None => {
-                            results[idx] = Some(Err(SpaceError::CrossSpaceMove {
-                                from_slug: resolved.space.slug.clone(),
-                                to_slug: "<sandbox>".to_string(),
-                            }
-                            .into()));
-                            continue;
-                        }
-                    };
-                    if to_ref.slug != resolved.space.slug {
-                        results[idx] = Some(Err(SpaceError::CrossSpaceMove {
-                            from_slug: resolved.space.slug.clone(),
-                            to_slug: to_ref.slug.to_string(),
-                        }
-                        .into()));
-                        continue;
-                    }
-                    if let Err(e) = Self::validate_rel_path(to_ref.rel_path) {
-                        results[idx] = Some(Err(e.into()));
-                        continue;
-                    }
-                    SpaceOpKind::Move {
-                        to_rel_path: to_ref.rel_path.to_string(),
-                    }
-                }
-            };
-            to_commit.push((
-                idx,
-                SpaceOp {
-                    slug: resolved.space.slug,
-                    rel_path: resolved.rel_path,
-                    kind: space_op_kind,
-                },
-            ));
-        }
-
-        if !to_commit.is_empty() {
-            let (indices, space_ops): (Vec<_>, Vec<_>) = to_commit.into_iter().unzip();
-            let outcomes = self.spaces.apply_batch(space_ops).await;
-            for (idx, outcome) in indices.into_iter().zip(outcomes) {
-                results[idx] = Some(match outcome {
-                    Ok(()) => Ok(Some(())),
-                    Err(e) => Err(e.into()),
-                });
-            }
-        }
-
-        results
-            .into_iter()
-            .map(|slot| slot.expect("every input must produce a result"))
-            .collect()
-    }
-
     /// Glob walk across the space's tree. Pattern is the standard
     /// glob syntax (`*`, `**`, `?`); matches against the relative
     /// path inside `spaces/<slug>/`. `path`'s rel-component anchors
@@ -570,50 +473,6 @@ impl SpaceFs {
             }
         }
         Ok(())
-    }
-}
-
-/// One queued write op for [`SpaceFs::apply_batch`]. Carries the raw
-/// `space:<slug>/...` path so resolve+authz happens inside the batch
-/// dispatcher (per op, not per batch).
-#[derive(Debug, Clone)]
-pub struct BatchedSpaceWrite {
-    pub path: String,
-    pub kind: BatchedSpaceWriteKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum BatchedSpaceWriteKind {
-    Write {
-        content: String,
-    },
-    Delete,
-    StrReplace {
-        old_str: String,
-        new_str: String,
-    },
-    Insert {
-        line_number: usize,
-        text: String,
-    },
-    /// Rename within the same space. `to_path` MUST also be a
-    /// `space:<slug>/...` path with the same slug as the queued
-    /// op's `path`; cross-space and mixed sandbox/space moves
-    /// are rejected during dispatch (per-op error, batch unaffected).
-    Move {
-        to_path: String,
-    },
-}
-
-impl BatchedSpaceWriteKind {
-    fn audit_action(&self) -> &'static str {
-        match self {
-            Self::Write { .. } => "space.write_file",
-            Self::Delete => "space.delete_file",
-            Self::StrReplace { .. } => "space.str_replace",
-            Self::Insert { .. } => "space.insert",
-            Self::Move { .. } => "space.move_file",
-        }
     }
 }
 

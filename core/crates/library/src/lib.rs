@@ -21,7 +21,7 @@ pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 pub use job::WriteOp;
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
-pub use space::{NewSpace, Space, SpaceError, SpaceEvent, SpaceOp, SpaceOpKind, Spaces};
+pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces};
 pub use synced::LibrarySynced;
 
 pub use self::git::DirEntry;

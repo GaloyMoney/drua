@@ -1085,62 +1085,35 @@ async fn fan_out_tool_calls(
     calls: Vec<llm::RequestToolUse>,
     tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
 ) -> Vec<llm::ToolUseResult> {
-    use std::collections::BTreeMap;
-
     let n = calls.len();
-    let mut groups: BTreeMap<String, Vec<(usize, llm::RequestToolUse)>> = BTreeMap::new();
-    for (i, tu) in calls.into_iter().enumerate() {
-        groups.entry(tu.name.clone()).or_default().push((i, tu));
-    }
-
-    let dispatches = groups.into_iter().map(|(name, tagged)| {
+    let dispatches = calls.into_iter().map(|tu| {
         let toolsets = toolsets.clone();
         let subject = subject.clone();
         async move {
-            let (indices, tus): (Vec<usize>, Vec<llm::RequestToolUse>) = tagged.into_iter().unzip();
-            let ids: Vec<String> = tus.iter().map(|t| t.id.clone()).collect();
-            let inputs: Vec<Option<rmcp::model::JsonObject>> = tus
-                .into_iter()
-                .map(|t| t.input.as_object().cloned())
-                .collect();
-            let outcomes = toolsets
-                .call_top_level_tool_batch(&subject, &name, inputs)
-                .await;
-            indices
-                .into_iter()
-                .zip(ids)
-                .zip(outcomes)
-                .map(|((i, id), res)| {
-                    let result = match res {
-                        Ok(r) => llm::ToolUseResult {
-                            tool_use_id: id,
-                            content: call_result_to_text(&r),
-                            is_error: r.is_error.unwrap_or(false),
-                        },
-                        Err(e) => llm::ToolUseResult {
-                            tool_use_id: id,
-                            content: flatten_error(&e),
-                            is_error: true,
-                        },
-                    };
-                    (i, name.clone(), result)
-                })
-                .collect::<Vec<_>>()
+            let name = tu.name.clone();
+            let id = tu.id.clone();
+            let args = tu.input.as_object().cloned();
+            let res = toolsets.call_top_level_tool(&subject, &name, args).await;
+            let result = match res {
+                Ok(r) => llm::ToolUseResult {
+                    tool_use_id: id,
+                    content: call_result_to_text(&r),
+                    is_error: r.is_error.unwrap_or(false),
+                },
+                Err(e) => llm::ToolUseResult {
+                    tool_use_id: id,
+                    content: flatten_error(&e),
+                    is_error: true,
+                },
+            };
+            (name, result)
         }
     });
 
-    let group_outcomes = futures::future::join_all(dispatches).await;
-
-    let mut indexed: Vec<Option<(String, llm::ToolUseResult)>> = (0..n).map(|_| None).collect();
-    for group in group_outcomes {
-        for (i, name, tur) in group {
-            indexed[i] = Some((name, tur));
-        }
-    }
+    let outcomes = futures::future::join_all(dispatches).await;
 
     let mut results = Vec::with_capacity(n);
-    for slot in indexed {
-        let (name, result) = slot.expect("every tool_use index must be filled");
+    for (name, result) in outcomes {
         const MAX_CONTENT_LEN: usize = 4096;
         let content = if result.content.is_empty() {
             None
@@ -1166,9 +1139,6 @@ async fn fan_out_tool_calls(
 /// Walks `.source()` to the deepest cause (so wrapper layers like
 /// `ToolSetsError -> ProjectError -> SpaceError` collapse to the leaf),
 /// then strips the conventional `"TypeName - "` thiserror prefix.
-/// Cascaded batch failures keep their `BatchAborted: ...` marker so the
-/// model can tell "real" errors apart from siblings rolled back by the
-/// batch commit.
 fn flatten_error(err: &dyn std::error::Error) -> String {
     let mut current: &dyn std::error::Error = err;
     while let Some(src) = current.source() {

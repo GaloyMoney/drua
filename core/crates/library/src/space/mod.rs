@@ -60,9 +60,9 @@ impl Spaces {
         let space = self.repo.create_in_op(op, new_space).await?;
 
         self.git
-            .update_file(
+            .write_file(
                 format!("spaces/{}/.gitkeep", space.slug),
-                |_input_path, _current| Ok((None, Some(Vec::new()))),
+                Vec::new(),
                 format!("space: init {}", space.slug),
             )
             .await
@@ -80,11 +80,10 @@ impl Spaces {
         content: String,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
-        let bytes = content.into_bytes();
         self.git
-            .update_file(
+            .write_file(
                 path,
-                move |_, _| Ok((None, Some(bytes.clone()))),
+                content.into_bytes(),
                 format!("space:{slug}: write {relative_path}"),
             )
             .await
@@ -96,11 +95,7 @@ impl Spaces {
     pub async fn delete_file(&self, slug: &str, relative_path: &str) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         self.git
-            .update_file(
-                path,
-                |_, _| Ok((None, None)),
-                format!("space:{slug}: delete {relative_path}"),
-            )
+            .delete_file(path, format!("space:{slug}: delete {relative_path}"))
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))
     }
@@ -117,36 +112,34 @@ impl Spaces {
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
+        let update: crate::git::BatchRmwFn = Box::new(move |current| {
+            let current = current.ok_or_else(|| {
+                crate::LibraryError::Validation(format!(
+                    "str_replace: file does not exist: {path_for_err}"
+                ))
+            })?;
+            let current_str = std::str::from_utf8(current).map_err(|e| {
+                crate::LibraryError::Validation(format!(
+                    "str_replace: non-utf8 content in {path_for_err}: {e}"
+                ))
+            })?;
+            let count = current_str.matches(&old_str).count();
+            if count == 0 {
+                return Err(crate::LibraryError::Validation(format!(
+                    "str_replace: old_str not found in {path_for_err}"
+                )));
+            }
+            if count > 1 {
+                return Err(crate::LibraryError::Validation(format!(
+                    "str_replace: old_str appears {count} times in {path_for_err}; must be unique"
+                )));
+            }
+            Ok(Some(
+                current_str.replacen(&old_str, &new_str, 1).into_bytes(),
+            ))
+        });
         self.git
-            .update_file(
-                path,
-                move |_, current| {
-                    let current = current.ok_or_else(|| {
-                        crate::LibraryError::Validation(format!(
-                            "str_replace: file does not exist: {path_for_err}"
-                        ))
-                    })?;
-                    let current_str = std::str::from_utf8(current).map_err(|e| {
-                        crate::LibraryError::Validation(format!(
-                            "str_replace: non-utf8 content in {path_for_err}: {e}"
-                        ))
-                    })?;
-                    let count = current_str.matches(&old_str).count();
-                    if count == 0 {
-                        return Err(crate::LibraryError::Validation(format!(
-                            "str_replace: old_str not found in {path_for_err}"
-                        )));
-                    }
-                    if count > 1 {
-                        return Err(crate::LibraryError::Validation(format!(
-                            "str_replace: old_str appears {count} times in {path_for_err}; must be unique"
-                        )));
-                    }
-                    let new_content = current_str.replacen(&old_str, &new_str, 1);
-                    Ok((None, Some(new_content.into_bytes())))
-                },
-                format!("space:{slug}: edit {relative_path}"),
-            )
+            .update_file(path, update, format!("space:{slug}: edit {relative_path}"))
             .await
             .map_err(|e| match e {
                 crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
@@ -166,31 +159,32 @@ impl Spaces {
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
+        let update: crate::git::BatchRmwFn = Box::new(move |current| {
+            let current = current.ok_or_else(|| {
+                crate::LibraryError::Validation(format!(
+                    "insert: file does not exist: {path_for_err}"
+                ))
+            })?;
+            let current_str = std::str::from_utf8(current).map_err(|e| {
+                crate::LibraryError::Validation(format!(
+                    "insert: non-utf8 content in {path_for_err}: {e}"
+                ))
+            })?;
+            let mut lines: Vec<String> = current_str.lines().map(String::from).collect();
+            let idx = line_number.min(lines.len());
+            for (offset, t) in text.lines().enumerate() {
+                lines.insert(idx + offset, t.to_string());
+            }
+            let mut new_content = lines.join("\n");
+            if current_str.ends_with('\n') {
+                new_content.push('\n');
+            }
+            Ok(Some(new_content.into_bytes()))
+        });
         self.git
             .update_file(
                 path,
-                move |_, current| {
-                    let current = current.ok_or_else(|| {
-                        crate::LibraryError::Validation(format!(
-                            "insert: file does not exist: {path_for_err}"
-                        ))
-                    })?;
-                    let current_str = std::str::from_utf8(current).map_err(|e| {
-                        crate::LibraryError::Validation(format!(
-                            "insert: non-utf8 content in {path_for_err}: {e}"
-                        ))
-                    })?;
-                    let mut lines: Vec<String> = current_str.lines().map(String::from).collect();
-                    let idx = line_number.min(lines.len());
-                    for (offset, t) in text.lines().enumerate() {
-                        lines.insert(idx + offset, t.to_string());
-                    }
-                    let mut new_content = lines.join("\n");
-                    if current_str.ends_with('\n') {
-                        new_content.push('\n');
-                    }
-                    Ok((None, Some(new_content.into_bytes())))
-                },
+                update,
                 format!("space:{slug}: insert {relative_path}"),
             )
             .await
@@ -305,43 +299,6 @@ impl Spaces {
         Ok(out)
     }
 
-    /// Apply N space ops as N commits + one push, all under a single
-    /// `GitEngine` write-lock acquisition. Each op is its own git
-    /// commit (so the history is per-op auditable and `git revert
-    /// <sha>` works), but the network push happens once at the end.
-    /// Per-op `Validation` errors don't advance HEAD; siblings keep
-    /// going. If the final push fails, every op that committed
-    /// locally is downgraded to `BatchAborted` and the local HEAD is
-    /// rolled back so we don't ship divergent state.
-    #[tracing::instrument(name = "library.spaces.apply_batch", skip_all, fields(n = ops.len()))]
-    pub async fn apply_batch(&self, ops: Vec<SpaceOp>) -> Vec<Result<(), SpaceError>> {
-        if ops.is_empty() {
-            return Vec::new();
-        }
-
-        let batch_ops: Vec<crate::git::BatchOp> =
-            ops.into_iter().map(space_op_to_batch_op).collect();
-        let results = self.git.commit_each_then_push(batch_ops).await;
-
-        results
-            .into_iter()
-            .map(|r| {
-                r.map_err(|e| match e {
-                    crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
-                    crate::LibraryError::Git(msg) if msg.starts_with("push failed:") => {
-                        SpaceError::BatchAborted {
-                            reason: msg
-                                .strip_prefix("push failed: ")
-                                .unwrap_or(&msg)
-                                .to_string(),
-                        }
-                    }
-                    other => SpaceError::Git(other.to_string()),
-                })
-            })
-            .collect()
-    }
-
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
     /// `from` is missing or `to` already exists.
     #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to))]
@@ -452,129 +409,5 @@ impl LibraryImporter for Spaces {
             &SPACE_DOC_NAMESPACE,
             format!("{slug}/{rel}").as_bytes(),
         )))
-    }
-}
-
-/// One logical write against a space, queued into [`Spaces::apply_batch`].
-#[derive(Debug, Clone)]
-pub struct SpaceOp {
-    pub slug: String,
-    pub rel_path: String,
-    pub kind: SpaceOpKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum SpaceOpKind {
-    Write {
-        content: Vec<u8>,
-    },
-    Delete,
-    StrReplace {
-        old_str: String,
-        new_str: String,
-    },
-    Insert {
-        line_number: usize,
-        text: String,
-    },
-    /// Rename within the same space. `to_rel_path` is the destination
-    /// relative to `spaces/<slug>/`.
-    Move {
-        to_rel_path: String,
-    },
-}
-
-/// Translate a high-level [`SpaceOp`] into the engine's per-op
-/// [`crate::git::BatchOp`]. RMW ops carry their validation closure
-/// inline so it runs against the *parent commit's* current bytes —
-/// i.e. previous successful ops in the same batch are visible.
-fn space_op_to_batch_op(op: SpaceOp) -> crate::git::BatchOp {
-    let SpaceOp {
-        slug,
-        rel_path,
-        kind,
-    } = op;
-    let path = format!("spaces/{slug}/{rel_path}");
-    match kind {
-        SpaceOpKind::Write { content } => crate::git::BatchOp {
-            commit_message: format!("space:{slug}: write {rel_path}"),
-            kind: crate::git::BatchOpKind::Write { path, content },
-        },
-        SpaceOpKind::Delete => crate::git::BatchOp {
-            commit_message: format!("space:{slug}: delete {rel_path}"),
-            kind: crate::git::BatchOpKind::Delete { path },
-        },
-        SpaceOpKind::StrReplace { old_str, new_str } => {
-            let path_for_err = path.clone();
-            let update: crate::git::BatchRmwFn = Box::new(move |current| {
-                let current = current.ok_or_else(|| {
-                    crate::LibraryError::Validation(format!(
-                        "str_replace: file does not exist: {path_for_err}"
-                    ))
-                })?;
-                let current_str = std::str::from_utf8(current).map_err(|e| {
-                    crate::LibraryError::Validation(format!(
-                        "str_replace: non-utf8 content in {path_for_err}: {e}"
-                    ))
-                })?;
-                let count = current_str.matches(&old_str).count();
-                if count == 0 {
-                    return Err(crate::LibraryError::Validation(format!(
-                        "str_replace: old_str not found in {path_for_err}"
-                    )));
-                }
-                if count > 1 {
-                    return Err(crate::LibraryError::Validation(format!(
-                        "str_replace: old_str appears {count} times in {path_for_err}; must be unique"
-                    )));
-                }
-                Ok(Some(
-                    current_str.replacen(&old_str, &new_str, 1).into_bytes(),
-                ))
-            });
-            crate::git::BatchOp {
-                commit_message: format!("space:{slug}: edit {rel_path}"),
-                kind: crate::git::BatchOpKind::Rmw { path, update },
-            }
-        }
-        SpaceOpKind::Insert { line_number, text } => {
-            let path_for_err = path.clone();
-            let update: crate::git::BatchRmwFn = Box::new(move |current| {
-                let current = current.ok_or_else(|| {
-                    crate::LibraryError::Validation(format!(
-                        "insert: file does not exist: {path_for_err}"
-                    ))
-                })?;
-                let current_str = std::str::from_utf8(current).map_err(|e| {
-                    crate::LibraryError::Validation(format!(
-                        "insert: non-utf8 content in {path_for_err}: {e}"
-                    ))
-                })?;
-                let mut lines: Vec<String> = current_str.lines().map(String::from).collect();
-                let idx = line_number.min(lines.len());
-                for (offset, t) in text.lines().enumerate() {
-                    lines.insert(idx + offset, t.to_string());
-                }
-                let mut new_content = lines.join("\n");
-                if current_str.ends_with('\n') {
-                    new_content.push('\n');
-                }
-                Ok(Some(new_content.into_bytes()))
-            });
-            crate::git::BatchOp {
-                commit_message: format!("space:{slug}: insert {rel_path}"),
-                kind: crate::git::BatchOpKind::Rmw { path, update },
-            }
-        }
-        SpaceOpKind::Move { to_rel_path } => {
-            let to_path = format!("spaces/{slug}/{to_rel_path}");
-            crate::git::BatchOp {
-                commit_message: format!("space:{slug}: move {rel_path} -> {to_rel_path}"),
-                kind: crate::git::BatchOpKind::Move {
-                    from: path,
-                    to: to_path,
-                },
-            }
-        }
     }
 }

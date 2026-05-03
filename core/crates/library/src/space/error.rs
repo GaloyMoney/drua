@@ -22,15 +22,6 @@ pub enum SpaceError {
     Git(String),
     #[error("SpaceError - Validation: {0}")]
     Validation(String),
-    /// Set on ops that passed validation but were rolled back when the
-    /// batch's single commit failed. Carries the underlying commit error
-    /// in `reason`; the wording makes it clear the op itself was valid
-    /// — i.e. the model shouldn't blame this input on retry.
-    #[error(
-        "SpaceError - BatchAborted: this op was queued in a batch; the batch's commit failed: \
-        {reason}"
-    )]
-    BatchAborted { reason: String },
     #[error("SpaceError - NotFound: space {slug:?} does not exist")]
     NotFound { slug: String },
     #[error("SpaceError - NotMounted: space {slug:?} is not mounted in project {project_id:?}")]

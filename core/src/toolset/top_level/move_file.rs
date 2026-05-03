@@ -22,7 +22,7 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
-use crate::space_fs::{BatchedSpaceWrite, BatchedSpaceWriteKind, SpaceFs};
+use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -69,8 +69,7 @@ impl TopLevelTool for MoveFile {
          `space:<slug>/...` paths from mounted spaces. Both `from` and \
          `to` must be in the same realm (same space, or both in-sandbox); \
          cross-space moves are not supported. Errors if the destination \
-         already exists. Independent Move calls in one turn commit \
-         atomically."
+         already exists."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -136,70 +135,5 @@ impl TopLevelTool for MoveFile {
                 "sandbox /execute call failed: {e}"
             ))])),
         }
-    }
-
-    /// Same-space moves coalesce into one git commit per turn.
-    /// Sandbox-bound moves and cross-space moves return `None` so the
-    /// dispatcher routes them through `call` (where the existing
-    /// per-realm checks fire with their own error messages).
-    fn batch_key(&self, arguments: Option<&JsonObject>) -> Option<&'static str> {
-        let args = arguments?;
-        let from = args.get("from")?.as_str()?;
-        let to = args.get("to")?.as_str()?;
-        if SpaceFs::is_space_path(from) && SpaceFs::is_space_path(to) {
-            Some("Move:space")
-        } else {
-            None
-        }
-    }
-
-    async fn call_batch(
-        &self,
-        subject: &AuthSubject,
-        inputs: Vec<Option<JsonObject>>,
-    ) -> Vec<Result<CallToolResult, ToolSetsError>> {
-        let mut writes: Vec<BatchedSpaceWrite> = Vec::with_capacity(inputs.len());
-        let mut tos: Vec<String> = Vec::with_capacity(inputs.len());
-        for args in &inputs {
-            let from = args
-                .as_ref()
-                .and_then(|a| a.get("from"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let to = args
-                .as_ref()
-                .and_then(|a| a.get("to"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            writes.push(BatchedSpaceWrite {
-                path: from,
-                kind: BatchedSpaceWriteKind::Move {
-                    to_path: to.clone(),
-                },
-            });
-            tos.push(to);
-        }
-        let outcomes = self.space_fs.apply_batch(subject, writes.clone()).await;
-        outcomes
-            .into_iter()
-            .zip(writes)
-            .zip(tos)
-            .map(|((outcome, w), to)| match outcome {
-                Ok(Some(())) => {
-                    let summary = format!("Moved {} -> {}", w.path, to);
-                    let out = TextOutput {
-                        output: summary.clone(),
-                    };
-                    Ok(MOVE_OUTPUT.success(summary, &out))
-                }
-                Ok(None) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "space path did not resolve: {} -> {}",
-                    w.path, to
-                ))])),
-                Err(e) => Err(ToolSetsError::from(e)),
-            })
-            .collect()
     }
 }

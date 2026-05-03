@@ -1,8 +1,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 
 use crate::importer::GitFileHash;
 use crate::{GitHubAppTokenProvider, LibraryError};
+
+/// How long the writer waits for additional ops after the first one
+/// arrives before processing the batch. Sized to absorb the jitter of
+/// parallel tool calls in a single agent turn without delaying the
+/// upstream push noticeably.
+const BATCH_WINDOW: Duration = Duration::from_millis(25);
+const MAX_BATCH: usize = 32;
+const QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
@@ -53,6 +65,23 @@ pub enum BatchOpKind {
         from: String,
         to: String,
     },
+    /// Atomic delete-then-write in one commit (importer canonical
+    /// rewrites). Removes `from_path` and writes `content` at `to_path`.
+    WriteWithRename {
+        from_path: String,
+        to_path: String,
+        content: Vec<u8>,
+    },
+    /// Recursive directory removal. No-op if the directory is absent.
+    DeleteDir {
+        path: String,
+    },
+    /// Multi-file write/delete in a single commit (e.g. project-init
+    /// scaffolding). Each `(path, content)` pair is applied to an
+    /// evolving tree before commit.
+    MultiFile {
+        changes: Vec<(String, Option<Vec<u8>>)>,
+    },
 }
 
 pub struct BatchOp {
@@ -60,10 +89,37 @@ pub struct BatchOp {
     pub kind: BatchOpKind,
 }
 
+struct QueuedOp {
+    op: BatchOp,
+    response: oneshot::Sender<Result<(), LibraryError>>,
+}
+
+/// Drop aborts the worker; lets it live as long as its owning `GitEngine`.
+struct OwnedTaskHandle(Option<JoinHandle<()>>);
+
+impl OwnedTaskHandle {
+    fn new(inner: JoinHandle<()>) -> Self {
+        Self(Some(inner))
+    }
+}
+
+impl Drop for OwnedTaskHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 pub struct GitEngine {
     repo_path: PathBuf,
-    write_lock: tokio::sync::Mutex<()>,
+    /// Held by the writer for each batch and by `fetch_and_head`.
+    /// Prevents the periodic fetch's mirror refspec from racing
+    /// in-flight commits before `push_main` lands.
+    repo_mutex: Arc<Mutex<()>>,
+    write_tx: mpsc::Sender<QueuedOp>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
+    _writer: OwnedTaskHandle,
 }
 
 impl GitEngine {
@@ -92,10 +148,21 @@ impl GitEngine {
         .await
         .map_err(|e| LibraryError::Git(format!("init join: {e}")))??;
 
+        let repo_mutex = Arc::new(Mutex::new(()));
+        let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
+        let writer = tokio::spawn(Self::run_writer(
+            repo_path.clone(),
+            github_app.clone(),
+            Arc::clone(&repo_mutex),
+            write_rx,
+        ));
+
         Ok(Self {
             repo_path,
-            write_lock: tokio::sync::Mutex::new(()),
+            repo_mutex,
+            write_tx,
             github_app,
+            _writer: OwnedTaskHandle::new(writer),
         })
     }
 
@@ -306,7 +373,7 @@ impl GitEngine {
 
     #[tracing::instrument(name = "library.git.fetch_and_head", skip_all)]
     pub async fn fetch_and_head(&self) -> Result<Option<String>, LibraryError> {
-        let _guard = self.write_lock.lock().await;
+        let _guard = self.repo_mutex.lock().await;
         let token = Self::fresh_token(self.github_app.as_ref()).await;
         let path = self.repo_path.clone();
 
@@ -324,157 +391,236 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("fetch_and_head join: {e}")))?
     }
 
-    /// Atomically apply a single-file edit and push to origin.
-    ///
-    /// `update` receives `(input_path, current_content)` (content is `None` if
-    /// the file doesn't exist at HEAD) and returns `(rename_to, output_content)`.
-    /// `rename_to = None` keeps the same path; `Some(new)` is an atomic move.
-    /// `output_content = None` deletes the file. The closure may return
-    /// `Err(LibraryError::Validation(_))` to abort with a typed error
-    /// (e.g. `str_replace` sentinel-not-unique).
-    ///
-    /// On non-fast-forward push, fetches origin, resets local main to the new
-    /// remote, re-invokes `update` against the new HEAD, and pushes once more.
-    /// A second failure aborts.
-    #[tracing::instrument(name = "library.git.update_file", skip_all, fields(%path))]
-    pub async fn update_file<F>(
+    /// Blind overwrite (or create) of `path`.
+    #[tracing::instrument(name = "library.git.write_file", skip_all, fields(%path))]
+    pub async fn write_file(
         &self,
         path: String,
-        update: F,
+        content: Vec<u8>,
         commit_message: String,
-    ) -> Result<(), LibraryError>
-    where
-        F: Fn(&str, Option<&[u8]>) -> Result<(Option<String>, Option<Vec<u8>>), LibraryError>
-            + Send
-            + 'static,
-    {
-        let _guard = self.write_lock.lock().await;
-        let token = Self::fresh_token(self.github_app.as_ref()).await;
-        let repo_path = self.repo_path.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-
-            const MAX_ATTEMPTS: u32 = 2;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                match Self::try_update_once(
-                    &repo,
-                    &path,
-                    &update,
-                    &commit_message,
-                    token.as_deref(),
-                ) {
-                    Ok(()) => return Ok(()),
-                    // Validation errors are deterministic (closure-side), so
-                    // refetch+retry would just produce the same failure.
-                    Err(e @ LibraryError::Validation(_)) => return Err(e),
-                    Err(e) if attempt < MAX_ATTEMPTS => {
-                        tracing::info!(
-                            error = %e,
-                            attempt,
-                            "update_file failed, refetching and retrying",
-                        );
-                        Self::fetch_origin(&repo, token.as_deref())?;
-                        Self::reset_main_to_origin(&repo)?;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+    ) -> Result<(), LibraryError> {
+        self.enqueue(BatchOp {
+            commit_message,
+            kind: BatchOpKind::Write { path, content },
         })
         .await
-        .map_err(|e| LibraryError::Git(format!("update_file join: {e}")))?
     }
 
-    fn try_update_once<F>(
-        repo: &git2::Repository,
-        path: &str,
-        update: &F,
-        commit_message: &str,
-        token: Option<&str>,
-    ) -> Result<(), LibraryError>
-    where
-        F: Fn(&str, Option<&[u8]>) -> Result<(Option<String>, Option<Vec<u8>>), LibraryError>,
-    {
-        let head_commit = repo
-            .head()
-            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
-            .peel_to_commit()
-            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
-        let head_tree = head_commit
-            .tree()
-            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
+    /// Remove `path`. No-op if absent at HEAD.
+    #[tracing::instrument(name = "library.git.delete_file", skip_all, fields(%path))]
+    pub async fn delete_file(
+        &self,
+        path: String,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        self.enqueue(BatchOp {
+            commit_message,
+            kind: BatchOpKind::Delete { path },
+        })
+        .await
+    }
 
-        let current_content = Self::read_blob_at(repo, &head_tree, path)?;
-        let (rename_to, new_content) = update(path, current_content.as_deref())?;
-        let new_path: &str = rename_to.as_deref().unwrap_or(path);
+    /// Read–modify–write at `path`. The closure runs against the
+    /// freshest content (parent-commit's tree) and may return
+    /// `Err(LibraryError::Validation(_))` to abort just this op.
+    #[tracing::instrument(name = "library.git.update_file", skip_all, fields(%path))]
+    pub async fn update_file(
+        &self,
+        path: String,
+        update: BatchRmwFn,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        self.enqueue(BatchOp {
+            commit_message,
+            kind: BatchOpKind::Rmw { path, update },
+        })
+        .await
+    }
 
-        let intermediate_oid = if new_path == path {
-            head_tree.id()
-        } else {
-            Self::apply_edit(repo, &head_tree, path, None)?
-        };
-        let intermediate_tree = repo
-            .find_tree(intermediate_oid)
-            .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
+    /// Atomically rename `from` → `to`. Errors with `Validation` if
+    /// `from` is missing or `to` already exists at the parent commit.
+    #[tracing::instrument(name = "library.git.move_file", skip_all, fields(%from, %to))]
+    pub async fn move_file(
+        &self,
+        from: String,
+        to: String,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        self.enqueue(BatchOp {
+            commit_message,
+            kind: BatchOpKind::Move { from, to },
+        })
+        .await
+    }
 
-        let final_oid = Self::apply_edit(repo, &intermediate_tree, new_path, new_content)?;
-        if final_oid == head_tree.id() {
-            tracing::debug!("update_file: tree unchanged, skipping commit");
+    /// Delete `from_path` and write `content` at `to_path` in a single
+    /// commit. Used by the importer when rewriting an imported file to
+    /// canonical form at a new path.
+    #[tracing::instrument(name = "library.git.write_with_rename", skip_all, fields(%from_path, %to_path))]
+    pub async fn write_with_rename(
+        &self,
+        from_path: String,
+        to_path: String,
+        content: Vec<u8>,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        self.enqueue(BatchOp {
+            commit_message,
+            kind: BatchOpKind::WriteWithRename {
+                from_path,
+                to_path,
+                content,
+            },
+        })
+        .await
+    }
+
+    /// Recursively remove every blob under `dir_path` in one commit.
+    /// No-op if the directory doesn't exist at HEAD.
+    #[tracing::instrument(name = "library.git.delete_dir", skip_all, fields(%dir_path))]
+    pub async fn delete_dir(
+        &self,
+        dir_path: String,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        self.enqueue(BatchOp {
+            commit_message,
+            kind: BatchOpKind::DeleteDir { path: dir_path },
+        })
+        .await
+    }
+
+    /// Apply multiple `(path, content_opt)` changes in a single commit.
+    /// `None` deletes (no-op if absent). No-op overall if the resulting
+    /// tree matches HEAD.
+    #[tracing::instrument(name = "library.git.commit_changes", skip_all, fields(count = changes.len()))]
+    pub async fn commit_changes(
+        &self,
+        changes: Vec<(String, Option<Vec<u8>>)>,
+        commit_message: String,
+    ) -> Result<(), LibraryError> {
+        if changes.is_empty() {
             return Ok(());
         }
-
-        let final_tree = repo
-            .find_tree(final_oid)
-            .map_err(|e| LibraryError::Git(format!("find final: {e}")))?;
-        let sig = git2::Signature::now("drua-library", "drua-library@local")
-            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
+        self.enqueue(BatchOp {
             commit_message,
-            &final_tree,
-            &[&head_commit],
-        )
-        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
-
-        Self::push_main(repo, token)
+            kind: BatchOpKind::MultiFile { changes },
+        })
+        .await
     }
 
-    /// Apply N ops, each as its own commit, then push once. Holds the
-    /// write lock for the whole sequence. Per-op `Validation` errors
-    /// don't advance HEAD — the next op layers on the previous
-    /// successful commit. On non-FF push, fetches origin, resets local
-    /// main, and replays every op against the new HEAD; second push
-    /// failure surfaces as `Git("push failed: ...")` on every op that
-    /// committed locally so the caller can mark them as cascaded.
-    #[tracing::instrument(name = "library.git.commit_each_then_push", skip_all, fields(n = ops.len()))]
-    pub async fn commit_each_then_push(&self, ops: Vec<BatchOp>) -> Vec<Result<(), LibraryError>> {
+    /// Push a single op onto the writer queue and await its result.
+    /// Failure to enqueue (writer task gone) or to receive the response
+    /// (response channel closed) collapses to a `Git(_)` error.
+    async fn enqueue(&self, op: BatchOp) -> Result<(), LibraryError> {
+        let (tx, rx) = oneshot::channel();
+        self.write_tx
+            .send(QueuedOp { op, response: tx })
+            .await
+            .map_err(|_| LibraryError::Git("git writer task is gone".into()))?;
+        rx.await
+            .map_err(|_| LibraryError::Git("git writer dropped response".into()))?
+    }
+
+    /// Drains the queue forever: takes the first op, waits up to
+    /// [`BATCH_WINDOW`] for siblings, then runs the whole batch as
+    /// N commits + 1 push under the [`Self::repo_mutex`].
+    async fn run_writer(
+        repo_path: PathBuf,
+        github_app: Option<Arc<GitHubAppTokenProvider>>,
+        repo_mutex: Arc<Mutex<()>>,
+        mut rx: mpsc::Receiver<QueuedOp>,
+    ) {
+        while let Some(first) = rx.recv().await {
+            let mut batch = vec![first];
+            let deadline = Instant::now() + BATCH_WINDOW;
+            while batch.len() < MAX_BATCH {
+                let now = Instant::now();
+                let timeout = deadline.saturating_duration_since(now);
+                if timeout.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(timeout, rx.recv()).await {
+                    Ok(Some(op)) => batch.push(op),
+                    Ok(None) => return, // channel closed
+                    Err(_) => break,    // window elapsed
+                }
+            }
+            Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch).await;
+        }
+    }
+
+    #[tracing::instrument(name = "library.git.process_batch", skip_all, fields(n = batch.len()))]
+    async fn process_batch(
+        repo_path: &Path,
+        github_app: Option<&Arc<GitHubAppTokenProvider>>,
+        repo_mutex: &Mutex<()>,
+        batch: Vec<QueuedOp>,
+    ) {
+        let _guard = repo_mutex.lock().await;
+        let token = Self::fresh_token(github_app).await;
+        let path = repo_path.to_path_buf();
+        let n = batch.len();
+        let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<Result<(), LibraryError>>>) =
+            batch.into_iter().map(|q| (q.op, q.response)).unzip();
+
+        let results = tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
+            Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
+        })
+        .await
+        .unwrap_or_else(|e| {
+            let msg = format!("commit_each_then_push join: {e}");
+            (0..n)
+                .map(|_| Err(LibraryError::Git(msg.clone())))
+                .collect()
+        });
+
+        for (resp, res) in responders.into_iter().zip(results) {
+            let _ = resp.send(res);
+        }
+    }
+
+    /// Apply N ops as N commits, then push once. On non-FF push, fetch
+    /// origin, reset local main, and replay every op against the new
+    /// HEAD; second push failure rolls local main back to the
+    /// pre-batch HEAD and surfaces `Git("push failed: ...")` on every
+    /// op that committed locally so the caller can mark them as
+    /// cascaded. Per-op `Validation` errors don't advance HEAD — the
+    /// next op layers on the previous successful commit.
+    fn commit_each_then_push_blocking(
+        repo_path: &Path,
+        ops: Vec<BatchOp>,
+        token: Option<&str>,
+    ) -> Vec<Result<(), LibraryError>> {
         if ops.is_empty() {
             return Vec::new();
         }
-        let _guard = self.write_lock.lock().await;
-        let token = Self::fresh_token(self.github_app.as_ref()).await;
-        let repo_path = self.repo_path.clone();
-        let n_ops = ops.len();
+        let repo = match git2::Repository::open_bare(repo_path) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("open bare: {e}");
+                return ops
+                    .iter()
+                    .map(|_| Err(LibraryError::Git(msg.clone())))
+                    .collect();
+            }
+        };
 
-        tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
-            let repo = match git2::Repository::open_bare(&repo_path) {
-                Ok(r) => r,
-                Err(e) => {
-                    let msg = format!("open bare: {e}");
-                    return ops
-                        .iter()
-                        .map(|_| Err(LibraryError::Git(msg.clone())))
-                        .collect();
-                }
-            };
-
-            const MAX_ATTEMPTS: u32 = 2;
-            let initial_head_oid = match repo.head().and_then(|r| r.peel_to_commit()) {
+        const MAX_ATTEMPTS: u32 = 2;
+        let initial_head_oid = match repo.head().and_then(|r| r.peel_to_commit()) {
+            Ok(c) => c.id(),
+            Err(e) => {
+                let msg = format!("head: {e}");
+                return ops
+                    .iter()
+                    .map(|_| Err(LibraryError::Git(msg.clone())))
+                    .collect();
+            }
+        };
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let parent_oid_at_attempt_start = match repo.head().and_then(|r| r.peel_to_commit()) {
                 Ok(c) => c.id(),
                 Err(e) => {
                     let msg = format!("head: {e}");
@@ -484,88 +630,66 @@ impl GitEngine {
                         .collect();
                 }
             };
-            let mut attempt: u32 = 0;
-            loop {
-                attempt += 1;
-                let parent_oid_at_attempt_start = match repo.head().and_then(|r| r.peel_to_commit())
-                {
-                    Ok(c) => c.id(),
-                    Err(e) => {
-                        let msg = format!("head: {e}");
+            let mut current_parent_oid = parent_oid_at_attempt_start;
+            let mut per_op: Vec<Result<(), LibraryError>> = Vec::with_capacity(ops.len());
+            for op in &ops {
+                match Self::commit_one(&repo, current_parent_oid, op) {
+                    Ok(Some(new_oid)) => {
+                        per_op.push(Ok(()));
+                        current_parent_oid = new_oid;
+                    }
+                    Ok(None) => per_op.push(Ok(())),
+                    Err(e) => per_op.push(Err(e)),
+                }
+            }
+
+            if current_parent_oid == parent_oid_at_attempt_start {
+                return per_op;
+            }
+
+            match Self::push_main(&repo, token) {
+                Ok(()) => return per_op,
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::info!(
+                        error = %e, attempt,
+                        "commit_each_then_push: push failed, refetching and retrying"
+                    );
+                    if let Err(fe) = Self::fetch_origin(&repo, token) {
+                        let msg = fe.to_string();
                         return ops
                             .iter()
                             .map(|_| Err(LibraryError::Git(msg.clone())))
                             .collect();
                     }
-                };
-                let mut current_parent_oid = parent_oid_at_attempt_start;
-                let mut per_op: Vec<Result<(), LibraryError>> = Vec::with_capacity(ops.len());
-                for op in &ops {
-                    match Self::commit_one(&repo, current_parent_oid, op) {
-                        Ok(Some(new_oid)) => {
-                            per_op.push(Ok(()));
-                            current_parent_oid = new_oid;
-                        }
-                        Ok(None) => per_op.push(Ok(())),
-                        Err(e) => per_op.push(Err(e)),
-                    }
-                }
-
-                if current_parent_oid == parent_oid_at_attempt_start {
-                    return per_op;
-                }
-
-                match Self::push_main(&repo, token.as_deref()) {
-                    Ok(()) => return per_op,
-                    Err(e) if attempt < MAX_ATTEMPTS => {
-                        tracing::info!(
-                            error = %e, attempt,
-                            "commit_each_then_push: push failed, refetching and retrying"
-                        );
-                        if let Err(fe) = Self::fetch_origin(&repo, token.as_deref()) {
-                            let msg = fe.to_string();
-                            return ops
-                                .iter()
-                                .map(|_| Err(LibraryError::Git(msg.clone())))
-                                .collect();
-                        }
-                        if let Err(re) = Self::reset_main_to_origin(&repo) {
-                            let msg = re.to_string();
-                            return ops
-                                .iter()
-                                .map(|_| Err(LibraryError::Git(msg.clone())))
-                                .collect();
-                        }
-                    }
-                    Err(e) => {
-                        let _ = repo.reference(
-                            "refs/heads/main",
-                            initial_head_oid,
-                            true,
-                            "rollback after push failure",
-                        );
-                        let msg = format!("push failed: {e}");
-                        return per_op
-                            .into_iter()
-                            .map(|r| match r {
-                                Ok(()) => Err(LibraryError::Git(msg.clone())),
-                                Err(e) => Err(e),
-                            })
+                    if let Err(re) = Self::reset_main_to_origin(&repo) {
+                        let msg = re.to_string();
+                        return ops
+                            .iter()
+                            .map(|_| Err(LibraryError::Git(msg.clone())))
                             .collect();
                     }
                 }
+                Err(e) => {
+                    let _ = repo.reference(
+                        "refs/heads/main",
+                        initial_head_oid,
+                        true,
+                        "rollback after push failure",
+                    );
+                    let msg = format!("push failed: {e}");
+                    return per_op
+                        .into_iter()
+                        .map(|r| match r {
+                            Ok(()) => Err(LibraryError::Git(msg.clone())),
+                            Err(e) => Err(e),
+                        })
+                        .collect();
+                }
             }
-        })
-        .await
-        .unwrap_or_else(|e| {
-            let msg = format!("commit_each_then_push join: {e}");
-            (0..n_ops)
-                .map(|_| Err(LibraryError::Git(msg.clone())))
-                .collect()
-        })
+        }
     }
 
-    /// One commit step inside [`Self::commit_each_then_push`].
+    /// One commit step inside [`Self::commit_each_then_push_blocking`].
     /// `Ok(Some(oid))` = real commit; `Ok(None)` = tree unchanged;
     /// `Err(_)` = per-op validation or git failure (skip, don't advance).
     fn commit_one(
@@ -614,6 +738,38 @@ impl GitEngine {
                     .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
                 Self::apply_edit(repo, &intermediate_tree, to, Some(from_content))?
             }
+            BatchOpKind::WriteWithRename {
+                from_path,
+                to_path,
+                content,
+            } => {
+                let intermediate_oid = if from_path == to_path {
+                    parent_tree.id()
+                } else {
+                    Self::apply_edit(repo, &parent_tree, from_path, None)?
+                };
+                let intermediate_tree = repo
+                    .find_tree(intermediate_oid)
+                    .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
+                Self::apply_edit(repo, &intermediate_tree, to_path, Some(content.clone()))?
+            }
+            BatchOpKind::DeleteDir { path } => {
+                let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+                if segments.is_empty() {
+                    return Err(LibraryError::Git("empty dir_path".into()));
+                }
+                Self::remove_dir_recursive(repo, Some(&parent_tree), &segments)?
+            }
+            BatchOpKind::MultiFile { changes } => {
+                let mut current_oid = parent_tree.id();
+                for (path, content) in changes {
+                    let current_tree = repo
+                        .find_tree(current_oid)
+                        .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
+                    current_oid = Self::apply_edit(repo, &current_tree, path, content.clone())?;
+                }
+                current_oid
+            }
         };
 
         if new_tree_oid == parent_tree.id() {
@@ -636,264 +792,6 @@ impl GitEngine {
             )
             .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
         Ok(Some(commit_oid))
-    }
-
-    /// Apply multiple file changes in a single commit + push.
-    /// `changes` is a list of `(path, content_opt)` — `None` deletes
-    /// (no-op if absent). No-op overall if the resulting tree matches
-    /// HEAD. Same retry-on-non-ff semantics as `update_file`.
-    #[tracing::instrument(name = "library.git.commit_changes", skip_all, fields(count = changes.len()))]
-    pub async fn commit_changes(
-        &self,
-        changes: Vec<(String, Option<Vec<u8>>)>,
-        commit_message: String,
-    ) -> Result<(), LibraryError> {
-        if changes.is_empty() {
-            return Ok(());
-        }
-        let _guard = self.write_lock.lock().await;
-        let token = Self::fresh_token(self.github_app.as_ref()).await;
-        let repo_path = self.repo_path.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-
-            const MAX_ATTEMPTS: u32 = 2;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                match Self::try_commit_changes_once(&repo, &changes, &commit_message, token.as_deref()) {
-                    Ok(()) => return Ok(()),
-                    Err(e) if attempt < MAX_ATTEMPTS => {
-                        tracing::info!(error = %e, attempt, "commit_changes failed, refetching and retrying");
-                        Self::fetch_origin(&repo, token.as_deref())?;
-                        Self::reset_main_to_origin(&repo)?;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        })
-        .await
-        .map_err(|e| LibraryError::Git(format!("commit_changes join: {e}")))?
-    }
-
-    fn try_commit_changes_once(
-        repo: &git2::Repository,
-        changes: &[(String, Option<Vec<u8>>)],
-        commit_message: &str,
-        token: Option<&str>,
-    ) -> Result<(), LibraryError> {
-        let head_commit = repo
-            .head()
-            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
-            .peel_to_commit()
-            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
-        let head_tree = head_commit
-            .tree()
-            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
-
-        let mut current_oid = head_tree.id();
-        for (path, content) in changes {
-            let current_tree = repo
-                .find_tree(current_oid)
-                .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
-            current_oid = Self::apply_edit(repo, &current_tree, path, content.clone())?;
-        }
-
-        if current_oid == head_tree.id() {
-            tracing::debug!("commit_changes: tree unchanged, skipping commit");
-            return Ok(());
-        }
-
-        let final_tree = repo
-            .find_tree(current_oid)
-            .map_err(|e| LibraryError::Git(format!("find final: {e}")))?;
-        let sig = git2::Signature::now("drua-library", "drua-library@local")
-            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            commit_message,
-            &final_tree,
-            &[&head_commit],
-        )
-        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
-
-        Self::push_main(repo, token)
-    }
-
-    /// Atomically move `from` → `to` and push. Errors with
-    /// `LibraryError::Validation` if `from` is missing or `to` already
-    /// exists at HEAD. Same retry-on-non-ff semantics as `update_file`.
-    #[tracing::instrument(name = "library.git.move_file", skip_all, fields(%from, %to))]
-    pub async fn move_file(
-        &self,
-        from: String,
-        to: String,
-        commit_message: String,
-    ) -> Result<(), LibraryError> {
-        if from == to {
-            return Err(LibraryError::Validation(format!(
-                "move: src and dest are the same: {from}"
-            )));
-        }
-        let _guard = self.write_lock.lock().await;
-        let token = Self::fresh_token(self.github_app.as_ref()).await;
-        let repo_path = self.repo_path.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-
-            const MAX_ATTEMPTS: u32 = 2;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                match Self::try_move_once(&repo, &from, &to, &commit_message, token.as_deref()) {
-                    Ok(()) => return Ok(()),
-                    Err(e @ LibraryError::Validation(_)) => return Err(e),
-                    Err(e) if attempt < MAX_ATTEMPTS => {
-                        tracing::info!(error = %e, attempt, "move_file failed, refetching and retrying");
-                        Self::fetch_origin(&repo, token.as_deref())?;
-                        Self::reset_main_to_origin(&repo)?;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        })
-        .await
-        .map_err(|e| LibraryError::Git(format!("move_file join: {e}")))?
-    }
-
-    fn try_move_once(
-        repo: &git2::Repository,
-        from: &str,
-        to: &str,
-        commit_message: &str,
-        token: Option<&str>,
-    ) -> Result<(), LibraryError> {
-        let head_commit = repo
-            .head()
-            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
-            .peel_to_commit()
-            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
-        let head_tree = head_commit
-            .tree()
-            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
-
-        let from_content = Self::read_blob_at(repo, &head_tree, from)?
-            .ok_or_else(|| LibraryError::Validation(format!("move: src does not exist: {from}")))?;
-        if Self::read_blob_at(repo, &head_tree, to)?.is_some() {
-            return Err(LibraryError::Validation(format!(
-                "move: dest already exists: {to}"
-            )));
-        }
-
-        let intermediate_oid = Self::apply_edit(repo, &head_tree, from, None)?;
-        let intermediate_tree = repo
-            .find_tree(intermediate_oid)
-            .map_err(|e| LibraryError::Git(format!("find intermediate: {e}")))?;
-        let final_oid = Self::apply_edit(repo, &intermediate_tree, to, Some(from_content))?;
-
-        let final_tree = repo
-            .find_tree(final_oid)
-            .map_err(|e| LibraryError::Git(format!("find final: {e}")))?;
-        let sig = git2::Signature::now("drua-library", "drua-library@local")
-            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            commit_message,
-            &final_tree,
-            &[&head_commit],
-        )
-        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
-
-        Self::push_main(repo, token)
-    }
-
-    /// Recursively remove every blob under `dir_path` and push.
-    /// No-op if the directory doesn't exist at HEAD. Same retry-on-non-ff
-    /// semantics as `update_file`.
-    #[tracing::instrument(name = "library.git.delete_dir", skip_all, fields(%dir_path))]
-    pub async fn delete_dir(
-        &self,
-        dir_path: String,
-        commit_message: String,
-    ) -> Result<(), LibraryError> {
-        let _guard = self.write_lock.lock().await;
-        let token = Self::fresh_token(self.github_app.as_ref()).await;
-        let repo_path = self.repo_path.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-
-            const MAX_ATTEMPTS: u32 = 2;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                match Self::try_delete_dir_once(&repo, &dir_path, &commit_message, token.as_deref())
-                {
-                    Ok(()) => return Ok(()),
-                    Err(e) if attempt < MAX_ATTEMPTS => {
-                        tracing::info!(error = %e, attempt, "delete_dir failed, refetching and retrying");
-                        Self::fetch_origin(&repo, token.as_deref())?;
-                        Self::reset_main_to_origin(&repo)?;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        })
-        .await
-        .map_err(|e| LibraryError::Git(format!("delete_dir join: {e}")))?
-    }
-
-    fn try_delete_dir_once(
-        repo: &git2::Repository,
-        dir_path: &str,
-        commit_message: &str,
-        token: Option<&str>,
-    ) -> Result<(), LibraryError> {
-        let head_commit = repo
-            .head()
-            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
-            .peel_to_commit()
-            .map_err(|e| LibraryError::Git(format!("peel head: {e}")))?;
-        let head_tree = head_commit
-            .tree()
-            .map_err(|e| LibraryError::Git(format!("head tree: {e}")))?;
-
-        let segments: Vec<&str> = dir_path.split('/').filter(|s| !s.is_empty()).collect();
-        if segments.is_empty() {
-            return Err(LibraryError::Git("empty dir_path".into()));
-        }
-
-        let new_oid = Self::remove_dir_recursive(repo, Some(&head_tree), &segments)?;
-        if new_oid == head_tree.id() {
-            tracing::debug!("delete_dir: tree unchanged, skipping commit");
-            return Ok(());
-        }
-
-        let new_tree = repo
-            .find_tree(new_oid)
-            .map_err(|e| LibraryError::Git(format!("find new tree: {e}")))?;
-        let sig = git2::Signature::now("drua-library", "drua-library@local")
-            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            commit_message,
-            &new_tree,
-            &[&head_commit],
-        )
-        .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
-
-        Self::push_main(repo, token)
     }
 
     fn remove_dir_recursive(
