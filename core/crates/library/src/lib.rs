@@ -299,8 +299,7 @@ impl Library {
             entry,
         );
         if let Err(hook) = op.add_commit_hook(hook) {
-            let _ = hook
-                .force_execute_pre_commit(op)
+            hook.force_execute_pre_commit(op)
                 .await
                 .map_err(LibraryError::Sqlx)?;
         }
