@@ -2,7 +2,6 @@ use sqlx::PgPool;
 
 use es_entity::*;
 
-use crate::library::Library;
 use crate::primitives::*;
 
 use super::entity::*;
@@ -15,16 +14,16 @@ use super::entity::*;
         name(ty = "String"),
     ),
     delete = "soft_without_queries",
-    post_persist_hook(method = "sync_to_library", error = "crate::library::LibraryError")
+    post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")
 )]
 pub struct WorkflowDefinitionRepo {
     #[allow(dead_code)]
     pool: PgPool,
-    library: Option<Library>,
+    library: Option<drua_library::Library>,
 }
 
 impl WorkflowDefinitionRepo {
-    pub fn new(pool: &PgPool, library: Library) -> Self {
+    pub fn new(pool: &PgPool, library: drua_library::Library) -> Self {
         Self {
             pool: pool.clone(),
             library: Some(library),
@@ -55,7 +54,7 @@ impl WorkflowDefinitionRepo {
         op: &mut OP,
         entity: &WorkflowDefinition,
         mut new_events: es_entity::LastPersisted<'_, WorkflowDefinitionEvent>,
-    ) -> Result<(), crate::library::LibraryError> {
+    ) -> Result<(), drua_library::LibraryError> {
         if let Some(library) = &self.library {
             library.sync_entity_in_op(op, entity, &mut new_events).await
         } else {

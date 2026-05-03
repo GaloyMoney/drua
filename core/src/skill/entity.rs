@@ -1,10 +1,12 @@
 use derive_builder::Builder;
+use drua_library::{GitFileHash, SearchableFields, WriteOp};
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use crate::library::GitFileHash;
 use crate::primitives::*;
+use crate::skill::file::{canonical_skill_path, render_skill_markdown, slugify};
+use crate::skill::SKILL_DOC_TYPE;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -53,16 +55,30 @@ impl Skill {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub(crate) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
-        crate::library::UpstreamOp::WriteFile(Box::new(
-            <Self as crate::library::LibrarySynced>::to_synced_file(self),
-        ))
+    /// Canonical on-disk form (markdown w/ frontmatter).
+    pub(crate) fn rendered(&self) -> String {
+        render_skill_markdown(
+            self.id.into(),
+            &self.name,
+            &self.description,
+            &self.body,
+            &self.created_at().to_rfc3339(),
+            &self.updated_at_rfc3339(),
+        )
     }
 
-    /// Hash of the canonical runtime form (matches what `WriteToRuntime`
-    /// writes), so reverse-sync compares against on-disk hash without drift.
+    fn updated_at_rfc3339(&self) -> String {
+        self.events
+            .entity_last_modified_at()
+            .or_else(|| self.events.entity_first_persisted_at())
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339()
+    }
+
+    /// Hash of the canonical runtime form, used for reverse-sync
+    /// idempotency comparisons.
     pub(crate) fn file_hash(&self) -> GitFileHash {
-        self.as_runtime_file().file_hash()
+        GitFileHash::new(self.rendered())
     }
 
     pub fn update(
@@ -129,9 +145,8 @@ impl core::fmt::Display for Skill {
     }
 }
 
-impl crate::library::LibrarySynced for Skill {
+impl drua_library::LibrarySynced for Skill {
     type Event = SkillEvent;
-    const DOC_TYPE: crate::library::DocType = crate::library::DocType::Skill;
 
     fn is_content_event(ev: &SkillEvent) -> bool {
         matches!(
@@ -140,51 +155,41 @@ impl crate::library::LibrarySynced for Skill {
         )
     }
 
-    fn project(&self) -> Option<(ProjectId, &str)> {
-        match (self.project_id, self.project_name.as_deref()) {
-            (Some(id), Some(name)) => Some((id, name)),
-            _ => None,
+    fn searchable_fields(&self) -> SearchableFields {
+        let project_name = self.project_name.as_deref();
+        SearchableFields {
+            doc_id: self.id.into(),
+            doc_type: SKILL_DOC_TYPE,
+            scope_id: self.project_id.map(uuid::Uuid::from),
+            scope_slug: project_name.map(str::to_string),
+            name: self.name.clone(),
+            path: Some(canonical_skill_path(self.id, &self.name, project_name)),
+            content: self.description.clone(),
         }
     }
 
-    fn id(&self) -> uuid::Uuid {
-        self.id.into()
-    }
-
-    fn display_name(&self) -> &str {
-        &self.name
-    }
-
-    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.events
-            .entity_first_persisted_at()
-            .unwrap_or_else(chrono::Utc::now)
-    }
-
-    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.events
-            .entity_last_modified_at()
-            .or_else(|| self.events.entity_first_persisted_at())
-            .unwrap_or_else(chrono::Utc::now)
-    }
-
-    fn original_path(&self) -> Option<&str> {
-        self.original_path.as_deref()
-    }
-
-    fn index_body(&self) -> &str {
-        &self.description
-    }
-
-    fn render(&self) -> String {
-        crate::library::render_skill_markdown(
-            self.id.into(),
-            &self.name,
-            &self.description,
-            &self.body,
-            &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
-            &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
-        )
+    fn write_op(&self) -> WriteOp {
+        let canonical = canonical_skill_path(self.id, &self.name, self.project_name.as_deref());
+        let content = self.rendered().into_bytes();
+        let id_uuid: uuid::Uuid = self.id.into();
+        let message = format!(
+            "skill: {}-{}",
+            slugify(&self.name),
+            &id_uuid.to_string()[..8]
+        );
+        match self.original_path.as_deref() {
+            Some(orig) if orig != canonical => WriteOp::WriteFileWithRename {
+                old_path: orig.to_string(),
+                new_path: canonical,
+                content,
+                message,
+            },
+            _ => WriteOp::WriteFile {
+                path: canonical,
+                content,
+                message,
+            },
+        }
     }
 }
 

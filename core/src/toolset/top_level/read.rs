@@ -15,8 +15,8 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{FileView, SpaceFs};
 use crate::sandbox::Sandboxes;
+use crate::space_fs::{FileView, SpaceFs};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;

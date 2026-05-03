@@ -23,9 +23,9 @@ use sandbox::instance_client::ExecuteRequest;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::{FileView, SpaceFs};
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
+use crate::space_fs::{FileView, SpaceFs};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -75,7 +75,7 @@ static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "old_str": {
                 "type": "string",
-                "description": "Substring to replace for `str_replace`. Must appear exactly once."
+                "description": "Substring to replace for `str_replace`. Must match the file byte-for-byte and appear exactly once. `view` the file first if you don't have its current content in context."
             },
             "new_str": {
                 "type": "string",
@@ -142,7 +142,13 @@ impl TopLevelTool for TextEditor {
          directory), `create` (write a new file), `str_replace` (replace a \
          unique substring), `insert` (insert text at a line). Accepts both \
          in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
-         spaces — writes to spaces commit to the upstream library."
+         spaces — writes to spaces commit to the upstream library. \
+         Notes for `str_replace`: `old_str` must match the file byte-for-byte \
+         AND appear exactly once. If you don't already have the file content \
+         in context, `view` it first — guessing the surrounding text will \
+         fail. Notes for `create`: the path must point at a file, not a \
+         directory; to add a folder, create a file inside it (e.g. \
+         `<dir>/README.md`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

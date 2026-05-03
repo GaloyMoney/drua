@@ -11,11 +11,13 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
 use serde::Deserialize;
 
+use drua_library::{Space, SpaceError};
+
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::AuthSubject;
 use crate::auth::{AuthResource, AuthVerb};
-use crate::library::{Library, Space, SpaceError};
+use crate::library::AuthedSpaces;
 use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
@@ -298,7 +300,7 @@ pub struct AdminToolSet {
     sandboxes: Arc<Sandboxes>,
     audit: Arc<Audit>,
     projects: Arc<Projects>,
-    library: Arc<Library>,
+    spaces: Arc<AuthedSpaces>,
 }
 
 impl AdminToolSet {
@@ -307,7 +309,7 @@ impl AdminToolSet {
         sandboxes: Arc<Sandboxes>,
         audit: Arc<Audit>,
         projects: Arc<Projects>,
-        library: Arc<Library>,
+        spaces: Arc<AuthedSpaces>,
     ) -> Self {
         let entries = TOOLS
             .iter()
@@ -328,7 +330,7 @@ impl AdminToolSet {
             sandboxes,
             audit,
             projects,
-            library,
+            spaces,
         }
     }
 }
@@ -596,10 +598,7 @@ impl AdminToolSet {
                 })?;
                 let description = params.description.filter(|s| !s.is_empty());
                 Audit::record_action("spaces.create");
-                let space = self
-                    .library
-                    .create_space(subject, slug, description)
-                    .await?;
+                let space = self.spaces.create(subject, slug, description).await?;
                 Ok(CallToolResult::success(vec![Content::text(format_space(
                     &space, true,
                 ))]))
@@ -607,7 +606,7 @@ impl AdminToolSet {
 
             SpacesCommand::List => {
                 Audit::record_action("spaces.list");
-                let all = self.library.list_all_spaces(subject).await?;
+                let all = self.spaces.list_all(subject).await?;
                 Ok(CallToolResult::success(vec![Content::text(format_spaces(
                     &all,
                 ))]))
@@ -621,11 +620,10 @@ impl AdminToolSet {
                 subject
                     .can(AuthVerb::Read, AuthResource::Space(None))
                     .map_err(|e| ToolSetsError::Library(e.into()))?;
-                let space = self
-                    .library
-                    .find_space_by_slug(&slug)
-                    .await?
-                    .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
+                let space =
+                    self.spaces.find_by_slug(&slug).await?.ok_or_else(|| {
+                        ToolSetsError::Library(SpaceError::NotFound { slug }.into())
+                    })?;
                 Ok(CallToolResult::success(vec![Content::text(format_space(
                     &space, false,
                 ))]))
@@ -657,11 +655,10 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("project_id is required for unmount".to_string())
                 })?;
                 Audit::record_action("spaces.unmount");
-                let space = self
-                    .library
-                    .find_space_by_slug(&slug)
-                    .await?
-                    .ok_or_else(|| ToolSetsError::Library(SpaceError::NotFound { slug }.into()))?;
+                let space =
+                    self.spaces.find_by_slug(&slug).await?.ok_or_else(|| {
+                        ToolSetsError::Library(SpaceError::NotFound { slug }.into())
+                    })?;
                 self.projects
                     .unmount_space(subject, project_id, space.id)
                     .await?;

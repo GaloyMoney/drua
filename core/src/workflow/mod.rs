@@ -2,10 +2,13 @@ pub mod definition;
 pub mod entity;
 pub mod error;
 pub mod executor;
+pub mod importer;
 pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
 pub mod yaml;
+
+pub use importer::WorkflowsImporter;
 
 use std::sync::Arc;
 
@@ -13,10 +16,11 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
-use crate::library::{GitFileHash, Library};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+
+pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 pub use entity::*;
@@ -39,129 +43,10 @@ pub struct Workflows {
     jobs: ::job::Jobs,
 }
 
-impl crate::library::LibraryImporter for Workflows {
-    type Entity = WorkflowDefinition;
-    const JOB_TYPE: &'static str = "workflow.sync-from-library";
-    const PROJECT_REQUIRED: bool = true;
-
-    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        yaml::parse_workflow_yaml(content, path).map(|p| p.parsed)
-    }
-
-    /// On create: mints a fresh webhook secret. On update: preserves the
-    /// DB-side secret; the file never carries it. Re-parses the canonical
-    /// YAML payload to recover format-specific fields
-    /// (trigger/steps/sandboxes) that `SyncedFile` does not carry.
-    #[instrument(name = "core.workflow.library_importer.upsert_in_op", skip_all)]
-    async fn upsert_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        file: &crate::library::SyncedFile,
-        project_id: Option<ProjectId>,
-        file_hash: GitFileHash,
-    ) -> Result<(), crate::library::UpsertError> {
-        let project_id = project_id.ok_or_else(|| -> crate::library::UpsertError {
-            "workflow upsert requires a project id".into()
-        })?;
-
-        if file.doc_type != crate::library::DocType::Workflow {
-            return Ok(());
-        }
-
-        let synthetic_path = file
-            .original_path
-            .clone()
-            .unwrap_or_else(|| file.relative_path());
-        let parsed =
-            yaml::parse_workflow_yaml(&file.rendered, &synthetic_path).ok_or_else(|| {
-                WorkflowError::BuildEntity("workflow YAML failed to round-trip".into())
-            })?;
-
-        let doc_id = WorkflowDefinitionId::from(file.doc_id);
-        let name = file.title.clone();
-        let description = parsed.description;
-        let trigger = parsed.trigger;
-        let steps = parsed.steps;
-        let sandboxes = parsed.sandboxes;
-        let project_name = file.project_name.clone();
-        let original_path = file.original_path.clone();
-
-        // Soft check: a multi-file library push can legitimately land
-        // a workflow before its referenced skill, so warn don't fail.
-        for step in &steps {
-            match step {
-                WorkflowStepDef::AgentStep { skill, .. } => {
-                    if let Ok(None) = self
-                        .skills
-                        .find_by_name(skill, Some(project_id), None)
-                        .await
-                    {
-                        tracing::warn!(
-                            workflow = %name,
-                            skill = %skill,
-                            "workflow references unknown skill (will fail at run time if not added before triggering)"
-                        );
-                    }
-                }
-            }
-        }
-
-        if let Some(mut existing) = self.repo.maybe_find_by_id(doc_id).await? {
-            if existing
-                .update_from_library(
-                    Some(name.clone()),
-                    Some(description.clone()),
-                    Some(trigger),
-                    Some(steps),
-                    Some(sandboxes),
-                    file_hash,
-                )
-                .did_execute()
-            {
-                self.repo.update_in_op(op, &mut existing).await?;
-            }
-            tracing::info!(id = %doc_id, name = %name, "updated workflow from library");
-        } else {
-            let trigger = match trigger {
-                WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
-                    WorkflowTrigger::Webhook {
-                        provider,
-                        secret: Self::generate_webhook_secret(),
-                    }
-                }
-                other => other,
-            };
-
-            let mut builder = NewWorkflowDefinition::builder()
-                .id(doc_id)
-                .project_id(project_id)
-                .name(name.clone())
-                .trigger(trigger)
-                .steps(steps)
-                .sandboxes(sandboxes);
-            if let Some(project) = project_name {
-                builder = builder.project_name(project);
-            }
-            if let Some(desc) = description {
-                builder = builder.description(desc);
-            }
-            if let Some(path) = original_path {
-                builder = builder.original_path(path);
-            }
-            let new = builder
-                .build()
-                .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
-            self.repo.create_in_op(op, new).await?;
-            tracing::info!(id = %doc_id, name = %name, "created workflow from library");
-        }
-        Ok(())
-    }
-}
-
 impl Workflows {
     pub fn new(
         pool: &sqlx::PgPool,
-        library: Library,
+        library: drua_library::Library,
         skills: Arc<Skills>,
         execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
         jobs: &::job::Jobs,
@@ -173,6 +58,81 @@ impl Workflows {
             execute_run_spawner,
             jobs: jobs.clone(),
         }
+    }
+
+    /// Reverse-sync entry point: persist a `ParsedWorkflow` produced
+    /// by the library importer. Creates or updates depending on
+    /// whether the workflow already exists. `Ok(None)` signals
+    /// idempotency — the existing entity's `file_hash` matches the
+    /// incoming bytes, so the caller should skip search re-upsert +
+    /// embed re-spawn.
+    pub(crate) async fn import_from_library<OP: es_entity::AtomicOperation>(
+        &self,
+        op: &mut OP,
+        parsed: yaml::ParsedWorkflow,
+        project_id: ProjectId,
+    ) -> Result<Option<WorkflowDefinition>, WorkflowError> {
+        let yaml::ParsedWorkflow {
+            workflow_id,
+            project_name,
+            name,
+            description,
+            trigger,
+            steps,
+            sandboxes,
+            original_path,
+            rendered,
+            ..
+        } = parsed;
+
+        let file_hash = drua_library::GitFileHash::new(rendered);
+
+        if let Some(mut existing) = self.repo.maybe_find_by_id(workflow_id).await? {
+            if !existing
+                .update_from_library(
+                    Some(name.clone()),
+                    Some(description.clone()),
+                    Some(trigger),
+                    Some(steps),
+                    Some(sandboxes),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                return Ok(None);
+            }
+            self.repo.update_in_op(op, &mut existing).await?;
+            return Ok(Some(existing));
+        }
+
+        let trigger = match trigger {
+            WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
+                WorkflowTrigger::Webhook {
+                    provider,
+                    secret: Self::generate_webhook_secret(),
+                }
+            }
+            other => other,
+        };
+
+        let mut builder = NewWorkflowDefinition::builder()
+            .id(workflow_id)
+            .project_id(project_id)
+            .name(name)
+            .trigger(trigger)
+            .steps(steps)
+            .sandboxes(sandboxes);
+        if let Some(project) = project_name {
+            builder = builder.project_name(project);
+        }
+        if let Some(desc) = description {
+            builder = builder.description(desc);
+        }
+        builder = builder.original_path(original_path);
+        let new = builder
+            .build()
+            .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
+        Ok(Some(self.repo.create_in_op(op, new).await?))
     }
 
     /// No git sync — for tests.

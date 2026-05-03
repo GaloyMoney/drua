@@ -1,13 +1,20 @@
 mod entity;
 pub mod error;
+pub mod file;
+pub mod importer;
 pub(crate) mod repo;
+
+pub use file::{name_from_filename, parse_skill_markdown, ParsedSkill};
+pub use importer::SkillsImporter;
+
+pub const SKILL_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("skill");
 
 use std::sync::Arc;
 
+use drua_library::SearchHit;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
-use crate::library::{DocType, GitFileHash, Library, SearchResult};
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 pub use entity::*;
@@ -22,8 +29,12 @@ const MAX_DESCRIPTION_LEN: usize = 200;
 pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
-    library: Option<Library>,
+    library: Option<drua_library::Library>,
+    /// Held for context-bump hooks fired from reverse-sync importers
+    /// (registered in App init); unused on the forward-only paths.
+    #[allow(dead_code)]
     pool: Option<sqlx::PgPool>,
+    #[allow(dead_code)]
     context_generation: ContextGeneration,
 }
 
@@ -31,7 +42,7 @@ impl Skills {
     pub fn new(
         pool: &sqlx::PgPool,
         sandboxes: Arc<Sandboxes>,
-        library: Library,
+        library: drua_library::Library,
         context_generation: ContextGeneration,
     ) -> Self {
         let repo = SkillRepo::new(pool, library.clone());
@@ -45,7 +56,8 @@ impl Skills {
     }
 
     /// No-op when `Skills` has no `pool` (test contexts using `new_without_library`).
-    fn register_context_bump<OP: AtomicOperation>(
+    #[allow(dead_code)]
+    pub(crate) fn register_context_bump<OP: AtomicOperation>(
         &self,
         op: &mut OP,
         project_id: Option<ProjectId>,
@@ -220,22 +232,16 @@ impl Skills {
         project_id: ProjectId,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<SearchResult>, SkillError> {
+    ) -> Result<Vec<SearchHit>, SkillError> {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
         let library = self
             .library
             .as_ref()
             .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
-        // SearchStore::search() includes globals (sentinel nil UUID).
-        library
-            .search(
-                uuid::Uuid::from(project_id),
-                query,
-                Some(DocType::Skill),
-                limit,
-            )
-            .await
-            .map_err(SkillError::from)
+        Ok(library
+            .search()
+            .search(query, None, &[], &[SKILL_DOC_TYPE], limit)
+            .await?)
     }
 
     /// Build skills context for system prompt injection.
@@ -400,7 +406,8 @@ impl Skills {
 
 /// Extracts the markdown body from a canonical skill file (everything after
 /// the closing `---` of the frontmatter, leading/trailing newlines trimmed).
-fn extract_skill_body(rendered: &str) -> Option<String> {
+#[allow(dead_code)]
+pub(crate) fn extract_skill_body(rendered: &str) -> Option<String> {
     let after_first = rendered.strip_prefix("---")?;
     let (_, after_fm) = after_first.split_once("\n---")?;
     Some(
@@ -409,77 +416,6 @@ fn extract_skill_body(rendered: &str) -> Option<String> {
             .trim_end_matches('\n')
             .to_string(),
     )
-}
-
-impl crate::library::LibraryImporter for Skills {
-    type Entity = Skill;
-    const JOB_TYPE: &'static str = "skill.sync-from-library";
-
-    fn parse(content: &str, path: &str) -> Option<crate::library::ParsedFile> {
-        crate::library::parse_skill_markdown(content, path)
-    }
-
-    /// Upsert a skill from a library file. When the file carries an
-    /// `original_path` the entity stores it so the `WriteToRuntime` job
-    /// can remove the old file after writing the canonical one. The
-    /// skill content is `(title, body)` projected onto
-    /// `(name, description)`; the on-disk markdown body is reconstructed
-    /// from the rendered file.
-    #[instrument(name = "skill.library_importer.upsert_in_op", skip_all)]
-    async fn upsert_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        file: &crate::library::SyncedFile,
-        project_id: Option<ProjectId>,
-        file_hash: GitFileHash,
-    ) -> Result<(), crate::library::UpsertError> {
-        if file.doc_type != DocType::Skill {
-            return Ok(());
-        }
-        let doc_id = SkillId::from(file.doc_id);
-        let name = &file.title;
-        let description = &file.body;
-        let body = extract_skill_body(&file.rendered).unwrap_or_default();
-        let project_name = file.project_name.clone();
-        let original_path = file.original_path.clone();
-
-        if let Some(mut existing) = self.repo.maybe_find_by_id_in_op(&mut *op, doc_id).await? {
-            if existing
-                .update(
-                    Some(name.clone()),
-                    Some(description.clone()),
-                    Some(body.clone()),
-                    file_hash,
-                )
-                .did_execute()
-            {
-                self.repo.update_in_op(op, &mut existing).await?;
-            }
-            tracing::info!(id = %doc_id, name = %name, "updated skill from library");
-        } else {
-            let mut builder = NewSkill::builder()
-                .id(doc_id)
-                .name(name.clone())
-                .description(description.clone())
-                .body(body);
-            if let Some(project_id) = project_id {
-                builder = builder.project_id(project_id);
-            }
-            if let Some(ws_name) = project_name {
-                builder = builder.project_name(ws_name);
-            }
-            builder = builder.original_path(original_path.ok_or_else(|| {
-                SkillError::BuildEntity("original_path required for library import".into())
-            })?);
-            let new = builder
-                .build()
-                .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
-            self.repo.create_in_op(op, new).await?;
-            tracing::info!(id = %doc_id, name = %name, "created skill from library");
-        }
-        self.register_context_bump(op, project_id);
-        Ok(())
-    }
 }
 
 impl Skills {
@@ -495,6 +431,61 @@ impl Skills {
             .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
+    }
+
+    /// Reverse-sync entry point: persist a `ParsedSkill` produced by
+    /// the library importer. Creates or updates depending on whether
+    /// the skill already exists. `Ok(None)` signals idempotency — the
+    /// existing entity's `file_hash` matches the incoming bytes (i.e.
+    /// the round-trip is hitting a forward-write we already handled),
+    /// so the caller should skip search re-upsert + embed re-spawn.
+    pub(crate) async fn import_from_library<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        parsed: ParsedSkill,
+        project_id: Option<ProjectId>,
+    ) -> Result<Option<Skill>, SkillError> {
+        let file_hash = parsed.file_hash();
+
+        if let Some(mut existing) = self
+            .repo
+            .maybe_find_by_id_in_op(&mut *op, parsed.skill_id)
+            .await?
+        {
+            if !existing
+                .update(
+                    Some(parsed.name.clone()),
+                    Some(parsed.description.clone()),
+                    Some(parsed.body.clone()),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                return Ok(None);
+            }
+            self.repo.update_in_op(op, &mut existing).await?;
+            self.register_context_bump(op, project_id);
+            return Ok(Some(existing));
+        }
+
+        let mut builder = NewSkill::builder()
+            .id(parsed.skill_id)
+            .name(parsed.name)
+            .description(parsed.description)
+            .body(parsed.body)
+            .original_path(parsed.original_path);
+        if let Some(project_id) = project_id {
+            builder = builder.project_id(project_id);
+        }
+        if let Some(name) = parsed.project_name {
+            builder = builder.project_name(name);
+        }
+        let new = builder
+            .build()
+            .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+        let skill = self.repo.create_in_op(op, new).await?;
+        self.register_context_bump(op, project_id);
+        Ok(Some(skill))
     }
 
     /// Constructor without library sync — for tests or contexts where

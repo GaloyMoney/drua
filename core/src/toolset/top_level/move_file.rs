@@ -20,9 +20,9 @@ use serde::Deserialize;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::library::SpaceFs;
 use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
+use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;

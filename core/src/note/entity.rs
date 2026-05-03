@@ -1,10 +1,13 @@
 use derive_builder::Builder;
+use drua_library::{GitFileHash, SearchableFields, WriteOp};
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use crate::library::GitFileHash;
+use crate::note::file::{canonical_note_path, render_note_markdown};
+use crate::note::NOTE_DOC_TYPE;
 use crate::primitives::*;
+use crate::skill::file::slugify;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -46,7 +49,7 @@ pub struct Note {
 impl Note {
     /// Document content with frontmatter, as stored in the library.
     pub fn content(&self) -> String {
-        self.as_runtime_file().content()
+        self.rendered()
     }
 
     /// Note title (first line / heading).
@@ -77,10 +80,24 @@ impl Note {
             .unwrap_or_default()
     }
 
-    pub(super) fn as_runtime_file(&self) -> crate::library::UpstreamOp {
-        crate::library::UpstreamOp::WriteFile(Box::new(
-            <Self as crate::library::LibrarySynced>::to_synced_file(self),
-        ))
+    /// Canonical on-disk content (markdown w/ frontmatter).
+    pub(super) fn rendered(&self) -> String {
+        render_note_markdown(
+            self.id.into(),
+            &self.title,
+            &self.content,
+            &self.tags,
+            &self.created_at(),
+            &self.updated_at_rfc3339(),
+        )
+    }
+
+    fn updated_at_rfc3339(&self) -> String {
+        self.events
+            .entity_last_modified_at()
+            .or_else(|| self.events.entity_first_persisted_at())
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default()
     }
 
     pub fn pin(&mut self) -> Idempotent<()> {
@@ -129,9 +146,8 @@ impl Note {
     }
 }
 
-impl crate::library::LibrarySynced for Note {
+impl drua_library::LibrarySynced for Note {
     type Event = NoteEvent;
-    const DOC_TYPE: crate::library::DocType = crate::library::DocType::Note;
 
     fn is_content_event(ev: &NoteEvent) -> bool {
         matches!(
@@ -140,60 +156,35 @@ impl crate::library::LibrarySynced for Note {
         )
     }
 
-    fn project(&self) -> Option<(ProjectId, &str)> {
-        Some((self.project_id, &self.project_name))
+    fn searchable_fields(&self) -> SearchableFields {
+        SearchableFields {
+            doc_id: self.id.into(),
+            doc_type: NOTE_DOC_TYPE,
+            scope_id: Some(self.project_id.into()),
+            scope_slug: Some(self.project_name.clone()),
+            name: self.title.clone(),
+            path: Some(canonical_note_path(
+                self.id,
+                &self.title,
+                &self.project_name,
+            )),
+            content: self.content.clone(),
+        }
     }
 
-    fn id(&self) -> uuid::Uuid {
-        self.id.into()
-    }
-
-    fn display_name(&self) -> &str {
-        &self.title
-    }
-
-    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.events
-            .entity_first_persisted_at()
-            .unwrap_or_else(chrono::Utc::now)
-    }
-
-    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.events
-            .entity_last_modified_at()
-            .or_else(|| self.events.entity_first_persisted_at())
-            .unwrap_or_else(chrono::Utc::now)
-    }
-
-    fn index_body(&self) -> &str {
-        &self.content
-    }
-
-    fn index_tags(&self) -> Vec<String> {
-        self.tags.clone()
-    }
-
-    fn render(&self) -> String {
-        crate::library::render_note_markdown(
-            self.id.into(),
-            &self.title,
-            &self.content,
-            &self.tags,
-            &<Self as crate::library::LibrarySynced>::created_at(self).to_rfc3339(),
-            &<Self as crate::library::LibrarySynced>::updated_at(self).to_rfc3339(),
-        )
-    }
-}
-
-impl From<Note> for crate::library::SearchResult {
-    fn from(n: Note) -> Self {
-        Self {
-            doc_id: uuid::Uuid::from(n.id),
-            doc_type: crate::library::DocType::Note,
-            title: n.title,
-            content: n.content,
-            tags: n.tags,
-            score: 0.0,
+    fn write_op(&self) -> WriteOp {
+        let canonical = canonical_note_path(self.id, &self.title, &self.project_name);
+        let content = self.rendered().into_bytes();
+        let id_uuid: uuid::Uuid = self.id.into();
+        let message = format!(
+            "note: {}-{}",
+            slugify(&self.title),
+            &id_uuid.to_string()[..8]
+        );
+        WriteOp::WriteFile {
+            path: canonical,
+            content,
+            message,
         }
     }
 }
@@ -309,23 +300,23 @@ impl IntoEvents<NoteEvent> for NewNote {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
-    use crate::library::GitFileHash;
+    use drua_library::GitFileHash;
+
     use crate::primitives::{NoteId, ProjectId};
 
     use super::{NewNote, Note};
 
     fn test_hash() -> GitFileHash {
-        let rf = crate::library::UpstreamOp::for_note(
-            NoteId::new(),
-            ProjectId::new(),
-            "test",
+        let id = NoteId::new();
+        let rendered = super::render_note_markdown(
+            id.into(),
             "Test Note",
             "Some content here",
             &["tag1".into(), "tag2".into()],
             "",
             "",
         );
-        rf.file_hash()
+        GitFileHash::new(rendered)
     }
 
     fn new_note() -> Note {

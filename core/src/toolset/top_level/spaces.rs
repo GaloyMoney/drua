@@ -3,9 +3,11 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
 
+use drua_library::Space;
+
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::{Library, Space};
+use crate::library::AuthedSpaces;
 use crate::project::Projects;
 
 use super::super::error::ToolSetsError;
@@ -104,13 +106,13 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 });
 
 pub struct SpacesTool {
-    library: Arc<Library>,
+    spaces: Arc<AuthedSpaces>,
     projects: Arc<Projects>,
 }
 
 impl SpacesTool {
-    pub fn new(library: Arc<Library>, projects: Arc<Projects>) -> Self {
-        Self { library, projects }
+    pub fn new(spaces: Arc<AuthedSpaces>, projects: Arc<Projects>) -> Self {
+        Self { spaces, projects }
     }
 }
 
@@ -197,15 +199,11 @@ impl TopLevelTool for SpacesTool {
                 (text, out)
             }
             SpacesParams::Unmount { slug } => {
-                let space = self
-                    .library
-                    .find_space_by_slug(&slug)
-                    .await?
-                    .ok_or_else(|| {
-                        ToolSetsError::Library(
-                            crate::library::SpaceError::NotFound { slug: slug.clone() }.into(),
-                        )
-                    })?;
+                let space = self.spaces.find_by_slug(&slug).await?.ok_or_else(|| {
+                    ToolSetsError::Library(
+                        drua_library::SpaceError::NotFound { slug: slug.clone() }.into(),
+                    )
+                })?;
                 self.projects
                     .unmount_space(subject, project_id, space.id)
                     .await?;
@@ -223,7 +221,7 @@ impl TopLevelTool for SpacesTool {
             }
             SpacesParams::List { all } => {
                 let spaces = if all {
-                    self.library.list_all_spaces(subject).await?
+                    self.spaces.list_all(subject).await?
                 } else {
                     self.projects
                         .list_mounted_spaces(subject, project_id)

@@ -18,9 +18,57 @@ fn test_sub() -> drua_core::auth::AuthSubject {
     drua_core::auth::AuthSubject::User(drua_core::primitives::UserId::new())
 }
 
+/// Initialise a throwaway bare git repo under the test scratch dir and
+/// return its path. `Library::init` requires a non-empty `repo_url`
+/// and reachable upstream — this gives both without standing up a
+/// real remote.
+fn scratch_bare_repo() -> std::path::PathBuf {
+    let scratch = std::env::var("CARGO_TARGET_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("drua-server-tests"));
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
+    let upstream = scratch.join(format!("graphql-upstream-{stamp}.git"));
+    std::fs::create_dir_all(&upstream).expect("mkdir upstream");
+    let status = std::process::Command::new("git")
+        .args(["init", "--bare", "--quiet", "--initial-branch=main"])
+        .current_dir(&upstream)
+        .status()
+        .expect("spawn git init");
+    assert!(status.success(), "git init --bare failed");
+
+    // libgit2 won't clone an empty bare repo; seed it via a sibling
+    // working clone with one commit, then push.
+    let work = scratch.join(format!("graphql-work-{stamp}"));
+    std::fs::create_dir_all(&work).expect("mkdir work");
+    for args in [
+        vec!["init", "--quiet", "--initial-branch=main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test"],
+        vec!["remote", "add", "origin", &upstream.to_string_lossy()],
+        vec!["commit", "--quiet", "--allow-empty", "-m", "init"],
+        vec!["push", "--quiet", "-u", "origin", "main"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&work)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    upstream
+}
+
 /// Build a minimal App suitable for GraphQL integration tests.
 ///
-/// Uses default configs with the minimum required agent role setup.
+/// Uses default configs with the minimum required agent role setup
+/// plus a throwaway local bare repo so `Library::init` succeeds.
 /// No real LLM keys needed — prompt executor boots with empty models.
 async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
     use drua_core::agent::{AgentsConfig, ModelDefaults, RoleConfig};
@@ -49,11 +97,23 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
         },
     );
 
+    let upstream = scratch_bare_repo();
+    let library_data_dir = upstream
+        .parent()
+        .map(|p| p.join(format!("library-{}", std::process::id())))
+        .map(|p| p.to_string_lossy().into_owned());
+    let library = drua_core::library::LibraryConfig {
+        data_dir: library_data_dir,
+        repo_url: Some(upstream.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+
     let config = drua_core::AppConfig {
         agents: AgentsConfig {
             builtin_roles,
             models,
         },
+        library,
         ..Default::default()
     };
 

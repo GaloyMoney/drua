@@ -308,9 +308,9 @@ async fn library_search(
         .t
         .iter()
         .filter_map(|s| match s.as_str() {
-            "skill" => Some(drua_core::library::DocType::Skill),
-            "note" => Some(drua_core::library::DocType::Note),
-            "space_file" => Some(drua_core::library::DocType::SpaceFile),
+            "skill" => Some(drua_core::skill::SKILL_DOC_TYPE),
+            "note" => Some(drua_core::note::NOTE_DOC_TYPE),
+            "space_file" => Some(drua_core::library::DocType::new("space_file")),
             _ => None,
         })
         .collect();
@@ -333,8 +333,8 @@ async fn library_search(
 
     let hits = match state
         .app
-        .library()
-        .search_global(&sub, &project_ids, trimmed, &doc_types, 50)
+        .search()
+        .search(&sub, &project_ids, trimmed, &doc_types, 50)
         .await
     {
         Ok(h) => h,
@@ -363,47 +363,50 @@ async fn library_search(
     let views: Vec<LibraryHitView> = hits
         .into_iter()
         .map(|h| {
-            let (type_label, type_class, detail_url) = match h.doc_type {
-                drua_core::library::DocType::Skill => (
+            let project_id = h.fields.scope_id;
+            let (type_label, type_class, detail_url) = match h.fields.doc_type.as_str() {
+                "skill" => (
                     "Skill".to_string(),
                     "skill".to_string(),
-                    Some(format!("/projects/{}/skills/{}", h.project_id, h.doc_id)),
+                    project_id.map(|p| format!("/projects/{}/skills/{}", p, h.fields.doc_id)),
                 ),
-                drua_core::library::DocType::Workflow => (
+                "workflow" => (
                     "Workflow".to_string(),
                     "workflow".to_string(),
-                    Some(format!("/projects/{}/workflows/{}", h.project_id, h.doc_id)),
+                    project_id.map(|p| format!("/projects/{}/workflows/{}", p, h.fields.doc_id)),
                 ),
-                drua_core::library::DocType::Note => ("Note".to_string(), "note".to_string(), None),
-                // No detail page for space files yet — they're not project-scoped
-                // and `library.get_file(id)` is the only lookup path planned.
-                drua_core::library::DocType::SpaceFile => {
-                    ("Space File".to_string(), "space_file".to_string(), None)
-                }
+                "note" => ("Note".to_string(), "note".to_string(), None),
+                "space_file" => ("Space File".to_string(), "space_file".to_string(), None),
+                other => (other.to_string(), other.to_string(), None),
             };
-            let scope_label = match (&h.doc_type, &h.space_slug, h.project_id.is_nil()) {
-                (drua_core::library::DocType::SpaceFile, Some(slug), _) => match &h.relative_path {
-                    Some(path) => format!("space: {slug}/{path}"),
-                    None => format!("space: {slug}"),
-                },
-                (_, _, true) => "global".to_string(),
-                _ => {
-                    let name = project_lookup
-                        .get(&h.project_id)
-                        .cloned()
-                        .unwrap_or_else(|| h.project_id.to_string());
-                    format!("project: {name}")
+            let is_space = h.fields.doc_type.as_str() == "space_file";
+            let scope_label = if is_space {
+                match (&h.fields.scope_slug, &h.fields.path) {
+                    (Some(slug), Some(path)) => format!("space: {slug}/{path}"),
+                    (Some(slug), None) => format!("space: {slug}"),
+                    _ => "space".to_string(),
+                }
+            } else {
+                match project_id {
+                    None => "global".to_string(),
+                    Some(pid) => {
+                        let name = project_lookup
+                            .get(&pid)
+                            .cloned()
+                            .unwrap_or_else(|| pid.to_string());
+                        format!("project: {name}")
+                    }
                 }
             };
             LibraryHitView {
-                id: h.doc_id.to_string(),
+                id: h.fields.doc_id.to_string(),
                 scope_label,
                 type_label,
                 type_class,
-                title: h.title,
-                snippet: snippet(&h.content, 240),
+                title: h.fields.name,
+                snippet: snippet(&h.fields.content, 240),
                 score: format!("{:.0}%", h.score * 100.0),
-                tags: h.tags,
+                tags: Vec::new(),
                 detail_url,
             }
         })
@@ -830,12 +833,7 @@ async fn project_spaces_page(
 
     let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    let all_spaces = state
-        .app
-        .library()
-        .list_all_spaces(&sub)
-        .await
-        .unwrap_or_default();
+    let all_spaces = state.app.spaces().list_all(&sub).await.unwrap_or_default();
     let mounted = state
         .app
         .projects()

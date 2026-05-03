@@ -1,11 +1,11 @@
 //! YAML wire-format for `WorkflowDefinition`. Lives here (not in
 //! `library/`) because the schema is workflow-specific; the library
-//! only owns the file-abstraction layer (`UpstreamOp`, `SyncedFile`,
-//! `ParsedFile`).
+//! only owns transport (`WriteOp`).
 
-use crate::library::{name_from_filename, slugify, DocType, ParsedFile, SyncedFile, UpstreamOp};
-use crate::primitives::{ProjectId, WorkflowDefinitionId};
+use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+use crate::skill::file::slugify;
+use crate::skill::name_from_filename;
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
@@ -263,16 +263,28 @@ pub fn render_workflow_yaml(
     serde_yaml::to_string(&yaml).unwrap_or_else(|e| format!("# yaml render error: {e}\n"))
 }
 
-pub struct ParsedWorkflowFile {
-    pub parsed: ParsedFile,
+/// Flat result of parsing a workflow YAML file from the library.
+/// Replaces the old `(SyncedFile, ParsedFile)` pair the entity-import
+/// pipeline used.
+pub struct ParsedWorkflow {
+    pub workflow_id: WorkflowDefinitionId,
+    pub project_name: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
     pub trigger: WorkflowTrigger,
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
-    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub original_path: String,
+    pub rendered: String,
+    /// True when the on-disk form is non-canonical (no `id:`, stale path, …)
+    /// and the importer should re-render to canonical form.
+    pub needs_rewrite: bool,
 }
 
 /// `None` when the YAML is malformed or no name can be derived.
-pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFile> {
+pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> {
     let project_name = project_name_from_workflow_path(path);
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -313,9 +325,6 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
 
     let description = yaml.description;
 
-    let id_uuid = uuid::Uuid::from(workflow_id);
-    let id_prefix = id_uuid.to_string()[..8].to_string();
-    let slug = slugify(&name);
     let rendered = render_workflow_yaml(
         workflow_id,
         &name,
@@ -327,34 +336,37 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflowFi
         &yaml.updated,
     );
 
-    let file = SyncedFile {
-        doc_id: id_uuid,
-        doc_type: DocType::Workflow,
-        project_id: None,
+    let canonical_path = canonical_workflow_path(workflow_id, &name, project_name.as_deref());
+    let needs_rewrite = !has_id || canonical_path != path;
+
+    Some(ParsedWorkflow {
+        workflow_id,
         project_name,
-        slug,
-        id_prefix,
-        created_at: yaml.created,
-        updated_at: yaml.updated,
-        title: name,
-        body: description.clone().unwrap_or_default(),
-        tags: Vec::new(),
-        original_path: Some(path.to_string()),
-        rendered,
-    };
-
-    let needs_rewrite = !has_id || file.relative_path() != path;
-
-    Some(ParsedWorkflowFile {
-        parsed: ParsedFile {
-            file,
-            needs_rewrite,
-        },
+        name,
+        description,
         trigger,
         steps,
         sandboxes,
-        description,
+        created_at: yaml.created,
+        updated_at: yaml.updated,
+        original_path: path.to_string(),
+        rendered,
+        needs_rewrite,
     })
+}
+
+pub fn canonical_workflow_path(
+    id: WorkflowDefinitionId,
+    name: &str,
+    project_name: Option<&str>,
+) -> String {
+    let id_uuid = uuid::Uuid::from(id);
+    let id_prefix = &id_uuid.to_string()[..8];
+    let slug = slugify(name);
+    match project_name {
+        Some(project) => format!("runtime/projects/{project}/workflows/{slug}-{id_prefix}.yml"),
+        None => format!("runtime/workflows/{slug}-{id_prefix}.yml"),
+    }
 }
 
 /// `runtime/projects/{project}/workflows/*.yml` → `Some(project)`;
@@ -372,63 +384,9 @@ pub fn project_name_from_workflow_path(relative_path: &str) -> Option<String> {
     }
 }
 
-/// Build an `UpstreamOp::WriteFile` for a workflow definition.
-/// Production code reaches this via `LibrarySynced::to_synced_file`
-/// on `WorkflowDefinition`; this free function is the test/library
-/// convenience that mirrors the old `UpstreamOp::for_workflow`.
-#[allow(clippy::too_many_arguments)]
-pub fn upstream_op_for_workflow(
-    workflow_id: WorkflowDefinitionId,
-    project_id: Option<ProjectId>,
-    project_name: Option<&str>,
-    name: &str,
-    description: Option<&str>,
-    trigger: WorkflowTrigger,
-    steps: Vec<WorkflowStepDef>,
-    sandboxes: Vec<WorkflowSandboxDecl>,
-    created_at: &str,
-    updated_at: &str,
-    original_path: Option<String>,
-) -> UpstreamOp {
-    let id = uuid::Uuid::from(workflow_id);
-    let id_prefix = id.to_string()[..8].to_string();
-    let rendered = render_workflow_yaml(
-        workflow_id,
-        name,
-        description,
-        &trigger,
-        &steps,
-        &sandboxes,
-        created_at,
-        updated_at,
-    );
-    UpstreamOp::WriteFile(Box::new(SyncedFile {
-        doc_id: id,
-        doc_type: DocType::Workflow,
-        project_id,
-        project_name: project_name.map(|s| s.to_string()),
-        slug: slugify(name),
-        id_prefix,
-        created_at: created_at.to_string(),
-        updated_at: updated_at.to_string(),
-        title: name.to_string(),
-        body: description.unwrap_or_default().to_string(),
-        tags: Vec::new(),
-        original_path,
-        rendered,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn synced(op: &UpstreamOp) -> &SyncedFile {
-        match op {
-            UpstreamOp::WriteFile(s) => s,
-            _ => panic!("expected WriteFile variant"),
-        }
-    }
 
     fn sample_steps() -> Vec<WorkflowStepDef> {
         vec![WorkflowStepDef::AgentStep {
@@ -448,60 +406,48 @@ mod tests {
         }]
     }
 
-    fn build_op(
-        workflow_id: WorkflowDefinitionId,
+    fn render(
+        id: WorkflowDefinitionId,
         name: &str,
         description: Option<&str>,
-        trigger: WorkflowTrigger,
-        sandboxes: Vec<WorkflowSandboxDecl>,
-    ) -> UpstreamOp {
-        upstream_op_for_workflow(
-            workflow_id,
-            None,
-            None,
+        trigger: &WorkflowTrigger,
+        sandboxes: &[WorkflowSandboxDecl],
+    ) -> String {
+        render_workflow_yaml(
+            id,
             name,
             description,
             trigger,
-            sample_steps(),
+            &sample_steps(),
             sandboxes,
             "2026-04-29T00:00:00Z",
             "2026-04-29T00:00:00Z",
-            None,
         )
     }
 
     #[test]
     fn workflow_yaml_roundtrip_global() {
         let id = WorkflowDefinitionId::new();
-        let original = upstream_op_for_workflow(
+        let trigger = WorkflowTrigger::Webhook {
+            provider: Some("honeycomb".to_string()),
+            secret: "whsec_should-not-be-serialized".to_string(),
+        };
+        let content = render(
             id,
-            None,
-            None,
             "alert-response",
             Some("Investigate Honeycomb alerts"),
-            WorkflowTrigger::Webhook {
-                provider: Some("honeycomb".to_string()),
-                secret: "whsec_should-not-be-serialized".to_string(),
-            },
-            sample_steps(),
-            sample_sandboxes(),
-            "2026-04-27T00:00:00Z",
-            "2026-04-27T00:00:00Z",
-            None,
+            &trigger,
+            &sample_sandboxes(),
         );
-
-        let content = original.content();
         assert!(!content.contains("whsec_should-not-be-serialized"));
 
-        let path = synced(&original).relative_path();
+        let path = canonical_workflow_path(id, "alert-response", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
-        assert!(!parsed.parsed.needs_rewrite);
+        assert!(!parsed.needs_rewrite);
 
-        let s = &parsed.parsed.file;
-        assert_eq!(s.doc_id, uuid::Uuid::from(id));
-        assert_eq!(s.project_id, None);
-        assert_eq!(s.project_name, None);
-        assert_eq!(s.title, "alert-response");
+        assert_eq!(parsed.workflow_id, id);
+        assert_eq!(parsed.project_name, None);
+        assert_eq!(parsed.name, "alert-response");
         assert_eq!(
             parsed.description.as_deref(),
             Some("Investigate Honeycomb alerts")
@@ -522,15 +468,14 @@ mod tests {
     #[test]
     fn workflow_yaml_roundtrip_preserves_sandboxes() {
         let id = WorkflowDefinitionId::new();
-        let original = build_op(
+        let content = render(
             id,
             "alert-response",
             None,
-            WorkflowTrigger::Manual,
-            sample_sandboxes(),
+            &WorkflowTrigger::Manual,
+            &sample_sandboxes(),
         );
-        let content = original.content();
-        let path = synced(&original).relative_path();
+        let path = canonical_workflow_path(id, "alert-response", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 1);
         assert_eq!(parsed.sandboxes[0].name(), "investigation");
@@ -567,8 +512,8 @@ steps:
 ";
         let path = "runtime/workflows/simple-flow.yml";
         let parsed = parse_workflow_yaml(content, path).expect("parses");
-        assert!(parsed.parsed.needs_rewrite);
-        assert_eq!(parsed.parsed.file.title, "simple-flow");
+        assert!(parsed.needs_rewrite);
+        assert_eq!(parsed.name, "simple-flow");
         assert!(matches!(parsed.trigger, WorkflowTrigger::Manual));
     }
 
@@ -580,12 +525,12 @@ steps:
     #[test]
     fn workflow_yaml_renders_typed_sandboxes_with_nested_config() {
         let id = WorkflowDefinitionId::new();
-        let original = build_op(
+        let content = render(
             id,
             "alert-response",
             None,
-            WorkflowTrigger::Manual,
-            vec![
+            &WorkflowTrigger::Manual,
+            &[
                 WorkflowSandboxDecl::Provisioned {
                     name: "investigation".to_string(),
                     mode: SandboxMode::Scratch,
@@ -608,12 +553,11 @@ steps:
                 },
             ],
         );
-        let content = original.content();
         assert!(content.contains("type: scratch"));
         assert!(content.contains("type: repo"));
         assert!(content.contains("type: preexisting"));
         assert!(content.contains("config:"));
-        let path = synced(&original).relative_path();
+        let path = canonical_workflow_path(id, "alert-response", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 3);
     }
@@ -621,19 +565,18 @@ steps:
     #[test]
     fn workflow_yaml_roundtrip_preserves_preexisting_sandbox() {
         let id = WorkflowDefinitionId::new();
-        let original = build_op(
+        let content = render(
             id,
             "uses-existing",
             None,
-            WorkflowTrigger::Manual,
-            vec![WorkflowSandboxDecl::Preexisting {
+            &WorkflowTrigger::Manual,
+            &[WorkflowSandboxDecl::Preexisting {
                 name: "investigation".to_string(),
             }],
         );
-        let content = original.content();
         assert!(content.contains("type: preexisting"));
 
-        let path = synced(&original).relative_path();
+        let path = canonical_workflow_path(id, "uses-existing", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 1);
         assert!(matches!(

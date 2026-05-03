@@ -1085,16 +1085,16 @@ async fn fan_out_tool_calls(
     calls: Vec<llm::RequestToolUse>,
     tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
 ) -> Vec<llm::ToolUseResult> {
+    let n = calls.len();
     let dispatches = calls.into_iter().map(|tu| {
         let toolsets = toolsets.clone();
         let subject = subject.clone();
         async move {
-            let id = tu.id.clone();
             let name = tu.name.clone();
-            let result = match toolsets
-                .call_top_level_tool(&subject, &name, tu.input.as_object().cloned())
-                .await
-            {
+            let id = tu.id.clone();
+            let args = tu.input.as_object().cloned();
+            let res = toolsets.call_top_level_tool(&subject, &name, args).await;
+            let result = match res {
                 Ok(r) => llm::ToolUseResult {
                     tool_use_id: id,
                     content: call_result_to_text(&r),
@@ -1102,7 +1102,7 @@ async fn fan_out_tool_calls(
                 },
                 Err(e) => llm::ToolUseResult {
                     tool_use_id: id,
-                    content: e.to_string(),
+                    content: flatten_error(&e),
                     is_error: true,
                 },
             };
@@ -1111,7 +1111,8 @@ async fn fan_out_tool_calls(
     });
 
     let outcomes = futures::future::join_all(dispatches).await;
-    let mut results = Vec::with_capacity(outcomes.len());
+
+    let mut results = Vec::with_capacity(n);
     for (name, result) in outcomes {
         const MAX_CONTENT_LEN: usize = 4096;
         let content = if result.content.is_empty() {
@@ -1132,6 +1133,21 @@ async fn fan_out_tool_calls(
         results.push(result);
     }
     results
+}
+
+/// Render an error chain to a single concise line for the model.
+/// Walks `.source()` to the deepest cause (so wrapper layers like
+/// `ToolSetsError -> ProjectError -> SpaceError` collapse to the leaf),
+/// then strips the conventional `"TypeName - "` thiserror prefix.
+fn flatten_error(err: &dyn std::error::Error) -> String {
+    let mut current: &dyn std::error::Error = err;
+    while let Some(src) = current.source() {
+        current = src;
+    }
+    let leaf = current.to_string();
+    leaf.split_once(" - ")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or(leaf)
 }
 
 fn call_result_to_text(result: &rmcp::model::CallToolResult) -> String {

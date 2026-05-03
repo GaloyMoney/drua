@@ -1,8 +1,10 @@
 use thiserror::Error;
 
+use drua_library::SpaceError;
+
 use crate::agent::AgentError;
 use crate::auth::error::AuthorizationError;
-use crate::library::{LibraryError, SpaceError};
+use crate::library::LibraryError;
 use crate::note::NoteError;
 use crate::project_secret::ProjectSecretError;
 use crate::sandbox::SandboxError;
@@ -28,6 +30,8 @@ pub enum ProjectError {
     Authorization(#[from] AuthorizationError),
     #[error("ProjectError - Library: {0}")]
     Library(#[from] LibraryError),
+    #[error("ProjectError - Drua: {0}")]
+    Drua(#[from] drua_library::LibraryError),
     #[error("ProjectError - Space: {0}")]
     Space(#[from] SpaceError),
     #[error("ProjectError - Sandbox: {0}")]

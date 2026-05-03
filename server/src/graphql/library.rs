@@ -1,11 +1,15 @@
 use async_graphql::{Enum, InputObject, SimpleObject};
 
+use drua_core::library::{DocType, SearchHit};
+use drua_core::note::NOTE_DOC_TYPE;
+use drua_core::skill::SKILL_DOC_TYPE;
+
 use super::primitives::*;
 
-use drua_core::library::{DocType, GlobalSearchHit};
+const SPACE_FILE_DOC_TYPE_STR: &str = "space_file";
 
 /// Workflow files are git-synced to the library repo but not exposed
-/// here — `library.search_global` filters them out at the boundary.
+/// here — `AuthedSearch::search` filters them out at the boundary.
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
 pub enum LibraryFileType {
     Skill,
@@ -16,23 +20,21 @@ pub enum LibraryFileType {
 impl From<LibraryFileType> for DocType {
     fn from(t: LibraryFileType) -> Self {
         match t {
-            LibraryFileType::Skill => DocType::Skill,
-            LibraryFileType::Note => DocType::Note,
-            LibraryFileType::SpaceFile => DocType::SpaceFile,
+            LibraryFileType::Skill => SKILL_DOC_TYPE,
+            LibraryFileType::Note => NOTE_DOC_TYPE,
+            LibraryFileType::SpaceFile => DocType::new(SPACE_FILE_DOC_TYPE_STR),
         }
     }
 }
 
-/// `Workflow` rows can't reach this conversion in practice —
-/// `Library::search_global` drops them before fusion. Default to Note
-/// if one ever does.
+/// Workflow rows are filtered out before reaching this conversion;
+/// non-recognised doc types default to Note as a defensive fallback.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
-        match t {
-            DocType::Skill => LibraryFileType::Skill,
-            DocType::Note => LibraryFileType::Note,
-            DocType::SpaceFile => LibraryFileType::SpaceFile,
-            DocType::Workflow => LibraryFileType::Note,
+        match t.as_str() {
+            "skill" => LibraryFileType::Skill,
+            "space_file" => LibraryFileType::SpaceFile,
+            _ => LibraryFileType::Note,
         }
     }
 }
@@ -67,23 +69,29 @@ pub struct LibrarySearchHit {
 }
 
 impl LibrarySearchHit {
-    pub fn from_domain(hit: GlobalSearchHit) -> Self {
-        let snippet = make_snippet(&hit.content, 240);
-        let project_id = if hit.project_id.is_nil() {
+    pub fn from_domain(hit: SearchHit) -> Self {
+        let snippet = make_snippet(&hit.fields.content, 240);
+        let is_space = hit.fields.doc_type.as_str() == SPACE_FILE_DOC_TYPE_STR;
+        let project_id = if is_space {
             None
         } else {
-            Some(ProjectId::from(hit.project_id))
+            hit.fields.scope_id.map(ProjectId::from)
+        };
+        let (space_slug, relative_path) = if is_space {
+            (hit.fields.scope_slug, hit.fields.path)
+        } else {
+            (None, None)
         };
         Self {
-            id: UUID::from(hit.doc_id),
+            id: UUID::from(hit.fields.doc_id),
             project_id,
-            r#type: hit.doc_type.into(),
-            title: hit.title,
+            r#type: hit.fields.doc_type.into(),
+            title: hit.fields.name,
             snippet,
             score: hit.score,
-            tags: hit.tags,
-            space_slug: hit.space_slug,
-            relative_path: hit.relative_path,
+            tags: Vec::new(),
+            space_slug,
+            relative_path,
         }
     }
 }

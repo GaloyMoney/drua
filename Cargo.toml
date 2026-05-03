@@ -5,6 +5,7 @@ members = [
   "server",
   "lib/concourse-client",
   "core",
+  "core/crates/library",
   "mcp-gateway",
   "lib/sandbox",
   "lib/anthropic-client",
@@ -12,6 +13,7 @@ members = [
   "lib/llm",
   "lib/js-engine",
   "lib/json-schema-ts",
+  "lib/github-app",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",
@@ -52,6 +54,7 @@ code-assistant-core = { path = "code-assistant/crates/core" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
 openai-client = { path = "lib/openai-client" }
+github-app = { path = "lib/github-app" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }

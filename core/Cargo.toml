@@ -12,6 +12,8 @@ graphql = ["es-entity/graphql", "dep:async-graphql"]
 async-graphql = { version = "8.0.0-rc.4", optional = true, default-features = false }
 anthropic-client = { workspace = true }
 code-assistant-core = { workspace = true }
+drua-library = { path = "crates/library" }
+github-app = { workspace = true }
 openai-client = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
@@ -53,8 +55,10 @@ uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https", "ssh"] }
 llm = { workspace = true }
 rmcp = { workspace = true }
 serde_json = "1.0"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
