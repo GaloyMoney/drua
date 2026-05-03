@@ -61,11 +61,11 @@ fn path_exists(repo_path: &Path, path: &str) -> bool {
 
 fn upstream_head(repo_path: &Path) -> String {
     let repo = git2::Repository::open(repo_path).expect("open upstream");
-    repo.head()
+    let commit = repo
+        .head()
         .and_then(|h| h.peel_to_commit())
-        .expect("peel head")
-        .id()
-        .to_string()
+        .expect("peel head");
+    commit.id().to_string()
 }
 
 /// Walk upstream main back to (and excluding) `until_oid`, returning each
