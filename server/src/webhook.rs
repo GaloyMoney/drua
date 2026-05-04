@@ -164,10 +164,7 @@ mod tests {
 
     #[test]
     fn extract_secret_passes_raw_for_honeycomb() {
-        assert_eq!(
-            extract_secret("whsec_abc", Some("honeycomb")),
-            "whsec_abc"
-        );
+        assert_eq!(extract_secret("whsec_abc", Some("honeycomb")), "whsec_abc");
     }
 
     #[test]

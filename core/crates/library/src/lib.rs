@@ -1,3 +1,4 @@
+pub mod attribution;
 mod config;
 mod error;
 mod git;
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+pub use attribution::{CommitAttribution, CommitSubjectKind};
 pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
@@ -194,6 +196,10 @@ impl Library {
     /// this: projects the entity into a write op and registers the
     /// commit hook when at least one persisted event was a content
     /// event.
+    ///
+    /// Reads the [`CommitAttribution`] from the request's `EventContext`
+    /// (populated by `drua_core::audit::Audit::commit_attribution`);
+    /// falls back to the library default when nothing was captured.
     #[tracing::instrument(name = "library.sync_entity_in_op", skip_all)]
     pub async fn sync_entity_in_op<E, OP>(
         &self,
@@ -214,6 +220,7 @@ impl Library {
                 fields: Some(entity.searchable_fields()),
                 deletes: entity.extra_search_deletes(),
                 write_op: Some(entity.write_op()),
+                attribution: CommitAttribution::from_event_context(),
             },
         )
         .await
@@ -227,6 +234,7 @@ impl Library {
         &self,
         op: &mut impl es_entity::AtomicOperation,
         write_op: WriteOp,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue_in_op(
             op,
@@ -234,6 +242,7 @@ impl Library {
                 fields: None,
                 deletes: Vec::new(),
                 write_op: Some(write_op),
+                attribution,
             },
         )
         .await
@@ -249,6 +258,7 @@ impl Library {
         fields: Option<SearchableFields>,
         deletes: Vec<(uuid::Uuid, DocType)>,
         write_op: Option<WriteOp>,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         if fields.is_none() && deletes.is_empty() && write_op.is_none() {
             return Ok(());
@@ -259,6 +269,7 @@ impl Library {
                 fields,
                 deletes,
                 write_op,
+                attribution,
             },
         )
         .await
@@ -274,6 +285,7 @@ impl Library {
         scope_id: uuid::Uuid,
         dir_path: String,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.search.delete_for_scope_in_op(op, scope_id).await?;
         self.enqueue_write_in_op(
@@ -282,6 +294,7 @@ impl Library {
                 path: dir_path,
                 message: commit_message,
             },
+            attribution,
         )
         .await
     }

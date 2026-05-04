@@ -161,7 +161,11 @@ impl App {
         )
         .await
         .map_err(|e| AppError::Library(e.to_string()))?;
-        let spaces = Arc::new(AuthedSpaces::new(library.spaces().clone()));
+        let users = Arc::new(Users::new(pool));
+        let spaces = Arc::new(AuthedSpaces::new(
+            library.spaces().clone(),
+            Arc::clone(&users),
+        ));
         let search = Arc::new(AuthedSearch::new(library.search().clone()));
 
         // Bumped by Notes/Skills mutations (local) and PG NOTIFY (peers).
@@ -175,6 +179,7 @@ impl App {
             pool,
             Arc::clone(&sandboxes),
             library.clone(),
+            Arc::clone(&users),
             context_generation.clone(),
         ));
 
@@ -191,6 +196,7 @@ impl App {
         let notes = Arc::new(Notes::new(
             pool,
             library.clone(),
+            Arc::clone(&users),
             context_generation.clone(),
         ));
 
@@ -213,6 +219,7 @@ impl App {
             Arc::clone(&skills),
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
+            Arc::clone(&users),
             &mut jobs,
         ));
 
@@ -226,6 +233,7 @@ impl App {
             Arc::clone(&workflows),
             library.clone(),
             (*spaces).clone(),
+            Arc::clone(&users),
             context_generation.clone(),
         ));
         // Late-binding: Agents needs Projects to render the dynamic
@@ -239,6 +247,7 @@ impl App {
         let space_fs = Arc::new(space_fs::SpaceFs::new(
             Arc::new(library.spaces().clone()),
             Arc::clone(&projects),
+            Arc::clone(&users),
         ));
         toolsets.register_top_level(TextEditor::new(
             Arc::clone(&sandboxes),
@@ -308,7 +317,7 @@ impl App {
         let jobs = Arc::new(jobs);
 
         Ok(Self {
-            users: Arc::new(Users::new(pool)),
+            users,
             mcp_creds: Arc::new(mcp_creds),
             agents: Arc::clone(&agents),
             audit,

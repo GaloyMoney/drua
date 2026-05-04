@@ -7,9 +7,12 @@ pub use drua_library::{
     SpaceEvent, Spaces, WriteOp, SPACE_DOC_TYPE,
 };
 
+use std::sync::Arc;
+
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SpaceId;
+use crate::user::Users;
 
 const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 20;
 
@@ -63,11 +66,12 @@ impl LibraryConfig {
 #[derive(Clone)]
 pub struct AuthedSpaces {
     inner: drua_library::Spaces,
+    users: Arc<Users>,
 }
 
 impl AuthedSpaces {
-    pub fn new(inner: drua_library::Spaces) -> Self {
-        Self { inner }
+    pub fn new(inner: drua_library::Spaces, users: Arc<Users>) -> Self {
+        Self { inner, users }
     }
 
     /// Persists a new `Space`, scaffolds `spaces/<slug>/.gitkeep`
@@ -81,7 +85,11 @@ impl AuthedSpaces {
     ) -> Result<Space, LibraryError> {
         sub.can(AuthVerb::Create, AuthResource::Space(None))?;
         Audit::record_action_if_unset("library.spaces.create");
-        let space = self.inner.create(slug.into(), description).await?;
+        let attribution = Audit::commit_attribution(&self.users).await;
+        let space = self
+            .inner
+            .create(slug.into(), description, attribution)
+            .await?;
         Audit::record_space_id(space.id);
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created");
         Ok(space)
@@ -103,9 +111,10 @@ impl AuthedSpaces {
     ) -> Result<Space, LibraryError> {
         sub.can(AuthVerb::Create, AuthResource::Space(None))?;
         Audit::record_action_if_unset("library.spaces.create");
+        let attribution = Audit::commit_attribution(&self.users).await;
         let space = self
             .inner
-            .create_in_op(op, slug.into(), description)
+            .create_in_op(op, slug.into(), description, attribution)
             .await?;
         Audit::record_space_id(space.id);
         tracing::info!(space.id = %space.id, space.slug = %space.slug, "space created in op");
