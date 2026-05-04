@@ -94,6 +94,18 @@ impl Mutation {
         Ok(AgentDetachSandboxPayload::from(Agent::from(agent)))
     }
 
+    async fn agent_delete(
+        &self,
+        ctx: &Context<'_>,
+        input: AgentDeleteInput,
+    ) -> async_graphql::Result<AgentDeletePayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        app.agents().delete(sub, input.id).await?;
+        Ok(AgentDeletePayload {
+            deleted_id: input.id,
+        })
+    }
+
     async fn sandbox_create(
         &self,
         ctx: &Context<'_>,

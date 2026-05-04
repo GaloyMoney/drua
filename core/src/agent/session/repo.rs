@@ -26,27 +26,6 @@ impl AgentSessionRepo {
             threads: SessionThreadRepo::new(pool),
         }
     }
-
-    /// Soft-delete = no-event column update, so bulk SQL is equivalent to
-    /// per-entity `delete_in_op`.
-    pub async fn cascade_delete_for_agent_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        agent_id: AgentId,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE session_threads SET deleted = TRUE \
-             WHERE session_id IN (SELECT id FROM agent_sessions WHERE agent_id = $1)",
-        )
-        .bind(agent_id)
-        .execute(op.as_executor())
-        .await?;
-        sqlx::query("UPDATE agent_sessions SET deleted = TRUE WHERE agent_id = $1")
-            .bind(agent_id)
-            .execute(op.as_executor())
-            .await?;
-        Ok(())
-    }
 }
 
 #[derive(EsRepo, Clone)]

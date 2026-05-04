@@ -280,15 +280,23 @@ impl Sessions {
         session.exportable_thread(target)
     }
 
+    /// Used by the agent-delete cascade. The optional `detach` records
+    /// a sandbox-detach notification on the session (mirrors
+    /// [`Self::sandbox_notification_in_op`]) right before the soft
+    /// delete, so the chat history reflects the detach without an extra
+    /// load. `EsRepo::delete_in_op` cascades to nested `session_threads`.
     #[instrument(name = "domain.agent_session.delete_for_agent_in_op", skip(self, op))]
     pub async fn delete_for_agent_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         agent_id: AgentId,
+        detach: Option<(String, message::SandboxOperation)>,
     ) -> Result<(), AgentSessionError> {
-        self.repo
-            .cascade_delete_for_agent_in_op(op, agent_id)
-            .await?;
+        let mut session = self.repo.find_by_agent_id_in_op(op, agent_id).await?;
+        if let Some((sandbox_name, operation)) = detach {
+            session.add_sandbox_notification(sandbox_name, operation)?;
+        }
+        self.repo.delete_in_op(op, session).await?;
         Ok(())
     }
 }

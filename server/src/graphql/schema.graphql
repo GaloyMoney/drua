@@ -28,6 +28,14 @@ type AgentCreatePayload {
 	agent: Agent!
 }
 
+input AgentDeleteInput {
+	id: AgentId!
+}
+
+type AgentDeletePayload {
+	deletedId: AgentId!
+}
+
 input AgentDetachSandboxInput {
 	agentId: AgentId!
 	sandboxId: SandboxId!
@@ -214,6 +222,7 @@ type Me {
 type Mutation {
 	agentAttachSandbox(input: AgentAttachSandboxInput!): AgentAttachSandboxPayload!
 	agentCreate(input: AgentCreateInput!): AgentCreatePayload!
+	agentDelete(input: AgentDeleteInput!): AgentDeletePayload!
 	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
