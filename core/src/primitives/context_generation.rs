@@ -3,7 +3,28 @@ use std::sync::Arc;
 
 use es_entity::operation::hooks::CommitHook;
 
-use super::ProjectId;
+use super::{ProjectId, SpaceId};
+
+/// Identifies the scope a context-changing mutation belongs to. Used as the
+/// `pg_notify('context_changed', …)` payload (informational — listeners on
+/// other instances bump the local atomic unconditionally) and to label the
+/// `ContextBumpHook` for tracing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeId {
+    Global,
+    Project(ProjectId),
+    Space(SpaceId),
+}
+
+impl ScopeId {
+    pub fn payload(&self) -> String {
+        match self {
+            ScopeId::Global => "global".to_string(),
+            ScopeId::Project(p) => format!("project:{}", uuid::Uuid::from(*p)),
+            ScopeId::Space(s) => format!("space:{}", uuid::Uuid::from(*s)),
+        }
+    }
+}
 
 /// Cross-cutting "something changed" signal for project context (notes/skills).
 /// Bumped on every Notes/Skills mutation; read by Agents to detect cache staleness.
@@ -43,22 +64,18 @@ impl Default for ContextGeneration {
 pub struct ContextBumpHook {
     generation: ContextGeneration,
     pool: sqlx::PgPool,
-    /// `None` for global-scoped mutations (e.g. global skill upserts);
-    /// `Some(project)` for project-scoped mutations. The payload is
-    /// informational — listeners on other instances bump unconditionally.
-    project_id: Option<ProjectId>,
+    /// Labelled mutation scope. The payload is informational — listeners on
+    /// other instances bump unconditionally — but it future-proofs sharded
+    /// per-scope counters and shows up in traces.
+    scope: ScopeId,
 }
 
 impl ContextBumpHook {
-    pub fn new(
-        generation: ContextGeneration,
-        pool: sqlx::PgPool,
-        project_id: Option<ProjectId>,
-    ) -> Self {
+    pub fn new(generation: ContextGeneration, pool: sqlx::PgPool, scope: ScopeId) -> Self {
         Self {
             generation,
             pool,
-            project_id,
+            scope,
         }
     }
 }
@@ -69,10 +86,7 @@ impl CommitHook for ContextBumpHook {
         // (delayed notify only affects peers, never this instance).
         self.generation.bump();
         let pool = self.pool;
-        let payload = self
-            .project_id
-            .map(|w| w.to_string())
-            .unwrap_or_else(|| "global".to_string());
+        let payload = self.scope.payload();
         tokio::spawn(async move {
             if let Err(e) = sqlx::query("SELECT pg_notify('context_changed', $1)")
                 .bind(payload)
@@ -87,6 +101,6 @@ impl CommitHook for ContextBumpHook {
     fn merge(&mut self, other: &mut Self) -> bool {
         // Same-scope bumps collapse; different scopes keep separate hooks
         // so each peer gets a per-scope payload.
-        self.project_id == other.project_id
+        self.scope == other.scope
     }
 }

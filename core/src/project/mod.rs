@@ -81,7 +81,7 @@ impl Projects {
         let hook = ContextBumpHook::new(
             self.context_generation.clone(),
             self.pool.clone(),
-            Some(project_id),
+            ScopeId::Project(project_id),
         );
         if op.add_commit_hook(hook).is_err() {
             tracing::warn!(

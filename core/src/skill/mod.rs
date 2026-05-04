@@ -31,12 +31,14 @@ pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
     library: Option<drua_library::Library>,
-    /// Held for context-bump hooks fired from reverse-sync importers
-    /// (registered in App init); unused on the forward-only paths.
-    #[allow(dead_code)]
+    /// `None` in test contexts (`new_without_library`); `Some` everywhere
+    /// else. Used to wire `ContextBumpHook` onto mutation ops.
     pool: Option<sqlx::PgPool>,
+    /// `None` in test contexts (`new_without_library`); `Some` everywhere
+    /// else. Used to populate `EventContext` with `CommitAttribution` so
+    /// the post-persist `library.sync_entity_in_op` hook picks up rich
+    /// commit author / committer info.
     users: Option<Arc<Users>>,
-    #[allow(dead_code)]
     context_generation: ContextGeneration,
 }
 
@@ -69,17 +71,35 @@ impl Skills {
         }
     }
 
-    /// No-op when `Skills` has no `pool` (test contexts using `new_without_library`).
-    #[allow(dead_code)]
+    /// Begin a mutation op with a `ContextBumpHook` registered for `scope`,
+    /// so committing the op bumps the local `ContextGeneration` and fires a
+    /// `context_changed` PG NOTIFY. All Skill mutations must go through this
+    /// helper rather than `repo.begin_op()` so agents see fresh skills.
+    /// Falls back to a plain `repo.begin_op()` when `pool` is `None`
+    /// (test contexts using `new_without_library`).
+    async fn begin_op(&self, scope: ScopeId) -> Result<es_entity::DbOp<'static>, SkillError> {
+        let mut op = self.repo.begin_op().await?;
+        if let Some(pool) = self.pool.as_ref() {
+            let hook =
+                ContextBumpHook::new(self.context_generation.clone(), pool.clone(), scope);
+            op.add_commit_hook(hook)
+                .expect("DbOp supports commit hooks");
+        }
+        Ok(op)
+    }
+
+    /// Composable variant: registers a `ContextBumpHook` on the caller's
+    /// `op` for `scope`. Used by reverse-sync importers and other internal
+    /// callers that already own a transaction. No-op when `pool` is `None`.
     pub(crate) fn register_context_bump<OP: AtomicOperation>(
         &self,
         op: &mut OP,
-        project_id: Option<ProjectId>,
+        scope: ScopeId,
     ) {
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
-        let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), project_id);
+        let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), scope);
         if op.add_commit_hook(hook).is_err() {
             tracing::warn!("AtomicOperation rejected ContextBumpHook; context bump skipped");
         }
@@ -339,7 +359,9 @@ impl Skills {
     }
 
     /// DB-first; `post_persist_hook(sync_to_library)` writes the
-    /// canonical file asynchronously.
+    /// canonical file asynchronously. Routes through `begin_op` so commit
+    /// fires `ContextBumpHook(Project)` — agents see the new skill on the
+    /// next `send_message`.
     #[instrument(name = "skill.create", skip(self, body))]
     pub async fn create(
         &self,
@@ -365,8 +387,10 @@ impl Skills {
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
 
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         self.populate_attribution().await;
-        let skill = self.repo.create(new).await?;
+        let skill = self.repo.create_in_op(&mut op, new).await?;
+        op.commit().await?;
         Ok(skill)
     }
 
@@ -381,7 +405,8 @@ impl Skills {
         body: Option<String>,
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Update, AuthResource::Skill(project_id, Some(id)))?;
-        let mut skill = self.repo.find_by_id(id).await?;
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
+        let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
@@ -390,8 +415,9 @@ impl Skills {
         }
         if skill.update_content(name, description, body).did_execute() {
             self.populate_attribution().await;
-            self.repo.update(&mut skill).await?;
+            self.repo.update_in_op(&mut op, &mut skill).await?;
         }
+        op.commit().await?;
         Ok(skill)
     }
 
@@ -406,14 +432,14 @@ impl Skills {
         project_id: ProjectId,
     ) -> Result<(), SkillError> {
         sub.can(AuthVerb::Delete, AuthResource::Skill(project_id, Some(id)))?;
-        let skill = self.repo.find_by_id(id).await?;
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
+        let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Delete,
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
-        let mut op = self.repo.begin_op().await?;
         self.populate_attribution().await;
         self.repo.delete_in_op(&mut op, skill).await?;
         op.commit().await?;
@@ -481,7 +507,12 @@ impl Skills {
                 return Ok(None);
             }
             self.repo.update_in_op(op, &mut existing).await?;
-            self.register_context_bump(op, project_id);
+            self.register_context_bump(
+                op,
+                project_id
+                    .map(ScopeId::Project)
+                    .unwrap_or(ScopeId::Global),
+            );
             return Ok(Some(existing));
         }
 
@@ -501,7 +532,12 @@ impl Skills {
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
         let skill = self.repo.create_in_op(op, new).await?;
-        self.register_context_bump(op, project_id);
+        self.register_context_bump(
+            op,
+            project_id
+                .map(ScopeId::Project)
+                .unwrap_or(ScopeId::Global),
+        );
         Ok(Some(skill))
     }
 
