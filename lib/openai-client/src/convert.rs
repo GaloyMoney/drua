@@ -177,22 +177,49 @@ fn convert_tool_choice(choice: &ToolChoice) -> OpenAiToolChoice {
     }
 }
 
+/// Sentinel error string returned by `DeltaSynthesizer::process_chunk` when the
+/// upstream stream finishes with `finish_reason="stop"` having emitted neither
+/// text nor tool calls. `OpenAiClient` matches on this to retry once.
+pub(crate) const EMPTY_COMPLETION_ERR: &str =
+    "upstream returned empty completion (no text, no tool calls) with finish_reason=stop";
+
 /// Converts OpenAI streaming chunks into provider-agnostic [`StreamDelta`]s.
 /// Tracks tool call IDs by index so subsequent argument deltas can reference them.
+///
+/// Usage emission is deferred until either `finish_reason` or the `[DONE]`
+/// sentinel arrives. This way an empty-completion error (returned at
+/// `finish_reason="stop"` with no text/tool deltas) discards the stashed
+/// usage and nothing observable has been emitted, leaving the caller free
+/// to retry the request without corrupting the consumer's accumulator.
 pub(crate) struct DeltaSynthesizer {
     tool_ids: Vec<Option<String>>,
+    saw_text: bool,
+    saw_tool_call: bool,
+    pending_usage: Option<PendingUsage>,
+}
+
+#[derive(Copy, Clone)]
+struct PendingUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
 }
 
 impl DeltaSynthesizer {
     pub fn new() -> Self {
         Self {
             tool_ids: Vec::new(),
+            saw_text: false,
+            saw_tool_call: false,
+            pending_usage: None,
         }
     }
 
     pub fn process_chunk(&mut self, data: &str) -> Result<Vec<StreamDelta>, String> {
         if data.trim() == "[DONE]" {
-            return Ok(vec![]);
+            // Flush any usage that arrived in a separate post-finish chunk
+            // (some providers split usage into its own trailing chunk).
+            return Ok(self.drain_pending_usage());
         }
 
         let chunk: OpenAiStreamChunk =
@@ -200,18 +227,16 @@ impl DeltaSynthesizer {
 
         let mut deltas = Vec::new();
 
-        // OpenAI emits usage in a separate chunk when stream_options.include_usage is set.
         if let Some(usage) = &chunk.usage {
             let cached_tokens = usage
                 .prompt_tokens_details
                 .as_ref()
                 .map(|details| details.cached_tokens)
                 .unwrap_or(0);
-            deltas.push(StreamDelta::Usage {
+            self.pending_usage = Some(PendingUsage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
                 cache_read_input_tokens: cached_tokens,
-                cache_creation_input_tokens: 0,
             });
         }
 
@@ -222,6 +247,7 @@ impl DeltaSynthesizer {
         if let Some(delta) = &choice.delta {
             if let Some(text) = &delta.content {
                 if !text.is_empty() {
+                    self.saw_text = true;
                     deltas.push(StreamDelta::TextDelta { text: text.clone() });
                 }
             }
@@ -240,6 +266,7 @@ impl DeltaSynthesizer {
                             .and_then(|f| f.name.clone())
                             .unwrap_or_default();
                         self.tool_ids[tc.index] = Some(id.clone());
+                        self.saw_tool_call = true;
                         deltas.push(StreamDelta::ToolCallStart { id, name });
                     }
 
@@ -259,6 +286,19 @@ impl DeltaSynthesizer {
         }
 
         if let Some(reason) = &choice.finish_reason {
+            // An upstream "stop" with no text and no tool calls means the
+            // model returned an empty completion. Some providers (e.g. deepseek
+            // via OpenRouter) do this after a tool error and leave the workflow
+            // executor to mistake the empty turn for a clean end_turn. Fail
+            // the stream so the client can retry once before surfacing the
+            // error instead of silently marking the turn end_turn.
+            //
+            // Deferred `pending_usage` is left on `self` and dropped with the
+            // synthesizer — it never reaches the consumer.
+            if reason == "stop" && !self.saw_text && !self.saw_tool_call {
+                return Err(EMPTY_COMPLETION_ERR.to_string());
+            }
+            deltas.extend(self.drain_pending_usage());
             let stop_reason = match reason.as_str() {
                 "stop" => Some(StopReason::EndTurn),
                 "length" => Some(StopReason::MaxTokens),
@@ -269,6 +309,18 @@ impl DeltaSynthesizer {
         }
 
         Ok(deltas)
+    }
+
+    fn drain_pending_usage(&mut self) -> Vec<StreamDelta> {
+        match self.pending_usage.take() {
+            Some(u) => vec![StreamDelta::Usage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read_input_tokens: u.cache_read_input_tokens,
+                cache_creation_input_tokens: 0,
+            }],
+            None => Vec::new(),
+        }
     }
 }
 
@@ -502,6 +554,75 @@ mod tests {
             d,
             StreamDelta::Done {
                 stop_reason: Some(StopReason::ToolUse),
+            }
+        )));
+    }
+
+    #[test]
+    fn synthesizer_rejects_empty_stop_completion() {
+        let mut synth = DeltaSynthesizer::new();
+
+        let err = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":0}}"#,
+            )
+            .unwrap_err();
+        assert!(err.contains("empty completion"), "got: {err}");
+    }
+
+    #[test]
+    fn synthesizer_flushes_late_usage_at_done() {
+        let mut synth = DeltaSynthesizer::new();
+
+        // Text in first chunk; finish_reason in second chunk; usage in a
+        // third trailing chunk. The usage delta must still be emitted, here
+        // at the [DONE] sentinel.
+        let _ = synth
+            .process_chunk(r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#)
+            .unwrap();
+        let mid = synth
+            .process_chunk(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+            .unwrap();
+        assert!(mid.iter().any(|d| matches!(
+            d,
+            StreamDelta::Done {
+                stop_reason: Some(StopReason::EndTurn)
+            }
+        )));
+        // Usage hasn't arrived yet, so it must not be in `mid`.
+        assert!(!mid.iter().any(|d| matches!(d, StreamDelta::Usage { .. })));
+
+        let _ = synth
+            .process_chunk(r#"{"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}"#)
+            .unwrap();
+        let done = synth.process_chunk("[DONE]").unwrap();
+        assert!(done.iter().any(|d| matches!(
+            d,
+            StreamDelta::Usage {
+                input_tokens: 42,
+                output_tokens: 7,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn synthesizer_accepts_stop_after_text() {
+        let mut synth = DeltaSynthesizer::new();
+
+        synth
+            .process_chunk(r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#)
+            .unwrap();
+
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1}}"#,
+            )
+            .unwrap();
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Done {
+                stop_reason: Some(StopReason::EndTurn),
             }
         )));
     }

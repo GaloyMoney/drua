@@ -6,15 +6,17 @@ mod responses;
 mod sse;
 mod types;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use thiserror::Error;
-use tracing::instrument;
+use tracing::{instrument, Instrument};
 
 use llm::provider::LlmProvider;
 use llm::stream::StreamDelta;
 use llm::{Prompt, PromptError, PromptResponse};
 
-use crate::convert::{prompt_to_request, DeltaSynthesizer};
+use crate::convert::{prompt_to_request, DeltaSynthesizer, EMPTY_COMPLETION_ERR};
 use crate::sse::{parse_sse_stream, SseError};
 
 pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient, OpenAiResponsesError};
@@ -27,6 +29,13 @@ const API_PATH: &str = "/v1/chat/completions";
 const MAX_RETRIES: u32 = 2;
 const MAX_RETRY_AFTER_SECS: u64 = 5;
 const DEFAULT_RETRY_DELAY_SECS: u64 = 1;
+
+/// Maximum number of retries when an upstream returns an empty completion
+/// (`finish_reason=stop` with no text and no tool calls). Observed on
+/// `deepseek-v4-pro` via OpenRouter, often paired with a flat ~10 s span:
+/// the gateway appears to synthesise a stop response when its own provider
+/// times out. Retrying once usually succeeds.
+const MAX_EMPTY_COMPLETION_RETRIES: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum OpenAiChatCompletionsError {
@@ -92,30 +101,34 @@ impl OpenAiClient {
         Ok(accumulator.finish())
     }
 
-    #[instrument(name = "openai_client.send_prompt_streaming", skip_all)]
-    async fn send_prompt_streaming_internal(
+    /// POSTs `body` and waits for response headers. Retries up to
+    /// `MAX_RETRIES` times on 429/502/503, honouring `retry-after`. Returns
+    /// the response on first 2xx; returns `Api` error on non-retryable or
+    /// exhausted retries. Records `http.status_code` and `http.attempts` on
+    /// the current span.
+    async fn send_request(
         &self,
-        prompt: &Prompt,
-    ) -> Result<
-        tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiChatCompletionsError>>,
-        OpenAiChatCompletionsError,
-    > {
-        let request_body = prompt_to_request(prompt);
-
+        body: &[u8],
+    ) -> Result<reqwest::Response, OpenAiChatCompletionsError> {
+        let span = tracing::Span::current();
         let mut attempt: u32 = 0;
-        let resp = loop {
+        let mut attempts: u32 = 0;
+        loop {
+            attempts += 1;
             let resp = self
                 .http
                 .post(&self.api_url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("content-type", "application/json")
-                .json(&request_body)
+                .body(body.to_vec())
                 .send()
                 .await?;
 
             let status = resp.status();
             if status.is_success() {
-                break resp;
+                span.record("http.status_code", status.as_u16());
+                span.record("http.attempts", attempts);
+                return Ok(resp);
             }
 
             let header_retry = resp
@@ -141,41 +154,161 @@ impl OpenAiClient {
                 continue;
             }
 
+            span.record("http.status_code", status.as_u16());
+            span.record("http.attempts", attempts);
             return Err(OpenAiChatCompletionsError::Api {
                 status: status.as_u16(),
                 message,
             });
-        };
+        }
+    }
 
-        let byte_stream = resp.bytes_stream();
+    #[instrument(
+        name = "openai_client.send_prompt_streaming",
+        skip_all,
+        fields(
+            http.status_code = tracing::field::Empty,
+            http.attempts = tracing::field::Empty,
+        )
+    )]
+    async fn send_prompt_streaming_internal(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiChatCompletionsError>>,
+        OpenAiChatCompletionsError,
+    > {
+        let request_body = prompt_to_request(prompt);
+        let body_bytes = Arc::new(
+            serde_json::to_vec(&request_body)
+                .map_err(|e| OpenAiChatCompletionsError::Stream(format!("body serialize: {e}")))?,
+        );
+
+        // Issue first request synchronously so an outright failure surfaces
+        // before any receiver is handed out.
+        let resp = self.send_request(&body_bytes).await?;
+
         let (tx, rx) =
             tokio::sync::mpsc::channel::<Result<StreamDelta, OpenAiChatCompletionsError>>(128);
 
-        tokio::spawn(async move {
-            let tx_ref = &tx;
-            let mut synthesizer = DeltaSynthesizer::new();
-            let synth_ref = &mut synthesizer;
+        let stream_span = tracing::info_span!(
+            parent: tracing::Span::current(),
+            "openai_client.stream_processing",
+            empty_completion_retries = tracing::field::Empty,
+            usage.input_tokens = tracing::field::Empty,
+            usage.output_tokens = tracing::field::Empty,
+            usage.cache_read_input_tokens = tracing::field::Empty,
+            stream.delta_count = tracing::field::Empty,
+        );
 
-            let _ = parse_sse_stream(byte_stream, |event| {
-                match synth_ref.process_chunk(&event.data) {
-                    Ok(deltas) => {
-                        for delta in deltas {
-                            tx_ref
-                                .try_send(Ok(delta))
-                                .map_err(|e| SseError::Processing(e.to_string()))?;
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let _ = tx_ref.try_send(Err(OpenAiChatCompletionsError::Stream(e.clone())));
-                        Err(SseError::Processing(e))
-                    }
-                }
-            })
-            .await;
-        });
+        let client = self.clone();
+        tokio::spawn(
+            async move {
+                drive_stream_with_retry(client, body_bytes, resp, tx).await;
+            }
+            .instrument(stream_span),
+        );
 
         Ok(rx)
+    }
+}
+
+/// Drains the SSE response, forwarding every delta to `tx` in real time.
+/// On `EMPTY_COMPLETION_ERR`, re-issues the HTTP request (up to
+/// `MAX_EMPTY_COMPLETION_RETRIES` times) and resumes streaming from the
+/// new response without forwarding anything from the failed attempt — the
+/// synthesizer holds usage internally and discards it on the empty path.
+///
+/// Records `empty_completion_retries`, `usage.*`, and `stream.delta_count`
+/// on `Span::current()` (the `stream_processing` span).
+async fn drive_stream_with_retry(
+    client: OpenAiClient,
+    body: Arc<Vec<u8>>,
+    initial_resp: reqwest::Response,
+    tx: tokio::sync::mpsc::Sender<Result<StreamDelta, OpenAiChatCompletionsError>>,
+) {
+    let span = tracing::Span::current();
+    let mut current_resp = initial_resp;
+    let mut empty_retries: u32 = 0;
+    let mut delta_count: u64 = 0;
+    let mut usage_seen: Option<(u32, u32, u32)> = None;
+
+    loop {
+        let byte_stream = current_resp.bytes_stream();
+        let mut synthesizer = DeltaSynthesizer::new();
+        let mut empty_completion_seen = false;
+        let mut other_processing_err: Option<String> = None;
+
+        let parse_result = parse_sse_stream(byte_stream, |event| {
+            match synthesizer.process_chunk(&event.data) {
+                Ok(deltas) => {
+                    for delta in deltas {
+                        delta_count += 1;
+                        if let StreamDelta::Usage {
+                            input_tokens,
+                            output_tokens,
+                            cache_read_input_tokens,
+                            ..
+                        } = &delta
+                        {
+                            usage_seen =
+                                Some((*input_tokens, *output_tokens, *cache_read_input_tokens));
+                        }
+                        tx.try_send(Ok(delta))
+                            .map_err(|e| SseError::Processing(e.to_string()))?;
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    if e == EMPTY_COMPLETION_ERR {
+                        empty_completion_seen = true;
+                    } else {
+                        other_processing_err = Some(e.clone());
+                    }
+                    Err(SseError::Processing(e))
+                }
+            }
+        })
+        .await;
+
+        if empty_completion_seen && empty_retries < MAX_EMPTY_COMPLETION_RETRIES {
+            empty_retries += 1;
+            tracing::warn!(
+                retry = empty_retries,
+                "openai-client: upstream returned empty completion, retrying"
+            );
+            match client.send_request(&body).await {
+                Ok(new_resp) => {
+                    current_resp = new_resp;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+
+        if let Some(msg) = other_processing_err {
+            let _ = tx.send(Err(OpenAiChatCompletionsError::Stream(msg))).await;
+        } else if empty_completion_seen {
+            let _ = tx
+                .send(Err(OpenAiChatCompletionsError::Stream(format!(
+                    "{EMPTY_COMPLETION_ERR} (after {empty_retries} retries)"
+                ))))
+                .await;
+        } else if let Err(e) = parse_result {
+            let _ = tx.send(Err(OpenAiChatCompletionsError::from(e))).await;
+        }
+        break;
+    }
+
+    span.record("empty_completion_retries", empty_retries);
+    span.record("stream.delta_count", delta_count);
+    if let Some((input, output, cache_read)) = usage_seen {
+        span.record("usage.input_tokens", input);
+        span.record("usage.output_tokens", output);
+        span.record("usage.cache_read_input_tokens", cache_read);
     }
 }
 
