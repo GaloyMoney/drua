@@ -30,7 +30,19 @@ teardown_file() {
 }
 
 @test "sandbox: bash returns error on non-zero exit" {
+  # `exit 42` kills the persistent shell before the marker echo runs, so it
+  # surfaces via the shell-died path with a richer prefix that names the
+  # exit code; sub-shell `exit` (next test) keeps the parent shell alive
+  # and goes through the regular `Exit code N` path.
   RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"exit 42"}}')
+  echo "$RESP"
+
+  echo "$RESP" | jq -e '.is_error == true'
+  echo "$RESP" | jq -r '.output' | grep -qE "Shell exited before completing the command.*exit_code=42"
+}
+
+@test "sandbox: bash returns error from sub-shell non-zero exit" {
+  RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"bash -c '\''exit 42'\''"}}')
   echo "$RESP"
 
   echo "$RESP" | jq -e '.is_error == true'
