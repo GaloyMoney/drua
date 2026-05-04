@@ -132,14 +132,17 @@ fn try_spawn(
         }
     };
 
-    // Detach the spawned shell from the parent's controlling terminal.
-    // Without this, `bash -i` calls `tcsetpgrp` and steals the user's TTY
-    // foreground pgroup, causing Ctrl-C on the dev server to be delivered
-    // to bash (which ignores SIGINT) instead of the server. The Bwrap layer
-    // already gets this via `--new-session`; the UidOnly/Plain fallbacks
-    // need an explicit `setsid()`.
+    // Detach the spawned shell from the parent's controlling terminal —
+    // but only when there IS one to detach from. Without setsid(), local
+    // `bash -i` calls `tcsetpgrp` and steals the dev server's TTY
+    // foreground pgroup, swallowing Ctrl-C. In prod (gVisor sandbox, no
+    // tty) the parent has no controlling terminal anyway — and there
+    // adding setsid() makes interactive bash exit immediately on first
+    // command for reasons we haven't fully characterized (likely a
+    // gVisor + bash-job-control interaction). Bwrap gets session
+    // detachment via `--new-session` already.
     #[cfg(unix)]
-    if !matches!(layer, IsolationLayer::Bwrap) {
+    if !matches!(layer, IsolationLayer::Bwrap) && parent_has_controlling_tty() {
         // SAFETY: setsid(2) is async-signal-safe and only mutates the
         // child's session/pgroup state. No allocations, no locks.
         unsafe {
@@ -179,6 +182,16 @@ fn is_root() -> bool {
         fn geteuid() -> u32;
     }
     unsafe { geteuid() == 0 }
+}
+
+/// True when the *parent* (this process) has a controlling terminal —
+/// i.e. there's a tty whose foreground pgroup the spawned shell could
+/// otherwise steal. `tcgetpgrp(0) >= 0` is the standard probe: it
+/// returns -1/ENOTTY when stdin isn't a tty AND -1/ENXIO when stdin is
+/// a tty but no controlling tty is associated.
+#[cfg(unix)]
+fn parent_has_controlling_tty() -> bool {
+    unsafe { libc::tcgetpgrp(0) >= 0 }
 }
 
 fn is_bwrap_unavailable(err: &str) -> bool {
@@ -778,19 +791,28 @@ mod tests {
     }
 
     /// Regression test for the Ctrl-C-swallowed bug: the persistent
-    /// `bash -i` must NOT inherit the parent's session. Without
-    /// `setsid()` in `try_spawn`'s pre_exec, interactive bash takes over
-    /// the controlling TTY's foreground pgroup and Ctrl-C on the dev
-    /// server stops being delivered.
+    /// `bash -i` must NOT inherit the parent's session when the parent
+    /// owns a controlling tty. Without setsid()/--new-session,
+    /// interactive bash takes over the tty's foreground pgroup and
+    /// Ctrl-C on the dev server stops being delivered.
     ///
-    /// Asserts the spawned shell is in its own session
-    /// (`getsid(child) != getsid(self)`) — Plain/UidOnly layers run
-    /// `setsid()`, Bwrap uses `--new-session`, so this invariant holds
-    /// for whichever layer was selected.
+    /// Bwrap uses `--new-session`; UidOnly/Plain run `setsid()` — but
+    /// only when the parent has a controlling tty (skipping it in
+    /// container environments like gVisor where `bash -i` + setsid
+    /// kills the shell). The test only runs when the parent does have
+    /// a tty, since that's the scenario the fix actually targets.
     #[cfg(unix)]
     #[tokio::test]
     async fn session_shell_is_in_a_separate_session() {
         init_test_workspace();
+        if !parent_has_controlling_tty() {
+            eprintln!(
+                "skipping: no parent controlling tty — \
+                 setsid() is intentionally not applied here"
+            );
+            return;
+        }
+
         let session = BashSession::new();
 
         let _ = session
