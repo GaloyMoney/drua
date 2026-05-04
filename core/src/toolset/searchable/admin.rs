@@ -1,8 +1,8 @@
 //! `AdminToolSet` — admin-only tools exposed exclusively through the
 //! searchable catalog (`search_tools` → `describe_tool` → `call_tool`).
 //!
-//! Consolidated into 7 tools with command discriminators:
-//! `agent`, `sandbox`, `log`, `project`, `spaces`, `workflow`, `skill`.
+//! Consolidated into 8 tools with command discriminators:
+//! `agent`, `sandbox`, `log`, `project`, `spaces`, `workflow`, `skill`, `note`.
 //! Prefixed as `drua_admin_agent`, `drua_admin_sandbox`, etc.
 
 use std::sync::{Arc, LazyLock};
@@ -17,7 +17,10 @@ use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::AuthedSpaces;
-use crate::primitives::{AgentId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId};
+use crate::note::{Note, Notes};
+use crate::primitives::{
+    AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId,
+};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
 use crate::skill::{Skill, Skills};
@@ -432,6 +435,41 @@ struct SkillParams {
     body: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum NoteCommand {
+    Create,
+    List,
+    Get,
+    Update,
+    Pin,
+    Unpin,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct NoteParams {
+    command: NoteCommand,
+
+    /// Required for `create` and `list`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    project_id: Option<ProjectId>,
+
+    /// Required for `get`, `update`, `pin`, `unpin`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    note_id: Option<NoteId>,
+
+    /// `create` / `update`: required.
+    title: Option<String>,
+    /// `create` / `update`: required.
+    content: Option<String>,
+    /// `create` / `update`: optional. Defaults to empty.
+    #[serde(default)]
+    tags: Vec<String>,
+
+    /// `list`: optional cap. Defaults to 50.
+    limit: Option<usize>,
+}
+
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
 static SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SandboxParams>);
 static LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LogParams>);
@@ -439,6 +477,7 @@ static PROJECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SpacesParams>);
 static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkflowParams>);
 static SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SkillParams>);
+static NOTE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<NoteParams>);
 
 struct ToolDef {
     name: &'static str,
@@ -501,6 +540,19 @@ static TOOLS: &[ToolDef] = &[
         schema: &SKILL_SCHEMA,
     },
     ToolDef {
+        name: "note",
+        description: "Manage notes across any project. Commands: \
+                       `create` (requires `project_id`, `title`, `content`; \
+                       optional `tags`), \
+                       `list` (requires `project_id`; optional `limit`), \
+                       `get` (requires `note_id`, `project_id`), \
+                       `update` (requires `note_id`, `project_id`, `title`, \
+                       `content`; optional `tags`), \
+                       `pin` (requires `note_id`, `project_id`; idempotent), \
+                       `unpin` (requires `note_id`, `project_id`; idempotent).",
+        schema: &NOTE_SCHEMA,
+    },
+    ToolDef {
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
                        `spaces/<slug>/` in the knowledge-base repo. Commands: \
@@ -529,6 +581,7 @@ pub struct AdminToolSet {
     space_fs: Arc<SpaceFs>,
     workflows: Arc<Workflows>,
     skills: Arc<Skills>,
+    notes: Arc<Notes>,
 }
 
 impl AdminToolSet {
@@ -542,6 +595,7 @@ impl AdminToolSet {
         space_fs: Arc<SpaceFs>,
         workflows: Arc<Workflows>,
         skills: Arc<Skills>,
+        notes: Arc<Notes>,
     ) -> Self {
         let entries = TOOLS
             .iter()
@@ -566,6 +620,7 @@ impl AdminToolSet {
             space_fs,
             workflows,
             skills,
+            notes,
         }
     }
 }
@@ -606,6 +661,7 @@ impl SearchableToolSet for AdminToolSet {
             "spaces" => self.spaces(subject, arguments).await,
             "workflow" => self.workflow(subject, arguments).await,
             "skill" => self.skill(subject, arguments).await,
+            "note" => self.note(subject, arguments).await,
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -1174,6 +1230,139 @@ impl AdminToolSet {
             }
         }
     }
+
+    async fn note(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let params: NoteParams = parse_params(arguments)?;
+
+        match params.command {
+            NoteCommand::Create => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for create".to_string())
+                })?;
+                let title = params.title.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("title is required for create".to_string())
+                })?;
+                let content = params.content.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("content is required for create".to_string())
+                })?;
+                Audit::record_action("note.create");
+                let project = self.projects.find_by_id(subject, project_id).await?;
+                let note = self
+                    .notes
+                    .store(
+                        subject,
+                        project_id,
+                        &project.name,
+                        title,
+                        content,
+                        params.tags,
+                    )
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, true,
+                ))]))
+            }
+
+            NoteCommand::List => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for list".to_string())
+                })?;
+                Audit::record_action("note.list");
+                let limit = params.limit.unwrap_or(50).clamp(1, 200);
+                let notes = self
+                    .notes
+                    .list(subject, project_id, limit)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_notes(
+                    &notes,
+                ))]))
+            }
+
+            NoteCommand::Get => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for get".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for get".to_string())
+                })?;
+                Audit::record_action("note.get");
+                let note = self
+                    .notes
+                    .find_by_id(subject, project_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, false,
+                ))]))
+            }
+
+            NoteCommand::Update => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for update".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for update".to_string())
+                })?;
+                let title = params.title.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("title is required for update".to_string())
+                })?;
+                let content = params.content.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("content is required for update".to_string())
+                })?;
+                Audit::record_action("note.update");
+                let note = self
+                    .notes
+                    .update(subject, project_id, note_id, title, content, params.tags)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, false,
+                ))]))
+            }
+
+            NoteCommand::Pin => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for pin".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for pin".to_string())
+                })?;
+                Audit::record_action("note.pin");
+                let note = self
+                    .notes
+                    .pin(subject, project_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, false,
+                ))]))
+            }
+
+            NoteCommand::Unpin => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for unpin".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for unpin".to_string())
+                })?;
+                Audit::record_action("note.unpin");
+                let note = self
+                    .notes
+                    .unpin(subject, project_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, false,
+                ))]))
+            }
+        }
+    }
 }
 
 async fn execute_inspect(
@@ -1530,6 +1719,52 @@ fn format_skills(skills: &[Skill]) -> String {
             truncate(&s.name, 24),
             scope,
             truncate(&s.description, 50),
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_note(n: &Note, created: bool) -> String {
+    let header = if created { "Note created." } else { "Note:" };
+    let tags = if n.tags().is_empty() {
+        "\u{2014}".to_string()
+    } else {
+        n.tags().join(", ")
+    };
+    let pinned = if n.is_pinned() { "yes" } else { "no" };
+    format!(
+        "{header}\n  id: {}\n  title: {}\n  pinned: {}\n  tags: {}",
+        n.id,
+        n.title(),
+        pinned,
+        tags,
+    )
+}
+
+fn format_notes(notes: &[Note]) -> String {
+    if notes.is_empty() {
+        return "No notes found.".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(notes.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<6} {:<40} {}",
+        "ID", "PINNED", "TITLE", "TAGS"
+    ));
+    lines.push("-".repeat(110));
+    for n in notes {
+        let tags = if n.tags().is_empty() {
+            "\u{2014}".to_string()
+        } else {
+            n.tags().join(",")
+        };
+        let pinned = if n.is_pinned() { "yes" } else { "no" };
+        lines.push(format!(
+            "{:<38} {:<6} {:<40} {}",
+            n.id,
+            pinned,
+            truncate(n.title(), 40),
+            truncate(&tags, 40),
         ));
     }
     lines.join("\n")
@@ -1955,6 +2190,121 @@ mod tests {
                 assert!(specs.is_none());
             }
             other => panic!("unexpected decl: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tools_includes_note() {
+        assert!(TOOLS.iter().any(|t| t.name == "note"));
+    }
+
+    #[test]
+    fn note_create_parses_full_args() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "title": "Onboarding",
+            "content": "Welcome to the team.",
+            "tags": ["onboarding", "welcome"],
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Create));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+        assert_eq!(p.title.as_deref(), Some("Onboarding"));
+        assert_eq!(p.content.as_deref(), Some("Welcome to the team."));
+        assert_eq!(
+            p.tags,
+            vec!["onboarding".to_string(), "welcome".to_string()]
+        );
+    }
+
+    #[test]
+    fn note_list_takes_optional_limit() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "list",
+            "project_id": project_id,
+            "limit": 10,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::List));
+        assert_eq!(p.limit, Some(10));
+    }
+
+    #[test]
+    fn note_get_takes_ids() {
+        let note_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "get",
+            "note_id": note_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Get));
+        assert_eq!(p.note_id.map(uuid::Uuid::from), Some(note_id));
+    }
+
+    #[test]
+    fn note_update_parses_full_args() {
+        let note_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "note_id": note_id,
+            "project_id": project_id,
+            "title": "Updated title",
+            "content": "New body",
+            "tags": ["x"],
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Update));
+        assert_eq!(p.title.as_deref(), Some("Updated title"));
+        assert_eq!(p.content.as_deref(), Some("New body"));
+        assert_eq!(p.tags, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn note_rejects_unknown_command() {
+        let res: Result<NoteParams, _> = parse_params(args(serde_json::json!({
+            "command": "destroy",
+        })));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn note_pin_takes_ids() {
+        let note_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "pin",
+            "note_id": note_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Pin));
+        assert_eq!(p.note_id.map(uuid::Uuid::from), Some(note_id));
+    }
+
+    #[test]
+    fn note_unpin_takes_ids() {
+        let note_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "unpin",
+            "note_id": note_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Unpin));
+    }
+
+    #[test]
+    fn note_schema_includes_command_enum() {
+        let s = serde_json::to_string(&*NOTE_SCHEMA).unwrap();
+        for v in ["create", "list", "get", "update", "pin", "unpin"] {
+            assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }
 }
