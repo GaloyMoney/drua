@@ -1,6 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
-use rmcp::model::{CallToolResult, JsonObject};
+use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
 use drua_library::Space;
@@ -9,8 +9,10 @@ use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::AuthedSpaces;
 use crate::project::Projects;
+use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
+use super::super::inspect::{dispatch_inspect, require_space_op, InspectTool};
 use super::super::traits::TopLevelTool;
 use super::{parse_params, OutputSchema};
 
@@ -36,6 +38,32 @@ enum SpacesParams {
         #[serde(default)]
         all: bool,
     },
+    /// Read-only file ops on a space mounted on the caller's project.
+    /// Mirrors `sandbox`'s `inspect`: pass `tool` (read|ls|grep|glob)
+    /// and `tool_args`.
+    Inspect {
+        slug: String,
+        tool: InspectTool,
+        #[serde(default)]
+        tool_args: Option<JsonObject>,
+    },
+    /// Blind overwrite of `space:<slug>/<path>` with `content`. Slug
+    /// must be mounted on the caller's project.
+    Write {
+        slug: String,
+        path: String,
+        content: String,
+    },
+    /// Delete `space:<slug>/<path>`. Slug must be mounted on the
+    /// caller's project.
+    Delete { slug: String, path: String },
+    /// Rename / move `space:<slug>/<from>` → `space:<slug>/<to>`.
+    /// Slug must be mounted on the caller's project.
+    Move {
+        slug: String,
+        from: String,
+        to: String,
+    },
 }
 
 impl SpacesParams {
@@ -45,6 +73,10 @@ impl SpacesParams {
             Self::Mount { .. } => "mount",
             Self::Unmount { .. } => "unmount",
             Self::List { .. } => "list",
+            Self::Inspect { .. } => "inspect",
+            Self::Write { .. } => "write",
+            Self::Delete { .. } => "delete",
+            Self::Move { .. } => "move",
         }
     }
 }
@@ -84,12 +116,12 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "mount", "unmount", "list"],
+                "enum": ["create", "mount", "unmount", "list", "inspect", "write", "delete", "move"],
                 "description": "Which spaces operation to perform."
             },
             "slug": {
                 "type": "string",
-                "description": "Directory-safe identifier ([a-z0-9-]+, no leading/trailing hyphens). Becomes spaces/<slug>/ in the library repo. Required for create, mount, and unmount."
+                "description": "Directory-safe identifier ([a-z0-9-]+, no leading/trailing hyphens). Becomes spaces/<slug>/ in the library repo. Required for create, mount, unmount, inspect, write, delete, and move."
             },
             "description": {
                 "type": "string",
@@ -98,6 +130,31 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "all": {
                 "type": "boolean",
                 "description": "List flag: true returns every space in the library (for discovery before mount); false (default) returns only spaces mounted on this project."
+            },
+            "tool": {
+                "type": "string",
+                "enum": ["read", "ls", "grep", "glob"],
+                "description": "Inspect sub-tool. Required for inspect."
+            },
+            "tool_args": {
+                "type": "object",
+                "description": "Inspect sub-tool arguments. Shape mirrors the equivalent top-level tool: ls/read take {path, ...}; grep/glob take {pattern, path?, ...}."
+            },
+            "path": {
+                "type": "string",
+                "description": "Path relative to spaces/<slug>/. Required for write and delete."
+            },
+            "content": {
+                "type": "string",
+                "description": "File contents. Required for write."
+            },
+            "from": {
+                "type": "string",
+                "description": "Source path relative to spaces/<slug>/. Required for move."
+            },
+            "to": {
+                "type": "string",
+                "description": "Destination path relative to spaces/<slug>/. Required for move."
             }
         },
         "required": ["command"],
@@ -108,11 +165,16 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 pub struct SpacesTool {
     spaces: Arc<AuthedSpaces>,
     projects: Arc<Projects>,
+    space_fs: Arc<SpaceFs>,
 }
 
 impl SpacesTool {
-    pub fn new(spaces: Arc<AuthedSpaces>, projects: Arc<Projects>) -> Self {
-        Self { spaces, projects }
+    pub fn new(spaces: Arc<AuthedSpaces>, projects: Arc<Projects>, space_fs: Arc<SpaceFs>) -> Self {
+        Self {
+            spaces,
+            projects,
+            space_fs,
+        }
     }
 }
 
@@ -132,7 +194,14 @@ impl TopLevelTool for SpacesTool {
          `unmount` (requires `slug`; drops a previously-mounted space \
          — the space itself is unaffected), \
          `list` (defaults to spaces mounted by the caller's project; \
-         pass `all: true` to discover every space in the library)."
+         pass `all: true` to discover every space in the library), \
+         `inspect` (read-only file ops on a mounted space; requires \
+         `slug`, `tool` (read|ls|grep|glob), `tool_args`), \
+         `write` (requires `slug`, `path`, `content`), \
+         `delete` (requires `slug`, `path`), \
+         `move` (requires `slug`, `from`, `to`). \
+         File ops are gated on the slug being mounted on the caller's \
+         project."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -167,6 +236,55 @@ impl TopLevelTool for SpacesTool {
         Audit::record_action(format!("spaces.{}", params.command_name()));
 
         let (text, out) = match params {
+            SpacesParams::Inspect {
+                slug,
+                tool,
+                tool_args,
+            } => {
+                return dispatch_inspect(
+                    &self.space_fs,
+                    subject,
+                    &slug,
+                    tool,
+                    tool_args.unwrap_or_default(),
+                )
+                .await;
+            }
+            SpacesParams::Write {
+                slug,
+                path,
+                content,
+            } => {
+                let space_path = format!("space:{slug}/{path}");
+                let result = self
+                    .space_fs
+                    .write_file(subject, &space_path, content)
+                    .await?;
+                require_space_op(result, "write")?;
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Wrote {space_path}"
+                ))]));
+            }
+            SpacesParams::Delete { slug, path } => {
+                let space_path = format!("space:{slug}/{path}");
+                let result = self.space_fs.delete_file(subject, &space_path).await?;
+                require_space_op(result, "delete")?;
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Deleted {space_path}"
+                ))]));
+            }
+            SpacesParams::Move { slug, from, to } => {
+                let from_path = format!("space:{slug}/{from}");
+                let to_path = format!("space:{slug}/{to}");
+                let result = self
+                    .space_fs
+                    .move_file(subject, &from_path, &to_path)
+                    .await?;
+                require_space_op(result, "move")?;
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Moved {from_path} -> {to_path}"
+                ))]));
+            }
             SpacesParams::Create { slug, description } => {
                 let space = self
                     .projects

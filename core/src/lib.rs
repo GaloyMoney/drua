@@ -258,7 +258,11 @@ impl App {
         toolsets.register_top_level(MoveFile::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
         toolsets.register_top_level(Delete::new(Arc::clone(&sandboxes), Arc::clone(&space_fs)));
 
-        toolsets.register_top_level(SpacesTool::new(Arc::clone(&spaces), Arc::clone(&projects)));
+        toolsets.register_top_level(SpacesTool::new(
+            Arc::clone(&spaces),
+            Arc::clone(&projects),
+            Arc::clone(&space_fs),
+        ));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
@@ -280,6 +284,7 @@ impl App {
             Arc::clone(&audit),
             Arc::clone(&projects),
             Arc::clone(&spaces),
+            Arc::clone(&space_fs),
         ));
 
         // Reverse-sync (file → entity) for skills + workflows runs

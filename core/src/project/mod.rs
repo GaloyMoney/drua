@@ -421,19 +421,17 @@ impl Projects {
     }
 
     /// Central authorization primitive for sandboxless space access.
-    /// Resolves `slug` via `Library`, asserts the calling subject's
-    /// project has it mounted, and returns the resolved `Space` for
-    /// downstream tracing/audit. Used by `SpaceFs` read ops.
+    /// Resolves `slug` via `Library` and returns the `Space`. For
+    /// project-bound subjects (`Agent` / `AgentOnBehalfOfUser`),
+    /// asserts the carrying project has the space mounted. Admin
+    /// subjects bypass the mount gate — they reach into any space
+    /// in the library by design.
     #[instrument(name = "domain.project.space_for_subject", skip(self, sub))]
     pub async fn space_for_subject(
         &self,
         sub: &AuthSubject,
         slug: &str,
     ) -> Result<Space, ProjectError> {
-        let project_id = sub
-            .project_id()
-            .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
-
         let space = self
             .spaces
             .find_by_slug(slug)
@@ -442,6 +440,14 @@ impl Projects {
                 slug: slug.to_string(),
             })?;
 
+        if sub.is_admin() {
+            Audit::record_space_id(space.id);
+            return Ok(space);
+        }
+
+        let project_id = sub
+            .project_id()
+            .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
         let project = self.repo.find_by_id(project_id).await?;
         if !project.is_space_mounted(space.id) {
             return Err(SpaceError::NotMounted {

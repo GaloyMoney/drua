@@ -12,8 +12,9 @@
 //! `Result<Option<T>, ProjectError>`. `Ok(None)` signals "not a `space:`
 //! path — fall through to the existing sandbox dispatch"; `Ok(Some(_))`
 //! is a successful space-rooted op. Authorization runs once in
-//! `resolve` via `Projects::space_for_subject`; per-method docs only
-//! call out method-specific behaviour.
+//! `resolve` via `Projects::space_for_subject`, which gates project
+//! agents on the mount and lets admins reach any space; per-method
+//! docs only call out method-specific behaviour.
 
 use std::sync::Arc;
 
@@ -329,15 +330,7 @@ impl SpaceFs {
             .walk(&resolved.space.slug, &resolved.rel_path)
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        let regex = glob_to_regex(pattern)
-            .map_err(|e| io_err(format!("invalid glob pattern '{pattern}': {e}")))?;
-        let mut out: Vec<String> = blobs
-            .into_iter()
-            .map(|(p, _)| p)
-            .filter(|p| regex.is_match(p))
-            .collect();
-        out.sort();
-        Ok(Some(out))
+        Ok(Some(glob_blobs(blobs, pattern)?))
     }
 
     /// Grep walk across the space's tree. Replicates the curated subset
@@ -353,114 +346,17 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        let pattern = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| io_err("grep: missing 'pattern'".to_string()))?;
-        let mode = args
-            .get("output_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("files_with_matches");
-        let case_insensitive = args.get("-i").and_then(|v| v.as_bool()).unwrap_or(false);
-        let multiline = args
-            .get("multiline")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let glob_filter = args
-            .get("glob")
-            .and_then(|v| v.as_str())
-            .map(glob_to_regex)
-            .transpose()
-            .map_err(|e| io_err(format!("invalid glob filter: {e}")))?;
-        let show_line_nums = args.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
-        let context_after = args.get("-A").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-        let context_before = args.get("-B").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-        let context_around = args.get("-C").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-        let head_limit = args
-            .get("head_limit")
-            .and_then(|v| v.as_i64())
-            .map(|n| n.max(0) as usize);
-
-        let regex = regex::RegexBuilder::new(pattern)
-            .case_insensitive(case_insensitive)
-            .multi_line(multiline)
-            .dot_matches_new_line(multiline)
-            .build()
-            .map_err(|e| io_err(format!("invalid regex '{pattern}': {e}")))?;
-
         let blobs = self
             .spaces
             .walk(&resolved.space.slug, &resolved.rel_path)
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-
-        let before = context_before.max(context_around);
-        let after = context_after.max(context_around);
-
-        let mut output_lines: Vec<String> = Vec::new();
-        for (rel, bytes) in blobs {
-            if let Some(g) = glob_filter.as_ref() {
-                if !g.is_match(&rel) {
-                    continue;
-                }
-            }
-            let Ok(content) = std::str::from_utf8(&bytes) else {
-                continue;
-            };
-
-            match mode {
-                "files_with_matches" => {
-                    if regex.is_match(content) {
-                        output_lines.push(rel);
-                    }
-                }
-                "count" => {
-                    let n = regex.find_iter(content).count();
-                    if n > 0 {
-                        output_lines.push(format!("{rel}:{n}"));
-                    }
-                }
-                _ => {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let mut matched_idx: Vec<usize> = Vec::new();
-                    for (i, line) in lines.iter().enumerate() {
-                        if regex.is_match(line) {
-                            matched_idx.push(i);
-                        }
-                    }
-                    if matched_idx.is_empty() {
-                        continue;
-                    }
-                    // Build the context-window line set (deduped).
-                    let mut want: std::collections::BTreeSet<usize> =
-                        std::collections::BTreeSet::new();
-                    for i in &matched_idx {
-                        let lo = i.saturating_sub(before);
-                        let hi = (*i + after).min(lines.len().saturating_sub(1));
-                        for j in lo..=hi {
-                            want.insert(j);
-                        }
-                    }
-                    for idx in want {
-                        if show_line_nums {
-                            output_lines.push(format!("{rel}:{}:{}", idx + 1, lines[idx]));
-                        } else {
-                            output_lines.push(format!("{rel}:{}", lines[idx]));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(cap) = head_limit {
-            output_lines.truncate(cap);
-        }
-        Ok(Some(output_lines.join("\n")))
+        Ok(Some(grep_blobs(blobs, args)?))
     }
 
     /// Rejects path-traversal, absolute paths, NUL bytes, and leading `/`.
     /// Empty `rel` is allowed (means "the space root").
-    fn validate_rel_path(rel: &str) -> Result<(), SpaceError> {
+    pub(crate) fn validate_rel_path(rel: &str) -> Result<(), SpaceError> {
         if rel.is_empty() {
             return Ok(());
         }
@@ -474,6 +370,121 @@ impl SpaceFs {
         }
         Ok(())
     }
+}
+
+/// Filter `blobs` (rel-path, bytes) by a glob pattern and return the
+/// matching paths, sorted.
+fn glob_blobs(blobs: Vec<(String, Vec<u8>)>, pattern: &str) -> Result<Vec<String>, SpaceError> {
+    let regex = glob_to_regex(pattern)
+        .map_err(|e| io_err(format!("invalid glob pattern '{pattern}': {e}")))?;
+    let mut out: Vec<String> = blobs
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| regex.is_match(p))
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// Run `grep` over already-walked blobs. Mirrors the curated subset of
+/// flags the `Grep` top-level tool accepts.
+fn grep_blobs(blobs: Vec<(String, Vec<u8>)>, args: &Value) -> Result<String, SpaceError> {
+    let pattern = args
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| io_err("grep: missing 'pattern'".to_string()))?;
+    let mode = args
+        .get("output_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("files_with_matches");
+    let case_insensitive = args.get("-i").and_then(|v| v.as_bool()).unwrap_or(false);
+    let multiline = args
+        .get("multiline")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let glob_filter = args
+        .get("glob")
+        .and_then(|v| v.as_str())
+        .map(glob_to_regex)
+        .transpose()
+        .map_err(|e| io_err(format!("invalid glob filter: {e}")))?;
+    let show_line_nums = args.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
+    let context_after = args.get("-A").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+    let context_before = args.get("-B").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+    let context_around = args.get("-C").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+    let head_limit = args
+        .get("head_limit")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.max(0) as usize);
+
+    let regex = regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .multi_line(multiline)
+        .dot_matches_new_line(multiline)
+        .build()
+        .map_err(|e| io_err(format!("invalid regex '{pattern}': {e}")))?;
+
+    let before = context_before.max(context_around);
+    let after = context_after.max(context_around);
+
+    let mut output_lines: Vec<String> = Vec::new();
+    for (rel, bytes) in blobs {
+        if let Some(g) = glob_filter.as_ref() {
+            if !g.is_match(&rel) {
+                continue;
+            }
+        }
+        let Ok(content) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+
+        match mode {
+            "files_with_matches" => {
+                if regex.is_match(content) {
+                    output_lines.push(rel);
+                }
+            }
+            "count" => {
+                let n = regex.find_iter(content).count();
+                if n > 0 {
+                    output_lines.push(format!("{rel}:{n}"));
+                }
+            }
+            _ => {
+                let lines: Vec<&str> = content.lines().collect();
+                let mut matched_idx: Vec<usize> = Vec::new();
+                for (i, line) in lines.iter().enumerate() {
+                    if regex.is_match(line) {
+                        matched_idx.push(i);
+                    }
+                }
+                if matched_idx.is_empty() {
+                    continue;
+                }
+                // Build the context-window line set (deduped).
+                let mut want: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+                for i in &matched_idx {
+                    let lo = i.saturating_sub(before);
+                    let hi = (*i + after).min(lines.len().saturating_sub(1));
+                    for j in lo..=hi {
+                        want.insert(j);
+                    }
+                }
+                for idx in want {
+                    if show_line_nums {
+                        output_lines.push(format!("{rel}:{}:{}", idx + 1, lines[idx]));
+                    } else {
+                        output_lines.push(format!("{rel}:{}", lines[idx]));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(cap) = head_limit {
+        output_lines.truncate(cap);
+    }
+    Ok(output_lines.join("\n"))
 }
 
 fn invalid_rel_path(rel: &str) -> SpaceError {
