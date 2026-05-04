@@ -55,7 +55,7 @@ toolsets:
     url: https://ci.galoy.io
     team: dev
   zenduty:
-    enabled: true
+    enabled: false
     url: ''
     default_team: 'c634c1cb-405d-451f-a83b-23fa06475e89'
   mcp_upstreams:

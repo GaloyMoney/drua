@@ -64,6 +64,14 @@ struct AddNoteArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct DeleteNoteArgs {
+    /// Zenduty incident `unique_id`.
+    incident_id: String,
+    /// Note `unique_id` (returned by `add_incident_note` / `list_incident_notes`).
+    note_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct UpdateStatusArgs {
     incident_id: String,
     /// One of "acknowledged" or "resolved". "triggered" is rarely useful.
@@ -89,6 +97,8 @@ static LIST_INCIDENTS_SCHEMA: LazyLock<serde_json::Value> =
 static INCIDENT_ID_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<IncidentIdArgs>);
 static ADD_NOTE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AddNoteArgs>);
+static DELETE_NOTE_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<DeleteNoteArgs>);
 static UPDATE_STATUS_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<UpdateStatusArgs>);
 static LIST_SCHEDULES_SCHEMA: LazyLock<serde_json::Value> =
@@ -174,6 +184,17 @@ static OUT_LIST_INCIDENTS: LazyLock<serde_json::Value> =
 static OUT_INCIDENT_DETAIL: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<IncidentDetailOutput>);
 static OUT_NOTE: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<NoteOutput>);
+static OUT_DELETED: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "deleted": { "type": "boolean" },
+            "incident_id": { "type": "string" },
+            "note_id": { "type": "string" },
+        },
+        "additionalProperties": false,
+    })
+});
 static OUT_LIST_SCHEDULES: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<ScheduleListOutput>);
 static OUT_SCHEDULE_DETAIL: LazyLock<serde_json::Value> =
@@ -236,6 +257,12 @@ impl ZendutyToolSet {
                     },
                     "additionalProperties": false,
                 }),
+            ),
+            tool_entry(
+                "delete_incident_note",
+                "Delete a note from a Zenduty incident by its unique_id.",
+                (*DELETE_NOTE_SCHEMA).clone(),
+                (*OUT_DELETED).clone(),
             ),
             tool_entry(
                 "update_incident_status",
@@ -382,6 +409,21 @@ impl SearchableToolSet for ZendutyToolSet {
                     })
                     .collect();
                 let out = serde_json::json!({ "notes": mapped });
+                let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(out);
+                Ok(result)
+            }
+            "delete_incident_note" => {
+                let args: DeleteNoteArgs = parse_params(arguments)?;
+                self.client
+                    .delete_incident_note(&args.incident_id, &args.note_id)
+                    .await?;
+                let out = serde_json::json!({
+                    "deleted": true,
+                    "incident_id": args.incident_id,
+                    "note_id": args.note_id,
+                });
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
                 result.structured_content = Some(out);

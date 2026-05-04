@@ -91,9 +91,21 @@ impl ZendutyClient {
         if status.is_success() {
             return Ok(resp.json::<T>().await?);
         }
-        let code = status.as_u16();
+        Err(Self::error_for_status(resp).await)
+    }
+
+    /// DELETE returns 204 No Content — no body to deserialize.
+    async fn handle_no_content(resp: reqwest::Response) -> Result<(), ZendutyError> {
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        Err(Self::error_for_status(resp).await)
+    }
+
+    async fn error_for_status(resp: reqwest::Response) -> ZendutyError {
+        let code = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        Err(match code {
+        match code {
             401 | 403 => ZendutyError::Unauthorized(body),
             404 => ZendutyError::NotFound(body),
             429 => ZendutyError::RateLimited(body),
@@ -101,7 +113,7 @@ impl ZendutyClient {
                 status: code,
                 message: body,
             },
-        })
+        }
     }
 
     #[tracing::instrument(name = "zenduty_client.list_incidents", skip_all)]
@@ -156,6 +168,17 @@ impl ZendutyClient {
             .get(&format!("/api/incidents/{incident_id}/note/"))
             .await?;
         Ok(page.into_results())
+    }
+
+    #[tracing::instrument(name = "zenduty_client.delete_incident_note", skip_all)]
+    pub async fn delete_incident_note(
+        &self,
+        incident_id: &str,
+        note_id: &str,
+    ) -> Result<(), ZendutyError> {
+        let url = self.api_url(&format!("/api/incidents/{incident_id}/note/{note_id}/"))?;
+        let resp = self.http.delete(url).send().await?;
+        Self::handle_no_content(resp).await
     }
 
     #[tracing::instrument(name = "zenduty_client.update_incident_status", skip_all)]
