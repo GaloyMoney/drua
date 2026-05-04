@@ -157,6 +157,20 @@ fn try_spawn(
 ) -> Result<Child, String> {
     let mut cmd = match layer {
         IsolationLayer::Bwrap => {
+            // No `--unshare-user` / `--uid` / `--gid`: gVisor on prod
+            // exposes `userNamespaces: false`, so any user-namespace
+            // syscall fails inside the sandbox kernel. Bash ends up
+            // running as the calling uid (root in the prod container,
+            // whatever invoked sandbox-tool-server in dev). The
+            // workspace is chowned 1000:1000 already and the gVisor pod
+            // is single-tenant + deleted after use, so root-vs-1000
+            // inside is a minor distinction.
+            //
+            // `--new-session` is gated on the parent having a
+            // controlling tty for the same reason `setsid()` is gated
+            // in the UidOnly/Plain layers (see `parent_has_controlling_tty`):
+            // without a tty, calling setsid was observed to kill `bash -i`
+            // in gVisor for reasons we never fully characterized.
             let mut c = Command::new("bwrap");
             c.args(["--ro-bind", "/nix/store", "/nix/store"])
                 .args(["--ro-bind", "/etc", "/etc"])
@@ -177,14 +191,12 @@ fn try_spawn(
                 ])
                 .args(["--proc", "/proc"])
                 .args(["--dev", "/dev"])
-                .args([
-                    "--unshare-user",
-                    "--unshare-pid",
-                    "--die-with-parent",
-                    "--new-session",
-                ])
-                .args(["--uid", "1000", "--gid", "1000"])
-                .args(["--", "bash", "--noediting", "--noprofile", "--norc", "-i"]);
+                .args(["--unshare-pid", "--die-with-parent"]);
+            #[cfg(unix)]
+            if parent_has_controlling_tty() {
+                c.arg("--new-session");
+            }
+            c.args(["--", "bash", "--noediting", "--noprofile", "--norc", "-i"]);
             c
         }
         IsolationLayer::UidOnly => {
