@@ -4,7 +4,6 @@ pub mod graphql;
 mod routes;
 pub mod server;
 mod templates;
-pub mod tracing_init;
 pub mod tunnel;
 pub mod webhook;
 
@@ -106,7 +105,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         .install_default()
         .expect("Failed to install default CryptoProvider");
 
-    tracing_init::init_tracer(tracing_init::TracingConfig {
+    drua_tracing_utils::init_tracer(drua_tracing_utils::TracingConfig {
         service_name: "drua".to_string(),
     })?;
 
@@ -211,7 +210,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
     tracing::info!("shutdown signal received; draining background jobs");
     app_for_shutdown.shutdown().await;
 
-    if let Err(e) = tracing_init::shutdown_tracer() {
+    if let Err(e) = drua_tracing_utils::shutdown_tracer() {
         eprintln!("Error shutting down tracer: {e}");
     }
 

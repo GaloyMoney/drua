@@ -9,6 +9,7 @@ members = [
   "core/crates/library",
   "mcp-gateway",
   "lib/sandbox",
+  "lib/tracing-utils",
   "lib/anthropic-client",
   "lib/openai-client",
   "lib/llm",
@@ -50,6 +51,7 @@ name = "drua"
 concourse-client = { path = "lib/concourse-client" }
 zenduty-client = { path = "lib/zenduty-client" }
 sandbox = { path = "lib/sandbox" }
+drua-tracing-utils = { path = "lib/tracing-utils" }
 js-engine = { path = "lib/js-engine" }
 json-schema-ts = { path = "lib/json-schema-ts" }
 code-assistant-core = { path = "code-assistant/crates/core" }

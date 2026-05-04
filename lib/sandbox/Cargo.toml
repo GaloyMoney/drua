@@ -6,8 +6,11 @@ edition.workspace = true
 [dependencies]
 async-trait = "0.1"
 futures = { workspace = true }
+http = "1"
 k8s-openapi = { version = "0.25", features = ["v1_33", "schemars"] }
 kube = { version = "1", features = ["runtime", "derive", "client", "ws"] }
+opentelemetry = { workspace = true }
+opentelemetry-http = "0.31"
 reqwest = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -15,3 +18,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
