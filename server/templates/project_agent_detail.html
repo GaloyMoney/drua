@@ -200,4 +200,21 @@
 {% endif %}
 {% endmatch %}
 {% endif %}
+
+{% if !agent.is_lead %}
+<hr>
+<h3>Danger zone</h3>
+<p><small>Soft-deletes the agent. Its chat history is retained but the agent
+no longer appears in listings. Any attached sandbox is detached (the sandbox
+itself is kept).</small></p>
+<button
+  data-gql-mutation="mutation($input: AgentDeleteInput!) { agentDelete(input: $input) { deletedId } }"
+  data-gql-input='{"id":"{{ agent.id }}"}'
+  data-gql-confirm="Delete agent '{{ agent.name }}'? This cannot be undone."
+  data-gql-redirect="/projects/{{ project.id }}"
+  class="outline secondary"
+>
+  Delete Agent
+</button>
+{% endif %}
 {% endblock %}
