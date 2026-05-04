@@ -36,54 +36,21 @@ fn parse_marker(line: &str, request_id: &str) -> Option<i32> {
     code_str.parse::<i32>().ok()
 }
 
-#[derive(Debug, Clone, Copy)]
-enum IsolationLayer {
-    /// Full bubblewrap with mount namespace, PID namespace, uid drop.
-    Bwrap,
-    /// UID/GID drop only (no mount namespace).
-    UidOnly,
-    /// No isolation — plain bash.
-    Plain,
-}
-
-/// Try each isolation layer in order until one works (bwrap → uid-only → plain).
+/// Spawns the persistent bash session.
 ///
-/// Each layer is also probed for *runtime* health: `try_spawn` only catches
-/// spawn-time failures (binary missing, fork failed), but bwrap in particular
-/// can fork+exec successfully and then exit immediately during argument
-/// validation or kernel-restricted namespace ops. We give the freshly spawned
-/// child a brief window to fail, and if it does we drain its stderr, log the
-/// reason, and fall through to the next layer.
+/// Drops to the agent uid (1000) when the server runs as root in the prod
+/// container, falling back to plain bash otherwise (dev, fake-root, or a
+/// uid drop that fails its probe). Pod-level isolation (gVisor +
+/// NetworkPolicy + ephemeral single-tenant pod) is the load-bearing
+/// boundary; the uid drop is a cheap in-pod DAC layer on top of it.
 async fn spawn_session_shell(
     workspace: &str,
     workspace_tmp: &str,
     cwd: &str,
 ) -> Result<Child, String> {
     #[cfg(unix)]
-    match try_spawn(IsolationLayer::Bwrap, workspace, workspace_tmp, cwd) {
-        Ok(mut child) => match probe_child_alive(&mut child).await {
-            Ok(()) => {
-                tracing::info!(layer = "bwrap", "spawned session shell");
-                return Ok(child);
-            }
-            Err((code, stderr)) => {
-                tracing::warn!(
-                    layer = "bwrap",
-                    exit_code = code,
-                    stderr = ?stderr.trim(),
-                    "shell exited immediately after spawn, falling back",
-                );
-            }
-        },
-        Err(e) if is_bwrap_unavailable(&e) => {
-            tracing::warn!("bwrap unavailable for session, falling back: {e}");
-        }
-        Err(e) => return Err(e),
-    }
-
-    #[cfg(unix)]
     if is_root() {
-        match try_spawn(IsolationLayer::UidOnly, workspace, workspace_tmp, cwd) {
+        match try_spawn(true, workspace, workspace_tmp, cwd) {
             Ok(mut child) => match probe_child_alive(&mut child).await {
                 Ok(()) => {
                     tracing::info!(layer = "uid-only", "spawned session shell");
@@ -105,7 +72,7 @@ async fn spawn_session_shell(
         }
     }
 
-    let mut child = try_spawn(IsolationLayer::Plain, workspace, workspace_tmp, cwd)?;
+    let mut child = try_spawn(false, workspace, workspace_tmp, cwd)?;
     if let Err((code, stderr)) = probe_child_alive(&mut child).await {
         return Err(format!(
             "plain bash exited immediately (code={code}): {}",
@@ -150,70 +117,17 @@ async fn probe_child_alive(child: &mut Child) -> Result<(), (i32, String)> {
 }
 
 fn try_spawn(
-    layer: IsolationLayer,
+    drop_uid: bool,
     workspace: &str,
     workspace_tmp: &str,
     cwd: &str,
 ) -> Result<Child, String> {
-    let mut cmd = match layer {
-        IsolationLayer::Bwrap => {
-            // No `--unshare-user` / `--uid` / `--gid`: gVisor on prod
-            // exposes `userNamespaces: false`, so any user-namespace
-            // syscall fails inside the sandbox kernel. Bash ends up
-            // running as the calling uid (root in the prod container,
-            // whatever invoked sandbox-tool-server in dev). The
-            // workspace is chowned 1000:1000 already and the gVisor pod
-            // is single-tenant + deleted after use, so root-vs-1000
-            // inside is a minor distinction.
-            //
-            // `--new-session` is gated on the parent having a
-            // controlling tty for the same reason `setsid()` is gated
-            // in the UidOnly/Plain layers (see `parent_has_controlling_tty`):
-            // without a tty, calling setsid was observed to kill `bash -i`
-            // in gVisor for reasons we never fully characterized.
-            let mut c = Command::new("bwrap");
-            c.args(["--ro-bind", "/nix/store", "/nix/store"])
-                .args(["--ro-bind", "/etc", "/etc"])
-                .args(["--bind", workspace, workspace])
-                .args(["--bind", workspace_tmp, "/tmp"])
-                .args(["--tmpfs", "/run"])
-                .args([
-                    "--bind",
-                    "/nix/var/nix/daemon-socket",
-                    "/nix/var/nix/daemon-socket",
-                ])
-                .args(["--ro-bind", "/nix/var/nix/db", "/nix/var/nix/db"])
-                .args(["--ro-bind", "/nix/var/nix/gcroots", "/nix/var/nix/gcroots"])
-                .args([
-                    "--ro-bind",
-                    "/nix/var/nix/profiles",
-                    "/nix/var/nix/profiles",
-                ])
-                .args(["--proc", "/proc"])
-                .args(["--dev", "/dev"])
-                .args(["--unshare-pid", "--die-with-parent"]);
-            #[cfg(unix)]
-            if parent_has_controlling_tty() {
-                c.arg("--new-session");
-            }
-            c.args(["--", "bash", "--noediting", "--noprofile", "--norc", "-i"]);
-            c
-        }
-        IsolationLayer::UidOnly => {
-            let mut c = Command::new("bash");
-            c.args(["--noediting", "--noprofile", "--norc", "-i"]);
-            #[cfg(unix)]
-            {
-                c.uid(1000).gid(1000);
-            }
-            c
-        }
-        IsolationLayer::Plain => {
-            let mut c = Command::new("bash");
-            c.args(["--noediting", "--noprofile", "--norc", "-i"]);
-            c
-        }
-    };
+    let mut cmd = Command::new("bash");
+    cmd.args(["--noediting", "--noprofile", "--norc", "-i"]);
+    #[cfg(unix)]
+    if drop_uid {
+        cmd.uid(1000).gid(1000);
+    }
 
     // Detach the spawned shell from the parent's controlling terminal —
     // but only when there IS one to detach from. Without setsid(), local
@@ -222,10 +136,9 @@ fn try_spawn(
     // tty) the parent has no controlling terminal anyway — and there
     // adding setsid() makes interactive bash exit immediately on first
     // command for reasons we haven't fully characterized (likely a
-    // gVisor + bash-job-control interaction). Bwrap gets session
-    // detachment via `--new-session` already.
+    // gVisor + bash-job-control interaction).
     #[cfg(unix)]
-    if !matches!(layer, IsolationLayer::Bwrap) && parent_has_controlling_tty() {
+    if parent_has_controlling_tty() {
         // SAFETY: setsid(2) is async-signal-safe and only mutates the
         // child's session/pgroup state. No allocations, no locks.
         unsafe {
@@ -243,14 +156,7 @@ fn try_spawn(
         .stderr(Stdio::piped())
         .env("HOME", workspace)
         .env("USER", "agent")
-        .env(
-            "TMPDIR",
-            if matches!(layer, IsolationLayer::Bwrap) {
-                "/tmp"
-            } else {
-                workspace_tmp
-            },
-        )
+        .env("TMPDIR", workspace_tmp)
         .env("NIX_REMOTE", "daemon")
         .env("PS1", "")
         .current_dir(cwd);
@@ -275,12 +181,6 @@ fn is_root() -> bool {
 #[cfg(unix)]
 fn parent_has_controlling_tty() -> bool {
     unsafe { libc::tcgetpgrp(0) >= 0 }
-}
-
-fn is_bwrap_unavailable(err: &str) -> bool {
-    err.contains("No permissions to create new namespace")
-        || err.contains("No such file or directory")
-        || err.contains("Operation not permitted")
 }
 
 fn is_spawn_failure(err: &str) -> bool {
@@ -659,13 +559,12 @@ mod tests {
     }
 
     /// A child that exits with a non-zero code and prints to stderr
-    /// before dying should be reported with both pieces of information.
-    /// This is the bwrap failure shape: validation error to stderr, exit
-    /// with non-zero, all before any caller has read from the pipes.
+    /// before dying should be reported with both pieces of information,
+    /// before any caller has read from the pipes.
     #[tokio::test]
     async fn probe_child_alive_captures_exit_code_and_stderr() {
         let mut child = Command::new("bash")
-            .args(["-c", "echo bwrap-style-error >&2; exit 7"])
+            .args(["-c", "echo spawn-fail-error >&2; exit 7"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -676,7 +575,7 @@ mod tests {
             .expect_err("dying child must surface as Err");
         assert_eq!(code, 7);
         assert!(
-            stderr.contains("bwrap-style-error"),
+            stderr.contains("spawn-fail-error"),
             "stderr should be drained, got: {stderr:?}"
         );
     }
@@ -917,15 +816,14 @@ mod tests {
 
     /// Regression test for the Ctrl-C-swallowed bug: the persistent
     /// `bash -i` must NOT inherit the parent's session when the parent
-    /// owns a controlling tty. Without setsid()/--new-session,
-    /// interactive bash takes over the tty's foreground pgroup and
-    /// Ctrl-C on the dev server stops being delivered.
+    /// owns a controlling tty. Without setsid(), interactive bash takes
+    /// over the tty's foreground pgroup and Ctrl-C on the dev server
+    /// stops being delivered.
     ///
-    /// Bwrap uses `--new-session`; UidOnly/Plain run `setsid()` — but
-    /// only when the parent has a controlling tty (skipping it in
-    /// container environments like gVisor where `bash -i` + setsid
-    /// kills the shell). The test only runs when the parent does have
-    /// a tty, since that's the scenario the fix actually targets.
+    /// `setsid()` is only applied when the parent has a controlling tty
+    /// (skipping it in container environments like gVisor where `bash -i`
+    /// + setsid kills the shell). The test only runs when the parent
+    /// does have a tty, since that's the scenario the fix actually targets.
     #[cfg(unix)]
     #[tokio::test]
     async fn session_shell_is_in_a_separate_session() {
