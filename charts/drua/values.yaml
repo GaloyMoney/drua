@@ -4,6 +4,7 @@ galoyAgents:
   resources: {}
   tracing:
     serviceName: galoy-agents-dev
+    sandboxServiceName: galoy-agents-dev-sandbox
     otelExporterOtlpEndpoint: "http://localhost:4317"
   server:
     service:
