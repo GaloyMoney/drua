@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT doc_id,\n                      doc_type,\n                      scope_id, scope_slug, name, path, content\n               FROM library_documents\n               WHERE search_tsv @@ plainto_tsquery('english', $1)\n                 AND ($2::bool = false OR scope_id = ANY($3) OR scope_id IS NULL)\n                 AND ($4::bool = false OR doc_type = ANY($5))\n               ORDER BY ts_rank(search_tsv, plainto_tsquery('english', $1)) DESC\n               LIMIT $6",
+  "query": "SELECT doc_id,\n                          doc_type,\n                          scope_id, scope_slug, name, path, content\n                   FROM library_documents\n                   WHERE embedding IS NOT NULL\n                     AND ($2::bool = false OR scope_id = ANY($3) OR scope_id IS NULL)\n                     AND ($4::bool = false OR doc_type = ANY($5))\n                     AND ($6::bool = false OR path LIKE ANY($7))\n                   ORDER BY embedding <=> $1\n                   LIMIT $8",
   "describe": {
     "columns": [
       {
@@ -41,9 +41,16 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
+        {
+          "Custom": {
+            "name": "vector",
+            "kind": "Simple"
+          }
+        },
         "Bool",
         "UuidArray",
+        "Bool",
+        "TextArray",
         "Bool",
         "TextArray",
         "Int8"
@@ -59,5 +66,5 @@
       false
     ]
   },
-  "hash": "f7da5ae01996242aafe822e033094778d317913908eee07cecf2cb11c1a568b4"
+  "hash": "4fc5816bd3420598dea08870ba9bcf277620194e46ff3e4ca6b840a353403677"
 }

@@ -334,7 +334,7 @@ async fn library_search(
     let hits = match state
         .app
         .search()
-        .search(&sub, &project_ids, trimmed, &doc_types, 50)
+        .search(&sub, &project_ids, trimmed, &doc_types, &[], 50)
         .await
     {
         Ok(h) => h,

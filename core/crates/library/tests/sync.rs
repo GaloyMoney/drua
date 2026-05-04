@@ -65,7 +65,7 @@ async fn space_file_imports_into_search_store() {
     loop {
         let hits = library
             .search()
-            .search("bravo", None, &[], &[], 10)
+            .search("bravo", None, &[], &[], &[], 10)
             .await
             .expect("search");
         if let Some(hit) = hits.iter().find(|h| {

@@ -159,7 +159,7 @@ impl Query {
 
         let hits = app
             .search()
-            .search(sub, &project_ids, &input.query, &doc_types, limit)
+            .search(sub, &project_ids, &input.query, &doc_types, &[], limit)
             .await?;
 
         Ok(hits

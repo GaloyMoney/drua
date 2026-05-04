@@ -140,6 +140,12 @@ impl SearchStore {
     /// - `scope_ids` empty → no scope filter; non-empty → match scope_id
     ///   in the slice OR `scope_id IS NULL` (global / scopeless docs).
     /// - `doc_types` empty → no type filter; non-empty → match any.
+    /// - `path_prefixes` empty → no path filter; non-empty → `path`
+    ///   must equal one of the prefixes (exact-file match) or live
+    ///   under one of them as a subtree (`prefix/...`). Tree-prefix,
+    ///   not character-prefix: `["triggers"]` matches `triggers/x.md`
+    ///   but not `triggersfoo.md`. Callers must pre-normalise prefixes
+    ///   (no trailing slash, no globs, no leading `/`).
     ///
     /// If `query_embedding` is `None` we embed the query string; if
     /// embedding fails we fall back to FTS-only.
@@ -150,10 +156,19 @@ impl SearchStore {
         query_embedding: Option<Vec<f32>>,
         scope_ids: &[uuid::Uuid],
         doc_types: &[DocType],
+        path_prefixes: &[String],
         limit: usize,
     ) -> Result<Vec<SearchHit>, LibraryError> {
         let doc_type_strs: Vec<&str> = doc_types.iter().map(|d| d.as_str()).collect();
         let scope_filter_active = !scope_ids.is_empty();
+        let path_filter_active = !path_prefixes.is_empty();
+        // Two LIKE patterns per prefix: the exact path and the subtree.
+        // `LIKE 'p'` (no wildcards) is equivalent to `path = 'p'`, so
+        // a single `path LIKE ANY($M)` covers both shapes.
+        let path_patterns: Vec<String> = path_prefixes
+            .iter()
+            .flat_map(|p| [p.clone(), format!("{p}/%")])
+            .collect();
         let over_fetch = (limit * 3).max(10) as i64;
 
         let fts = sqlx::query!(
@@ -164,13 +179,16 @@ impl SearchStore {
                WHERE search_tsv @@ plainto_tsquery('english', $1)
                  AND ($2::bool = false OR scope_id = ANY($3) OR scope_id IS NULL)
                  AND ($4::bool = false OR doc_type = ANY($5))
+                 AND ($6::bool = false OR path LIKE ANY($7))
                ORDER BY ts_rank(search_tsv, plainto_tsquery('english', $1)) DESC
-               LIMIT $6"#,
+               LIMIT $8"#,
             query,
             scope_filter_active,
             scope_ids,
             !doc_type_strs.is_empty(),
             &doc_type_strs as &[&str],
+            path_filter_active,
+            &path_patterns as &[String],
             over_fetch,
         )
         .fetch_all(&self.pool)
@@ -197,13 +215,16 @@ impl SearchStore {
                    WHERE embedding IS NOT NULL
                      AND ($2::bool = false OR scope_id = ANY($3) OR scope_id IS NULL)
                      AND ($4::bool = false OR doc_type = ANY($5))
+                     AND ($6::bool = false OR path LIKE ANY($7))
                    ORDER BY embedding <=> $1
-                   LIMIT $6"#,
+                   LIMIT $8"#,
                 v as Vector,
                 scope_filter_active,
                 scope_ids,
                 !doc_type_strs.is_empty(),
                 &doc_type_strs as &[&str],
+                path_filter_active,
+                &path_patterns as &[String],
                 over_fetch,
             )
             .fetch_all(&self.pool)

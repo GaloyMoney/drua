@@ -162,14 +162,22 @@ impl AuthedSearch {
 
     /// Cross-scope hybrid FTS + semantic search. Empty `scope_ids` =
     /// no scope filter; otherwise hits are restricted to those
-    /// scope_ids plus globals (null scope_id).
-    #[tracing::instrument(name = "library.search.search", skip(self, sub, scope_ids))]
+    /// scope_ids plus globals (null scope_id). Empty `path_prefixes`
+    /// = no path filter; non-empty restricts hits to documents whose
+    /// `path` is exactly one of the prefixes or lives under one as a
+    /// subtree. Tree-prefix semantics — see
+    /// `drua_library::SearchStore::search`.
+    #[tracing::instrument(
+        name = "library.search.search",
+        skip(self, sub, scope_ids, path_prefixes)
+    )]
     pub async fn search(
         &self,
         sub: &AuthSubject,
         scope_ids: &[uuid::Uuid],
         query: &str,
         doc_types: &[DocType],
+        path_prefixes: &[String],
         limit: usize,
     ) -> Result<Vec<SearchHit>, LibraryError> {
         if matches!(sub, AuthSubject::Anonymous) {
@@ -178,7 +186,7 @@ impl AuthedSearch {
         Audit::record_action_if_unset("library.search.search");
         Ok(self
             .inner
-            .search(query, None, scope_ids, doc_types, limit)
+            .search(query, None, scope_ids, doc_types, path_prefixes, limit)
             .await?)
     }
 

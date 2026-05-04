@@ -280,6 +280,7 @@ impl Notes {
                 None,
                 &[uuid::Uuid::from(project_id)],
                 &[NOTE_DOC_TYPE],
+                &[],
                 limit,
             )
             .await?)

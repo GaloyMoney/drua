@@ -20,6 +20,43 @@ fn default_search_limit() -> usize {
     10
 }
 
+/// Validate and normalise a caller-supplied list of path prefixes for
+/// `spaces.search`. Empty strings are silently dropped; trailing
+/// slashes are stripped (so `"triggers"` and `"triggers/"` are
+/// equivalent). Leading `/`, `..` segments, and glob metacharacters
+/// (`*`, `?`, `[`) are rejected — globs are explicitly out of scope
+/// in v1.
+fn normalize_path_prefixes(paths: Vec<String>) -> Result<Vec<String>, ToolSetsError> {
+    let mut out = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('/') {
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "spaces.search paths entry must not start with '/': {raw:?}"
+            )));
+        }
+        if trimmed.split('/').any(|seg| seg == "..") {
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "spaces.search paths entry must not contain '..': {raw:?}"
+            )));
+        }
+        if trimmed.contains(['*', '?', '[']) {
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "spaces.search does not support glob patterns in paths: {raw:?}"
+            )));
+        }
+        let normalized = trimmed.trim_end_matches('/');
+        if normalized.is_empty() {
+            continue;
+        }
+        out.push(normalized.to_string());
+    }
+    Ok(out)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum SpacesParams {
@@ -61,9 +98,15 @@ enum SpacesParams {
     /// Hybrid FTS + semantic search restricted to a single mounted
     /// space. Mirrors `notes.search` / skill `use_skill search`, but
     /// scoped to `space_file` rows tagged with this space's id.
+    /// `paths` (optional) narrows the candidate pool to files whose
+    /// path is exactly one of the entries or lives under one as a
+    /// subtree (`triggers/` matches `triggers/x.md` but not
+    /// `triggersfoo.md`). Empty / omitted = whole space.
     Search {
         slug: String,
         query: String,
+        #[serde(default)]
+        paths: Vec<String>,
         #[serde(default = "default_search_limit")]
         limit: usize,
     },
@@ -159,6 +202,11 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "type": "string",
                 "description": "Search query — keywords or natural language (search command)."
             },
+            "paths": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional path-prefix scope for `search`: each entry restricts hits to files whose path equals it or lives under it as a subtree (`triggers/` matches `triggers/x.md` but not `triggersfoo.md`). Trailing slash is optional. Empty / omitted = whole space. Reject leading `/`, `..` segments, and glob metacharacters."
+            },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
@@ -218,7 +266,9 @@ impl TopLevelTool for SpacesTool {
          delete {path}, move {from, to}), \
          `search` (hybrid FTS + semantic search over the files in a \
          single mounted space; requires `slug`, `query`; optional \
-         `limit` defaults to 10). \
+         `paths` is a list of subtree prefixes (e.g. \
+         [\"triggers/\", \"runbooks/\"]) — empty = whole space; \
+         optional `limit` defaults to 10). \
          File ops and search are gated on the slug being mounted on \
          the caller's project. Use path=\"\" for the space root."
     }
@@ -365,8 +415,14 @@ impl TopLevelTool for SpacesTool {
                 };
                 (text, out)
             }
-            SpacesParams::Search { slug, query, limit } => {
+            SpacesParams::Search {
+                slug,
+                query,
+                paths,
+                limit,
+            } => {
                 let space = self.projects.space_for_subject(subject, &slug).await?;
+                let path_prefixes = normalize_path_prefixes(paths)?;
                 let hits = self
                     .search
                     .search(
@@ -374,6 +430,7 @@ impl TopLevelTool for SpacesTool {
                         &[uuid::Uuid::from(space.id)],
                         &query,
                         &[SPACE_DOC_TYPE],
+                        &path_prefixes,
                         limit,
                     )
                     .await?;
@@ -432,9 +489,15 @@ mod tests {
         });
         let params: SpacesParams = serde_json::from_value(json).unwrap();
         match params {
-            SpacesParams::Search { slug, query, limit } => {
+            SpacesParams::Search {
+                slug,
+                query,
+                paths,
+                limit,
+            } => {
                 assert_eq!(slug, "ops");
                 assert_eq!(query, "deploy");
+                assert!(paths.is_empty());
                 assert_eq!(limit, default_search_limit());
             }
             _ => panic!("expected Search variant"),
@@ -457,10 +520,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_with_paths() {
+        let json = serde_json::json!({
+            "command": "search",
+            "slug": "ops",
+            "query": "deploy",
+            "paths": ["triggers/", "runbooks/"]
+        });
+        let params: SpacesParams = serde_json::from_value(json).unwrap();
+        match params {
+            SpacesParams::Search { paths, .. } => {
+                assert_eq!(
+                    paths,
+                    vec!["triggers/".to_string(), "runbooks/".to_string()]
+                );
+            }
+            _ => panic!("expected Search variant"),
+        }
+    }
+
+    #[test]
     fn search_command_name_matches_audit_action() {
         let p = SpacesParams::Search {
             slug: "ops".into(),
             query: "x".into(),
+            paths: Vec::new(),
             limit: 1,
         };
         assert_eq!(p.command_name(), "search");
@@ -477,5 +561,81 @@ mod tests {
         assert!(cmd_enum.iter().any(|v| v == "search"));
         assert!(schema.pointer("/properties/query").is_some());
         assert!(schema.pointer("/properties/limit").is_some());
+        assert_eq!(
+            schema
+                .pointer("/properties/paths/type")
+                .and_then(|v| v.as_str()),
+            Some("array")
+        );
+        assert_eq!(
+            schema
+                .pointer("/properties/paths/items/type")
+                .and_then(|v| v.as_str()),
+            Some("string")
+        );
+    }
+
+    #[test]
+    fn normalize_paths_empty() {
+        assert!(normalize_path_prefixes(Vec::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn normalize_paths_drops_trailing_slash() {
+        let got = normalize_path_prefixes(vec!["triggers/".into()]).unwrap();
+        assert_eq!(got, vec!["triggers".to_string()]);
+    }
+
+    #[test]
+    fn normalize_paths_no_trailing_slash_kept() {
+        let got = normalize_path_prefixes(vec!["triggers".into()]).unwrap();
+        assert_eq!(got, vec!["triggers".to_string()]);
+    }
+
+    #[test]
+    fn normalize_paths_multiple_prefixes() {
+        let got = normalize_path_prefixes(vec!["triggers/".into(), "runbooks".into()]).unwrap();
+        assert_eq!(got, vec!["triggers".to_string(), "runbooks".to_string()]);
+    }
+
+    #[test]
+    fn normalize_paths_keeps_exact_file_path() {
+        let got = normalize_path_prefixes(vec!["triggers/account-locked.md".into()]).unwrap();
+        assert_eq!(got, vec!["triggers/account-locked.md".to_string()]);
+    }
+
+    #[test]
+    fn normalize_paths_silently_drops_empty_strings() {
+        let got = normalize_path_prefixes(vec!["".into(), "  ".into()]).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn normalize_paths_bare_slash_rejected_as_leading() {
+        let err = normalize_path_prefixes(vec!["/".into()]).unwrap_err();
+        assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn normalize_paths_rejects_leading_slash() {
+        let err = normalize_path_prefixes(vec!["/triggers".into()]).unwrap_err();
+        assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn normalize_paths_rejects_dotdot_segment() {
+        let err = normalize_path_prefixes(vec!["triggers/../etc".into()]).unwrap_err();
+        assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn normalize_paths_rejects_glob_metacharacters() {
+        for raw in ["triggers/*.md", "trig?ers", "trig[ab]"] {
+            let err = normalize_path_prefixes(vec![raw.into()]).unwrap_err();
+            assert!(
+                matches!(err, ToolSetsError::InvalidArgument(_)),
+                "expected InvalidArgument for {raw:?}",
+            );
+        }
     }
 }

@@ -240,7 +240,7 @@ impl Skills {
             .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
         Ok(library
             .search()
-            .search(query, None, &[], &[SKILL_DOC_TYPE], limit)
+            .search(query, None, &[], &[SKILL_DOC_TYPE], &[], limit)
             .await?)
     }
 
