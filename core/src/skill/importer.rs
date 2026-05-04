@@ -10,10 +10,16 @@ use crate::skill::file::parse_skill_markdown;
 use crate::skill::{ImportScope, Skills};
 
 /// Adapter that lets the drua_library reverse-sync job route
-/// `runtime/{skills, projects/*/skills, spaces/*/skills}/*.md` paths
-/// into the Skills service. Built post-`Library::init` (Skills,
-/// Projects, and Spaces already exist) and registered via
-/// `Library::register_importer`.
+/// skill markdown paths into the Skills service. Three layouts:
+///
+/// - `runtime/skills/*.md` — global
+/// - `runtime/projects/{project}/skills/*.md` — project-scoped
+/// - `spaces/{slug}/skills/*.md` — space-scoped (the spaces tree
+///   intentionally lives at the repo root, not under `runtime/`; see
+///   `library::Spaces::write_file`)
+///
+/// Built post-`Library::init` (Skills, Projects, and Spaces already
+/// exist) and registered via `Library::register_importer`.
 pub struct SkillsImporter {
     skills: Arc<Skills>,
     projects: Arc<Projects>,
@@ -41,7 +47,7 @@ impl LibraryImporter for SkillsImporter {
             parts.as_slice(),
             ["runtime", "skills", _]
                 | ["runtime", "projects", _, "skills", _]
-                | ["runtime", "spaces", _, "skills", _]
+                | ["spaces", _, "skills", _]
         )
     }
 

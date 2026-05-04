@@ -116,10 +116,16 @@ impl Library {
         })
     }
 
-    /// Append an importer post-init. The next CommitTick (and all later
-    /// ones) will route matching paths to this importer.
+    /// Register an importer post-init. Inserted at the FRONT of the
+    /// registry so it takes precedence over importers registered earlier.
+    /// First-match-wins dispatch: when a subtree-refining importer
+    /// (e.g. `SkillsImporter` claiming `spaces/<slug>/skills/*.md`)
+    /// would otherwise be shadowed by the built-in `Spaces` catch-all
+    /// (matches all `spaces/<slug>/...`), the later registration wins.
+    /// The next `CommitTick` and all subsequent ticks honour the new
+    /// ordering.
     pub async fn register_importer(&self, importer: Arc<dyn LibraryImporter>) {
-        self.importers.write().await.push(importer);
+        self.importers.write().await.insert(0, importer);
     }
 
     fn spawn_fetcher(

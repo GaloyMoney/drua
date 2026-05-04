@@ -220,11 +220,13 @@ pub fn project_name_from_skill_path(relative_path: &str) -> Option<String> {
     }
 }
 
-/// `runtime/spaces/{slug}/skills/*.md` → `Some(slug)`; other paths → `None`.
+/// `spaces/{slug}/skills/*.md` → `Some(slug)`; other paths → `None`.
+/// Spaces use the flat `spaces/<slug>/...` layout (no `runtime/` prefix);
+/// see `library/src/space/mod.rs::write_file` for the canonical layout.
 pub fn space_slug_from_skill_path(relative_path: &str) -> Option<String> {
     let parts: Vec<&str> = relative_path.split('/').collect();
-    if parts.len() >= 5 && parts[0] == "runtime" && parts[1] == "spaces" && parts[3] == "skills" {
-        Some(parts[2].to_string())
+    if parts.len() >= 4 && parts[0] == "spaces" && parts[2] == "skills" {
+        Some(parts[1].to_string())
     } else {
         None
     }
@@ -298,7 +300,9 @@ pub fn canonical_skill_path(
     let id_prefix = &id_uuid.to_string()[..8];
     let slug = slugify(name);
     if let Some(space) = space_slug {
-        format!("runtime/spaces/{space}/skills/{slug}-{id_prefix}.md")
+        // Spaces use the flat `spaces/<slug>/...` layout (no `runtime/`
+        // prefix) — matches `library::Spaces::write_file`.
+        format!("spaces/{space}/skills/{slug}-{id_prefix}.md")
     } else if let Some(project) = project_name {
         format!("runtime/projects/{project}/skills/{slug}-{id_prefix}.md")
     } else {
@@ -330,7 +334,7 @@ mod path_tests {
     #[test]
     fn space_slug_extraction() {
         assert_eq!(
-            space_slug_from_skill_path("runtime/spaces/team/skills/foo.md"),
+            space_slug_from_skill_path("spaces/team/skills/foo.md"),
             Some("team".to_string())
         );
         assert_eq!(
@@ -339,6 +343,11 @@ mod path_tests {
             "project-rooted path must not be parsed as space"
         );
         assert_eq!(space_slug_from_skill_path("runtime/skills/foo.md"), None);
+        assert_eq!(
+            space_slug_from_skill_path("spaces/team/notes/foo.md"),
+            None,
+            "non-skill subtree must not match"
+        );
     }
 
     #[test]
@@ -347,7 +356,7 @@ mod path_tests {
         // 8-char id prefix is the first hex group.
         assert_eq!(
             canonical_skill_path(id, "Deploy", None, Some("team")),
-            "runtime/spaces/team/skills/deploy-019dabcd.md"
+            "spaces/team/skills/deploy-019dabcd.md"
         );
         assert_eq!(
             canonical_skill_path(id, "Deploy", Some("alpha"), None),
@@ -361,7 +370,7 @@ mod path_tests {
         // space wins. Documents precedence.
         assert_eq!(
             canonical_skill_path(id, "Deploy", Some("alpha"), Some("team")),
-            "runtime/spaces/team/skills/deploy-019dabcd.md"
+            "spaces/team/skills/deploy-019dabcd.md"
         );
     }
 }

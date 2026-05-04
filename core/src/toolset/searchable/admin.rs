@@ -1704,16 +1704,24 @@ fn format_workflows(defs: &[WorkflowDefinition]) -> String {
     lines.join("\n")
 }
 
-fn format_skill(s: &Skill, created: bool) -> String {
-    let header = if created { "Skill created." } else { "Skill:" };
-    let scope = if s.project_id.is_some() {
+fn skill_scope_label(s: &Skill) -> &'static str {
+    if s.space_id.is_some() {
+        "space"
+    } else if s.project_id.is_some() {
         "project"
     } else {
         "global"
-    };
+    }
+}
+
+fn format_skill(s: &Skill, created: bool) -> String {
+    let header = if created { "Skill created." } else { "Skill:" };
     format!(
         "{header}\n  id: {}\n  name: {}\n  scope: {}\n  description: {}",
-        s.id, s.name, scope, s.description,
+        s.id,
+        s.name,
+        skill_scope_label(s),
+        s.description,
     )
 }
 
@@ -1729,16 +1737,11 @@ fn format_skills(skills: &[Skill]) -> String {
     ));
     lines.push("-".repeat(110));
     for s in skills {
-        let scope = if s.project_id.is_some() {
-            "project"
-        } else {
-            "global"
-        };
         lines.push(format!(
             "{:<38} {:<24} {:<10} {}",
             s.id,
             truncate(&s.name, 24),
-            scope,
+            skill_scope_label(s),
             truncate(&s.description, 50),
         ));
     }

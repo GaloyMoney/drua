@@ -175,9 +175,16 @@ impl Skills {
             )
             .await?;
         let candidates = result.entities;
+        // Truly-global means no project AND no space — space-scoped skills
+        // (project_id NULL but space_id Some) are reachable via the
+        // space-mount path, not via the global fallback.
         let best = project_id
             .and_then(|project_id| candidates.iter().find(|s| s.project_id == Some(project_id)))
-            .or_else(|| candidates.iter().find(|s| s.project_id.is_none()));
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|s| s.project_id.is_none() && s.space_id.is_none())
+            });
         if let Some(skill) = best {
             return Ok(Some(SkillBody::new(skill.body.clone())));
         }
@@ -272,7 +279,16 @@ impl Skills {
                 es_entity::ListDirection::Ascending,
             )
             .await?;
-        let global_skills = global_result.entities;
+        // The repo query for `project_id IS NULL` returns BOTH truly-global
+        // skills (no project, no space) AND space-scoped skills (no
+        // project, but `space_id IS Some`). Filter out the space-scoped
+        // ones — those are reachable only via mounted spaces and are
+        // resolved separately in `skills_context_for_scope`.
+        let global_skills: Vec<Skill> = global_result
+            .entities
+            .into_iter()
+            .filter(|s| s.space_id.is_none())
+            .collect();
 
         // Project first, dedup by name; project wins over global.
         let mut seen_names = std::collections::HashSet::new();

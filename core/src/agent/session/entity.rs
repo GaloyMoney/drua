@@ -728,6 +728,23 @@ impl AgentSession {
             &self.events,
         ))
     }
+
+    /// Flat list of every system block ever pushed in this session, ordered
+    /// by `SystemBlockIndex`. Unlike [`Self::thread_system_view`] this does
+    /// not require a persisted thread — useful for inspecting an agent's
+    /// initial blocks before the first prompt has fired.
+    pub fn all_system_blocks(&self) -> Vec<history::ThreadSystemBlock> {
+        let materialized = self.materialize();
+        materialized
+            .iter_system_blocks()
+            .enumerate()
+            .map(|(idx, block)| history::ThreadSystemBlock {
+                index: idx,
+                kind: block.kind().into(),
+                text: block.text().to_string(),
+            })
+            .collect()
+    }
 }
 
 impl TryFromEvents<AgentSessionEvent> for AgentSession {
