@@ -111,7 +111,12 @@ fn try_spawn(
                 ])
                 .args(["--proc", "/proc"])
                 .args(["--dev", "/dev"])
-                .args(["--unshare-pid", "--die-with-parent", "--new-session"])
+                .args([
+                    "--unshare-user",
+                    "--unshare-pid",
+                    "--die-with-parent",
+                    "--new-session",
+                ])
                 .args(["--uid", "1000", "--gid", "1000"])
                 .args(["--", "bash", "--noediting", "--noprofile", "--norc", "-i"]);
             c
