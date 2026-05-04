@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO skills (id, project_id, space_id, name, created_at) VALUES ($1, $2, $3, $4, COALESCE($5, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4e66ca4ddebf54abc36f6a7e0a0c1f6d8996f06c38de23bc8de12921b161ba0c"
+}

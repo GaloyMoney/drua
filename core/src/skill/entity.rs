@@ -16,6 +16,11 @@ pub enum SkillEvent {
         id: SkillId,
         project_id: Option<ProjectId>,
         project_name: Option<String>,
+        /// `Some(s)` for space-scoped skills; mutually exclusive with
+        /// `project_id` (enforced by the `skills_owner_at_most_one`
+        /// CHECK constraint).
+        #[serde(default)]
+        space_id: Option<SpaceId>,
         name: String,
         description: String,
         body: String,
@@ -40,6 +45,10 @@ pub struct Skill {
     pub project_id: Option<ProjectId>,
     #[builder(default)]
     pub project_name: Option<String>,
+    /// `Some(s)` when this skill belongs to a space rather than a project.
+    /// Mutually exclusive with `project_id` (DB CHECK constraint).
+    #[builder(default)]
+    pub space_id: Option<SpaceId>,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -290,6 +299,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_initialized_event_without_space_id_deserializes() {
+        // Pre-space-tier events have no `space_id` key. `#[serde(default)]`
+        // must hydrate them as `space_id: None`.
+        let json = serde_json::json!({
+            "type": "initialized",
+            "id": uuid::Uuid::new_v4(),
+            "project_id": uuid::Uuid::new_v4(),
+            "project_name": "proj",
+            "name": "skill-x",
+            "description": "desc",
+            "body": "body",
+        });
+        let ev: SkillEvent = serde_json::from_value(json).expect("legacy event");
+        match ev {
+            SkillEvent::Initialized { space_id, .. } => assert!(space_id.is_none()),
+            _ => panic!("expected Initialized"),
+        }
+    }
+
+    #[test]
     fn shell_split_double_quotes() {
         assert_eq!(
             shell_split(r#""hello world" foo"#),
@@ -408,6 +437,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                     id,
                     project_id,
                     project_name,
+                    space_id,
                     name,
                     description,
                     body,
@@ -418,6 +448,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .id(*id)
                         .project_id(*project_id)
                         .project_name(project_name.clone())
+                        .space_id(*space_id)
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
@@ -456,6 +487,8 @@ pub struct NewSkill {
     pub(super) project_id: Option<ProjectId>,
     #[builder(default, setter(into, strip_option))]
     pub(super) project_name: Option<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) space_id: Option<SpaceId>,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
@@ -480,6 +513,7 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 id: self.id,
                 project_id: self.project_id,
                 project_name: self.project_name.clone(),
+                space_id: self.space_id,
                 name: self.name,
                 description: self.description,
                 body: self.body,
