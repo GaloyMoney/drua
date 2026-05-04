@@ -76,6 +76,16 @@ data:
         enabled: {{ .Values.galoyAgents.config.concourse.enabled }}
         url: {{ .Values.galoyAgents.config.concourse.url | quote }}
         team: {{ .Values.galoyAgents.config.concourse.team | quote }}
+      {{- with .Values.galoyAgents.config.zenduty }}
+      zenduty:
+        enabled: {{ .enabled | default false }}
+        {{- with .url }}
+        url: {{ . | quote }}
+        {{- end }}
+        {{- with .defaultTeam }}
+        default_team: {{ . | quote }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.galoyAgents.config.compose }}
       compose:
         max_tool_calls: {{ printf "%d" (int .maxToolCalls) }}

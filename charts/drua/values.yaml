@@ -71,6 +71,10 @@ galoyAgents:
       enabled: false
       url: ""
       team: ""
+    zenduty:
+      enabled: false
+      url: ""
+      defaultTeam: ""
     ## JS-engine sandbox limits for the `compose` top-level tool. Each
     ## key maps 1:1 to a JsEngine setter; missing keys fall back to the
     ## drua-core defaults (50 calls / 32 MiB per inner tool result /

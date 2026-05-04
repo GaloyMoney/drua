@@ -18,6 +18,9 @@ variable "anthropic_api_key" {
 variable "openrouter_api_key" {
   default = ""
 }
+variable "zenduty_api_token" {
+  default = ""
+}
 locals {
   cluster_name         = "galoy-agents-cluster"
   cluster_location     = "us-east1-b"
@@ -88,6 +91,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "lingo-auth-header"          = var.lingo_api_key
     "anthropic-api-key"          = var.anthropic_api_key
     "openai-api-key"             = var.openrouter_api_key
+    "zenduty-api-token"          = var.zenduty_api_token
     "github-app-private-key"     = local.github_app_private_key
   }
 

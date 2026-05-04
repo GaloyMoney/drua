@@ -153,6 +153,7 @@ jobs:
         HONEYCOMB_API_KEY: #@ data.values.honeycomb_api_key
         GITHUB_PAT: #@ data.values.github_pat
         LINGO_API_KEY: #@ data.values.lingo_api_key
+        ZENDUTY_API_TOKEN: #@ data.values.zenduty_api_token
         ANTHROPIC_API_KEY: #@ data.values.deploy_anthropic_api_key
         OPENROUTER_API_KEY: #@ data.values.deploy_openrouter_api_key
         GITHUB_APP_PRIVATE_KEY: #@ data.values.deploy_github_app_private_key
@@ -180,6 +181,7 @@ jobs:
             honeycomb_api_key = "${HONEYCOMB_API_KEY}"
             github_pat = "${GITHUB_PAT}"
             lingo_api_key = "${LINGO_API_KEY}"
+            zenduty_api_token = "${ZENDUTY_API_TOKEN}"
             anthropic_api_key = "${ANTHROPIC_API_KEY}"
             openrouter_api_key = "${OPENROUTER_API_KEY}"
             EOF
