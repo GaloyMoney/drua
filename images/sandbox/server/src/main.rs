@@ -814,6 +814,19 @@ async fn initialize_repo(
         }
     }
 
+    // The clone (and the surrounding `create_dir_all`) runs as the
+    // sandbox-tool-server's uid — root in the prod container. The agent's
+    // `bash` tool drops to uid 1000 via the UidOnly isolation layer, so
+    // any subsequent git command inside the repo would trip the
+    // safe.directory check ("fatal: detected dubious ownership"). chown
+    // the tree to the agent uid up front so the agent doesn't have to
+    // burn a turn applying `git config --add safe.directory` every run.
+    //
+    // Best-effort: in dev / CI the test process isn't root and lacks
+    // CAP_CHOWN, but it also already owns the files it just cloned, so
+    // git is happy without this step.
+    chown_to_agent(&clone_dir).await;
+
     let system_prompt = scan_claude_md(&clone_dir).await;
     let skills = scan_skills(&clone_dir).await;
 
@@ -823,6 +836,31 @@ async fn initialize_repo(
         exported_skills: skills,
         error: None,
     })
+}
+
+async fn chown_to_agent(path: &Path) {
+    let Some(p) = path.to_str() else {
+        tracing::warn!(?path, "skipping chown: path is not valid UTF-8");
+        return;
+    };
+    match Command::new("chown")
+        .args(["-R", "1000:1000", p])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            tracing::warn!(
+                exit_code = o.status.code().unwrap_or(-1),
+                stderr = ?String::from_utf8_lossy(&o.stderr).trim(),
+                path = p,
+                "chown -R 1000:1000 failed, continuing",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = p, "failed to spawn chown, continuing");
+        }
+    }
 }
 
 fn extract_repo_name(url: &str) -> Result<String, String> {
