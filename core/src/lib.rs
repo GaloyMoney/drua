@@ -287,6 +287,7 @@ impl App {
             Arc::clone(&space_fs),
             Arc::clone(&workflows),
             Arc::clone(&skills),
+            Arc::clone(&notes),
         ));
 
         // Reverse-sync (file → entity) for skills + workflows runs
