@@ -257,7 +257,6 @@ enum WorkflowCommand {
     List,
     Get,
     Update,
-    Delete,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -369,7 +368,7 @@ struct WorkflowParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`, `delete`.
+    /// Required for `get`, `update`.
     #[schemars(with = "Option<uuid::Uuid>")]
     definition_id: Option<WorkflowDefinitionId>,
 
@@ -411,7 +410,6 @@ enum SkillCommand {
     List,
     Get,
     Update,
-    Delete,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -422,7 +420,7 @@ struct SkillParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`, `delete`.
+    /// Required for `get`, `update`.
     #[schemars(with = "Option<uuid::Uuid>")]
     skill_id: Option<SkillId>,
 
@@ -488,8 +486,7 @@ static TOOLS: &[ToolDef] = &[
                        `update` (requires `definition_id`; optional `name`, \
                        `description`+`clear_description` for None semantics, \
                        `provider`+`update_trigger`, `steps`+`update_steps`, \
-                       `sandboxes`+`update_sandboxes`), \
-                       `delete` (requires `definition_id`; cascades to runs).",
+                       `sandboxes`+`update_sandboxes`).",
         schema: &WORKFLOW_SCHEMA,
     },
     ToolDef {
@@ -500,8 +497,7 @@ static TOOLS: &[ToolDef] = &[
                        `list` (requires `project_id`), \
                        `get` (requires `skill_id`, `project_id`), \
                        `update` (requires `skill_id`, `project_id`; any of \
-                       `name`/`description`/`body`), \
-                       `delete` (requires `skill_id`, `project_id`).",
+                       `name`/`description`/`body`).",
         schema: &SKILL_SCHEMA,
     },
     ToolDef {
@@ -1083,22 +1079,6 @@ impl AdminToolSet {
                     format_workflow(&definition, false),
                 )]))
             }
-
-            WorkflowCommand::Delete => {
-                let definition_id = params.definition_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument(
-                        "definition_id is required for delete".to_string(),
-                    )
-                })?;
-                Audit::record_action("workflow.delete");
-                self.workflows
-                    .delete(subject, definition_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Workflow deleted (id {definition_id})."
-                ))]))
-            }
         }
     }
 
@@ -1190,23 +1170,6 @@ impl AdminToolSet {
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_skill(
                     &skill, false,
-                ))]))
-            }
-
-            SkillCommand::Delete => {
-                let skill_id = params.skill_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("skill_id is required for delete".to_string())
-                })?;
-                let project_id = params.project_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("project_id is required for delete".to_string())
-                })?;
-                Audit::record_action("skill.delete");
-                self.skills
-                    .delete(subject, skill_id, project_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Skill deleted (id {skill_id})."
                 ))]))
             }
         }
@@ -1909,20 +1872,9 @@ mod tests {
     }
 
     #[test]
-    fn workflow_delete_takes_definition_id() {
-        let definition_id = uuid::Uuid::new_v4();
-        let p: WorkflowParams = parse_params(args(serde_json::json!({
-            "command": "delete",
-            "definition_id": definition_id,
-        })))
-        .expect("parse");
-        assert!(matches!(p.command, WorkflowCommand::Delete));
-    }
-
-    #[test]
     fn workflow_schema_includes_command_enum() {
         let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update", "delete"] {
+        for v in ["create", "list", "get", "update"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }
@@ -1974,22 +1926,9 @@ mod tests {
     }
 
     #[test]
-    fn skill_delete_takes_ids() {
-        let skill_id = uuid::Uuid::new_v4();
-        let project_id = uuid::Uuid::new_v4();
-        let p: SkillParams = parse_params(args(serde_json::json!({
-            "command": "delete",
-            "skill_id": skill_id,
-            "project_id": project_id,
-        })))
-        .expect("parse");
-        assert!(matches!(p.command, SkillCommand::Delete));
-    }
-
-    #[test]
     fn skill_schema_includes_command_enum() {
         let s = serde_json::to_string(&*SKILL_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update", "delete"] {
+        for v in ["create", "list", "get", "update"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }

@@ -383,27 +383,6 @@ impl Workflows {
         Ok(definition)
     }
 
-    #[instrument(name = "core.workflow.delete", skip_all)]
-    pub async fn delete(
-        &self,
-        sub: &AuthSubject,
-        id: WorkflowDefinitionId,
-    ) -> Result<(), WorkflowError> {
-        let definition = self.repo.find_by_id(id).await?;
-        sub.can(
-            AuthVerb::Delete,
-            AuthResource::Workflow(definition.project_id, Some(definition.id)),
-        )?;
-
-        let mut op = self.repo.begin_op().await?;
-        self.run_repo
-            .cascade_delete_for_definition_in_op(&mut op, id)
-            .await?;
-        self.repo.delete_in_op(&mut op, definition).await?;
-        op.commit().await?;
-        Ok(())
-    }
-
     #[instrument(name = "core.workflow.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,
