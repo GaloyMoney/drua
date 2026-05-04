@@ -33,3 +33,11 @@ deploy_anthropic_api_key: ((anthropic-api-key.key))
 deploy_openrouter_api_key: ((openrouter-api-key.key))
 deploy_github_app_private_key: ((galoy-agents-prod-secrets.github_app_private_key))
 tunnel_deployments_public_keys: ((tunnel-deployments.public_keys))
+
+#! drua self-management — `heal-check-code` workflow trigger.
+#! Hard-coded (not vault-backed) for v1 since this workflow is internal
+#! and only fires on this pipeline's own `check-code` failures. To rotate:
+#! edit this file and update the workflow's secret in the drua dashboard.
+drua_url: https://dashboard.agents.galoy.io
+drua_heal_check_code_workflow_id: 019df441-55cd-79a3-bdba-d025a33a5447
+drua_heal_check_code_secret: whsec_b62d25027995aa923e34a5f19e2f8d11

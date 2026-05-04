@@ -41,6 +41,10 @@ jobs:
           - |
             cd repo
             nix flake check
+  on_failure:
+    put: drua-on-check-code-failure
+    params:
+      alert_type: ci_failure
 
 - name: test-integration
   serial: true
@@ -507,6 +511,19 @@ resource_types:
   source:
     repository: frodenas/gcs-resource
 
+#! Built by `build-concourse-drua-resource-image` in this same pipeline.
+#! Bootstrap order: the image must be published once before any pipeline
+#! `put` against `drua-on-*-failure` resolves; if `check-code` fails
+#! before that first build, the `on_failure` step itself fails — a one-
+#! time, self-resolving condition.
+- name: drua-workflow
+  type: registry-image
+  source:
+    repository: #@ data.values.gar_registry + "/concourse-drua-resource"
+    tag: edge
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+
 resources:
 - name: repo
   type: git
@@ -662,6 +679,18 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/concourse-drua-resource"
+
+#! Fires drua's `heal-check-code` workflow when the local `check-code`
+#! job fails. The workflow's agent reads the failing build's logs,
+#! attempts a narrow fix, and opens a PR. Never merges, never
+#! force-pushes. Workflow definition + skill live in the run-drua
+#! project on `dashboard.agents.galoy.io`.
+- name: drua-on-check-code-failure
+  type: drua-workflow
+  source:
+    url: #@ data.values.drua_url
+    workflow_id: #@ data.values.drua_heal_check_code_workflow_id
+    secret: #@ data.values.drua_heal_check_code_secret
 
 - name: tf-galoy-agents-prod
   type: terraform
