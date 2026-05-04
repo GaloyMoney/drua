@@ -1,4 +1,12 @@
 //! Outside the auth middleware — authn via the trigger's stored secret.
+//!
+//! Recognised `provider` values on `WorkflowTrigger::Webhook`:
+//! - `None` / `Some("concourse")` — `Authorization: Bearer <secret>`.
+//!   The `concourse` arm is documentation-only; it tags workflows
+//!   meant to be fired by the `concourse-drua-resource` so the
+//!   dashboard and library YAML carry intent.
+//! - `Some("honeycomb")` — `X-Honeycomb-Webhook-Token: <secret>`
+//!   (Honeycomb's non-standard header, no `Bearer` prefix).
 
 use axum::{
     body::Bytes,
@@ -48,18 +56,10 @@ pub async fn handle_webhook(
         }
     };
 
-    let header_name = match provider.as_deref() {
-        Some("honeycomb") => "x-honeycomb-webhook-token",
-        _ => "authorization",
-    };
+    let header_name = header_name_for_provider(provider.as_deref());
 
     let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
-        Some(value) => match provider.as_deref() {
-            // Generic provider strips the `Bearer ` prefix; named
-            // providers carry the raw secret.
-            None => value.strip_prefix("Bearer ").unwrap_or(value).to_string(),
-            _ => value.to_string(),
-        },
+        Some(value) => extract_secret(value, provider.as_deref()),
         None => {
             tracing::warn!(header_name, "webhook: missing verification header");
             return StatusCode::UNAUTHORIZED.into_response();
@@ -97,5 +97,82 @@ pub async fn handle_webhook(
             tracing::error!(error = %e, "webhook: failed to trigger run");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+fn header_name_for_provider(provider: Option<&str>) -> &'static str {
+    match provider {
+        Some("honeycomb") => "x-honeycomb-webhook-token",
+        // `concourse` is documentation-only — same wire shape as `None`.
+        Some("concourse") | None => "authorization",
+        _ => "authorization",
+    }
+}
+
+fn extract_secret(header_value: &str, provider: Option<&str>) -> String {
+    match provider {
+        Some("concourse") | None => header_value
+            .strip_prefix("Bearer ")
+            .unwrap_or(header_value)
+            .to_string(),
+        _ => header_value.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_name_default_is_authorization() {
+        assert_eq!(header_name_for_provider(None), "authorization");
+    }
+
+    #[test]
+    fn header_name_honeycomb_uses_custom_header() {
+        assert_eq!(
+            header_name_for_provider(Some("honeycomb")),
+            "x-honeycomb-webhook-token"
+        );
+    }
+
+    #[test]
+    fn header_name_concourse_uses_authorization() {
+        assert_eq!(header_name_for_provider(Some("concourse")), "authorization");
+    }
+
+    #[test]
+    fn header_name_unknown_provider_falls_back_to_authorization() {
+        assert_eq!(
+            header_name_for_provider(Some("not-a-known-provider")),
+            "authorization"
+        );
+    }
+
+    #[test]
+    fn extract_secret_strips_bearer_for_default_provider() {
+        assert_eq!(extract_secret("Bearer whsec_abc", None), "whsec_abc");
+    }
+
+    #[test]
+    fn extract_secret_strips_bearer_for_concourse() {
+        assert_eq!(
+            extract_secret("Bearer whsec_abc", Some("concourse")),
+            "whsec_abc"
+        );
+    }
+
+    #[test]
+    fn extract_secret_passes_raw_for_honeycomb() {
+        assert_eq!(
+            extract_secret("whsec_abc", Some("honeycomb")),
+            "whsec_abc"
+        );
+    }
+
+    #[test]
+    fn extract_secret_returns_value_unchanged_when_no_bearer_prefix() {
+        assert_eq!(extract_secret("whsec_abc", None), "whsec_abc");
+        assert_eq!(extract_secret("whsec_abc", Some("concourse")), "whsec_abc");
     }
 }

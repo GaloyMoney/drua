@@ -13,6 +13,7 @@ groups:
   - build-edge-image
   - build-sandbox-image
   - build-tunnel-connector-image
+  - build-concourse-drua-resource-image
   - bump-galoy-charts-tunnel-connector-image
   - deploy-to-prod
   - train-classifier
@@ -400,6 +401,40 @@ jobs:
     get_params:
       skip_download: true
 
+#! Builds the OCI image used as a Concourse `resource_type` to fire
+#! drua workflow runs from any pipeline's `on_failure:` (or anywhere
+#! else). Image source lives in `images/concourse-drua-resource/`.
+- name: build-concourse-drua-resource-image
+  serial: true
+  plan:
+  - get: repo-concourse-drua-resource
+    trigger: true
+  - task: build-image
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_image_config()
+      inputs:
+      - name: repo-concourse-drua-resource
+        path: repo
+      outputs:
+      - name: image
+      caches:
+      - path: /nix-cache
+      run:
+        path: repo/ci/tasks/with-nix-cache.sh
+        args:
+          - sh
+          - -exc
+          - |
+            cd repo
+            nix build .#concourse-drua-resource-image
+            gunzip -c result > ../image/image.tar
+  - put: concourse-drua-resource-edge-image
+    params:
+      image: image/image.tar
+    get_params:
+      skip_download: true
+
 #! After `build-tunnel-connector-image` publishes a fresh digest, open
 #! (or force-update) a PR on GaloyMoney/galoy-charts that pins
 #! `tunnelConnector.image.digest` in `charts/galoy-deps/values.yaml`.
@@ -512,6 +547,16 @@ resources:
     - Cargo.toml
     - Cargo.lock
 
+- name: repo-concourse-drua-resource
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+    paths:
+    - images/concourse-drua-resource/
+    - flake.nix
+
 #! Read-only clone of galoy-charts main. The `bump-galoy-charts-
 #! tunnel-connector-image` job uses this to build the commit that gets
 #! force-pushed to the bot branch below.
@@ -609,6 +654,14 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/tunnel-connector"
+
+- name: concourse-drua-resource-edge-image
+  type: registry-image
+  source:
+    tag: edge
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+    repository: #@ data.values.gar_registry + "/concourse-drua-resource"
 
 - name: tf-galoy-agents-prod
   type: terraform

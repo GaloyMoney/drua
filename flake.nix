@@ -436,6 +436,10 @@
           tunnel-connector = self.packages.${system}.tunnel-connector;
         };
 
+        packages.concourse-drua-resource-image = import ./images/concourse-drua-resource/default.nix {
+          inherit pkgs;
+        };
+
         devShells.training = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
           shellHook = ''
