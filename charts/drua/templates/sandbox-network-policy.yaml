@@ -52,9 +52,15 @@ spec:
         matchLabels:
           app: {{ template "galoyAgents.fullname" . }}
           release: {{ .Release.Name }}
-  # 3. OTel collector — allow trace export (OTLP HTTP/protobuf)
+  # 3. OTel collector — allow trace export. 4317 is OTLP/gRPC (what
+  # drua_tracing_utils uses via .with_tonic()), 4318 is OTLP/HTTP.
+  # Without 4317 the sandbox-tool-server's exporter times out
+  # connecting to the collector and `service.name=drua-sandbox`
+  # spans never reach Honeycomb.
   {{- if .Values.sandbox.otelCollectorNamespace }}
   - ports:
+    - protocol: TCP
+      port: 4317
     - protocol: TCP
       port: 4318
     to:
