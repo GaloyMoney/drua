@@ -45,8 +45,11 @@ setup_file() {
   git -C "$WORKING_REPO" init -q -b main
   git -C "$WORKING_REPO" config user.email test@drua
   git -C "$WORKING_REPO" config user.name "Drua Test"
-  mkdir -p "$WORKING_REPO/runtime/spaces"
-  : > "$WORKING_REPO/runtime/spaces/.gitkeep"
+  # Spaces live at the repo root (`spaces/<slug>/...`) — not under
+  # `runtime/`. Seed the directory so the bare repo's HEAD has a tree
+  # the importer can diff against.
+  mkdir -p "$WORKING_REPO/spaces"
+  : > "$WORKING_REPO/spaces/.gitkeep"
   git -C "$WORKING_REPO" add -A
   git -C "$WORKING_REPO" commit -q -m "init"
   git -C "$WORKING_REPO" remote add origin "$UPSTREAM_REPO"
