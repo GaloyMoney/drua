@@ -258,21 +258,22 @@ impl Skills {
             .await?)
     }
 
-    /// Build skills context for system prompt injection.
+    /// Build skills context for system prompt injection, scoped to a single
+    /// agent's attached sandbox (or none).
     ///
-    /// Returns an `<available_skills>` block listing project + global +
-    /// sandbox-exported skills with their descriptions, truncated to fit the
-    /// character budget. DB skills shadow sandbox skills of the same name.
-    /// Returns `None` if there are no skills.
-    #[instrument(name = "skill.skills_context_for_project", skip(self))]
-    pub async fn skills_context_for_project(
+    /// Returns an `<available_skills>` block listing project + global skills
+    /// plus the attached sandbox's exported skills (when `sandbox_id` is
+    /// `Some` and the sandbox is `Ready`). DB skills shadow sandbox skills of
+    /// the same name. Returns `None` if there are no skills.
+    #[instrument(name = "skill.skills_context_for_agent", skip(self))]
+    pub async fn skills_context_for_agent(
         &self,
         project_id: ProjectId,
+        sandbox_id: Option<SandboxId>,
     ) -> Result<Option<String>, SkillError> {
         let db_skills = self.list_for_project_inner(project_id).await?;
 
-        // Collect sandbox-exported skills, dedup against DB skills.
-        let sandbox_skills = match self.sandboxes.exported_skills_for_project(project_id).await {
+        let sandbox_skills = match self.sandboxes.exported_skills_for_sandbox(sandbox_id).await {
             Ok(skills) => skills,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to fetch sandbox exported skills");
@@ -280,7 +281,6 @@ impl Skills {
             }
         };
 
-        // Build a unified listing: (name, scope_tag, description)
         let mut seen_names = std::collections::HashSet::new();
         let mut entries: Vec<(&str, &str, String)> = Vec::new();
 
@@ -299,7 +299,7 @@ impl Skills {
             }
             seen_names.insert(&skill.name);
             let desc = skill.description.clone().unwrap_or_default();
-            entries.push((&skill.name, " [sandbox]", desc));
+            entries.push((&skill.name, "", desc));
         }
 
         if entries.is_empty() {

@@ -471,27 +471,24 @@ impl Sandboxes {
     }
 
     /// `pub(crate)` helper used by the skills context builder; no auth check.
-    #[instrument(name = "domain.sandbox.exported_skills_for_project", skip(self))]
-    pub(crate) async fn exported_skills_for_project(
+    /// `None` (unattached agent) → empty `Vec`. `Some(id)` → that one
+    /// sandbox's `exported_skills` only when its state is `Ready`; other
+    /// states (and unknown ids) return empty.
+    #[instrument(name = "domain.sandbox.exported_skills_for_sandbox", skip(self))]
+    pub(crate) async fn exported_skills_for_sandbox(
         &self,
-        project_id: ProjectId,
+        sandbox_id: Option<SandboxId>,
     ) -> Result<Vec<sandbox::instance_client::ExportedSkill>, SandboxError> {
-        let query = PaginatedQueryArgs {
-            first: 100,
-            after: None,
+        let Some(id) = sandbox_id else {
+            return Ok(Vec::new());
         };
-        let result = self
-            .repo
-            .list_for_project_id_by_created_at(project_id, query, ListDirection::Descending)
-            .await?;
-        let mut skills = Vec::new();
-        for sandbox in &result.entities {
-            if sandbox.state != SandboxState::Ready {
-                continue;
-            }
-            skills.extend(sandbox.exported_skills.iter().cloned());
+        let Some(sandbox) = self.repo.maybe_find_by_id(id).await? else {
+            return Ok(Vec::new());
+        };
+        if sandbox.state != SandboxState::Ready {
+            return Ok(Vec::new());
         }
-        Ok(skills)
+        Ok(sandbox.exported_skills.clone())
     }
 
     /// Returns `NotReady` unless `state == Ready` (only state with `base_url`).
