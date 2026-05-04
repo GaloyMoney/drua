@@ -147,6 +147,64 @@ impl WorkflowDefinition {
         });
         Idempotent::Executed(())
     }
+
+    /// User-driven path (no file_hash compare; that's [`Self::update_from_library`]).
+    /// Webhook secrets are preserved when only `provider` changes.
+    /// Returns `AlreadyApplied` only when every input is `None`.
+    pub fn update_content(
+        &mut self,
+        name: Option<String>,
+        description: Option<Option<String>>,
+        trigger: Option<WorkflowTrigger>,
+        steps: Option<Vec<WorkflowStepDef>>,
+        sandboxes: Option<Vec<WorkflowSandboxDecl>>,
+    ) -> Idempotent<()> {
+        if name.is_none()
+            && description.is_none()
+            && trigger.is_none()
+            && steps.is_none()
+            && sandboxes.is_none()
+        {
+            return Idempotent::AlreadyApplied;
+        }
+
+        if let Some(ref n) = name {
+            self.name = n.clone();
+        }
+        if let Some(ref d) = description {
+            self.description = d.clone();
+        }
+        let merged_trigger = trigger
+            .as_ref()
+            .map(|incoming| match (incoming, &self.trigger) {
+                (
+                    WorkflowTrigger::Webhook { provider, .. },
+                    WorkflowTrigger::Webhook { secret, .. },
+                ) => WorkflowTrigger::Webhook {
+                    provider: provider.clone(),
+                    secret: secret.clone(),
+                },
+                _ => incoming.clone(),
+            });
+        if let Some(t) = merged_trigger.clone() {
+            self.trigger = t;
+        }
+        if let Some(ref s) = steps {
+            self.steps = s.clone();
+        }
+        if let Some(ref s) = sandboxes {
+            self.sandboxes = s.clone();
+        }
+
+        self.events.push(WorkflowDefinitionEvent::Updated {
+            name,
+            description: description.flatten(),
+            trigger: merged_trigger,
+            steps,
+            sandboxes,
+        });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for WorkflowDefinition {

@@ -340,6 +340,49 @@ impl Workflows {
         Ok(workflow)
     }
 
+    /// Updates name / description / trigger / steps / sandboxes on
+    /// an existing definition. Any `Some` field is applied; `None`
+    /// leaves the field unchanged. Steps/sandboxes are re-validated
+    /// when supplied.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(name = "core.workflow.update", skip_all)]
+    pub async fn update(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+        name: Option<String>,
+        description: Option<Option<String>>,
+        trigger: Option<WorkflowTrigger>,
+        steps: Option<Vec<WorkflowStepDef>>,
+        sandboxes: Option<Vec<WorkflowSandboxDecl>>,
+    ) -> Result<WorkflowDefinition, WorkflowError> {
+        let mut definition = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Workflow(definition.project_id, Some(definition.id)),
+        )?;
+
+        let next_steps = steps.as_ref().unwrap_or(&definition.steps);
+        let next_sandboxes = sandboxes.as_ref().unwrap_or(&definition.sandboxes);
+        if next_steps.is_empty() {
+            return Err(WorkflowError::InvalidDefinition(
+                "workflow requires at least one step".into(),
+            ));
+        }
+        if steps.is_some() || sandboxes.is_some() {
+            self.validate_steps(sub, definition.project_id, next_steps, next_sandboxes)
+                .await?;
+        }
+
+        if definition
+            .update_content(name, description, trigger, steps, sandboxes)
+            .did_execute()
+        {
+            self.repo.update(&mut definition).await?;
+        }
+        Ok(definition)
+    }
+
     #[instrument(name = "core.workflow.find_by_id", skip_all)]
     pub async fn find_by_id(
         &self,

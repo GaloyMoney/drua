@@ -68,6 +68,33 @@ enum WorkflowParams {
     Run {
         run_id: WorkflowRunId,
     },
+    Update {
+        definition_id: WorkflowDefinitionId,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        /// `true` clears `description` to `None`. Ignored unless set.
+        #[serde(default)]
+        clear_description: bool,
+        /// When non-empty AND `update_steps`, replaces the step list.
+        #[serde(default)]
+        steps: Vec<WorkflowStepParam>,
+        #[serde(default)]
+        update_steps: bool,
+        /// When `update_sandboxes`, replaces the sandbox decl list (use empty array to clear).
+        #[serde(default)]
+        sandboxes: Vec<WorkflowSandboxParam>,
+        #[serde(default)]
+        update_sandboxes: bool,
+        /// `true` rebuilds the trigger from `provider`/`manual`.
+        #[serde(default)]
+        update_trigger: bool,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        manual: bool,
+    },
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -191,6 +218,7 @@ impl WorkflowParams {
             Self::AwaitRun { .. } => "workflow.await_run",
             Self::Runs { .. } => "workflow.runs",
             Self::Run { .. } => "workflow.run",
+            Self::Update { .. } => "workflow.update",
         }
     }
 }
@@ -335,7 +363,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run"],
+                "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run", "update"],
                 "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run; pair with `await_run` to block until terminal. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
             },
             "name": {
@@ -389,6 +417,22 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "payload": {
                 "description": "Trigger context payload (trigger). Defaults to {}."
+            },
+            "clear_description": {
+                "type": "boolean",
+                "description": "Update only: clears `description` to null. Ignored when false."
+            },
+            "update_steps": {
+                "type": "boolean",
+                "description": "Update only: replace the step list with the supplied `steps` array."
+            },
+            "update_sandboxes": {
+                "type": "boolean",
+                "description": "Update only: replace the sandbox decl list with the supplied `sandboxes` array."
+            },
+            "update_trigger": {
+                "type": "boolean",
+                "description": "Update only: rebuild the trigger from `provider`/`manual`."
             }
         },
         "required": ["command"],
@@ -416,7 +460,10 @@ impl TopLevelTool for WorkflowTool {
          `await_run` (requires `run_id`; blocks until terminal — pair with \
          `trigger` when you need the final state inline), `runs` \
          (requires `definition_id`; truncated step outputs), `run` \
-         (requires `run_id`; full per-step outputs)."
+         (requires `run_id`; full per-step outputs), \
+         `update` (requires `definition_id`; optional `name`, \
+         `description`+`clear_description`, `steps`+`update_steps`, \
+         `sandboxes`+`update_sandboxes`, `provider`/`manual`+`update_trigger`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -622,6 +669,67 @@ impl TopLevelTool for WorkflowTool {
                 let out = WorkflowOutput {
                     command: "run".to_string(),
                     run: Some(run_to_output(&run)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            WorkflowParams::Update {
+                definition_id,
+                name,
+                description,
+                clear_description,
+                steps,
+                update_steps,
+                sandboxes,
+                update_sandboxes,
+                update_trigger,
+                provider,
+                manual,
+            } => {
+                let description: Option<Option<String>> = if clear_description {
+                    Some(None)
+                } else {
+                    description.filter(|s| !s.is_empty()).map(Some)
+                };
+                let trigger = if update_trigger {
+                    Some(if manual {
+                        WorkflowTrigger::Manual
+                    } else {
+                        WorkflowTrigger::Webhook {
+                            provider,
+                            secret: String::new(),
+                        }
+                    })
+                } else {
+                    None
+                };
+                let steps_arg = update_steps.then(|| {
+                    steps
+                        .into_iter()
+                        .map(WorkflowStepParam::into_step)
+                        .collect()
+                });
+                let sandboxes_arg = update_sandboxes
+                    .then(|| sandboxes.into_iter().map(|s| s.into_decl()).collect());
+
+                let definition = self
+                    .workflows
+                    .update(
+                        subject,
+                        definition_id,
+                        name,
+                        description,
+                        trigger,
+                        steps_arg,
+                        sandboxes_arg,
+                    )
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let text = format_get_text(&definition);
+                let out = WorkflowOutput {
+                    command: "update".to_string(),
+                    definition: Some(definition_to_output(&definition)),
                     ..Default::default()
                 };
                 (text, out)
