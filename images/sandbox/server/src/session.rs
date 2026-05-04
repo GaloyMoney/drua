@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
@@ -47,6 +47,13 @@ enum IsolationLayer {
 }
 
 /// Try each isolation layer in order until one works (bwrap → uid-only → plain).
+///
+/// Each layer is also probed for *runtime* health: `try_spawn` only catches
+/// spawn-time failures (binary missing, fork failed), but bwrap in particular
+/// can fork+exec successfully and then exit immediately during argument
+/// validation or kernel-restricted namespace ops. We give the freshly spawned
+/// child a brief window to fail, and if it does we drain its stderr, log the
+/// reason, and fall through to the next layer.
 async fn spawn_session_shell(
     workspace: &str,
     workspace_tmp: &str,
@@ -54,10 +61,20 @@ async fn spawn_session_shell(
 ) -> Result<Child, String> {
     #[cfg(unix)]
     match try_spawn(IsolationLayer::Bwrap, workspace, workspace_tmp, cwd) {
-        Ok(child) => {
-            tracing::info!(layer = "bwrap", "spawned session shell");
-            return Ok(child);
-        }
+        Ok(mut child) => match probe_child_alive(&mut child).await {
+            Ok(()) => {
+                tracing::info!(layer = "bwrap", "spawned session shell");
+                return Ok(child);
+            }
+            Err((code, stderr)) => {
+                tracing::warn!(
+                    layer = "bwrap",
+                    exit_code = code,
+                    stderr = ?stderr.trim(),
+                    "shell exited immediately after spawn, falling back",
+                );
+            }
+        },
         Err(e) if is_bwrap_unavailable(&e) => {
             tracing::warn!("bwrap unavailable for session, falling back: {e}");
         }
@@ -67,10 +84,20 @@ async fn spawn_session_shell(
     #[cfg(unix)]
     if is_root() {
         match try_spawn(IsolationLayer::UidOnly, workspace, workspace_tmp, cwd) {
-            Ok(child) => {
-                tracing::info!(layer = "uid-only", "spawned session shell");
-                return Ok(child);
-            }
+            Ok(mut child) => match probe_child_alive(&mut child).await {
+                Ok(()) => {
+                    tracing::info!(layer = "uid-only", "spawned session shell");
+                    return Ok(child);
+                }
+                Err((code, stderr)) => {
+                    tracing::warn!(
+                        layer = "uid-only",
+                        exit_code = code,
+                        stderr = ?stderr.trim(),
+                        "shell exited immediately after spawn, falling back",
+                    );
+                }
+            },
             Err(e) if is_spawn_failure(&e) => {
                 tracing::warn!("uid-only session failed (fake-root?), falling back: {e}");
             }
@@ -78,9 +105,48 @@ async fn spawn_session_shell(
         }
     }
 
-    let child = try_spawn(IsolationLayer::Plain, workspace, workspace_tmp, cwd)?;
+    let mut child = try_spawn(IsolationLayer::Plain, workspace, workspace_tmp, cwd)?;
+    if let Err((code, stderr)) = probe_child_alive(&mut child).await {
+        return Err(format!(
+            "plain bash exited immediately (code={code}): {}",
+            stderr.trim()
+        ));
+    }
     tracing::info!(layer = "plain", "spawned session shell");
     Ok(child)
+}
+
+/// Brief liveness probe for a freshly-spawned child. `Ok(())` means the
+/// child is still running after a short window — taken as evidence that
+/// argument validation and any startup checks have passed. `Err((code,
+/// stderr))` means the child has already exited; the caller should treat
+/// the layer as unavailable. The stderr drain is best-effort and only
+/// runs in the failure path, so a healthy child's stderr stream is left
+/// untouched for the persistent drainer task to claim.
+async fn probe_child_alive(child: &mut Child) -> Result<(), (i32, String)> {
+    const PROBE_WINDOW: Duration = Duration::from_millis(150);
+    const POLL: Duration = Duration::from_millis(10);
+
+    let deadline = std::time::Instant::now() + PROBE_WINDOW;
+    loop {
+        match child.try_wait() {
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(());
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(-1);
+                let mut stderr_buf = String::new();
+                if let Some(stderr) = child.stderr.as_mut() {
+                    let _ = stderr.read_to_string(&mut stderr_buf).await;
+                }
+                return Err((code, stderr_buf));
+            }
+            Err(_) => return Err((-1, String::new())),
+        }
+    }
 }
 
 fn try_spawn(
@@ -559,6 +625,48 @@ mod tests {
             std::fs::create_dir_all(&tmp).unwrap();
             std::env::set_var("WORKSPACE_ROOT", tmp.to_str().unwrap());
         });
+    }
+
+    /// A still-running child should pass the probe.
+    #[tokio::test]
+    async fn probe_child_alive_returns_ok_for_running_child() {
+        let mut child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let result = probe_child_alive(&mut child).await;
+        assert!(
+            result.is_ok(),
+            "running child should pass probe: {result:?}"
+        );
+
+        let _ = child.kill().await;
+    }
+
+    /// A child that exits with a non-zero code and prints to stderr
+    /// before dying should be reported with both pieces of information.
+    /// This is the bwrap failure shape: validation error to stderr, exit
+    /// with non-zero, all before any caller has read from the pipes.
+    #[tokio::test]
+    async fn probe_child_alive_captures_exit_code_and_stderr() {
+        let mut child = Command::new("bash")
+            .args(["-c", "echo bwrap-style-error >&2; exit 7"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn bash");
+
+        let (code, stderr) = probe_child_alive(&mut child)
+            .await
+            .expect_err("dying child must surface as Err");
+        assert_eq!(code, 7);
+        assert!(
+            stderr.contains("bwrap-style-error"),
+            "stderr should be drained, got: {stderr:?}"
+        );
     }
 
     #[test]
