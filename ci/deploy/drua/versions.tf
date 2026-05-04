@@ -1,4 +1,15 @@
 terraform {
+  # Bucket + prefix match ci/values.yml's deploy_tf_state_bucket and the
+  # ci/pipeline.yml `tf-galoy-agents-prod` resource. `credentials` is
+  # intentionally omitted — Concourse fills it in at apply time via the
+  # terraform-resource override, and local users supply it via
+  # `GOOGLE_APPLICATION_CREDENTIALS` env var or `gcloud auth
+  # application-default login`. See ./Makefile for the local workflow.
+  backend "gcs" {
+    bucket = "galoy-agents-tf-state"
+    prefix = "galoy-agents/prod"
+  }
+
   required_providers {
     google = {
       source  = "hashicorp/google"
