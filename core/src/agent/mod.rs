@@ -576,19 +576,27 @@ impl Agents {
         id: impl Into<AgentId> + std::fmt::Debug,
     ) -> Result<(), AgentError> {
         let id = id.into();
-        let agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let mut agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
         Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(id);
-        // Drop the sandbox-side attachment so its `attached_agents`
-        // list doesn't reference a deleted agent. Idempotent — no-op
-        // when nothing is attached.
-        if let Some(sandbox_id) = agent.attached_sandbox_id() {
-            self.sandboxes
+        // Mirror `detach_sandbox`: agent-side detach event + sandbox-side
+        // detach. The session detach notification is folded into the
+        // session delete below to avoid loading the session twice.
+        let session_detach = if let Some(sandbox_id) = agent.attached_sandbox_id() {
+            if agent.sandbox_detached(sandbox_id).did_execute() {
+                self.repo.update_in_op(&mut *op, &mut agent).await?;
+            }
+            let sandbox = self
+                .sandboxes
                 .detach_from_agent_in_op(op, sandbox_id, id)
                 .await?;
-        }
-        // Cascade soft-delete sessions before agent (mirrors project → agents).
-        self.sessions.delete_for_agent_in_op(op, id).await?;
+            Some((sandbox.name, session::message::SandboxOperation::Detach))
+        } else {
+            None
+        };
+        self.sessions
+            .delete_for_agent_in_op(op, id, session_detach)
+            .await?;
         self.repo.delete_in_op(op, agent).await?;
         Ok(())
     }
