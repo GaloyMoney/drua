@@ -1,8 +1,8 @@
 //! `AdminToolSet` — admin-only tools exposed exclusively through the
 //! searchable catalog (`search_tools` → `describe_tool` → `call_tool`).
 //!
-//! Consolidated into 5 tools with command discriminators:
-//! `agent`, `sandbox`, `log`, `project`, `spaces`.
+//! Consolidated into 7 tools with command discriminators:
+//! `agent`, `sandbox`, `log`, `project`, `spaces`, `workflow`, `skill`.
 //! Prefixed as `drua_admin_agent`, `drua_admin_sandbox`, etc.
 
 use std::sync::{Arc, LazyLock};
@@ -17,10 +17,14 @@ use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::AuthedSpaces;
-use crate::primitives::{AgentId, ProjectId, SandboxId, UserId};
+use crate::primitives::{AgentId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId};
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
+use crate::skill::{Skill, Skills};
 use crate::space_fs::SpaceFs;
+use crate::workflow::{
+    WorkflowDefinition, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
+};
 
 use super::super::error::ToolSetsError;
 use super::super::inspect::{dispatch_edit, dispatch_view, parse_view_range, EditOp, ReadOp};
@@ -246,11 +250,197 @@ struct SpacesParams {
     op_args: Option<JsonObject>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowCommand {
+    Create,
+    List,
+    Get,
+    Update,
+    Delete,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct WorkflowStepParams {
+    name: String,
+    /// NAME of an existing skill in the target project.
+    skill: String,
+    #[serde(default)]
+    sandbox: Option<String>,
+    #[serde(default)]
+    sandbox_mode: Option<SandboxAgentMode>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+impl WorkflowStepParams {
+    fn into_step(self) -> WorkflowStepDef {
+        WorkflowStepDef::AgentStep {
+            name: self.name,
+            skill: self.skill,
+            sandbox: self.sandbox,
+            sandbox_mode: self.sandbox_mode,
+            timeout_seconds: self.timeout_seconds,
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WorkflowSandboxParams {
+    Scratch {
+        name: String,
+        #[serde(default)]
+        cpu: Option<String>,
+        #[serde(default)]
+        memory: Option<String>,
+        #[serde(default)]
+        disk_size: Option<String>,
+    },
+    Repo {
+        name: String,
+        repo_url: String,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        cpu: Option<String>,
+        #[serde(default)]
+        memory: Option<String>,
+        #[serde(default)]
+        disk_size: Option<String>,
+    },
+    Preexisting {
+        name: String,
+    },
+}
+
+impl WorkflowSandboxParams {
+    fn into_decl(self) -> WorkflowSandboxDecl {
+        match self {
+            WorkflowSandboxParams::Preexisting { name } => {
+                WorkflowSandboxDecl::Preexisting { name }
+            }
+            WorkflowSandboxParams::Scratch {
+                name,
+                cpu,
+                memory,
+                disk_size,
+            } => WorkflowSandboxDecl::Provisioned {
+                name,
+                mode: SandboxMode::Scratch,
+                specs: specs_from_parts(cpu, memory, disk_size),
+            },
+            WorkflowSandboxParams::Repo {
+                name,
+                repo_url,
+                branch,
+                cpu,
+                memory,
+                disk_size,
+            } => WorkflowSandboxDecl::Provisioned {
+                name,
+                mode: SandboxMode::Repo { repo_url, branch },
+                specs: specs_from_parts(cpu, memory, disk_size),
+            },
+        }
+    }
+}
+
+fn specs_from_parts(
+    cpu: Option<String>,
+    memory: Option<String>,
+    disk_size: Option<String>,
+) -> Option<SandboxSpecs> {
+    match (cpu, memory, disk_size) {
+        (Some(cpu), Some(memory), Some(disk_size)) => Some(SandboxSpecs {
+            cpu,
+            memory,
+            disk_size,
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct WorkflowParams {
+    command: WorkflowCommand,
+
+    /// Required for `create`, `list`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    project_id: Option<ProjectId>,
+
+    /// Required for `get`, `update`, `delete`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    definition_id: Option<WorkflowDefinitionId>,
+
+    /// `create`: required. `update`: optional rename.
+    name: Option<String>,
+    description: Option<String>,
+
+    /// `create`: optional. Defaults to a generic webhook trigger if
+    /// `manual` is not set. Bare `provider` builds a webhook trigger.
+    provider: Option<String>,
+    /// `create`: opt out of webhooks (Manual trigger).
+    #[serde(default)]
+    manual: bool,
+
+    /// `create` / `update`: full step list. Required for create.
+    #[serde(default)]
+    steps: Vec<WorkflowStepParams>,
+    /// `create` / `update`: full sandbox decl list.
+    #[serde(default)]
+    sandboxes: Vec<WorkflowSandboxParams>,
+
+    /// `update`: signals which fields the caller intends to change so
+    /// `None`-vs-omitted is distinguishable. Defaults to `false` —
+    /// when omitted, the field is left untouched.
+    #[serde(default)]
+    update_steps: bool,
+    #[serde(default)]
+    update_sandboxes: bool,
+    #[serde(default)]
+    clear_description: bool,
+    #[serde(default)]
+    update_trigger: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SkillCommand {
+    Create,
+    List,
+    Get,
+    Update,
+    Delete,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SkillParams {
+    command: SkillCommand,
+
+    /// Required for `create` and `list`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    project_id: Option<ProjectId>,
+
+    /// Required for `get`, `update`, `delete`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    skill_id: Option<SkillId>,
+
+    /// `create`: required. `update`: optional rename.
+    name: Option<String>,
+    /// `create`: required. `update`: optional.
+    description: Option<String>,
+    /// `create`: required. `update`: optional.
+    body: Option<String>,
+}
+
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
 static SANDBOX_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SandboxParams>);
 static LOG_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<LogParams>);
 static PROJECT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<ProjectParams>);
 static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SpacesParams>);
+static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<WorkflowParams>);
+static SKILL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<SkillParams>);
 
 struct ToolDef {
     name: &'static str,
@@ -288,6 +478,33 @@ static TOOLS: &[ToolDef] = &[
         schema: &PROJECT_SCHEMA,
     },
     ToolDef {
+        name: "workflow",
+        description: "Manage workflows across any project. Commands: \
+                       `create` (requires `project_id`, `name`, `steps`; \
+                       optional `description`, `provider`, `manual`, \
+                       `sandboxes`), \
+                       `list` (requires `project_id`), \
+                       `get` (requires `definition_id`), \
+                       `update` (requires `definition_id`; optional `name`, \
+                       `description`+`clear_description` for None semantics, \
+                       `provider`+`update_trigger`, `steps`+`update_steps`, \
+                       `sandboxes`+`update_sandboxes`), \
+                       `delete` (requires `definition_id`; cascades to runs).",
+        schema: &WORKFLOW_SCHEMA,
+    },
+    ToolDef {
+        name: "skill",
+        description: "Manage skills across any project. Commands: \
+                       `create` (requires `project_id`, `name`, \
+                       `description`, `body`), \
+                       `list` (requires `project_id`), \
+                       `get` (requires `skill_id`, `project_id`), \
+                       `update` (requires `skill_id`, `project_id`; any of \
+                       `name`/`description`/`body`), \
+                       `delete` (requires `skill_id`, `project_id`).",
+        schema: &SKILL_SCHEMA,
+    },
+    ToolDef {
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
                        `spaces/<slug>/` in the knowledge-base repo. Commands: \
@@ -314,9 +531,12 @@ pub struct AdminToolSet {
     projects: Arc<Projects>,
     spaces: Arc<AuthedSpaces>,
     space_fs: Arc<SpaceFs>,
+    workflows: Arc<Workflows>,
+    skills: Arc<Skills>,
 }
 
 impl AdminToolSet {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agents: Arc<Agents>,
         sandboxes: Arc<Sandboxes>,
@@ -324,6 +544,8 @@ impl AdminToolSet {
         projects: Arc<Projects>,
         spaces: Arc<AuthedSpaces>,
         space_fs: Arc<SpaceFs>,
+        workflows: Arc<Workflows>,
+        skills: Arc<Skills>,
     ) -> Self {
         let entries = TOOLS
             .iter()
@@ -346,6 +568,8 @@ impl AdminToolSet {
             projects,
             spaces,
             space_fs,
+            workflows,
+            skills,
         }
     }
 }
@@ -384,6 +608,8 @@ impl SearchableToolSet for AdminToolSet {
             "log" => self.log(arguments).await,
             "project" => self.project(subject, arguments).await,
             "spaces" => self.spaces(subject, arguments).await,
+            "workflow" => self.workflow(subject, arguments).await,
+            "skill" => self.skill(subject, arguments).await,
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -708,6 +934,283 @@ impl AdminToolSet {
             }
         }
     }
+
+    async fn workflow(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let params: WorkflowParams = parse_params(arguments)?;
+
+        match params.command {
+            WorkflowCommand::Create => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for create".to_string())
+                })?;
+                let name = params.name.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("name is required for create".to_string())
+                })?;
+                if params.steps.is_empty() {
+                    return Err(ToolSetsError::MissingArgument(
+                        "steps is required for create".to_string(),
+                    ));
+                }
+                Audit::record_action("workflow.create");
+                let project = self.projects.find_by_id(subject, project_id).await?;
+                let trigger = if params.manual {
+                    WorkflowTrigger::Manual
+                } else {
+                    WorkflowTrigger::Webhook {
+                        provider: params.provider.clone(),
+                        secret: String::new(),
+                    }
+                };
+                let steps = params.steps.into_iter().map(|s| s.into_step()).collect();
+                let sandboxes = params
+                    .sandboxes
+                    .into_iter()
+                    .map(|s| s.into_decl())
+                    .collect();
+                let definition = self
+                    .workflows
+                    .create(
+                        subject,
+                        project_id,
+                        &project.name,
+                        name,
+                        params.description.filter(|s| !s.is_empty()),
+                        trigger,
+                        steps,
+                        sandboxes,
+                    )
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_workflow(&definition, true),
+                )]))
+            }
+
+            WorkflowCommand::List => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for list".to_string())
+                })?;
+                Audit::record_action("workflow.list");
+                let definitions = self
+                    .workflows
+                    .list_for_project(subject, project_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_workflows(&definitions),
+                )]))
+            }
+
+            WorkflowCommand::Get => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("definition_id is required for get".to_string())
+                })?;
+                Audit::record_action("workflow.get");
+                let definition = self
+                    .workflows
+                    .find_by_id(subject, definition_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_workflow(&definition, false),
+                )]))
+            }
+
+            WorkflowCommand::Update => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "definition_id is required for update".to_string(),
+                    )
+                })?;
+                Audit::record_action("workflow.update");
+                let description: Option<Option<String>> = if params.clear_description {
+                    Some(None)
+                } else {
+                    params.description.filter(|s| !s.is_empty()).map(Some)
+                };
+                let trigger = if params.update_trigger {
+                    Some(if params.manual {
+                        WorkflowTrigger::Manual
+                    } else {
+                        WorkflowTrigger::Webhook {
+                            provider: params.provider.clone(),
+                            secret: String::new(),
+                        }
+                    })
+                } else {
+                    None
+                };
+                let steps = if params.update_steps {
+                    Some(
+                        params
+                            .steps
+                            .into_iter()
+                            .map(|s| s.into_step())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                };
+                let sandboxes = if params.update_sandboxes {
+                    Some(
+                        params
+                            .sandboxes
+                            .into_iter()
+                            .map(|s| s.into_decl())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                };
+                let definition = self
+                    .workflows
+                    .update(
+                        subject,
+                        definition_id,
+                        params.name,
+                        description,
+                        trigger,
+                        steps,
+                        sandboxes,
+                    )
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_workflow(&definition, false),
+                )]))
+            }
+
+            WorkflowCommand::Delete => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "definition_id is required for delete".to_string(),
+                    )
+                })?;
+                Audit::record_action("workflow.delete");
+                self.workflows
+                    .delete(subject, definition_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Workflow deleted (id {definition_id})."
+                ))]))
+            }
+        }
+    }
+
+    async fn skill(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let params: SkillParams = parse_params(arguments)?;
+
+        match params.command {
+            SkillCommand::Create => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for create".to_string())
+                })?;
+                let name = params.name.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("name is required for create".to_string())
+                })?;
+                let description = params.description.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("description is required for create".to_string())
+                })?;
+                let body = params.body.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("body is required for create".to_string())
+                })?;
+                Audit::record_action("skill.create");
+                let project = self.projects.find_by_id(subject, project_id).await?;
+                let skill = self
+                    .skills
+                    .create(subject, project_id, &project.name, name, description, body)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_skill(
+                    &skill, true,
+                ))]))
+            }
+
+            SkillCommand::List => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for list".to_string())
+                })?;
+                Audit::record_action("skill.list");
+                let skills = self
+                    .skills
+                    .list_for_project(subject, project_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_skills(
+                    &skills,
+                ))]))
+            }
+
+            SkillCommand::Get => {
+                let skill_id = params.skill_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("skill_id is required for get".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for get".to_string())
+                })?;
+                Audit::record_action("skill.get");
+                let skill = self
+                    .skills
+                    .find_by_id(subject, skill_id, project_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_skill(
+                    &skill, false,
+                ))]))
+            }
+
+            SkillCommand::Update => {
+                let skill_id = params.skill_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("skill_id is required for update".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for update".to_string())
+                })?;
+                Audit::record_action("skill.update");
+                let skill = self
+                    .skills
+                    .update(
+                        subject,
+                        skill_id,
+                        project_id,
+                        params.name,
+                        params.description,
+                        params.body,
+                    )
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_skill(
+                    &skill, false,
+                ))]))
+            }
+
+            SkillCommand::Delete => {
+                let skill_id = params.skill_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("skill_id is required for delete".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for delete".to_string())
+                })?;
+                Audit::record_action("skill.delete");
+                self.skills
+                    .delete(subject, skill_id, project_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Skill deleted (id {skill_id})."
+                ))]))
+            }
+        }
+    }
 }
 
 async fn execute_inspect(
@@ -971,6 +1474,104 @@ fn format_projects(project: &[Project]) -> String {
     lines.join("\n")
 }
 
+fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
+    let header = if created {
+        "Workflow created."
+    } else {
+        "Workflow:"
+    };
+    let trigger = match &d.trigger {
+        WorkflowTrigger::Manual => "manual".to_string(),
+        WorkflowTrigger::Webhook { provider, .. } => match provider {
+            Some(p) => format!("webhook ({p})"),
+            None => "webhook".to_string(),
+        },
+    };
+    let description = d.description.as_deref().unwrap_or("\u{2014}");
+    format!(
+        "{header}\n  id: {}\n  name: {}\n  project: {}\n  trigger: {}\n  description: {}\n  steps: {}\n  sandboxes: {}",
+        d.id,
+        d.name,
+        d.project_id,
+        trigger,
+        description,
+        d.steps.len(),
+        d.sandboxes.len(),
+    )
+}
+
+fn format_workflows(defs: &[WorkflowDefinition]) -> String {
+    if defs.is_empty() {
+        return "No workflows found.".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(defs.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<24} {:<14} {:<6} {}",
+        "ID", "NAME", "TRIGGER", "STEPS", "PROJECT"
+    ));
+    lines.push("-".repeat(110));
+    for d in defs {
+        let trigger = match &d.trigger {
+            WorkflowTrigger::Manual => "manual".to_string(),
+            WorkflowTrigger::Webhook { provider, .. } => match provider {
+                Some(p) => format!("webhook:{p}"),
+                None => "webhook".to_string(),
+            },
+        };
+        lines.push(format!(
+            "{:<38} {:<24} {:<14} {:<6} {}",
+            d.id,
+            truncate(&d.name, 24),
+            truncate(&trigger, 14),
+            d.steps.len(),
+            d.project_id,
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_skill(s: &Skill, created: bool) -> String {
+    let header = if created { "Skill created." } else { "Skill:" };
+    let scope = if s.project_id.is_some() {
+        "project"
+    } else {
+        "global"
+    };
+    format!(
+        "{header}\n  id: {}\n  name: {}\n  scope: {}\n  description: {}",
+        s.id, s.name, scope, s.description,
+    )
+}
+
+fn format_skills(skills: &[Skill]) -> String {
+    if skills.is_empty() {
+        return "No skills found.".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(skills.len() + 2);
+    lines.push(format!(
+        "{:<38} {:<24} {:<10} {}",
+        "ID", "NAME", "SCOPE", "DESCRIPTION"
+    ));
+    lines.push("-".repeat(110));
+    for s in skills {
+        let scope = if s.project_id.is_some() {
+            "project"
+        } else {
+            "global"
+        };
+        lines.push(format!(
+            "{:<38} {:<24} {:<10} {}",
+            s.id,
+            truncate(&s.name, 24),
+            scope,
+            truncate(&s.description, 50),
+        ));
+    }
+    lines.join("\n")
+}
+
 fn format_space(s: &Space, created: bool) -> String {
     let description = s.description.as_deref().unwrap_or("\u{2014}");
     let header = if created { "Space created." } else { "Space:" };
@@ -1229,5 +1830,192 @@ mod tests {
     #[test]
     fn tools_includes_spaces() {
         assert!(TOOLS.iter().any(|t| t.name == "spaces"));
+    }
+
+    #[test]
+    fn tools_includes_workflow_and_skill() {
+        assert!(TOOLS.iter().any(|t| t.name == "workflow"));
+        assert!(TOOLS.iter().any(|t| t.name == "skill"));
+    }
+
+    #[test]
+    fn workflow_create_parses_full_args() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "nightly",
+            "description": "Run nightly checks",
+            "manual": true,
+            "steps": [
+                { "name": "step", "skill": "audit", "timeout_seconds": 60 }
+            ],
+            "sandboxes": [
+                { "type": "scratch", "name": "sb1" }
+            ],
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Create));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+        assert_eq!(p.name.as_deref(), Some("nightly"));
+        assert!(p.manual);
+        assert_eq!(p.steps.len(), 1);
+        assert_eq!(p.sandboxes.len(), 1);
+    }
+
+    #[test]
+    fn workflow_list_requires_project() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "list",
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::List));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+    }
+
+    #[test]
+    fn workflow_get_takes_definition_id() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "get",
+            "definition_id": definition_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Get));
+        assert_eq!(p.definition_id.map(uuid::Uuid::from), Some(definition_id));
+    }
+
+    #[test]
+    fn workflow_update_parses_partial_fields() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "definition_id": definition_id,
+            "name": "renamed",
+            "update_steps": true,
+            "steps": [
+                { "name": "s1", "skill": "audit" }
+            ],
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Update));
+        assert_eq!(p.name.as_deref(), Some("renamed"));
+        assert!(p.update_steps);
+        assert!(!p.update_sandboxes);
+        assert!(!p.update_trigger);
+        assert!(!p.clear_description);
+    }
+
+    #[test]
+    fn workflow_delete_takes_definition_id() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "delete",
+            "definition_id": definition_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Delete));
+    }
+
+    #[test]
+    fn workflow_schema_includes_command_enum() {
+        let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
+        for v in ["create", "list", "get", "update", "delete"] {
+            assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
+        }
+    }
+
+    #[test]
+    fn skill_create_parses_full_args() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SkillParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "review",
+            "description": "Review the PR",
+            "body": "Review $ARGUMENTS",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SkillCommand::Create));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+        assert_eq!(p.name.as_deref(), Some("review"));
+        assert_eq!(p.description.as_deref(), Some("Review the PR"));
+        assert_eq!(p.body.as_deref(), Some("Review $ARGUMENTS"));
+    }
+
+    #[test]
+    fn skill_list_requires_project() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SkillParams = parse_params(args(serde_json::json!({
+            "command": "list",
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SkillCommand::List));
+    }
+
+    #[test]
+    fn skill_update_parses_partial_fields() {
+        let skill_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: SkillParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "skill_id": skill_id,
+            "project_id": project_id,
+            "description": "new desc",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SkillCommand::Update));
+        assert!(p.name.is_none());
+        assert_eq!(p.description.as_deref(), Some("new desc"));
+        assert!(p.body.is_none());
+    }
+
+    #[test]
+    fn skill_delete_takes_ids() {
+        let skill_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: SkillParams = parse_params(args(serde_json::json!({
+            "command": "delete",
+            "skill_id": skill_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SkillCommand::Delete));
+    }
+
+    #[test]
+    fn skill_schema_includes_command_enum() {
+        let s = serde_json::to_string(&*SKILL_SCHEMA).unwrap();
+        for v in ["create", "list", "get", "update", "delete"] {
+            assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
+        }
+    }
+
+    #[test]
+    fn workflow_sandbox_param_repo_into_decl_extracts_repo() {
+        let p: WorkflowSandboxParams = serde_json::from_value(serde_json::json!({
+            "type": "repo",
+            "name": "main",
+            "repo_url": "git@github.com:org/r.git",
+            "branch": "dev",
+        }))
+        .expect("parse");
+        let decl = p.into_decl();
+        match decl {
+            WorkflowSandboxDecl::Provisioned {
+                name,
+                mode: SandboxMode::Repo { repo_url, branch },
+                specs,
+            } => {
+                assert_eq!(name, "main");
+                assert_eq!(repo_url, "git@github.com:org/r.git");
+                assert_eq!(branch.as_deref(), Some("dev"));
+                assert!(specs.is_none());
+            }
+            other => panic!("unexpected decl: {other:?}"),
+        }
     }
 }
