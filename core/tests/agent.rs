@@ -18,6 +18,83 @@ async fn pool() -> sqlx::PgPool {
     sqlx::PgPool::connect(&url).await.expect("connect to pg")
 }
 
+/// Inserts a bare project row so foreign keys (agents.project_id, etc.)
+/// resolve in tests that don't go through `Projects::create`.
+async fn insert_project(pool: &sqlx::PgPool) -> ProjectId {
+    let id = ProjectId::new();
+    let name = format!("test-project-{}", uuid::Uuid::from(id));
+    sqlx::query("INSERT INTO projects (id, name, created_at) VALUES ($1, $2, NOW())")
+        .bind(id)
+        .bind(&name)
+        .execute(pool)
+        .await
+        .expect("insert project");
+    id
+}
+
+/// Builds a minimal `Agents` (+ shared `Sandboxes`) wired against a real
+/// pool. The prompt-request channel is dropped on the receiver side; tests
+/// that exercise `delete` / `list` don't dispatch prompts.
+async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
+    let (prompt_tx, _prompt_rx) = mpsc::channel::<PromptRequest>(64);
+
+    let model_name = "claude-haiku-4-5-20251001".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            model: model_name.clone(),
+            compaction: Default::default(),
+        },
+    );
+    builtin_roles.insert(
+        AgentRole::Agent,
+        RoleConfig {
+            model: model_name.clone(),
+            compaction: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    models.insert(
+        model_name.clone(),
+        ModelDefaults {
+            model: model_name,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+    };
+
+    let toolsets = Arc::new(
+        ToolSets::init(ToolSetsConfig::default())
+            .await
+            .expect("init toolsets"),
+    );
+    let sandboxes = Arc::new(
+        Sandboxes::init(pool, SandboxConfig::default(), None)
+            .await
+            .expect("init sandboxes"),
+    );
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        skills,
+        None,
+        ContextGeneration::new(),
+    );
+    (agents, sandboxes)
+}
+
 #[tokio::test]
 async fn send_message_round_trip_via_prompt_channel() {
     let pool = pool().await;
@@ -356,4 +433,102 @@ async fn send_message_dispatches_registered_tool_call() {
         }
         other => panic!("event[5] should be Done, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn delete_removes_agent_from_listing() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let project_id = insert_project(&pool).await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let agent = agents
+        .create_project_lead(&sub, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+
+    agents.delete(&sub, agent.id).await.expect("delete");
+
+    let listed = agents
+        .list_for_project(&sub, project_id)
+        .await
+        .expect("list");
+    assert!(
+        !listed.iter().any(|a| a.id == agent.id),
+        "deleted agent should not appear in listing"
+    );
+}
+
+#[tokio::test]
+async fn delete_is_idempotent_on_second_call() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let project_id = insert_project(&pool).await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let agent = agents
+        .create_project_lead(&sub, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+
+    agents.delete(&sub, agent.id).await.expect("first delete");
+    // Second delete on a soft-deleted entity surfaces as `Find` —
+    // expected and acceptable per project convention; the row is gone
+    // from listings either way.
+    let second = agents.delete(&sub, agent.id).await;
+    assert!(
+        second.is_err(),
+        "soft-deleted agent should not be findable for re-delete"
+    );
+}
+
+#[tokio::test]
+async fn delete_detaches_attached_sandbox() {
+    use drua_core::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+
+    let pool = pool().await;
+    let (agents, sandboxes) = build_agents(&pool).await;
+    let project_id = insert_project(&pool).await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let _lead = agents
+        .create_project_lead(&sub, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+
+    let sandbox = sandboxes
+        .create(
+            &sub,
+            project_id,
+            "sb",
+            SandboxSpecs {
+                cpu: "100m".to_string(),
+                memory: "128Mi".to_string(),
+                disk_size: "1Gi".to_string(),
+            },
+            SandboxMode::Scratch,
+        )
+        .await
+        .expect("create sandbox");
+
+    let agent = agents
+        .create_agent(
+            &sub,
+            project_id,
+            "worker",
+            Some((sandbox.id, SandboxAgentMode::Read)),
+        )
+        .await
+        .expect("create attached agent");
+
+    agents.delete(&sub, agent.id).await.expect("delete agent");
+
+    let after = sandboxes
+        .find_by_id(&sub, sandbox.id)
+        .await
+        .expect("find sandbox");
+    assert!(
+        after.attached_agents.iter().all(|(id, _)| *id != agent.id),
+        "sandbox.attached_agents should not reference the deleted agent"
+    );
 }

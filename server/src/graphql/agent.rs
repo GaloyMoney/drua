@@ -133,3 +133,13 @@ pub struct AgentDetachSandboxInput {
 }
 
 mutation_payload! { AgentDetachSandboxPayload, agent: Agent }
+
+#[derive(InputObject)]
+pub struct AgentDeleteInput {
+    pub id: AgentId,
+}
+
+#[derive(async_graphql::SimpleObject)]
+pub struct AgentDeletePayload {
+    pub deleted_id: AgentId,
+}

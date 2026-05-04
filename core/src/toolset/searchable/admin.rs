@@ -82,6 +82,7 @@ enum AgentCommand {
     List,
     AttachSandbox,
     DetachSandbox,
+    Delete,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -93,7 +94,7 @@ struct AgentParams {
     project_id: Option<ProjectId>,
     /// Display name for the new agent (required for `create`).
     name: Option<String>,
-    /// ID of the agent (required for `attach_sandbox` and `detach_sandbox`).
+    /// ID of the agent (required for `attach_sandbox`, `detach_sandbox`, and `delete`).
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
     /// ID of the sandbox (required for `attach_sandbox` and `detach_sandbox`).
@@ -491,7 +492,9 @@ static TOOLS: &[ToolDef] = &[
         description: "Manage agents. Commands: `create` (requires `project_id`, `name`), \
                        `list` (requires `project_id`), \
                        `attach_sandbox` (requires `agent_id`, `sandbox_id`, optional `mode`), \
-                       `detach_sandbox` (requires `agent_id`, `sandbox_id`).",
+                       `detach_sandbox` (requires `agent_id`, `sandbox_id`), \
+                       `delete` (requires `agent_id`; soft-deletes the agent, cascades \
+                       to its session and detaches any attached sandbox).",
         schema: &AGENT_SCHEMA,
     },
     ToolDef {
@@ -747,6 +750,19 @@ impl AdminToolSet {
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agent(
                     &agent,
+                ))]))
+            }
+
+            AgentCommand::Delete => {
+                let agent_id = params.agent_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("agent_id is required for delete".to_string())
+                })?;
+                self.agents
+                    .delete(subject, agent_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Agent deleted (id {agent_id})."
                 ))]))
             }
         }

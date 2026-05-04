@@ -40,6 +40,7 @@ enum ProjectAgentCommand {
     List,
     AttachSandbox,
     DetachSandbox,
+    Delete,
 }
 
 impl ProjectAgentCommand {
@@ -49,6 +50,7 @@ impl ProjectAgentCommand {
             Self::List => "agent.list",
             Self::AttachSandbox => "agent.attach_sandbox",
             Self::DetachSandbox => "agent.detach_sandbox",
+            Self::Delete => "agent.delete",
         }
     }
 }
@@ -91,7 +93,9 @@ impl TopLevelTool for ProjectAgent {
     fn description(&self) -> &str {
         "Manage agents. Commands: `create` (requires `name`), `list`, \
          `attach_sandbox` (requires `agent_id`, `sandbox_id`, optional `mode`), \
-         `detach_sandbox` (requires `agent_id`, `sandbox_id`)."
+         `detach_sandbox` (requires `agent_id`, `sandbox_id`), \
+         `delete` (requires `agent_id`; soft-deletes the agent, cascades \
+         to its session and detaches any attached sandbox)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -188,6 +192,20 @@ impl TopLevelTool for ProjectAgent {
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agent(
                     &agent,
+                ))]))
+            }
+
+            ProjectAgentCommand::Delete => {
+                let agent_id = params.agent_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("agent_id is required for delete".to_string())
+                })?;
+
+                self.agents
+                    .delete(subject, agent_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Agent deleted (id {agent_id})."
                 ))]))
             }
         }

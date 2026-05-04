@@ -548,6 +548,27 @@ impl Agents {
         Ok(result.entities)
     }
 
+    #[instrument(name = "domain.agent.delete", skip(self, sub))]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<AgentId> + std::fmt::Debug,
+    ) -> Result<(), AgentError> {
+        let id = id.into();
+        let agent = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.delete");
+        Audit::record_project_id(agent.project_id);
+        Audit::record_agent_id(id);
+        let mut op = self.repo.begin_op().await?;
+        self.delete_in_op(&mut op, id).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
     #[instrument(name = "domain.agent.delete_in_op", skip(self, op))]
     pub async fn delete_in_op(
         &self,
@@ -558,6 +579,14 @@ impl Agents {
         let agent = self.repo.find_by_id_in_op(&mut *op, id).await?;
         Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(id);
+        // Drop the sandbox-side attachment so its `attached_agents`
+        // list doesn't reference a deleted agent. Idempotent — no-op
+        // when nothing is attached.
+        if let Some(sandbox_id) = agent.attached_sandbox_id() {
+            self.sandboxes
+                .detach_from_agent_in_op(op, sandbox_id, id)
+                .await?;
+        }
         // Cascade soft-delete sessions before agent (mirrors project → agents).
         self.sessions.delete_for_agent_in_op(op, id).await?;
         self.repo.delete_in_op(op, agent).await?;
