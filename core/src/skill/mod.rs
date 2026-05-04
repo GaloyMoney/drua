@@ -16,6 +16,7 @@ use es_entity::AtomicOperation;
 use tracing::instrument;
 
 use crate::agent::AgentScope;
+use crate::audit::Audit;
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::user::Users;
@@ -331,9 +332,9 @@ impl Skills {
     /// Folds the agent's full scope: project + global DB skills, every
     /// mounted space's DB skills, and the attached sandbox's exported
     /// skills (when `Ready`). Same-name conflicts resolve by precedence —
-    /// **WorkflowDef > Space > Sandbox > Project > Global** — so a space
-    /// skill called `deploy` shadows a project skill of the same name.
-    /// Returns `None` if no skill source contributes anything.
+    /// **Space > Sandbox > Project > Global** — so a space skill called
+    /// `deploy` shadows a project skill of the same name. Returns `None`
+    /// if no skill source contributes anything.
     #[instrument(name = "skill.skills_context_for_scope", skip(self, scope))]
     pub async fn skills_context_for_scope(
         &self,
@@ -447,6 +448,8 @@ impl Skills {
         body: String,
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Create, AuthResource::Skill(project_id, None))?;
+        Audit::record_action_if_unset("skill.create");
+        Audit::record_project_id(project_id);
         if name.trim().is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
@@ -464,6 +467,7 @@ impl Skills {
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         self.populate_attribution().await;
         let skill = self.repo.create_in_op(&mut op, new).await?;
+        Audit::record_skill_id(skill.id);
         op.commit().await?;
         Ok(skill)
     }
@@ -479,6 +483,9 @@ impl Skills {
         body: Option<String>,
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Update, AuthResource::Skill(project_id, Some(id)))?;
+        Audit::record_action_if_unset("skill.update");
+        Audit::record_project_id(project_id);
+        Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.project_id != Some(project_id) {
@@ -506,6 +513,9 @@ impl Skills {
         project_id: ProjectId,
     ) -> Result<(), SkillError> {
         sub.can(AuthVerb::Delete, AuthResource::Skill(project_id, Some(id)))?;
+        Audit::record_action_if_unset("skill.delete");
+        Audit::record_project_id(project_id);
+        Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.project_id != Some(project_id) {
@@ -536,6 +546,8 @@ impl Skills {
         body: String,
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Create, AuthResource::SpaceSkill(space_id, None))?;
+        Audit::record_action_if_unset("skill.create_in_space");
+        Audit::record_space_id(space_id);
         if name.trim().is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
@@ -551,6 +563,7 @@ impl Skills {
 
         let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
         let skill = self.repo.create_in_op(&mut op, new).await?;
+        Audit::record_skill_id(skill.id);
         op.commit().await?;
         Ok(skill)
     }
@@ -569,6 +582,9 @@ impl Skills {
             AuthVerb::Update,
             AuthResource::SpaceSkill(space_id, Some(id)),
         )?;
+        Audit::record_action_if_unset("skill.update_in_space");
+        Audit::record_space_id(space_id);
+        Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
         let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.space_id != Some(space_id) {
@@ -596,6 +612,9 @@ impl Skills {
             AuthVerb::Delete,
             AuthResource::SpaceSkill(space_id, Some(id)),
         )?;
+        Audit::record_action_if_unset("skill.delete_in_space");
+        Audit::record_space_id(space_id);
+        Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
         let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.space_id != Some(space_id) {

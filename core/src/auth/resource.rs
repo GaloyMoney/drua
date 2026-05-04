@@ -18,10 +18,10 @@ pub enum AuthResource {
     McpCreds(Option<McpCredsId>),
     Note(ProjectId, Option<NoteId>),
     Skill(ProjectId, Option<SkillId>),
-    /// Space-owned skill. Authority follows the parent space — if the
-    /// caller can update the space, they can write its skills. Agents
-    /// resolving a space's skills go through the project's mount, not
-    /// through this resource.
+    /// Space-owned skill. Writes are admin-only today: `project_id()`
+    /// returns `None` so `ProjectAdmin` falls through (no `permits` rule
+    /// for non-admin scopes). Reads happen indirectly via the project's
+    /// `mounted_spaces`, resolved in `Skills::skills_context_for_scope`.
     SpaceSkill(SpaceId, Option<SkillId>),
     Workflow(ProjectId, Option<WorkflowDefinitionId>),
     AuditLog(ProjectId),
