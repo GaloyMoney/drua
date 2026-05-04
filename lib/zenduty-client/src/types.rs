@@ -80,6 +80,8 @@ pub struct Incident {
     #[serde(default)]
     pub escalation_policy: Option<serde_json::Value>,
     #[serde(default)]
+    pub escalation_policy_object: Option<serde_json::Value>,
+    #[serde(default)]
     pub tags: Vec<serde_json::Value>,
     #[serde(default)]
     pub merged_with: Option<serde_json::Value>,
@@ -92,15 +94,17 @@ pub struct Incident {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncidentNote {
     #[serde(default)]
-    pub id: Option<u64>,
-    #[serde(default)]
     pub unique_id: Option<String>,
     #[serde(default)]
     pub note: String,
     #[serde(default)]
-    pub user: Option<serde_json::Value>,
+    pub user: Option<String>,
     #[serde(default)]
-    pub time_created: Option<String>,
+    pub user_name: Option<String>,
+    #[serde(default)]
+    pub incident: Option<u64>,
+    #[serde(default)]
+    pub creation_date: Option<String>,
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }

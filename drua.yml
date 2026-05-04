@@ -55,9 +55,9 @@ toolsets:
     url: https://ci.galoy.io
     team: dev
   zenduty:
-    enabled: false
+    enabled: true
     url: ''
-    default_team: ''
+    default_team: 'c634c1cb-405d-451f-a83b-23fa06475e89'
   mcp_upstreams:
     - name: honeycomb
       url: https://mcp.honeycomb.io/mcp

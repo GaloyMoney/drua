@@ -74,13 +74,13 @@ impl ZendutyClient {
         Self::handle_response(resp).await
     }
 
-    async fn put_json<T, B>(&self, path: &str, body: &B) -> Result<T, ZendutyError>
+    async fn patch_json<T, B>(&self, path: &str, body: &B) -> Result<T, ZendutyError>
     where
         T: serde::de::DeserializeOwned,
         B: Serialize + ?Sized,
     {
         let url = self.api_url(path)?;
-        let resp = self.http.put(url).json(body).send().await?;
+        let resp = self.http.patch(url).json(body).send().await?;
         Self::handle_response(resp).await
     }
 
@@ -127,14 +127,13 @@ impl ZendutyClient {
         if let Some(page_size) = params.page_size {
             q.push(("page_size", page_size.to_string()));
         }
-        let page: Page<Incident> = self.get_with_query("/api/account/incidents/", &q).await?;
+        let page: Page<Incident> = self.get_with_query("/api/incidents/", &q).await?;
         Ok(page.into_results())
     }
 
     #[tracing::instrument(name = "zenduty_client.get_incident", skip_all)]
     pub async fn get_incident(&self, incident_id: &str) -> Result<Incident, ZendutyError> {
-        self.get(&format!("/api/account/incidents/{incident_id}/"))
-            .await
+        self.get(&format!("/api/incidents/{incident_id}/")).await
     }
 
     #[tracing::instrument(name = "zenduty_client.add_incident_note", skip_all)]
@@ -144,11 +143,8 @@ impl ZendutyClient {
         note: &str,
     ) -> Result<IncidentNote, ZendutyError> {
         let body = NewIncidentNote { note };
-        self.post_json(
-            &format!("/api/account/incidents/{incident_id}/notes/"),
-            &body,
-        )
-        .await
+        self.post_json(&format!("/api/incidents/{incident_id}/note/"), &body)
+            .await
     }
 
     #[tracing::instrument(name = "zenduty_client.list_incident_notes", skip_all)]
@@ -157,7 +153,7 @@ impl ZendutyClient {
         incident_id: &str,
     ) -> Result<Vec<IncidentNote>, ZendutyError> {
         let page: Page<IncidentNote> = self
-            .get(&format!("/api/account/incidents/{incident_id}/notes/"))
+            .get(&format!("/api/incidents/{incident_id}/note/"))
             .await?;
         Ok(page.into_results())
     }
@@ -171,7 +167,7 @@ impl ZendutyClient {
         let body = IncidentStatusUpdate {
             status: Some(status.as_u8()),
         };
-        self.put_json(&format!("/api/account/incidents/{incident_id}/"), &body)
+        self.patch_json(&format!("/api/incidents/{incident_id}/"), &body)
             .await
     }
 

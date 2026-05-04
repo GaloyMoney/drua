@@ -138,7 +138,8 @@ struct IncidentDetailOutput {
 struct NoteOutput {
     unique_id: Option<String>,
     note: String,
-    time_created: Option<String>,
+    user_name: Option<String>,
+    creation_date: Option<String>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -349,7 +350,7 @@ impl SearchableToolSet for ZendutyToolSet {
                     service: i.service_object.or(i.service),
                     assigned_to: i.assigned_to,
                     team: i.team,
-                    escalation_policy: i.escalation_policy,
+                    escalation_policy: i.escalation_policy_object.or(i.escalation_policy),
                     tags: i.tags,
                 };
                 Ok(typed_result(&out))
@@ -363,7 +364,8 @@ impl SearchableToolSet for ZendutyToolSet {
                 let out = NoteOutput {
                     unique_id: note.unique_id,
                     note: note.note,
-                    time_created: note.time_created,
+                    user_name: note.user_name,
+                    creation_date: note.creation_date,
                 };
                 Ok(typed_result(&out))
             }
@@ -375,7 +377,8 @@ impl SearchableToolSet for ZendutyToolSet {
                     .map(|n| NoteOutput {
                         unique_id: n.unique_id,
                         note: n.note,
-                        time_created: n.time_created,
+                        user_name: n.user_name,
+                        creation_date: n.creation_date,
                     })
                     .collect();
                 let out = serde_json::json!({ "notes": mapped });
@@ -404,7 +407,7 @@ impl SearchableToolSet for ZendutyToolSet {
                     service: i.service_object.or(i.service),
                     assigned_to: i.assigned_to,
                     team: i.team,
-                    escalation_policy: i.escalation_policy,
+                    escalation_policy: i.escalation_policy_object.or(i.escalation_policy),
                     tags: i.tags,
                 };
                 Ok(typed_result(&out))
