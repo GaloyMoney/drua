@@ -1,8 +1,8 @@
 mod config;
 mod error;
 mod filter;
+mod inspect;
 pub mod searchable;
-mod space_inspect;
 pub mod top_level;
 mod traits;
 

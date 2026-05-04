@@ -1,7 +1,11 @@
-//! Shared helpers for space file-ops dispatch from the tool layer
-//! (top-level `spaces` and admin `drua_admin_spaces`). The actual auth
-//! gate lives in `Projects::space_for_subject` (called via `SpaceFs`);
-//! this module just adapts request shapes and formats responses.
+//! Shared helpers for inspect-style tool dispatch:
+//! - `InspectTool` enum (Read|Ls|Grep|Glob), shared by sandbox and
+//!   space inspect commands across top-level and admin toolsets.
+//! - `parse_view_range`: zero-based `{offset, limit}` → 1-based
+//!   `(start, end)` view-range conversion. Also reused by sandbox
+//!   `build_read_request` to construct the editor `view_range` arg.
+//! - `dispatch_inspect` / `require_space_op`: space-specific helpers
+//!   that funnel through `SpaceFs`.
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;

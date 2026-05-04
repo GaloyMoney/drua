@@ -374,10 +374,7 @@ impl SpaceFs {
 
 /// Filter `blobs` (rel-path, bytes) by a glob pattern and return the
 /// matching paths, sorted.
-fn glob_blobs(
-    blobs: Vec<(String, Vec<u8>)>,
-    pattern: &str,
-) -> Result<Vec<String>, SpaceError> {
+fn glob_blobs(blobs: Vec<(String, Vec<u8>)>, pattern: &str) -> Result<Vec<String>, SpaceError> {
     let regex = glob_to_regex(pattern)
         .map_err(|e| io_err(format!("invalid glob pattern '{pattern}': {e}")))?;
     let mut out: Vec<String> = blobs
@@ -391,10 +388,7 @@ fn glob_blobs(
 
 /// Run `grep` over already-walked blobs. Mirrors the curated subset of
 /// flags the `Grep` top-level tool accepts.
-fn grep_blobs(
-    blobs: Vec<(String, Vec<u8>)>,
-    args: &Value,
-) -> Result<String, SpaceError> {
+fn grep_blobs(blobs: Vec<(String, Vec<u8>)>, args: &Value) -> Result<String, SpaceError> {
     let pattern = args
         .get("pattern")
         .and_then(|v| v.as_str())

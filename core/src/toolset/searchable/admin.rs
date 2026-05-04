@@ -23,7 +23,7 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandb
 use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
-use super::super::space_inspect::{dispatch_inspect, require_space_op, InspectTool};
+use super::super::inspect::{dispatch_inspect, parse_view_range, require_space_op, InspectTool};
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -846,19 +846,7 @@ fn build_read_request(args: &JsonObject) -> Result<ExecuteRequest, ToolSetsError
         "path": path,
     });
 
-    let offset = args
-        .get("offset")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
-
-    if offset.is_some() || limit.is_some() {
-        let start = offset.unwrap_or(0) + 1;
-        let end = match limit {
-            Some(l) => start + l - 1,
-            None => -1,
-        };
+    if let Some((start, end)) = parse_view_range(args) {
         input["view_range"] = serde_json::json!([start, end]);
     }
 

@@ -12,7 +12,7 @@ use crate::project::Projects;
 use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
-use super::super::space_inspect::{dispatch_inspect, require_space_op, InspectTool};
+use super::super::inspect::{dispatch_inspect, require_space_op, InspectTool};
 use super::super::traits::TopLevelTool;
 use super::{parse_params, OutputSchema};
 
@@ -169,11 +169,7 @@ pub struct SpacesTool {
 }
 
 impl SpacesTool {
-    pub fn new(
-        spaces: Arc<AuthedSpaces>,
-        projects: Arc<Projects>,
-        space_fs: Arc<SpaceFs>,
-    ) -> Self {
+    pub fn new(spaces: Arc<AuthedSpaces>, projects: Arc<Projects>, space_fs: Arc<SpaceFs>) -> Self {
         Self {
             spaces,
             projects,
@@ -384,4 +380,3 @@ impl TopLevelTool for SpacesTool {
         Ok(SPACES_OUTPUT.success(text, &out))
     }
 }
-
