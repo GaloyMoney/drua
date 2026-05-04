@@ -12,7 +12,7 @@ use crate::git::GitEngine;
 use crate::importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 use crate::SearchableFields;
 
-const SPACE_DOC_TYPE: DocType = DocType::new("space_file");
+pub const SPACE_DOC_TYPE: DocType = DocType::new("space_file");
 
 /// UUID v5 namespace for deriving deterministic doc_ids from `<slug>/<rel_path>`.
 const SPACE_DOC_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([

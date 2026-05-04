@@ -3,11 +3,11 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
 
-use drua_library::Space;
+use drua_library::{Space, SPACE_DOC_TYPE};
 
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::AuthedSpaces;
+use crate::library::{AuthedSearch, AuthedSpaces};
 use crate::project::Projects;
 use crate::space_fs::SpaceFs;
 
@@ -15,6 +15,10 @@ use super::super::error::ToolSetsError;
 use super::super::inspect::{dispatch_edit, dispatch_view, EditOp, ReadOp};
 use super::super::traits::TopLevelTool;
 use super::{parse_params, OutputSchema};
+
+fn default_search_limit() -> usize {
+    10
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -54,6 +58,15 @@ enum SpacesParams {
         #[serde(default)]
         op_args: Option<JsonObject>,
     },
+    /// Hybrid FTS + semantic search restricted to a single mounted
+    /// space. Mirrors `notes.search` / skill `use_skill search`, but
+    /// scoped to `space_file` rows tagged with this space's id.
+    Search {
+        slug: String,
+        query: String,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+    },
 }
 
 impl SpacesParams {
@@ -65,6 +78,7 @@ impl SpacesParams {
             Self::List { .. } => "list",
             Self::View { .. } => "view",
             Self::Edit { .. } => "edit",
+            Self::Search { .. } => "search",
         }
     }
 }
@@ -94,6 +108,19 @@ struct SpacesOutput {
     space: Option<SpaceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     spaces: Option<Vec<SpaceSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    results: Option<Vec<SpaceSearchHit>>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct SpaceSearchHit {
+    doc_id: String,
+    title: String,
+    preview: String,
+    score: f64,
+    /// Path inside `spaces/<slug>/`, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relative_path: Option<String>,
 }
 
 static SPACES_OUTPUT: LazyLock<OutputSchema<SpacesOutput>> = LazyLock::new(OutputSchema::new);
@@ -104,7 +131,7 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "mount", "unmount", "list", "view", "edit"],
+                "enum": ["create", "mount", "unmount", "list", "view", "edit", "search"],
                 "description": "Which spaces operation to perform."
             },
             "slug": {
@@ -127,6 +154,15 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "op_args": {
                 "type": "object",
                 "description": "Sub-op arguments. view: read/ls take {path, ...}; grep/glob take {pattern, path?, ...}. edit: write {path, content}; str_replace {path, old_str, new_str}; insert {path, line, text}; delete {path}; move {from, to}."
+            },
+            "query": {
+                "type": "string",
+                "description": "Search query — keywords or natural language (search command)."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of search results (search command, default 10)."
             }
         },
         "required": ["command"],
@@ -138,14 +174,21 @@ pub struct SpacesTool {
     spaces: Arc<AuthedSpaces>,
     projects: Arc<Projects>,
     space_fs: Arc<SpaceFs>,
+    search: Arc<AuthedSearch>,
 }
 
 impl SpacesTool {
-    pub fn new(spaces: Arc<AuthedSpaces>, projects: Arc<Projects>, space_fs: Arc<SpaceFs>) -> Self {
+    pub fn new(
+        spaces: Arc<AuthedSpaces>,
+        projects: Arc<Projects>,
+        space_fs: Arc<SpaceFs>,
+        search: Arc<AuthedSearch>,
+    ) -> Self {
         Self {
             spaces,
             projects,
             space_fs,
+            search,
         }
     }
 }
@@ -172,9 +215,12 @@ impl TopLevelTool for SpacesTool {
          op=write {path, content} (full overwrite), \
          str_replace {path, old_str, new_str} (old_str must occur once), \
          insert {path, line, text} (line is 1-based, insert AFTER; 0 prepends), \
-         delete {path}, move {from, to}). \
-         File ops are gated on the slug being mounted on the caller's \
-         project. Use path=\"\" for the space root."
+         delete {path}, move {from, to}), \
+         `search` (hybrid FTS + semantic search over the files in a \
+         single mounted space; requires `slug`, `query`; optional \
+         `limit` defaults to 10). \
+         File ops and search are gated on the slug being mounted on \
+         the caller's project. Use path=\"\" for the space root."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -239,7 +285,7 @@ impl TopLevelTool for SpacesTool {
                 let out = SpacesOutput {
                     command: "create".to_string(),
                     space: Some(SpaceSummary::from(&space)),
-                    spaces: None,
+                    ..Default::default()
                 };
                 (text, out)
             }
@@ -256,7 +302,7 @@ impl TopLevelTool for SpacesTool {
                 let out = SpacesOutput {
                     command: "mount".to_string(),
                     space: Some(SpaceSummary::from(&space)),
-                    spaces: None,
+                    ..Default::default()
                 };
                 (text, out)
             }
@@ -277,7 +323,7 @@ impl TopLevelTool for SpacesTool {
                 let out = SpacesOutput {
                     command: "unmount".to_string(),
                     space: Some(SpaceSummary::from(&space)),
-                    spaces: None,
+                    ..Default::default()
                 };
                 (text, out)
             }
@@ -314,13 +360,122 @@ impl TopLevelTool for SpacesTool {
                 };
                 let out = SpacesOutput {
                     command: "list".to_string(),
-                    space: None,
                     spaces: Some(summaries),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::Search { slug, query, limit } => {
+                let space = self.projects.space_for_subject(subject, &slug).await?;
+                let hits = self
+                    .search
+                    .search(
+                        subject,
+                        &[uuid::Uuid::from(space.id)],
+                        &query,
+                        &[SPACE_DOC_TYPE],
+                        limit,
+                    )
+                    .await?;
+
+                let total = hits.len();
+                let mut entries: Vec<String> = Vec::with_capacity(total);
+                let mut results: Vec<SpaceSearchHit> = Vec::with_capacity(total);
+                for hit in hits {
+                    let preview: String = hit.fields.content.chars().take(200).collect();
+                    let path = hit.fields.path.unwrap_or_default();
+                    entries.push(format!(
+                        "path: {path}\ntitle: {}\npreview: {preview}",
+                        hit.fields.name,
+                    ));
+                    results.push(SpaceSearchHit {
+                        doc_id: hit.fields.doc_id.to_string(),
+                        title: hit.fields.name,
+                        preview,
+                        score: hit.score,
+                        relative_path: (!path.is_empty()).then_some(path),
+                    });
+                }
+                let text = if total == 0 {
+                    format!("No matches in space '{}' for query.", space.slug)
+                } else {
+                    format!(
+                        "Found {total} hit(s) in space '{}':\n\n{}",
+                        space.slug,
+                        entries.join("\n---\n"),
+                    )
+                };
+                let out = SpacesOutput {
+                    command: "search".to_string(),
+                    space: Some(SpaceSummary::from(&space)),
+                    results: Some(results),
+                    ..Default::default()
                 };
                 (text, out)
             }
         };
 
         Ok(SPACES_OUTPUT.success(text, &out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_search_minimal() {
+        let json = serde_json::json!({
+            "command": "search",
+            "slug": "ops",
+            "query": "deploy"
+        });
+        let params: SpacesParams = serde_json::from_value(json).unwrap();
+        match params {
+            SpacesParams::Search { slug, query, limit } => {
+                assert_eq!(slug, "ops");
+                assert_eq!(query, "deploy");
+                assert_eq!(limit, default_search_limit());
+            }
+            _ => panic!("expected Search variant"),
+        }
+    }
+
+    #[test]
+    fn parse_search_with_limit() {
+        let json = serde_json::json!({
+            "command": "search",
+            "slug": "ops",
+            "query": "deploy",
+            "limit": 25
+        });
+        let params: SpacesParams = serde_json::from_value(json).unwrap();
+        match params {
+            SpacesParams::Search { limit, .. } => assert_eq!(limit, 25),
+            _ => panic!("expected Search variant"),
+        }
+    }
+
+    #[test]
+    fn search_command_name_matches_audit_action() {
+        let p = SpacesParams::Search {
+            slug: "ops".into(),
+            query: "x".into(),
+            limit: 1,
+        };
+        assert_eq!(p.command_name(), "search");
+    }
+
+    #[test]
+    fn schema_advertises_search_command() {
+        let schema = &*SPACES_SCHEMA;
+        let cmd_enum = schema
+            .pointer("/properties/command/enum")
+            .expect("command.enum")
+            .as_array()
+            .expect("array");
+        assert!(cmd_enum.iter().any(|v| v == "search"));
+        assert!(schema.pointer("/properties/query").is_some());
+        assert!(schema.pointer("/properties/limit").is_some());
     }
 }
