@@ -262,6 +262,7 @@ impl App {
             Arc::clone(&spaces),
             Arc::clone(&projects),
             Arc::clone(&space_fs),
+            Arc::clone(&search),
         ));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));

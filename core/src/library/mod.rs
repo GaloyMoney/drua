@@ -4,7 +4,7 @@ pub use error::LibraryError;
 
 pub use drua_library::{
     DirEntry, DocType, GitFileHash, NewSpace, SearchHit, SearchableFields, Space, SpaceError,
-    SpaceEvent, Spaces, WriteOp,
+    SpaceEvent, Spaces, WriteOp, SPACE_DOC_TYPE,
 };
 
 use crate::audit::Audit;

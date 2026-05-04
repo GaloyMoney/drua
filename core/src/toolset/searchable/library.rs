@@ -1,6 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
-use drua_library::{DocType, SearchHit, SearchableFields};
+use drua_library::{DocType, SearchHit, SearchableFields, SPACE_DOC_TYPE};
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 use serde::Deserialize;
 
@@ -12,8 +12,6 @@ use crate::skill::SKILL_DOC_TYPE;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
-
-const SPACE_FILE_DOC_TYPE_STR: &str = "space_file";
 
 /// Tool-shaped global search hit. Translated from `drua_library::SearchHit`
 /// at the toolset boundary.
@@ -51,7 +49,7 @@ fn hit_to_global(hit: SearchHit) -> GlobalSearchHit {
 }
 
 fn fields_to_file(fields: SearchableFields) -> LibraryFile {
-    let is_space = fields.doc_type.as_str() == SPACE_FILE_DOC_TYPE_STR;
+    let is_space = fields.doc_type == SPACE_DOC_TYPE;
     let (space_slug, relative_path, project_id) = if is_space {
         (fields.scope_slug, fields.path, None)
     } else {
@@ -125,7 +123,7 @@ impl From<LibraryFileType> for DocType {
         match t {
             LibraryFileType::Skill => SKILL_DOC_TYPE,
             LibraryFileType::Note => NOTE_DOC_TYPE,
-            LibraryFileType::SpaceFile => DocType::new(SPACE_FILE_DOC_TYPE_STR),
+            LibraryFileType::SpaceFile => SPACE_DOC_TYPE,
         }
     }
 }
@@ -135,10 +133,12 @@ impl From<LibraryFileType> for DocType {
 /// fallback.
 impl From<DocType> for LibraryFileType {
     fn from(t: DocType) -> Self {
-        match t.as_str() {
-            "skill" => LibraryFileType::Skill,
-            "space_file" => LibraryFileType::SpaceFile,
-            _ => LibraryFileType::Note,
+        if t == SKILL_DOC_TYPE {
+            LibraryFileType::Skill
+        } else if t == SPACE_DOC_TYPE {
+            LibraryFileType::SpaceFile
+        } else {
+            LibraryFileType::Note
         }
     }
 }
@@ -329,11 +329,7 @@ impl LibraryToolSet {
         let doc_types: Vec<DocType> = if let Some(types) = params.types {
             types.into_iter().map(Into::into).collect()
         } else {
-            vec![
-                SKILL_DOC_TYPE,
-                NOTE_DOC_TYPE,
-                DocType::new(SPACE_FILE_DOC_TYPE_STR),
-            ]
+            vec![SKILL_DOC_TYPE, NOTE_DOC_TYPE, SPACE_DOC_TYPE]
         };
 
         let raw = self
@@ -607,7 +603,7 @@ mod tests {
     fn library_file_output_carries_space_metadata() {
         let f = LibraryFile {
             doc_id: uuid::Uuid::new_v4(),
-            doc_type: DocType::new(SPACE_FILE_DOC_TYPE_STR),
+            doc_type: SPACE_DOC_TYPE,
             project_id: None,
             title: "Incident playbook".into(),
             body: "body".into(),
