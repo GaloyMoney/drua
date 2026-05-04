@@ -442,6 +442,8 @@ enum NoteCommand {
     List,
     Get,
     Update,
+    Pin,
+    Unpin,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -452,7 +454,7 @@ struct NoteParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`.
+    /// Required for `get`, `update`, `pin`, `unpin`.
     #[schemars(with = "Option<uuid::Uuid>")]
     note_id: Option<NoteId>,
 
@@ -545,7 +547,9 @@ static TOOLS: &[ToolDef] = &[
                        `list` (requires `project_id`; optional `limit`), \
                        `get` (requires `note_id`, `project_id`), \
                        `update` (requires `note_id`, `project_id`, `title`, \
-                       `content`; optional `tags`).",
+                       `content`; optional `tags`), \
+                       `pin` (requires `note_id`, `project_id`; idempotent), \
+                       `unpin` (requires `note_id`, `project_id`; idempotent).",
         schema: &NOTE_SCHEMA,
     },
     ToolDef {
@@ -1315,6 +1319,42 @@ impl AdminToolSet {
                 let note = self
                     .notes
                     .update(subject, project_id, note_id, title, content, params.tags)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, false,
+                ))]))
+            }
+
+            NoteCommand::Pin => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for pin".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for pin".to_string())
+                })?;
+                Audit::record_action("note.pin");
+                let note = self
+                    .notes
+                    .pin(subject, project_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_note(
+                    &note, false,
+                ))]))
+            }
+
+            NoteCommand::Unpin => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for unpin".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for unpin".to_string())
+                })?;
+                Audit::record_action("note.unpin");
+                let note = self
+                    .notes
+                    .unpin(subject, project_id, note_id)
                     .await
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_note(
@@ -2234,9 +2274,36 @@ mod tests {
     }
 
     #[test]
+    fn note_pin_takes_ids() {
+        let note_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "pin",
+            "note_id": note_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Pin));
+        assert_eq!(p.note_id.map(uuid::Uuid::from), Some(note_id));
+    }
+
+    #[test]
+    fn note_unpin_takes_ids() {
+        let note_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: NoteParams = parse_params(args(serde_json::json!({
+            "command": "unpin",
+            "note_id": note_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, NoteCommand::Unpin));
+    }
+
+    #[test]
     fn note_schema_includes_command_enum() {
         let s = serde_json::to_string(&*NOTE_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update"] {
+        for v in ["create", "list", "get", "update", "pin", "unpin"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }
