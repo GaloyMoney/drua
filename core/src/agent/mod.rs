@@ -9,9 +9,10 @@ mod system_prompt;
 
 pub use scope::AgentScope;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::audit::Audit;
+use crate::library::SpaceMounts;
 use crate::note::Notes;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
@@ -73,10 +74,12 @@ pub struct Agents {
     sandboxes: Arc<Sandboxes>,
     skills: Arc<Skills>,
     notes: Option<Arc<Notes>>,
-    /// Late-bound: `Projects::new` takes `Arc<Agents>`, so we set this
-    /// after both are constructed via `Agents::set_projects`. Used only
-    /// to render the dynamic `<spaces>` system block.
-    projects: Arc<OnceLock<Arc<crate::project::Projects>>>,
+    /// Read-only facade for the project↔space mount relationship.
+    /// Used to derive `AgentScope.mounted_space_ids` and to render the
+    /// `<spaces>` system block. Holds its own `ProjectRepo` + library
+    /// `AuthedSpaces` internally — no upward dep on the `Projects`
+    /// service, so the previous `OnceLock<Projects>` cycle is gone.
+    space_mounts: SpaceMounts,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -96,6 +99,7 @@ impl Agents {
         skills: Arc<Skills>,
         notes: Option<Arc<Notes>>,
         context_generation: ContextGeneration,
+        space_mounts: SpaceMounts,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),
@@ -103,21 +107,13 @@ impl Agents {
             sandboxes,
             skills,
             notes,
-            projects: Arc::new(OnceLock::new()),
+            space_mounts,
             config,
             toolsets,
             prompt_requests,
             context_generation,
             context_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
-    }
-
-    /// Late-binds the `Projects` service so the dynamic `<spaces>`
-    /// block can be rendered. `Projects::new` takes `Arc<Agents>`, so
-    /// the cyclic dependency forces this two-step wiring at app init.
-    /// Idempotent — second call is a no-op.
-    pub fn set_projects(&self, projects: Arc<crate::project::Projects>) {
-        let _ = self.projects.set(projects);
     }
 
     /// Hot-path lookup of dynamic system blocks for a specific agent. Reads
@@ -150,43 +146,31 @@ impl Agents {
                 .map(|text| session::message::SystemBlock::Notes { text }),
             None => None,
         };
-        let skills_block = match self.projects.get() {
-            Some(projects) => match scope::AgentScope::for_agent(agent, projects).await {
-                Ok(scope) => self
-                    .skills
-                    .skills_context_for_scope(&scope)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|text| session::message::SystemBlock::Skills { text }),
-                Err(e) => {
-                    tracing::warn!(error = %e, "AgentScope::for_agent failed; rendering skills block without space tier");
-                    self.skills
-                        .skills_context_for_agent(project_id, agent.attached_sandbox_id())
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|text| session::message::SystemBlock::Skills { text })
-                }
-            },
-            // Pre-Projects-wired (test) path: same single-tier fallback.
-            None => self
+        let skills_block = match scope::AgentScope::for_agent(agent, &self.space_mounts).await {
+            Ok(scope) => self
                 .skills
-                .skills_context_for_agent(project_id, agent.attached_sandbox_id())
+                .skills_context_for_scope(&scope)
                 .await
                 .ok()
                 .flatten()
                 .map(|text| session::message::SystemBlock::Skills { text }),
+            Err(e) => {
+                tracing::warn!(error = %e, "AgentScope::for_agent failed; rendering skills block without space tier");
+                self.skills
+                    .skills_context_for_agent(project_id, agent.attached_sandbox_id())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|text| session::message::SystemBlock::Skills { text })
+            }
         };
-        let spaces_block = match self.projects.get() {
-            Some(projects) => projects
-                .spaces_context_for_project(project_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|text| session::message::SystemBlock::Spaces { text }),
-            None => None,
-        };
+        let spaces_block = self
+            .space_mounts
+            .spaces_block_for_project(project_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|text| session::message::SystemBlock::Spaces { text });
 
         let entry = CachedAgentContext {
             generation: current_gen,
@@ -434,25 +418,16 @@ impl Agents {
             None
         };
 
-        let initial_skills = match self.projects.get() {
-            Some(projects) => {
-                match scope::AgentScope::for_agent(&agent, projects).await {
-                    Ok(mut scope) => {
-                        // Reflect the (just-applied) attachment in the
-                        // initial scope — `attached_sandbox_id()` reads
-                        // the entity, which we updated above.
-                        scope.attached_sandbox_id = initial_sandbox_id;
-                        self.skills.skills_context_for_scope(&scope).await
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "AgentScope::for_agent failed at create; rendering initial skills block without space tier");
-                        self.skills
-                            .skills_context_for_agent(project_id, initial_sandbox_id)
-                            .await
-                    }
-                }
+        let initial_skills = match scope::AgentScope::for_agent(&agent, &self.space_mounts).await {
+            Ok(mut scope) => {
+                // Reflect the (just-applied) attachment in the initial
+                // scope — `attached_sandbox_id()` reads the entity,
+                // which we updated above.
+                scope.attached_sandbox_id = initial_sandbox_id;
+                self.skills.skills_context_for_scope(&scope).await
             }
-            None => {
+            Err(e) => {
+                tracing::warn!(error = %e, "AgentScope::for_agent failed at create; rendering initial skills block without space tier");
                 self.skills
                     .skills_context_for_agent(project_id, initial_sandbox_id)
                     .await
@@ -464,13 +439,14 @@ impl Agents {
             });
         }
 
-        if let Some(projects) = self.projects.get() {
-            if let Ok(Some(spaces_content)) = projects.spaces_context_for_project(project_id).await
-            {
-                system_blocks.push(session::message::SystemBlock::Spaces {
-                    text: spaces_content,
-                });
-            }
+        if let Ok(Some(spaces_content)) = self
+            .space_mounts
+            .spaces_block_for_project(project_id)
+            .await
+        {
+            system_blocks.push(session::message::SystemBlock::Spaces {
+                text: spaces_content,
+            });
         }
 
         let session_model_defaults = ModelDefaults {

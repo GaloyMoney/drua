@@ -200,6 +200,15 @@ impl App {
             context_generation.clone(),
         ));
 
+        // Read facade for the project↔space mount relationship. Holds its
+        // own `ProjectRepo` + `AuthedSpaces`; no upward dep on `Projects`,
+        // so `Agents` can derive `AgentScope` without the old
+        // `set_projects` cycle workaround.
+        let space_mounts = library::SpaceMounts::new(
+            project::repo::ProjectRepo::new(pool),
+            (*spaces).clone(),
+        );
+
         let agents = Arc::new(Agents::new(
             pool,
             config.agents,
@@ -209,6 +218,7 @@ impl App {
             Arc::clone(&skills),
             Some(Arc::clone(&notes)),
             context_generation.clone(),
+            space_mounts,
         ));
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
@@ -236,9 +246,6 @@ impl App {
             Arc::clone(&users),
             context_generation.clone(),
         ));
-        // Late-binding: Agents needs Projects to render the dynamic
-        // `<spaces>` system block, but Projects::new takes Arc<Agents>.
-        agents.set_projects(Arc::clone(&projects));
 
         // Sandboxless read facade for `space:<slug>/...` paths. The
         // five read tools branch on the `space:` prefix and dispatch

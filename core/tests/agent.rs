@@ -148,6 +148,7 @@ async fn send_message_round_trip_via_prompt_channel() {
         Arc::clone(&skills),
         None,
         ContextGeneration::new(),
+        drua_core::library::SpaceMounts::empty(),
     );
 
     let sub = AuthSubject::User(UserId::new());
@@ -307,6 +308,7 @@ async fn send_message_dispatches_registered_tool_call() {
         Arc::clone(&skills),
         None,
         ContextGeneration::new(),
+        drua_core::library::SpaceMounts::empty(),
     );
 
     let sub = AuthSubject::User(UserId::new());
