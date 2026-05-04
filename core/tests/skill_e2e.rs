@@ -201,7 +201,7 @@ async fn skill_create_propagates_to_search_and_upstream() {
     let hits = app
         .library()
         .search()
-        .search("deploy", None, &[], &[SKILL_DOC_TYPE], 10)
+        .search("deploy", None, &[], &[SKILL_DOC_TYPE], &[], 10)
         .await
         .expect("search");
     let hit = hits

@@ -334,7 +334,7 @@ impl LibraryToolSet {
 
         let raw = self
             .search
-            .search(subject, &[], &params.query, &doc_types, limit)
+            .search(subject, &[], &params.query, &doc_types, &[], limit)
             .await?;
 
         let hits: Vec<LibrarySearchHit> = raw
