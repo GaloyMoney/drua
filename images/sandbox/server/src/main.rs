@@ -1014,10 +1014,7 @@ mod tests {
         Arc::new(BashSession::new())
     }
 
-    // Verifies the wire-format end of W3C trace-context propagation:
-    // the global propagator extracts the trace_id from a synthesised
-    // `traceparent` header. This is the same extraction the inbound
-    // middleware performs — exercised here without the axum stack.
+    // Same extraction the inbound middleware uses, without the axum stack.
     #[test]
     fn propagator_extracts_traceparent_trace_id() {
         use opentelemetry::propagation::TextMapPropagator;
@@ -1046,9 +1043,7 @@ mod tests {
         assert_eq!(span_ctx.span_id().to_string(), span_id);
     }
 
-    // Smoke-tests the inbound trace-context middleware end-to-end: a
-    // request carrying a `traceparent` header passes through the
-    // middleware without being rejected and reaches the handler.
+    // Smoke: a `traceparent`-bearing request passes the middleware.
     #[tokio::test]
     async fn middleware_accepts_traceparent_header() {
         use axum::body::Body;
