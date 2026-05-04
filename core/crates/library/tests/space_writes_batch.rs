@@ -4,7 +4,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::{library_data_dir, reset_library_db_state, TestRepo};
-use drua_library::{Library, LibraryConfig, SpaceError};
+use drua_library::{CommitAttribution, Library, LibraryConfig, SpaceError};
+
+fn attr() -> CommitAttribution {
+    CommitAttribution::library_default()
+}
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 const FETCH_INTERVAL_MS: u64 = 100;
@@ -105,17 +109,17 @@ async fn concurrent_writes_batch_with_per_op_results() {
 
     library
         .spaces()
-        .create(slug.into(), None)
+        .create(slug.into(), None, attr())
         .await
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "a.md", "alpha bravo charlie\n".into())
+        .write_file(slug, "a.md", "alpha bravo charlie\n".into(), attr())
         .await
         .expect("seed a.md");
     library
         .spaces()
-        .write_file(slug, "c.md", "to be deleted\n".into())
+        .write_file(slug, "c.md", "to be deleted\n".into(), attr())
         .await
         .expect("seed c.md");
 
@@ -133,18 +137,18 @@ async fn concurrent_writes_batch_with_per_op_results() {
     // them into a single push. Order within the batch follows submission
     // order, so str_replace lands on a.md before insert.
     let (r1, r2, r3, r4, r5, r6) = tokio::join!(
-        async move { s1.write_file(slug, "d.md", "delta\n".into()).await },
+        async move { s1.write_file(slug, "d.md", "delta\n".into(), attr()).await },
         async move {
-            s2.str_replace(slug, "a.md", "bravo".into(), "BRAVO".into())
+            s2.str_replace(slug, "a.md", "bravo".into(), "BRAVO".into(), attr())
                 .await
         },
         async move {
-            s3.str_replace(slug, "missing.md", "x".into(), "y".into())
+            s3.str_replace(slug, "missing.md", "x".into(), "y".into(), attr())
                 .await
         },
-        async move { s4.delete_file(slug, "c.md").await },
-        async move { s5.move_file(slug, "ghost.md", "elsewhere.md").await },
-        async move { s6.insert(slug, "a.md", 1, "appended".into()).await },
+        async move { s4.delete_file(slug, "c.md", attr()).await },
+        async move { s5.move_file(slug, "ghost.md", "elsewhere.md", attr()).await },
+        async move { s6.insert(slug, "a.md", 1, "appended".into(), attr()).await },
     );
 
     r1.expect("write d.md");

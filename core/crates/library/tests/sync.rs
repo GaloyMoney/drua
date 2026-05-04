@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{library_data_dir, reset_library_db_state, TestRepo};
-use drua_library::{Library, LibraryConfig};
+use drua_library::{CommitAttribution, Library, LibraryConfig};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 const FETCH_INTERVAL_MS: u64 = 100;
@@ -47,7 +47,11 @@ async fn space_file_imports_into_search_store() {
     let slug = format!("oncall-{}", uuid::Uuid::new_v4().simple());
     library
         .spaces()
-        .create(slug.clone(), Some("on-call rotation".into()))
+        .create(
+            slug.clone(),
+            Some("on-call rotation".into()),
+            CommitAttribution::library_default(),
+        )
         .await
         .expect("create space");
 

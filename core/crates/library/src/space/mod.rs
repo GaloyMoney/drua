@@ -8,6 +8,7 @@ pub use entity::{NewSpace, Space, SpaceEvent};
 pub use error::*;
 
 use self::repo::SpaceRepo;
+use crate::attribution::CommitAttribution;
 use crate::git::GitEngine;
 use crate::importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 use crate::SearchableFields;
@@ -38,9 +39,12 @@ impl Spaces {
         &self,
         slug: String,
         description: Option<String>,
+        attribution: CommitAttribution,
     ) -> Result<Space, SpaceError> {
         let mut op = self.repo.begin_op().await?;
-        let space = self.create_in_op(&mut op, slug, description).await?;
+        let space = self
+            .create_in_op(&mut op, slug, description, attribution)
+            .await?;
         op.commit().await?;
         Ok(space)
     }
@@ -51,6 +55,7 @@ impl Spaces {
         op: &mut es_entity::DbOp<'_>,
         slug: String,
         description: Option<String>,
+        attribution: CommitAttribution,
     ) -> Result<Space, SpaceError> {
         let mut builder = NewSpace::builder().slug(slug);
         if let Some(desc) = description {
@@ -64,6 +69,7 @@ impl Spaces {
                 format!("spaces/{}/.gitkeep", space.slug),
                 Vec::new(),
                 format!("space: init {}", space.slug),
+                attribution,
             )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))?;
@@ -78,6 +84,7 @@ impl Spaces {
         slug: &str,
         relative_path: &str,
         content: String,
+        attribution: CommitAttribution,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         self.git
@@ -85,6 +92,7 @@ impl Spaces {
                 path,
                 content.into_bytes(),
                 format!("space:{slug}: write {relative_path}"),
+                attribution,
             )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))
@@ -92,10 +100,19 @@ impl Spaces {
 
     /// Removes `spaces/{slug}/{relative_path}`. No-op if absent at HEAD.
     #[tracing::instrument(name = "library.spaces.delete_file", skip_all, fields(%slug, %relative_path))]
-    pub async fn delete_file(&self, slug: &str, relative_path: &str) -> Result<(), SpaceError> {
+    pub async fn delete_file(
+        &self,
+        slug: &str,
+        relative_path: &str,
+        attribution: CommitAttribution,
+    ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         self.git
-            .delete_file(path, format!("space:{slug}: delete {relative_path}"))
+            .delete_file(
+                path,
+                format!("space:{slug}: delete {relative_path}"),
+                attribution,
+            )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))
     }
@@ -109,6 +126,7 @@ impl Spaces {
         relative_path: &str,
         old_str: String,
         new_str: String,
+        attribution: CommitAttribution,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
@@ -139,7 +157,12 @@ impl Spaces {
             ))
         });
         self.git
-            .update_file(path, update, format!("space:{slug}: edit {relative_path}"))
+            .update_file(
+                path,
+                update,
+                format!("space:{slug}: edit {relative_path}"),
+                attribution,
+            )
             .await
             .map_err(|e| match e {
                 crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
@@ -156,6 +179,7 @@ impl Spaces {
         relative_path: &str,
         line_number: usize,
         text: String,
+        attribution: CommitAttribution,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
@@ -186,6 +210,7 @@ impl Spaces {
                 path,
                 update,
                 format!("space:{slug}: insert {relative_path}"),
+                attribution,
             )
             .await
             .map_err(|e| match e {
@@ -302,7 +327,13 @@ impl Spaces {
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
     /// `from` is missing or `to` already exists.
     #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to))]
-    pub async fn move_file(&self, slug: &str, from: &str, to: &str) -> Result<(), SpaceError> {
+    pub async fn move_file(
+        &self,
+        slug: &str,
+        from: &str,
+        to: &str,
+        attribution: CommitAttribution,
+    ) -> Result<(), SpaceError> {
         let from_path = format!("spaces/{slug}/{from}");
         let to_path = format!("spaces/{slug}/{to}");
         self.git
@@ -310,6 +341,7 @@ impl Spaces {
                 from_path,
                 to_path,
                 format!("space:{slug}: move {from} -> {to}"),
+                attribution,
             )
             .await
             .map_err(|e| match e {

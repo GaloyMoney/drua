@@ -20,6 +20,7 @@ use crate::agent::Agents;
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+use crate::user::Users;
 
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
@@ -41,6 +42,7 @@ pub struct Workflows {
     repo: WorkflowDefinitionRepo,
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
+    users: Arc<Users>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
@@ -53,12 +55,14 @@ impl Workflows {
     /// `TriggerCron` job initializers with `jobs`. Cron schedules
     /// persist as job rows, so no startup-recovery is needed — the
     /// poller will pick them up on its first tick.
+    #[allow(clippy::too_many_arguments)]
     pub fn init(
         pool: &sqlx::PgPool,
         library: drua_library::Library,
         skills: Arc<Skills>,
         agents: Arc<Agents>,
         sandboxes: Arc<Sandboxes>,
+        users: Arc<Users>,
         jobs: &mut ::job::Jobs,
     ) -> Self {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
@@ -77,6 +81,7 @@ impl Workflows {
             repo: WorkflowDefinitionRepo::new(pool, library),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
+            users,
             execute_run_spawner,
             cron_spawner,
             jobs: jobs.clone(),
@@ -354,6 +359,7 @@ impl Workflows {
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
         let mut op = self.repo.begin_op().await?;
+        self.users.commit_attribution().await;
         let workflow = self.repo.create_in_op(&mut op, new).await?;
         self.register_cron_in_op(&mut op, &workflow).await?;
         op.commit().await?;
@@ -411,6 +417,7 @@ impl Workflows {
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;
+            self.users.commit_attribution().await;
             self.repo.update_in_op(&mut op, &mut definition).await?;
             let is_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
             if !was_cron && is_cron {

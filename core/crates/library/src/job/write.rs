@@ -3,6 +3,7 @@ use std::sync::Arc;
 use job::{CurrentJob, Job, JobCompletion, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
 
+use crate::attribution::CommitAttribution;
 use crate::git::GitEngine;
 
 pub(crate) const LIBRARY_WRITE_JOB: &str = "library.write";
@@ -48,6 +49,11 @@ pub enum WriteOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LibraryWriteConfig {
     pub op: WriteOp,
+    /// Captured at enqueue time so the rendered author/committer/trailer
+    /// block reflects the originating request even after the persisted
+    /// job is replayed across a process restart.
+    #[serde(default)]
+    pub attribution: CommitAttribution,
 }
 
 pub(crate) struct LibraryWriteJobInitializer {
@@ -76,6 +82,7 @@ impl JobInitializer for LibraryWriteJobInitializer {
         Ok(Box::new(LibraryWriteRunner {
             git: Arc::clone(&self.git),
             op: config.op,
+            attribution: config.attribution,
         }))
     }
 }
@@ -83,6 +90,7 @@ impl JobInitializer for LibraryWriteJobInitializer {
 struct LibraryWriteRunner {
     git: Arc<GitEngine>,
     op: WriteOp,
+    attribution: CommitAttribution,
 }
 
 #[async_trait::async_trait]
@@ -92,6 +100,7 @@ impl JobRunner for LibraryWriteRunner {
         &self,
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+        let attribution = self.attribution.clone();
         match &self.op {
             WriteOp::WriteFile {
                 path,
@@ -99,7 +108,7 @@ impl JobRunner for LibraryWriteRunner {
                 message,
             } => {
                 self.git
-                    .write_file(path.clone(), content.clone(), message.clone())
+                    .write_file(path.clone(), content.clone(), message.clone(), attribution)
                     .await?;
             }
             WriteOp::WriteFileWithRename {
@@ -114,23 +123,28 @@ impl JobRunner for LibraryWriteRunner {
                         new_path.clone(),
                         content.clone(),
                         message.clone(),
+                        attribution,
                     )
                     .await?;
             }
             WriteOp::DeleteFile { path, message } => {
-                self.git.delete_file(path.clone(), message.clone()).await?;
+                self.git
+                    .delete_file(path.clone(), message.clone(), attribution)
+                    .await?;
             }
             WriteOp::DeleteDir { path, message } => {
-                self.git.delete_dir(path.clone(), message.clone()).await?;
+                self.git
+                    .delete_dir(path.clone(), message.clone(), attribution)
+                    .await?;
             }
             WriteOp::Batch { changes, message } => {
                 self.git
-                    .commit_changes(changes.clone(), message.clone())
+                    .commit_changes(changes.clone(), message.clone(), attribution)
                     .await?;
             }
             WriteOp::Move { from, to, message } => {
                 self.git
-                    .move_file(from.clone(), to.clone(), message.clone())
+                    .move_file(from.clone(), to.clone(), message.clone(), attribution)
                     .await?;
             }
         }

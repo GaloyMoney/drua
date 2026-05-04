@@ -23,8 +23,10 @@ use tracing::instrument;
 
 use drua_library::{Space, SpaceError, Spaces};
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::project::{ProjectError, Projects};
+use crate::user::Users;
 
 /// Soft cap on `view_file` to keep tool responses bounded. Larger than
 /// the typical sandbox `text_editor view` ceiling; agents needing more
@@ -75,11 +77,16 @@ struct Resolved {
 pub struct SpaceFs {
     spaces: Arc<Spaces>,
     projects: Arc<Projects>,
+    users: Arc<Users>,
 }
 
 impl SpaceFs {
-    pub fn new(spaces: Arc<Spaces>, projects: Arc<Projects>) -> Self {
-        Self { spaces, projects }
+    pub fn new(spaces: Arc<Spaces>, projects: Arc<Projects>, users: Arc<Users>) -> Self {
+        Self {
+            spaces,
+            projects,
+            users,
+        }
     }
 
     /// Pure peek — does `path` start with the `space:` prefix and have
@@ -183,9 +190,15 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        crate::audit::Audit::record_action_if_unset("space.write_file");
+        Audit::record_action_if_unset("space.write_file");
+        let attribution = self.users.commit_attribution().await;
         self.spaces
-            .write_file(&resolved.space.slug, &resolved.rel_path, content)
+            .write_file(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                content,
+                attribution,
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         Ok(Some(()))
@@ -208,9 +221,16 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        crate::audit::Audit::record_action_if_unset("space.str_replace");
+        Audit::record_action_if_unset("space.str_replace");
+        let attribution = self.users.commit_attribution().await;
         self.spaces
-            .str_replace(&resolved.space.slug, &resolved.rel_path, old_str, new_str)
+            .str_replace(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                old_str,
+                new_str,
+                attribution,
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         Ok(Some(()))
@@ -229,9 +249,16 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        crate::audit::Audit::record_action_if_unset("space.insert");
+        Audit::record_action_if_unset("space.insert");
+        let attribution = self.users.commit_attribution().await;
         self.spaces
-            .insert(&resolved.space.slug, &resolved.rel_path, line_number, text)
+            .insert(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                line_number,
+                text,
+                attribution,
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         Ok(Some(()))
@@ -248,9 +275,10 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        crate::audit::Audit::record_action_if_unset("space.delete_file");
+        Audit::record_action_if_unset("space.delete_file");
+        let attribution = self.users.commit_attribution().await;
         self.spaces
-            .delete_file(&resolved.space.slug, &resolved.rel_path)
+            .delete_file(&resolved.space.slug, &resolved.rel_path, attribution)
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         Ok(Some(()))
@@ -298,9 +326,15 @@ impl SpaceFs {
         }
         let to_rel = normalize_rel_path(to_ref.rel_path);
         Self::validate_rel_path(&to_rel)?;
-        crate::audit::Audit::record_action_if_unset("space.move_file");
+        Audit::record_action_if_unset("space.move_file");
+        let attribution = self.users.commit_attribution().await;
         self.spaces
-            .move_file(&from_resolved.space.slug, &from_resolved.rel_path, &to_rel)
+            .move_file(
+                &from_resolved.space.slug,
+                &from_resolved.rel_path,
+                &to_rel,
+                attribution,
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         Ok(Some(()))

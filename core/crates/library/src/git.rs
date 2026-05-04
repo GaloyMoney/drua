@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::attribution::CommitAttribution;
 use crate::importer::GitFileHash;
 use crate::{GitHubAppTokenProvider, LibraryError};
 
@@ -87,6 +88,7 @@ pub enum BatchOpKind {
 pub struct BatchOp {
     pub commit_message: String,
     pub kind: BatchOpKind,
+    pub attribution: CommitAttribution,
 }
 
 struct QueuedOp {
@@ -398,10 +400,12 @@ impl GitEngine {
         path: String,
         content: Vec<u8>,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Write { path, content },
+            attribution,
         })
         .await
     }
@@ -412,10 +416,12 @@ impl GitEngine {
         &self,
         path: String,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Delete { path },
+            attribution,
         })
         .await
     }
@@ -429,10 +435,12 @@ impl GitEngine {
         path: String,
         update: BatchRmwFn,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Rmw { path, update },
+            attribution,
         })
         .await
     }
@@ -445,10 +453,12 @@ impl GitEngine {
         from: String,
         to: String,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Move { from, to },
+            attribution,
         })
         .await
     }
@@ -463,6 +473,7 @@ impl GitEngine {
         to_path: String,
         content: Vec<u8>,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
@@ -471,6 +482,7 @@ impl GitEngine {
                 to_path,
                 content,
             },
+            attribution,
         })
         .await
     }
@@ -482,10 +494,12 @@ impl GitEngine {
         &self,
         dir_path: String,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::DeleteDir { path: dir_path },
+            attribution,
         })
         .await
     }
@@ -498,6 +512,7 @@ impl GitEngine {
         &self,
         changes: Vec<(String, Option<Vec<u8>>)>,
         commit_message: String,
+        attribution: CommitAttribution,
     ) -> Result<(), LibraryError> {
         if changes.is_empty() {
             return Ok(());
@@ -505,6 +520,7 @@ impl GitEngine {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::MultiFile { changes },
+            attribution,
         })
         .await
     }
@@ -779,14 +795,22 @@ impl GitEngine {
         let new_tree = repo
             .find_tree(new_tree_oid)
             .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
-        let sig = git2::Signature::now("drua-library", "drua-library@local")
-            .map_err(|e| LibraryError::Git(format!("signature: {e}")))?;
+        let author =
+            git2::Signature::now(&op.attribution.author_name, &op.attribution.author_email)
+                .map_err(|e| LibraryError::Git(format!("author signature: {e}")))?;
+        let committer = git2::Signature::now(
+            &op.attribution.committer_name,
+            &op.attribution.committer_email,
+        )
+        .map_err(|e| LibraryError::Git(format!("committer signature: {e}")))?;
+        let mut message = op.commit_message.clone();
+        message.push_str(&op.attribution.render_message_suffix());
         let commit_oid = repo
             .commit(
                 Some("HEAD"),
-                &sig,
-                &sig,
-                &op.commit_message,
+                &author,
+                &committer,
+                &message,
                 &new_tree,
                 &[&parent_commit],
             )

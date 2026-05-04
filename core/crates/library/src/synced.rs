@@ -1,6 +1,7 @@
 use es_entity::operation::hooks::{CommitHook, HookOperation, PreCommitRet};
 use job::{JobId, JobSpawner};
 
+use crate::attribution::CommitAttribution;
 use crate::importer::DocType;
 use crate::job::{LibraryEmbedConfig, LibraryWriteConfig, WriteOp};
 use crate::search::{SearchStore, SearchableFields};
@@ -40,6 +41,7 @@ pub(crate) struct HookEntry {
     pub fields: Option<SearchableFields>,
     pub deletes: Vec<(uuid::Uuid, DocType)>,
     pub write_op: Option<WriteOp>,
+    pub attribution: CommitAttribution,
 }
 
 /// Batches per-transaction library writes. On the per-transaction
@@ -108,6 +110,7 @@ impl CommitHook for LibrarySyncHook {
             if let Some(write_op) = &entry.write_op {
                 let config = LibraryWriteConfig {
                     op: write_op.clone(),
+                    attribution: entry.attribution.clone(),
                 };
                 if let Err(e) = self
                     .write_spawner

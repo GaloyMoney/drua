@@ -23,6 +23,7 @@ use crate::primitives::*;
 use crate::project_secret::ProjectSecrets;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+use crate::user::Users;
 use crate::workflow::Workflows;
 
 #[derive(Clone)]
@@ -37,6 +38,7 @@ pub struct Projects {
     workflows: Arc<Workflows>,
     library: drua_library::Library,
     spaces: AuthedSpaces,
+    users: Arc<Users>,
     context_generation: ContextGeneration,
 }
 
@@ -52,6 +54,7 @@ impl Projects {
         workflows: Arc<Workflows>,
         library: drua_library::Library,
         spaces: AuthedSpaces,
+        users: Arc<Users>,
         context_generation: ContextGeneration,
     ) -> Self {
         let repo = ProjectRepo::new(pool);
@@ -66,6 +69,7 @@ impl Projects {
             workflows,
             library,
             spaces,
+            users,
             context_generation,
         }
     }
@@ -119,6 +123,7 @@ impl Projects {
                 )
             })
             .collect::<Vec<_>>();
+        let attribution = self.users.commit_attribution().await;
         self.library
             .enqueue_write_in_op(
                 &mut op,
@@ -126,6 +131,7 @@ impl Projects {
                     changes: scaffold,
                     message: format!("project: init {name}"),
                 },
+                attribution,
             )
             .await?;
 
@@ -255,6 +261,7 @@ impl Projects {
             tracing::warn!(error = %e, "failed to delete workflows during project delete");
         }
 
+        let attribution = self.users.commit_attribution().await;
         if let Err(e) = self
             .library
             .cleanup_for_scope_in_op(
@@ -262,6 +269,7 @@ impl Projects {
                 uuid::Uuid::from(id),
                 format!("runtime/projects/{}", project.name),
                 format!("project: delete {}", project.name),
+                attribution,
             )
             .await
         {

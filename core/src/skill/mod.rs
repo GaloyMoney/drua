@@ -17,6 +17,7 @@ use tracing::instrument;
 
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
+use crate::user::Users;
 pub use entity::*;
 pub use error::*;
 use repo::*;
@@ -34,6 +35,7 @@ pub struct Skills {
     /// (registered in App init); unused on the forward-only paths.
     #[allow(dead_code)]
     pool: Option<sqlx::PgPool>,
+    users: Option<Arc<Users>>,
     #[allow(dead_code)]
     context_generation: ContextGeneration,
 }
@@ -43,6 +45,7 @@ impl Skills {
         pool: &sqlx::PgPool,
         sandboxes: Arc<Sandboxes>,
         library: drua_library::Library,
+        users: Arc<Users>,
         context_generation: ContextGeneration,
     ) -> Self {
         let repo = SkillRepo::new(pool, library.clone());
@@ -51,7 +54,18 @@ impl Skills {
             sandboxes,
             library: Some(library),
             pool: Some(pool.clone()),
+            users: Some(users),
             context_generation,
+        }
+    }
+
+    /// Side-effect: populates `EventContext` with the rich
+    /// [`drua_library::CommitAttribution`] so post-persist library
+    /// sync hooks pick it up. No-op when `users` isn't wired (test
+    /// constructors via `new_without_library`).
+    async fn populate_attribution(&self) {
+        if let Some(users) = self.users.as_ref() {
+            let _ = users.commit_attribution().await;
         }
     }
 
@@ -351,6 +365,7 @@ impl Skills {
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
 
+        self.populate_attribution().await;
         let skill = self.repo.create(new).await?;
         Ok(skill)
     }
@@ -374,6 +389,7 @@ impl Skills {
             }));
         }
         if skill.update_content(name, description, body).did_execute() {
+            self.populate_attribution().await;
             self.repo.update(&mut skill).await?;
         }
         Ok(skill)
@@ -398,6 +414,7 @@ impl Skills {
             }));
         }
         let mut op = self.repo.begin_op().await?;
+        self.populate_attribution().await;
         self.repo.delete_in_op(&mut op, skill).await?;
         op.commit().await?;
         Ok(())
@@ -497,6 +514,7 @@ impl Skills {
             sandboxes,
             library: None,
             pool: None,
+            users: None,
             context_generation: ContextGeneration::new(),
         }
     }
