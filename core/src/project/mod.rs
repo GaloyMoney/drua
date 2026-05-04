@@ -123,7 +123,7 @@ impl Projects {
                 )
             })
             .collect::<Vec<_>>();
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         self.library
             .enqueue_write_in_op(
                 &mut op,
@@ -261,7 +261,7 @@ impl Projects {
             tracing::warn!(error = %e, "failed to delete workflows during project delete");
         }
 
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         if let Err(e) = self
             .library
             .cleanup_for_scope_in_op(

@@ -191,7 +191,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.write_file");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         self.spaces
             .write_file(
                 &resolved.space.slug,
@@ -222,7 +222,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.str_replace");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         self.spaces
             .str_replace(
                 &resolved.space.slug,
@@ -250,7 +250,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.insert");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         self.spaces
             .insert(
                 &resolved.space.slug,
@@ -276,7 +276,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.delete_file");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         self.spaces
             .delete_file(&resolved.space.slug, &resolved.rel_path, attribution)
             .await
@@ -327,7 +327,7 @@ impl SpaceFs {
         let to_rel = normalize_rel_path(to_ref.rel_path);
         Self::validate_rel_path(&to_rel)?;
         Audit::record_action_if_unset("space.move_file");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         self.spaces
             .move_file(
                 &from_resolved.space.slug,

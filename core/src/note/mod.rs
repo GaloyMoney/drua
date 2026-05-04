@@ -14,7 +14,6 @@ use repo::*;
 
 pub const NOTE_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("note");
 
-use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::note::file::render_note_markdown;
 use crate::primitives::*;
@@ -103,7 +102,7 @@ impl Notes {
 
         // Populate EventContext so the Note's post_persist_hook (which
         // calls library.sync_entity_in_op) picks up rich attribution.
-        Audit::commit_attribution(&self.users).await;
+        self.users.commit_attribution().await;
         let note = self.repo.create_in_op(&mut op, new_note).await?;
         op.commit().await?;
         Ok(note)
@@ -149,7 +148,7 @@ impl Notes {
         let file_hash = drua_library::GitFileHash::new(rendered);
 
         if note.update(title, content, tags, file_hash).did_execute() {
-            Audit::commit_attribution(&self.users).await;
+            self.users.commit_attribution().await;
             self.repo.update_in_op(&mut op, &mut note).await?;
         }
         op.commit().await?;

@@ -15,7 +15,6 @@ use drua_library::SearchHit;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
-use crate::audit::Audit;
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::user::Users;
@@ -66,7 +65,7 @@ impl Skills {
     /// constructors via `new_without_library`).
     async fn populate_attribution(&self) {
         if let Some(users) = self.users.as_ref() {
-            let _ = Audit::commit_attribution(users).await;
+            let _ = users.commit_attribution().await;
         }
     }
 

@@ -17,7 +17,6 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
-use crate::audit::Audit;
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -360,7 +359,7 @@ impl Workflows {
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
         let mut op = self.repo.begin_op().await?;
-        Audit::commit_attribution(&self.users).await;
+        self.users.commit_attribution().await;
         let workflow = self.repo.create_in_op(&mut op, new).await?;
         self.register_cron_in_op(&mut op, &workflow).await?;
         op.commit().await?;
@@ -418,7 +417,7 @@ impl Workflows {
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;
-            Audit::commit_attribution(&self.users).await;
+            self.users.commit_attribution().await;
             self.repo.update_in_op(&mut op, &mut definition).await?;
             let is_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
             if !was_cron && is_cron {

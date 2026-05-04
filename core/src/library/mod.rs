@@ -85,7 +85,7 @@ impl AuthedSpaces {
     ) -> Result<Space, LibraryError> {
         sub.can(AuthVerb::Create, AuthResource::Space(None))?;
         Audit::record_action_if_unset("library.spaces.create");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         let space = self
             .inner
             .create(slug.into(), description, attribution)
@@ -111,7 +111,7 @@ impl AuthedSpaces {
     ) -> Result<Space, LibraryError> {
         sub.can(AuthVerb::Create, AuthResource::Space(None))?;
         Audit::record_action_if_unset("library.spaces.create");
-        let attribution = Audit::commit_attribution(&self.users).await;
+        let attribution = self.users.commit_attribution().await;
         let space = self
             .inner
             .create_in_op(op, slug.into(), description, attribution)
