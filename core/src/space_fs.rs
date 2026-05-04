@@ -93,9 +93,9 @@ impl SpaceFs {
         !slug.is_empty()
     }
 
-    /// Parses `path`, runs the auth gate, validates the rel-path,
-    /// and bundles the resolved `(Space, rel_path)`. `Ok(None)` means
-    /// `path` isn't a space path.
+    /// Parses `path`, runs the auth gate, normalises and validates
+    /// the rel-path, and bundles the resolved `(Space, rel_path)`.
+    /// `Ok(None)` means `path` isn't a space path.
     async fn resolve(
         &self,
         sub: &AuthSubject,
@@ -105,11 +105,9 @@ impl SpaceFs {
             return Ok(None);
         };
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
-        Self::validate_rel_path(sref.rel_path)?;
-        Ok(Some(Resolved {
-            space,
-            rel_path: sref.rel_path.to_string(),
-        }))
+        let rel_path = normalize_rel_path(sref.rel_path);
+        Self::validate_rel_path(&rel_path)?;
+        Ok(Some(Resolved { space, rel_path }))
     }
 
     /// View a file (or list a directory) under a `space:` path. Reads
@@ -298,14 +296,11 @@ impl SpaceFs {
             }
             .into());
         }
-        Self::validate_rel_path(to_ref.rel_path)?;
+        let to_rel = normalize_rel_path(to_ref.rel_path);
+        Self::validate_rel_path(&to_rel)?;
         crate::audit::Audit::record_action_if_unset("space.move_file");
         self.spaces
-            .move_file(
-                &from_resolved.space.slug,
-                &from_resolved.rel_path,
-                to_ref.rel_path,
-            )
+            .move_file(&from_resolved.space.slug, &from_resolved.rel_path, &to_rel)
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         Ok(Some(()))
@@ -370,6 +365,17 @@ impl SpaceFs {
         }
         Ok(())
     }
+}
+
+/// Strips `.` segments — the no-op CWD shorthand. Callers (`resolve`,
+/// `move_file`) normalise before validation so agents can pass `.` /
+/// `./foo` / `foo/./bar` interchangeably with `""` / `foo` / `foo/bar`.
+/// Does NOT collapse `..` (real traversal); those still fail validation.
+fn normalize_rel_path(rel: &str) -> String {
+    rel.split('/')
+        .filter(|seg| *seg != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Filter `blobs` (rel-path, bytes) by a glob pattern and return the
@@ -615,7 +621,36 @@ mod tests {
     fn validate_rejects_traversal() {
         assert!(SpaceFs::validate_rel_path("../etc").is_err());
         assert!(SpaceFs::validate_rel_path("foo/../etc").is_err());
-        assert!(SpaceFs::validate_rel_path("./foo").is_err());
+    }
+
+    #[test]
+    fn normalize_strips_dot_segments() {
+        assert_eq!(normalize_rel_path("."), "");
+        assert_eq!(normalize_rel_path("./"), "");
+        assert_eq!(normalize_rel_path("./foo"), "foo");
+        assert_eq!(normalize_rel_path("foo/."), "foo");
+        assert_eq!(normalize_rel_path("foo/./bar"), "foo/bar");
+        assert_eq!(normalize_rel_path("foo/bar"), "foo/bar");
+        assert_eq!(normalize_rel_path(""), "");
+    }
+
+    #[test]
+    fn normalize_then_validate_accepts_dot_paths() {
+        for raw in [".", "./", "./foo", "foo/.", "foo/./bar"] {
+            let normalized = normalize_rel_path(raw);
+            assert!(
+                SpaceFs::validate_rel_path(&normalized).is_ok(),
+                "expected `{raw}` (normalised: `{normalized}`) to validate"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_does_not_collapse_traversal() {
+        assert_eq!(normalize_rel_path(".."), "..");
+        assert_eq!(normalize_rel_path("foo/../bar"), "foo/../bar");
+        assert!(SpaceFs::validate_rel_path(&normalize_rel_path("..")).is_err());
+        assert!(SpaceFs::validate_rel_path(&normalize_rel_path("foo/../bar")).is_err());
     }
 
     #[test]
