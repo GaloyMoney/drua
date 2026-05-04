@@ -15,9 +15,23 @@ ARGUMENTS may include:
 - A free-form description (e.g. "the latest workspace lead session today") —
   in which case start with the discovery query in Phase 1.
 
-The DB is at `postgres://user:password@localhost:5432/drua`. Use `psql` (via
-the `Bash` tool) for direct queries; use the admin `log` MCP tool to slice
-the audit log.
+## Choose your data source first
+
+**Local conversation** (default): the DB is at
+`postgres://user:password@localhost:5432/drua`. Use `psql` (via the `Bash`
+tool) for direct queries; use the admin `log` MCP tool to slice the audit
+log.
+
+**Prod conversation**: when the request mentions prod / dashboard.agents.galoy.io
+/ a prod session ID, **do not** touch local PG. Use the drua MCP gateway
+instead — every SQL block in this skill should be run via `pg_execute_sql`,
+every audit slice via `drua_admin_log`, and pod / log inspection via the
+`k8s_*` tools (e.g. `k8s_pods_list_in_namespace` namespace=`galoy-agents`,
+`k8s_pods_log` for the running `galoy-agents-*` pod). The `pg_*` tools are
+read-only against the prod DB; that's enough for this audit.
+
+Decide once at the start and stick with it — mixing local `psql` output with
+prod MCP results in the same report leads to confusing cross-references.
 
 ## Phase 1 — Resolve the session
 
@@ -66,7 +80,9 @@ For each `assistant_response_received` event inspect:
 
 ## Phase 3 — Cross-reference with the audit log
 
-The MCP `log` tool is the easy path:
+The audit log MCP tool is the easy path. Use the admin variant
+(`drua_admin_log`) for prod inspections; the local `log` tool when working
+against your dev DB:
 
 - `log agent_id=<agent-id>` — every tool call this agent made
 - `log agent_id=<agent-id> errors_only=true` — only failures
