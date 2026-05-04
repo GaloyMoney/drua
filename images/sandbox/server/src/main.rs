@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,15 @@ async fn execute_bash(
         .ok_or("Missing 'command' field")?;
 
     let result = session.execute(command, DEFAULT_TIMEOUT_MS).await?;
+
+    if result.shell_died {
+        return Err(format!(
+            "Shell exited before completing the command (exit_code={}, output_bytes={})\n{}",
+            result.exit_code,
+            result.output.len(),
+            result.output
+        ));
+    }
 
     if result.exit_code == 0 {
         Ok(result.output)
@@ -618,13 +628,34 @@ async fn initialize(
 /// Per-agent attach hook. Called by core whenever a new agent
 /// attaches to this sandbox so the new tenant gets a clean shell
 /// pinned to the cwd `/initialize` recorded — i.e. doesn't inherit
-/// the previous tenant's `cd`. Implementation detail today: re-pin
-/// the bash session's cwd to its current value, which drops any
-/// active shell so the next `/execute` respawns.
-async fn attach(State(session): State<SharedSession>) -> &'static str {
+/// the previous tenant's `cd`. Re-pins the bash session's cwd to
+/// drop any active shell, then runs a smoke test through a fresh
+/// shell so a broken bash environment fails the attach immediately
+/// instead of letting the agent flail through dozens of `Exit code
+/// 1` results.
+async fn attach(
+    State(session): State<SharedSession>,
+) -> Result<&'static str, (StatusCode, String)> {
     let cwd = session.current_cwd().await;
     session.set_cwd(cwd).await;
-    "ok"
+
+    const SMOKE_TIMEOUT_MS: u64 = 10_000;
+    const SMOKE_MARKER: &str = "__sandbox_attach_ready__";
+    let smoke_cmd = format!("echo {SMOKE_MARKER}");
+    match session.execute(&smoke_cmd, SMOKE_TIMEOUT_MS).await {
+        Ok(r) if !r.shell_died && r.exit_code == 0 && r.output.contains(SMOKE_MARKER) => Ok("ok"),
+        Ok(r) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "attach smoke test failed: shell_died={}, exit_code={}, output={:?}",
+                r.shell_died, r.exit_code, r.output
+            ),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("attach smoke test failed: {e}"),
+        )),
+    }
 }
 
 async fn initialize_inner(
@@ -998,6 +1029,37 @@ mod tests {
         let result = execute_bash(&session, &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("command"));
+    }
+
+    /// `exec false` replaces the shell with `false` (exit 1) before the
+    /// marker echo can run, so the marker never arrives. The error
+    /// must (a) be tagged "Shell exited before completing the command"
+    /// rather than the generic "Exit code N" path, (b) carry the bytes
+    /// the shell printed to stdout/stderr before dying.
+    #[tokio::test]
+    async fn bash_surfaces_partial_output_when_shell_dies() {
+        init_test_workspace();
+        let session = test_session();
+        let input = serde_json::json!({
+            "command": "echo on-stdout; echo on-stderr >&2; exec false",
+        });
+        let result = execute_bash(&session, &input).await;
+        let err = result.expect_err("shell death should surface as Err");
+        assert!(
+            err.contains("Shell exited before completing the command"),
+            "expected shell-died prefix, got: {err}"
+        );
+        assert!(err.contains("on-stdout"), "stdout missing: {err}");
+        assert!(err.contains("on-stderr"), "stderr missing: {err}");
+    }
+
+    #[tokio::test]
+    async fn attach_smoke_test_succeeds_on_healthy_session() {
+        init_test_workspace();
+        let session = test_session();
+        let result = attach(State(session)).await;
+        assert!(result.is_ok(), "attach failed: {:?}", result.err());
+        assert_eq!(result.unwrap(), "ok");
     }
 
     #[tokio::test]

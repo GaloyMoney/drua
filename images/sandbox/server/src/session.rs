@@ -54,7 +54,10 @@ async fn spawn_session_shell(
 ) -> Result<Child, String> {
     #[cfg(unix)]
     match try_spawn(IsolationLayer::Bwrap, workspace, workspace_tmp, cwd) {
-        Ok(child) => return Ok(child),
+        Ok(child) => {
+            tracing::info!(layer = "bwrap", "spawned session shell");
+            return Ok(child);
+        }
         Err(e) if is_bwrap_unavailable(&e) => {
             tracing::warn!("bwrap unavailable for session, falling back: {e}");
         }
@@ -64,7 +67,10 @@ async fn spawn_session_shell(
     #[cfg(unix)]
     if is_root() {
         match try_spawn(IsolationLayer::UidOnly, workspace, workspace_tmp, cwd) {
-            Ok(child) => return Ok(child),
+            Ok(child) => {
+                tracing::info!(layer = "uid-only", "spawned session shell");
+                return Ok(child);
+            }
             Err(e) if is_spawn_failure(&e) => {
                 tracing::warn!("uid-only session failed (fake-root?), falling back: {e}");
             }
@@ -72,7 +78,9 @@ async fn spawn_session_shell(
         }
     }
 
-    try_spawn(IsolationLayer::Plain, workspace, workspace_tmp, cwd)
+    let child = try_spawn(IsolationLayer::Plain, workspace, workspace_tmp, cwd)?;
+    tracing::info!(layer = "plain", "spawned session shell");
+    Ok(child)
 }
 
 fn try_spawn(
@@ -207,6 +215,13 @@ pub struct BashSession {
 pub struct CommandResult {
     pub output: String,
     pub exit_code: i32,
+    /// True when the shell exited before echoing the per-command marker —
+    /// i.e. the command never completed normally. Distinguishes `exit 0`
+    /// (clean termination, output is empty) from a shell that died on
+    /// startup or mid-command (output carries any partial stdout/stderr
+    /// the shell printed before dying). Callers should surface this so
+    /// it doesn't get squashed into the generic exit-code path.
+    pub shell_died: bool,
 }
 
 impl BashSession {
@@ -275,16 +290,34 @@ impl BashSession {
                 let output = self.collect_output(session, result).await;
                 Ok(output)
             }
-            Ok(Err(_)) => {
-                // stdout EOF: retrieve the child's exit code so `exit N` reports correctly.
+            Ok(Err(read_err)) => {
+                // stdout EOF before the marker arrived. This is also the path
+                // for an explicit `exit N` (legitimate), so we still return Ok,
+                // but we drain stderr to EOF and surface any partial output so
+                // the caller can tell a clean exit from a shell that died on
+                // startup with no marker echo.
                 let mut session = guard.take().expect("session exists");
+                let _ = session.stdin.shutdown().await;
                 let exit_code = match session.child.wait().await {
                     Ok(status) => status.code().unwrap_or(1),
                     Err(_) => 1,
                 };
+                let mut stderr_buf = String::new();
+                while let Some(chunk) = session.stderr_rx.recv().await {
+                    stderr_buf.push_str(&chunk);
+                }
+                let mut output = read_err.partial_stdout;
+                if !stderr_buf.is_empty() {
+                    output = if output.is_empty() {
+                        format!("--- stderr ---\n{stderr_buf}")
+                    } else {
+                        format!("{}\n--- stderr ---\n{}", output.trim_end(), stderr_buf)
+                    };
+                }
                 Ok(CommandResult {
-                    output: String::new(),
+                    output,
                     exit_code,
+                    shell_died: true,
                 })
             }
             Err(_) => {
@@ -330,6 +363,7 @@ impl BashSession {
         CommandResult {
             output,
             exit_code: result.exit_code,
+            shell_died: false,
         }
     }
 
@@ -455,22 +489,34 @@ struct MarkerResult {
     exit_code: i32,
 }
 
+/// Returned when the marker never arrives: carries the bytes the shell
+/// did manage to print on stdout before EOF or a read error. The execute
+/// path uses this to surface partial output instead of dropping it.
+struct ReadError {
+    partial_stdout: String,
+}
+
 async fn read_until_marker(
     reader: &mut BufReader<tokio::process::ChildStdout>,
     request_id: &str,
-) -> Result<MarkerResult, String> {
+) -> Result<MarkerResult, ReadError> {
     let mut output = String::new();
     let mut line_buf = String::new();
 
     loop {
         line_buf.clear();
-        let n = reader
-            .read_line(&mut line_buf)
-            .await
-            .map_err(|e| format!("Failed to read session stdout: {e}"))?;
-
-        if n == 0 {
-            return Err("Shell process exited (stdout EOF)".to_string());
+        match reader.read_line(&mut line_buf).await {
+            Ok(0) => {
+                return Err(ReadError {
+                    partial_stdout: output,
+                });
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(ReadError {
+                    partial_stdout: output,
+                });
+            }
         }
 
         let trimmed = line_buf.trim();
