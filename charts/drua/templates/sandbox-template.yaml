@@ -50,7 +50,9 @@ spec:
         {{- end }}
         {{- if .Values.galoyAgents.tracing }}
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | replace ":4317" ":4318" | quote }}
+          value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
+        - name: OTEL_SERVICE_NAME
+          value: {{ .Values.galoyAgents.tracing.sandboxServiceName | quote }}
         {{- end }}
         {{- if .Values.sandbox.mcpGatewayUrl }}
         - name: MCP_GATEWAY_URL

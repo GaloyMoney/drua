@@ -132,6 +132,8 @@ spec:
           value: "/config/drua.yml"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
+        - name: OTEL_SERVICE_NAME
+          value: {{ .Values.galoyAgents.tracing.serviceName | quote }}
         - name: PG_CON
           valueFrom:
             secretKeyRef:

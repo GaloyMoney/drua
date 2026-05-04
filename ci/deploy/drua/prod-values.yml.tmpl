@@ -126,6 +126,7 @@ galoyAgents:
       memory: 512Mi
   tracing:
     serviceName: galoy-agents
+    sandboxServiceName: galoy-agents-sandbox
     otelExporterOtlpEndpoint: "http://opentelemetry-collector.galoy-agents-otel.svc.cluster.local:4317"
 
 sandbox:

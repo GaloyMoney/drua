@@ -1,8 +1,11 @@
 //! HTTP client for a single sandbox tool server. Wire types must mirror
 //! `images/sandbox/server/src/main.rs`.
 
+use opentelemetry::global;
+use opentelemetry_http::HeaderInjector;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::error::InstanceError;
 use crate::types::{Sandbox, SandboxMode};
@@ -11,6 +14,17 @@ use crate::types::{Sandbox, SandboxMode};
 pub struct InstanceClient {
     base_url: String,
     http: reqwest::Client,
+}
+
+/// Builds a `HeaderMap` carrying the W3C `traceparent` for the current
+/// tracing span, so the sandbox-tool-server can attach to the same trace.
+fn current_trace_headers() -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    let cx = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(&mut headers));
+    });
+    headers
 }
 
 impl InstanceClient {
@@ -35,6 +49,7 @@ impl InstanceClient {
         let resp = self
             .http
             .get(format!("{}/health", self.base_url))
+            .headers(current_trace_headers())
             .send()
             .await?;
         resp.error_for_status()?;
@@ -49,6 +64,7 @@ impl InstanceClient {
         let resp = self
             .http
             .post(format!("{}/initialize", self.base_url))
+            .headers(current_trace_headers())
             .json(req)
             .send()
             .await?
@@ -70,6 +86,7 @@ impl InstanceClient {
     pub async fn attach(&self) -> Result<(), InstanceError> {
         self.http
             .post(format!("{}/attach", self.base_url))
+            .headers(current_trace_headers())
             .send()
             .await?
             .error_for_status()?;
@@ -81,6 +98,7 @@ impl InstanceClient {
         let resp = self
             .http
             .post(format!("{}/execute", self.base_url))
+            .headers(current_trace_headers())
             .json(req)
             .send()
             .await?

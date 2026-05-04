@@ -12,6 +12,7 @@ path = "src/bin/write_sdl.rs"
 [dependencies]
 drua-core = { path = "../core", features = ["graphql"] }
 drua-mcp-gateway = { path = "../mcp-gateway" }
+drua-tracing-utils = { workspace = true }
 sandbox = { workspace = true }
 es-entity = { workspace = true }
 anyhow = "1"
@@ -45,13 +46,9 @@ tower-http = { version = "0.6", features = ["cors"] }
 tower-service = "0.3"
 tower-sessions = "0.15"
 tracing = "0.1"
-tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-http = "0.31"
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-opentelemetry-semantic-conventions = { workspace = true }
 url = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 

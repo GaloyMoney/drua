@@ -1,0 +1,15 @@
+[package]
+name = "drua-tracing-utils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,4 +1,5 @@
 mod session;
+mod tracing_middleware;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tracing::instrument;
 
 use session::{BashSession, SharedSession};
 
@@ -64,6 +66,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[instrument(name = "sandbox.server.execute", skip_all, fields(tool = %req.tool))]
 async fn execute(
     State(session): State<SharedSession>,
     Json(req): Json<ExecuteRequest>,
@@ -592,6 +595,7 @@ fn github_token_path() -> String {
     std::env::var("GITHUB_TOKEN_PATH").unwrap_or_else(|_| DEFAULT_GITHUB_TOKEN_PATH.to_string())
 }
 
+#[instrument(name = "sandbox.server.initialize", skip_all, fields(mode = %req.mode))]
 async fn initialize(
     State(session): State<SharedSession>,
     Json(req): Json<InitializeRequest>,
@@ -633,6 +637,7 @@ async fn initialize(
 /// shell so a broken bash environment fails the attach immediately
 /// instead of letting the agent flail through dozens of `Exit code
 /// 1` results.
+#[instrument(name = "sandbox.server.attach", skip_all)]
 async fn attach(
     State(session): State<SharedSession>,
 ) -> Result<&'static str, (StatusCode, String)> {
@@ -942,18 +947,31 @@ fn parse_skill_frontmatter(raw: &str) -> (Option<String>, String) {
     (fm.description.filter(|d| !d.is_empty()), body)
 }
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
-    let session: SharedSession = Arc::new(BashSession::new());
-
-    let app = Router::new()
+/// Builds the axum router with the inbound traceparent middleware
+/// applied. Exposed so integration tests can drive it via `tower::ServiceExt`.
+pub fn build_app(session: SharedSession) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route("/execute", post(execute))
         .route("/initialize", post(initialize))
         .route("/attach", post(attach))
-        .with_state(session);
+        .layer(axum::middleware::from_fn(
+            tracing_middleware::trace_context_middleware,
+        ))
+        .with_state(session)
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(e) = drua_tracing_utils::init_tracer(drua_tracing_utils::TracingConfig {
+        service_name: std::env::var("OTEL_SERVICE_NAME")
+            .unwrap_or_else(|_| "drua-sandbox".to_string()),
+    }) {
+        eprintln!("Failed to init tracer: {e}");
+    }
+
+    let session: SharedSession = Arc::new(BashSession::new());
+    let app = build_app(session);
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -966,7 +984,13 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");
-    axum::serve(listener, app).await.expect("server error");
+    let serve_result = axum::serve(listener, app).await;
+
+    if let Err(e) = drua_tracing_utils::shutdown_tracer() {
+        eprintln!("Error shutting down tracer: {e}");
+    }
+
+    serve_result.expect("server error");
 }
 
 #[cfg(test)]
@@ -988,6 +1012,60 @@ mod tests {
 
     fn test_session() -> SharedSession {
         Arc::new(BashSession::new())
+    }
+
+    // Same extraction the inbound middleware uses, without the axum stack.
+    #[test]
+    fn propagator_extracts_traceparent_trace_id() {
+        use opentelemetry::propagation::TextMapPropagator;
+        use opentelemetry::trace::TraceContextExt;
+        use opentelemetry_http::HeaderExtractor;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+        let propagator = TraceContextPropagator::new();
+
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let span_id = "b7ad6b7169203331";
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            format!("00-{trace_id}-{span_id}-01").parse().unwrap(),
+        );
+
+        let cx = propagator.extract(&HeaderExtractor(&headers));
+        let span_ctx = cx.span().span_context().clone();
+
+        assert!(
+            span_ctx.is_valid(),
+            "extracted span context should be valid"
+        );
+        assert_eq!(span_ctx.trace_id().to_string(), trace_id);
+        assert_eq!(span_ctx.span_id().to_string(), span_id);
+    }
+
+    // Smoke: a `traceparent`-bearing request passes the middleware.
+    #[tokio::test]
+    async fn middleware_accepts_traceparent_header() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use opentelemetry::global;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use tower::ServiceExt;
+
+        global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let app = build_app(test_session());
+        let req = Request::builder()
+            .uri("/health")
+            .header(
+                "traceparent",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
