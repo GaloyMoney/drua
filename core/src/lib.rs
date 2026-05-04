@@ -204,10 +204,8 @@ impl App {
         // own `ProjectRepo` + `AuthedSpaces`; no upward dep on `Projects`,
         // so `Agents` can derive `AgentScope` without the old
         // `set_projects` cycle workaround.
-        let space_mounts = library::SpaceMounts::new(
-            project::repo::ProjectRepo::new(pool),
-            (*spaces).clone(),
-        );
+        let space_mounts =
+            library::SpaceMounts::new(project::repo::ProjectRepo::new(pool), (*spaces).clone());
 
         let agents = Arc::new(Agents::new(
             pool,

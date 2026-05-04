@@ -84,8 +84,7 @@ pub struct Agents {
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
     context_generation: ContextGeneration,
-    context_cache:
-        Arc<std::sync::RwLock<std::collections::HashMap<AgentId, CachedAgentContext>>>,
+    context_cache: Arc<std::sync::RwLock<std::collections::HashMap<AgentId, CachedAgentContext>>>,
 }
 
 impl Agents {
@@ -120,10 +119,7 @@ impl Agents {
     /// `ContextGeneration` atomically; only hits DB when the generation has
     /// bumped. Per-agent cache so attached sandbox (and future per-agent
     /// scope dimensions) doesn't bleed across agents in the same project.
-    async fn cached_dynamic_blocks(
-        &self,
-        agent: &Agent,
-    ) -> Vec<session::message::SystemBlock> {
+    async fn cached_dynamic_blocks(&self, agent: &Agent) -> Vec<session::message::SystemBlock> {
         let current_gen = self.context_generation.current();
 
         {
@@ -439,10 +435,8 @@ impl Agents {
             });
         }
 
-        if let Ok(Some(spaces_content)) = self
-            .space_mounts
-            .spaces_block_for_project(project_id)
-            .await
+        if let Ok(Some(spaces_content)) =
+            self.space_mounts.spaces_block_for_project(project_id).await
         {
             system_blocks.push(session::message::SystemBlock::Spaces {
                 text: spaces_content,

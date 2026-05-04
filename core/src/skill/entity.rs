@@ -178,14 +178,8 @@ impl drua_library::LibrarySynced for Skill {
         // Space-scoped skills surface under their space; project- and
         // global-scoped under the project (or unscoped).
         let (scope_id, scope_slug) = match (self.space_id, self.project_id) {
-            (Some(s), _) => (
-                Some(uuid::Uuid::from(s)),
-                space_slug.map(str::to_string),
-            ),
-            (None, Some(p)) => (
-                Some(uuid::Uuid::from(p)),
-                project_name.map(str::to_string),
-            ),
+            (Some(s), _) => (Some(uuid::Uuid::from(s)), space_slug.map(str::to_string)),
+            (None, Some(p)) => (Some(uuid::Uuid::from(p)), project_name.map(str::to_string)),
             (None, None) => (None, None),
         };
         SearchableFields {

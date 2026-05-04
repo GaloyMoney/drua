@@ -467,7 +467,6 @@ impl Projects {
         Audit::record_space_id(space.id);
         Ok(space)
     }
-
 }
 
 fn build_new_project(

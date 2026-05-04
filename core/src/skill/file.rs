@@ -325,10 +325,7 @@ mod path_tests {
             None,
             "space-rooted path must not be parsed as project"
         );
-        assert_eq!(
-            project_name_from_skill_path("runtime/skills/foo.md"),
-            None
-        );
+        assert_eq!(project_name_from_skill_path("runtime/skills/foo.md"), None);
     }
 
     #[test]

@@ -140,4 +140,3 @@ fn render_spaces_block(spaces: &[Space]) -> Option<String> {
     buf.push_str("</spaces>\n");
     Some(buf)
 }
-

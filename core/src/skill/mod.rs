@@ -110,8 +110,7 @@ impl Skills {
     async fn begin_op(&self, scope: ScopeId) -> Result<es_entity::DbOp<'static>, SkillError> {
         let mut op = self.repo.begin_op().await?;
         if let Some(pool) = self.pool.as_ref() {
-            let hook =
-                ContextBumpHook::new(self.context_generation.clone(), pool.clone(), scope);
+            let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), scope);
             op.add_commit_hook(hook)
                 .expect("DbOp supports commit hooks");
         }
@@ -121,11 +120,7 @@ impl Skills {
     /// Composable variant: registers a `ContextBumpHook` on the caller's
     /// `op` for `scope`. Used by reverse-sync importers and other internal
     /// callers that already own a transaction. No-op when `pool` is `None`.
-    pub(crate) fn register_context_bump<OP: AtomicOperation>(
-        &self,
-        op: &mut OP,
-        scope: ScopeId,
-    ) {
+    pub(crate) fn register_context_bump<OP: AtomicOperation>(&self, op: &mut OP, scope: ScopeId) {
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
@@ -750,9 +745,7 @@ impl Skills {
                 space_id,
                 space_slug,
             } => {
-                builder = builder
-                    .space_id(*space_id)
-                    .space_slug(space_slug.clone());
+                builder = builder.space_id(*space_id).space_slug(space_slug.clone());
             }
             ImportScope::Global => {}
         }
