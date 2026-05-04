@@ -207,20 +207,13 @@ impl App {
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
 
-        let execute_run_initializer = Workflows::execute_run_job_initializer(
-            pool,
-            Arc::clone(&agents),
-            Arc::clone(&skills),
-            Arc::clone(&sandboxes),
-        );
-        let execute_run_spawner = jobs.add_initializer(execute_run_initializer);
-
-        let workflows = Arc::new(Workflows::new(
+        let workflows = Arc::new(Workflows::init(
             pool,
             library.clone(),
             Arc::clone(&skills),
-            execute_run_spawner,
-            &jobs,
+            Arc::clone(&agents),
+            Arc::clone(&sandboxes),
+            &mut jobs,
         ));
 
         let projects = Arc::new(Projects::new(

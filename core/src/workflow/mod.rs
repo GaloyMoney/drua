@@ -1,3 +1,4 @@
+pub(crate) mod cron_job;
 pub mod definition;
 pub mod entity;
 pub mod error;
@@ -22,13 +23,16 @@ use crate::skill::Skills;
 
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
-pub use definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
+pub use definition::{
+    next_cron_fire_at, parse_cron_schedule, parse_timezone, WorkflowSandboxDecl, WorkflowStepDef,
+    WorkflowTrigger,
+};
 pub use entity::*;
 pub use error::*;
-pub use job::ExecuteRunJobInitializer;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
-use job::ExecuteRunConfig;
+use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
+use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
 
@@ -38,24 +42,43 @@ pub struct Workflows {
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
+    cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
     /// `ExecuteRun` job (whose id == run id) without polling.
     jobs: ::job::Jobs,
 }
 
 impl Workflows {
-    pub fn new(
+    /// Wires the workflow service: registers the `ExecuteRun` and
+    /// `TriggerCron` job initializers with `jobs`. Cron schedules
+    /// persist as job rows, so no startup-recovery is needed — the
+    /// poller will pick them up on its first tick.
+    pub fn init(
         pool: &sqlx::PgPool,
         library: drua_library::Library,
         skills: Arc<Skills>,
-        execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
-        jobs: &::job::Jobs,
+        agents: Arc<Agents>,
+        sandboxes: Arc<Sandboxes>,
+        jobs: &mut ::job::Jobs,
     ) -> Self {
+        let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
+            WorkflowRunRepo::new(pool),
+            WorkflowDefinitionRepo::new_without_library(pool),
+            agents,
+            Arc::clone(&skills),
+            sandboxes,
+        ));
+        let cron_spawner = jobs.add_initializer(TriggerCronJobInitializer::new(
+            WorkflowDefinitionRepo::new_without_library(pool),
+            WorkflowRunRepo::new(pool),
+            execute_run_spawner.clone(),
+        ));
         Self {
             repo: WorkflowDefinitionRepo::new(pool, library),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             execute_run_spawner,
+            cron_spawner,
             jobs: jobs.clone(),
         }
     }
@@ -85,9 +108,16 @@ impl Workflows {
             ..
         } = parsed;
 
+        Self::validate_trigger(&trigger)?;
+
         let file_hash = drua_library::GitFileHash::new(rendered);
 
         if let Some(mut existing) = self.repo.maybe_find_by_id(workflow_id).await? {
+            // Same non-cron → cron rule as `update`: only a fresh
+            // transition needs a spawn; cron → cron is picked up by
+            // the in-flight job, cron → other is handled by the
+            // runner's terminate-on-not-cron branch.
+            let was_cron = matches!(existing.trigger, WorkflowTrigger::Cron { .. });
             if !existing
                 .update_from_library(
                     Some(name.clone()),
@@ -102,6 +132,10 @@ impl Workflows {
                 return Ok(None);
             }
             self.repo.update_in_op(op, &mut existing).await?;
+            let is_cron = matches!(existing.trigger, WorkflowTrigger::Cron { .. });
+            if !was_cron && is_cron {
+                self.register_cron_in_op(op, &existing).await?;
+            }
             return Ok(Some(existing));
         }
 
@@ -132,44 +166,25 @@ impl Workflows {
         let new = builder
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
-        Ok(Some(self.repo.create_in_op(op, new).await?))
-    }
-
-    /// No git sync — for tests.
-    pub fn new_without_library(
-        pool: &sqlx::PgPool,
-        skills: Arc<Skills>,
-        execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
-        jobs: &::job::Jobs,
-    ) -> Self {
-        Self {
-            repo: WorkflowDefinitionRepo::new_without_library(pool),
-            run_repo: WorkflowRunRepo::new(pool),
-            skills,
-            execute_run_spawner,
-            jobs: jobs.clone(),
-        }
-    }
-
-    pub fn execute_run_job_initializer(
-        pool: &sqlx::PgPool,
-        agents: Arc<Agents>,
-        skills: Arc<Skills>,
-        sandboxes: Arc<Sandboxes>,
-    ) -> ExecuteRunJobInitializer {
-        ExecuteRunJobInitializer::new(
-            WorkflowRunRepo::new(pool),
-            WorkflowDefinitionRepo::new_without_library(pool),
-            agents,
-            skills,
-            sandboxes,
-        )
+        let created = self.repo.create_in_op(op, new).await?;
+        self.register_cron_in_op(op, &created).await?;
+        Ok(Some(created))
     }
 
     fn generate_webhook_secret() -> String {
         let mut bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut bytes);
         format!("whsec_{}", hex::encode(bytes))
+    }
+
+    /// Reject cron triggers whose schedule or timezone won't parse so
+    /// the failure surfaces at create-time, not on the first fire.
+    fn validate_trigger(trigger: &WorkflowTrigger) -> Result<(), WorkflowError> {
+        if let WorkflowTrigger::Cron { schedule, timezone } = trigger {
+            parse_cron_schedule(schedule).map_err(WorkflowError::InvalidCronExpression)?;
+            parse_timezone(timezone.as_deref()).map_err(WorkflowError::InvalidTimezone)?;
+        }
+        Ok(())
     }
 
     /// Resolve `skill:` references and validate sandbox references
@@ -307,6 +322,8 @@ impl Workflows {
             ));
         }
 
+        Self::validate_trigger(&trigger)?;
+
         self.validate_steps(sub, project_id, &steps, &sandboxes)
             .await?;
 
@@ -336,14 +353,17 @@ impl Workflows {
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
-        let workflow = self.repo.create(new).await?;
+        let mut op = self.repo.begin_op().await?;
+        let workflow = self.repo.create_in_op(&mut op, new).await?;
+        self.register_cron_in_op(&mut op, &workflow).await?;
+        op.commit().await?;
         Ok(workflow)
     }
 
     /// Updates name / description / trigger / steps / sandboxes on
     /// an existing definition. Any `Some` field is applied; `None`
     /// leaves the field unchanged. Steps/sandboxes are re-validated
-    /// when supplied.
+    /// when supplied; trigger is re-validated when supplied.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "core.workflow.update", skip_all)]
     pub async fn update(
@@ -362,6 +382,10 @@ impl Workflows {
             AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
 
+        if let Some(t) = trigger.as_ref() {
+            Self::validate_trigger(t)?;
+        }
+
         let next_steps = steps.as_ref().unwrap_or(&definition.steps);
         let next_sandboxes = sandboxes.as_ref().unwrap_or(&definition.sandboxes);
         if next_steps.is_empty() {
@@ -374,13 +398,68 @@ impl Workflows {
                 .await?;
         }
 
+        // Capture before `update_content` mutates `definition.trigger`.
+        // Only a non-cron → cron transition needs a fresh spawn. A
+        // cron → cron schedule change is picked up by the in-flight
+        // job's next fire (it re-reads the definition); cron → other
+        // is handled by the runner exiting when the trigger is no
+        // longer `Cron`. Re-spawning in either of those cases
+        // duplicates the chain.
+        let was_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
         if definition
             .update_content(name, description, trigger, steps, sandboxes)
             .did_execute()
         {
-            self.repo.update(&mut definition).await?;
+            let mut op = self.repo.begin_op().await?;
+            self.repo.update_in_op(&mut op, &mut definition).await?;
+            let is_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
+            if !was_cron && is_cron {
+                self.register_cron_in_op(&mut op, &definition).await?;
+            }
+            op.commit().await?;
         }
         Ok(definition)
+    }
+
+    /// Spawn the next cron fire in the same atomic op as the
+    /// workflow create/update. Either both land or both roll back, so
+    /// no startup-recovery sweep is needed: the schedule is durably
+    /// queued whenever its definition exists. No-op for non-cron
+    /// triggers.
+    async fn register_cron_in_op<OP: es_entity::AtomicOperation>(
+        &self,
+        op: &mut OP,
+        workflow: &WorkflowDefinition,
+    ) -> Result<(), WorkflowError> {
+        let WorkflowTrigger::Cron { schedule, timezone } = &workflow.trigger else {
+            return Ok(());
+        };
+        let next_at = match next_cron_fire_at(schedule, timezone.as_deref(), chrono::Utc::now())
+            .map_err(WorkflowError::InvalidCronExpression)?
+        {
+            Some(t) => t,
+            None => {
+                tracing::warn!(
+                    workflow_id = %workflow.id,
+                    %schedule,
+                    "cron expression has no future fires; skipping registration"
+                );
+                return Ok(());
+            }
+        };
+        self.cron_spawner
+            .spawn_at_with_queue_id_in_op(
+                op,
+                ::job::JobId::new(),
+                TriggerCronConfig {
+                    definition_id: workflow.id,
+                },
+                next_at,
+                cron_queue_id(workflow.id),
+            )
+            .await
+            .map_err(|e| WorkflowError::Job(e.to_string()))?;
+        Ok(())
     }
 
     #[instrument(name = "core.workflow.find_by_id", skip_all)]
@@ -461,6 +540,21 @@ impl Workflows {
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
     ) -> Result<WorkflowRun, WorkflowError> {
+        Self::spawn_run_static(
+            &self.run_repo,
+            &self.execute_run_spawner,
+            definition,
+            trigger_context,
+        )
+        .await
+    }
+
+    pub(crate) async fn spawn_run_static(
+        run_repo: &WorkflowRunRepo,
+        execute_run_spawner: &::job::JobSpawner<ExecuteRunConfig>,
+        definition: WorkflowDefinition,
+        trigger_context: serde_json::Value,
+    ) -> Result<WorkflowRun, WorkflowError> {
         let new = NewWorkflowRun::builder()
             .definition_id(definition.id)
             .project_id(definition.project_id)
@@ -469,10 +563,10 @@ impl Workflows {
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
-        let run = self.run_repo.create(new).await?;
+        let run = run_repo.create(new).await?;
 
         let queue_id = format!("workflow:{}", definition.id);
-        self.execute_run_spawner
+        execute_run_spawner
             .spawn_with_queue_id(run.id, ExecuteRunConfig { run_id: run.id }, &queue_id)
             .await
             .map_err(|e| WorkflowError::Job(e.to_string()))?;
@@ -563,5 +657,49 @@ impl Workflows {
             .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_trigger_accepts_manual_and_webhook() {
+        Workflows::validate_trigger(&WorkflowTrigger::Manual).unwrap();
+        Workflows::validate_trigger(&WorkflowTrigger::Webhook {
+            provider: Some("honeycomb".into()),
+            secret: "whsec".into(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_trigger_accepts_valid_cron() {
+        Workflows::validate_trigger(&WorkflowTrigger::Cron {
+            schedule: "0 */6 * * * *".into(),
+            timezone: Some("UTC".into()),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_trigger_rejects_bad_cron_expression() {
+        let err = Workflows::validate_trigger(&WorkflowTrigger::Cron {
+            schedule: "not a cron".into(),
+            timezone: None,
+        })
+        .unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidCronExpression(_)));
+    }
+
+    #[test]
+    fn validate_trigger_rejects_bad_timezone() {
+        let err = Workflows::validate_trigger(&WorkflowTrigger::Cron {
+            schedule: "0 */6 * * * *".into(),
+            timezone: Some("Mars/Olympus_Mons".into()),
+        })
+        .unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidTimezone(_)));
     }
 }

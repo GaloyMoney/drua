@@ -1638,6 +1638,10 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
             Some(p) => format!("webhook ({p})"),
             None => "webhook".to_string(),
         },
+        WorkflowTrigger::Cron { schedule, timezone } => match timezone {
+            Some(tz) => format!("cron ({schedule} {tz})"),
+            None => format!("cron ({schedule})"),
+        },
     };
     let description = d.description.as_deref().unwrap_or("\u{2014}");
     format!(
@@ -1670,6 +1674,7 @@ fn format_workflows(defs: &[WorkflowDefinition]) -> String {
                 Some(p) => format!("webhook:{p}"),
                 None => "webhook".to_string(),
             },
+            WorkflowTrigger::Cron { schedule, .. } => format!("cron:{schedule}"),
         };
         lines.push(format!(
             "{:<38} {:<24} {:<14} {:<6} {}",
