@@ -27,6 +27,34 @@ const SKILLS_CONTEXT_MAX: usize = 30;
 const SKILLS_CONTEXT_BUDGET: usize = 4000;
 const MAX_DESCRIPTION_LEN: usize = 200;
 
+/// Resolved scope for `Skills::import_from_library`. The importer maps a
+/// path prefix (`runtime/projects/{p}/skills/...`,
+/// `runtime/spaces/{s}/skills/...`, or `runtime/skills/...`) to one of
+/// these variants by looking up the project / space referenced by the
+/// path segment.
+#[derive(Debug, Clone)]
+pub enum ImportScope {
+    Global,
+    Project {
+        project_id: ProjectId,
+        project_name: String,
+    },
+    Space {
+        space_id: SpaceId,
+        space_slug: String,
+    },
+}
+
+impl ImportScope {
+    fn bump_scope(&self) -> ScopeId {
+        match self {
+            ImportScope::Global => ScopeId::Global,
+            ImportScope::Project { project_id, .. } => ScopeId::Project(*project_id),
+            ImportScope::Space { space_id, .. } => ScopeId::Space(*space_id),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Skills {
     repo: SkillRepo,
@@ -491,6 +519,117 @@ impl Skills {
         op.commit().await?;
         Ok(())
     }
+
+    /// Create a space-owned skill. Auth: `AuthVerb::Create` against
+    /// `AuthResource::SpaceSkill(space_id, None)` — admin-only by
+    /// default (no `permits` rule for non-admin scopes). Twin-writes to
+    /// `runtime/spaces/{slug}/skills/{name-slug}-{id_prefix}.md` via
+    /// the entity's `LibrarySynced::write_op`.
+    #[instrument(name = "skill.create_in_space", skip(self, body))]
+    pub async fn create_in_space(
+        &self,
+        sub: &AuthSubject,
+        space_id: SpaceId,
+        space_slug: &str,
+        name: String,
+        description: String,
+        body: String,
+    ) -> Result<Skill, SkillError> {
+        sub.can(AuthVerb::Create, AuthResource::SpaceSkill(space_id, None))?;
+        if name.trim().is_empty() {
+            return Err(SkillError::BuildEntity("skill name required".into()));
+        }
+        let new = NewSkill::builder()
+            .id(SkillId::new())
+            .space_id(space_id)
+            .space_slug(space_slug.to_string())
+            .name(name)
+            .description(description)
+            .body(body)
+            .build()
+            .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+
+        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        let skill = self.repo.create_in_op(&mut op, new).await?;
+        op.commit().await?;
+        Ok(skill)
+    }
+
+    #[instrument(name = "skill.update_in_space", skip(self, body))]
+    pub async fn update_in_space(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        space_id: SpaceId,
+        name: Option<String>,
+        description: Option<String>,
+        body: Option<String>,
+    ) -> Result<Skill, SkillError> {
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::SpaceSkill(space_id, Some(id)),
+        )?;
+        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if skill.space_id != Some(space_id) {
+            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Update,
+                resource: AuthResource::SpaceSkill(space_id, Some(id)),
+            }));
+        }
+        if skill.update_content(name, description, body).did_execute() {
+            self.repo.update_in_op(&mut op, &mut skill).await?;
+        }
+        op.commit().await?;
+        Ok(skill)
+    }
+
+    /// Soft-delete only — same caveat as [`Self::delete`].
+    #[instrument(name = "skill.delete_in_space", skip(self))]
+    pub async fn delete_in_space(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        space_id: SpaceId,
+    ) -> Result<(), SkillError> {
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::SpaceSkill(space_id, Some(id)),
+        )?;
+        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if skill.space_id != Some(space_id) {
+            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Delete,
+                resource: AuthResource::SpaceSkill(space_id, Some(id)),
+            }));
+        }
+        self.repo.delete_in_op(&mut op, skill).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
+    /// List skills owned by `space_id` (no global fold-in). Admin-only.
+    #[instrument(name = "skill.list_for_space", skip(self, sub))]
+    pub async fn list_for_space(
+        &self,
+        sub: &AuthSubject,
+        space_id: SpaceId,
+    ) -> Result<Vec<Skill>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::SpaceSkill(space_id, None))?;
+        let result = self
+            .repo
+            .list_for_space_id_by_created_at(
+                Some(space_id),
+                es_entity::PaginatedQueryArgs {
+                    first: 100,
+                    after: None,
+                },
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result.entities)
+    }
 }
 
 /// Extracts the markdown body from a canonical skill file (everything after
@@ -532,7 +671,7 @@ impl Skills {
         &self,
         op: &mut OP,
         parsed: ParsedSkill,
-        project_id: Option<ProjectId>,
+        scope: ImportScope,
     ) -> Result<Option<Skill>, SkillError> {
         let file_hash = parsed.file_hash();
 
@@ -553,12 +692,7 @@ impl Skills {
                 return Ok(None);
             }
             self.repo.update_in_op(op, &mut existing).await?;
-            self.register_context_bump(
-                op,
-                project_id
-                    .map(ScopeId::Project)
-                    .unwrap_or(ScopeId::Global),
-            );
+            self.register_context_bump(op, scope.bump_scope());
             return Ok(Some(existing));
         }
 
@@ -568,22 +702,30 @@ impl Skills {
             .description(parsed.description)
             .body(parsed.body)
             .original_path(parsed.original_path);
-        if let Some(project_id) = project_id {
-            builder = builder.project_id(project_id);
-        }
-        if let Some(name) = parsed.project_name {
-            builder = builder.project_name(name);
+        match &scope {
+            ImportScope::Project {
+                project_id,
+                project_name,
+            } => {
+                builder = builder
+                    .project_id(*project_id)
+                    .project_name(project_name.clone());
+            }
+            ImportScope::Space {
+                space_id,
+                space_slug,
+            } => {
+                builder = builder
+                    .space_id(*space_id)
+                    .space_slug(space_slug.clone());
+            }
+            ImportScope::Global => {}
         }
         let new = builder
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
         let skill = self.repo.create_in_op(op, new).await?;
-        self.register_context_bump(
-            op,
-            project_id
-                .map(ScopeId::Project)
-                .unwrap_or(ScopeId::Global),
-        );
+        self.register_context_bump(op, scope.bump_scope());
         Ok(Some(skill))
     }
 

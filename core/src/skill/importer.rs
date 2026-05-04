@@ -4,22 +4,29 @@ use drua_library::{
     DocType as DruaDocType, GitFileHash, LibraryImporter, SearchableFields, UpsertError,
 };
 
+use crate::library::AuthedSpaces;
 use crate::project::Projects;
 use crate::skill::file::parse_skill_markdown;
-use crate::skill::Skills;
+use crate::skill::{ImportScope, Skills};
 
 /// Adapter that lets the drua_library reverse-sync job route
-/// `runtime/{skills,projects/*/skills}/*.md` paths into the Skills
-/// service. Built post-`Library::init` (Skills + Projects already
-/// exist) and registered via `Library::register_importer`.
+/// `runtime/{skills, projects/*/skills, spaces/*/skills}/*.md` paths
+/// into the Skills service. Built post-`Library::init` (Skills,
+/// Projects, and Spaces already exist) and registered via
+/// `Library::register_importer`.
 pub struct SkillsImporter {
     skills: Arc<Skills>,
     projects: Arc<Projects>,
+    spaces: AuthedSpaces,
 }
 
 impl SkillsImporter {
-    pub fn new(skills: Arc<Skills>, projects: Arc<Projects>) -> Self {
-        Self { skills, projects }
+    pub fn new(skills: Arc<Skills>, projects: Arc<Projects>, spaces: AuthedSpaces) -> Self {
+        Self {
+            skills,
+            projects,
+            spaces,
+        }
     }
 }
 
@@ -32,7 +39,9 @@ impl LibraryImporter for SkillsImporter {
         let parts: Vec<&str> = path.split('/').collect();
         matches!(
             parts.as_slice(),
-            ["runtime", "skills", _] | ["runtime", "projects", _, "skills", _]
+            ["runtime", "skills", _]
+                | ["runtime", "projects", _, "skills", _]
+                | ["runtime", "spaces", _, "skills", _]
         )
     }
 
@@ -54,9 +63,34 @@ impl LibraryImporter for SkillsImporter {
             return Ok(None);
         };
 
-        let project_id = match parsed.project_name.as_deref() {
-            Some(name) => match self.projects.find_by_name(name).await {
-                Ok(Some(project)) => Some(project.id),
+        // Path determines scope: spaces/* wins over projects/* (paths
+        // are mutually exclusive by `parse_skill_markdown` shape).
+        let scope = if let Some(slug) = parsed.space_slug.as_deref() {
+            match self.spaces.find_by_slug(slug).await {
+                Ok(Some(space)) => ImportScope::Space {
+                    space_id: space.id,
+                    space_slug: space.slug,
+                },
+                Ok(None) => {
+                    tracing::debug!(
+                        space_slug = %slug,
+                        path,
+                        "skill references unknown space; skipping import"
+                    );
+                    return Ok(None);
+                }
+                Err(e) => {
+                    return Err(UpsertError::Other(format!(
+                        "space lookup failed for {slug}: {e}"
+                    )))
+                }
+            }
+        } else if let Some(name) = parsed.project_name.as_deref() {
+            match self.projects.find_by_name(name).await {
+                Ok(Some(project)) => ImportScope::Project {
+                    project_id: project.id,
+                    project_name: project.name.clone(),
+                },
                 Ok(None) => {
                     tracing::debug!(
                         project_name = %name,
@@ -70,8 +104,9 @@ impl LibraryImporter for SkillsImporter {
                         "project lookup failed for {name}: {e}"
                     )))
                 }
-            },
-            None => None,
+            }
+        } else {
+            ImportScope::Global
         };
 
         // Always returns Ok(None): when `import_from_library` persists
@@ -82,7 +117,7 @@ impl LibraryImporter for SkillsImporter {
         // importer is just the entity-persist path; the hook owns
         // search+embed for entity-backed doc types.
         self.skills
-            .import_from_library(op, parsed, project_id)
+            .import_from_library(op, parsed, scope)
             .await
             .map_err(|e| UpsertError::Other(format!("skill upsert: {e}")))?;
 

@@ -302,6 +302,7 @@ impl App {
             .register_importer(Arc::new(skill::SkillsImporter::new(
                 Arc::clone(&skills),
                 Arc::clone(&projects),
+                (*spaces).clone(),
             )))
             .await;
         library

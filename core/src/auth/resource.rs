@@ -18,6 +18,11 @@ pub enum AuthResource {
     McpCreds(Option<McpCredsId>),
     Note(ProjectId, Option<NoteId>),
     Skill(ProjectId, Option<SkillId>),
+    /// Space-owned skill. Authority follows the parent space — if the
+    /// caller can update the space, they can write its skills. Agents
+    /// resolving a space's skills go through the project's mount, not
+    /// through this resource.
+    SpaceSkill(SpaceId, Option<SkillId>),
     Workflow(ProjectId, Option<WorkflowDefinitionId>),
     AuditLog(ProjectId),
     /// Library-wide; not project-scoped.
@@ -37,7 +42,10 @@ impl AuthResource {
             | AuthResource::Skill(project, _)
             | AuthResource::Workflow(project, _)
             | AuthResource::AuditLog(project) => Some(*project),
-            AuthResource::McpCreds(_) | AuthResource::Space(_) | AuthResource::External(_) => None,
+            AuthResource::SpaceSkill(_, _)
+            | AuthResource::McpCreds(_)
+            | AuthResource::Space(_)
+            | AuthResource::External(_) => None,
         }
     }
 }
