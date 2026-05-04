@@ -3,8 +3,11 @@ mod entity;
 pub mod error;
 mod pi_export;
 pub mod repo;
+pub mod scope;
 pub mod session;
 mod system_prompt;
+
+pub use scope::AgentScope;
 
 use std::sync::{Arc, OnceLock};
 
@@ -137,7 +140,6 @@ impl Agents {
         }
 
         let project_id = agent.project_id;
-        let sandbox_id = agent.attached_sandbox_id();
 
         let notes_block = match &self.notes {
             Some(notes) => notes
@@ -148,13 +150,34 @@ impl Agents {
                 .map(|text| session::message::SystemBlock::Notes { text }),
             None => None,
         };
-        let skills_block = self
-            .skills
-            .skills_context_for_agent(project_id, sandbox_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|text| session::message::SystemBlock::Skills { text });
+        let skills_block = match self.projects.get() {
+            Some(projects) => match scope::AgentScope::for_agent(agent, projects).await {
+                Ok(scope) => self
+                    .skills
+                    .skills_context_for_scope(&scope)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|text| session::message::SystemBlock::Skills { text }),
+                Err(e) => {
+                    tracing::warn!(error = %e, "AgentScope::for_agent failed; rendering skills block without space tier");
+                    self.skills
+                        .skills_context_for_agent(project_id, agent.attached_sandbox_id())
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|text| session::message::SystemBlock::Skills { text })
+                }
+            },
+            // Pre-Projects-wired (test) path: same single-tier fallback.
+            None => self
+                .skills
+                .skills_context_for_agent(project_id, agent.attached_sandbox_id())
+                .await
+                .ok()
+                .flatten()
+                .map(|text| session::message::SystemBlock::Skills { text }),
+        };
         let spaces_block = match self.projects.get() {
             Some(projects) => projects
                 .spaces_context_for_project(project_id)
@@ -411,11 +434,31 @@ impl Agents {
             None
         };
 
-        if let Ok(Some(skills_content)) = self
-            .skills
-            .skills_context_for_agent(project_id, initial_sandbox_id)
-            .await
-        {
+        let initial_skills = match self.projects.get() {
+            Some(projects) => {
+                match scope::AgentScope::for_agent(&agent, projects).await {
+                    Ok(mut scope) => {
+                        // Reflect the (just-applied) attachment in the
+                        // initial scope — `attached_sandbox_id()` reads
+                        // the entity, which we updated above.
+                        scope.attached_sandbox_id = initial_sandbox_id;
+                        self.skills.skills_context_for_scope(&scope).await
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "AgentScope::for_agent failed at create; rendering initial skills block without space tier");
+                        self.skills
+                            .skills_context_for_agent(project_id, initial_sandbox_id)
+                            .await
+                    }
+                }
+            }
+            None => {
+                self.skills
+                    .skills_context_for_agent(project_id, initial_sandbox_id)
+                    .await
+            }
+        };
+        if let Ok(Some(skills_content)) = initial_skills {
             system_blocks.push(session::message::SystemBlock::Skills {
                 text: skills_content,
             });

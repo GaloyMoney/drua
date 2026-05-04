@@ -468,6 +468,19 @@ impl Projects {
         Ok(space)
     }
 
+    /// Just the mounted space ids for `project_id`. No library round-trip,
+    /// no auth check — used by `AgentScope::for_agent` to derive the scope
+    /// at agent context-cache refresh time. Returns empty when no spaces
+    /// are mounted (or the project doesn't exist).
+    #[instrument(name = "domain.project.mounted_space_ids_for_project", skip(self))]
+    pub async fn mounted_space_ids_for_project(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<SpaceId>, ProjectError> {
+        let project = self.repo.find_by_id(project_id).await?;
+        Ok(project.mounted_spaces.clone())
+    }
+
     /// Renders the spaces mounted on `project_id` as a `<spaces>`
     /// system-block string for inclusion in agent prompts. Caps at
     /// `SPACES_BLOCK_LIMIT` entries with a "…and N more" footer.

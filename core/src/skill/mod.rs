@@ -15,6 +15,7 @@ use drua_library::SearchHit;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
+use crate::agent::AgentScope;
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::user::Users;
@@ -278,22 +279,61 @@ impl Skills {
             .await?)
     }
 
-    /// Build skills context for system prompt injection, scoped to a single
-    /// agent's attached sandbox (or none).
-    ///
-    /// Returns an `<available_skills>` block listing project + global skills
-    /// plus the attached sandbox's exported skills (when `sandbox_id` is
-    /// `Some` and the sandbox is `Ready`). DB skills shadow sandbox skills of
-    /// the same name. Returns `None` if there are no skills.
+    /// Wraps [`Self::skills_context_for_scope`] with a single-tier scope —
+    /// only `(project_id, attached_sandbox_id)`, no mounted spaces. Kept as
+    /// the entry point used by `attach_sandbox` / `detach_sandbox`'s skills
+    /// refresh, which doesn't need to fold space skills back in (the sandbox
+    /// dimension is the only thing changing in those paths).
     #[instrument(name = "skill.skills_context_for_agent", skip(self))]
     pub async fn skills_context_for_agent(
         &self,
         project_id: ProjectId,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<String>, SkillError> {
-        let db_skills = self.list_for_project_inner(project_id).await?;
+        let scope = AgentScope {
+            project_id,
+            attached_sandbox_id: sandbox_id,
+            mounted_space_ids: Vec::new(),
+        };
+        self.skills_context_for_scope(&scope).await
+    }
 
-        let sandbox_skills = match self.sandboxes.exported_skills_for_sandbox(sandbox_id).await {
+    /// Build the `<available_skills>` block for an agent.
+    ///
+    /// Folds the agent's full scope: project + global DB skills, every
+    /// mounted space's DB skills, and the attached sandbox's exported
+    /// skills (when `Ready`). Same-name conflicts resolve by precedence —
+    /// **WorkflowDef > Space > Sandbox > Project > Global** — so a space
+    /// skill called `deploy` shadows a project skill of the same name.
+    /// Returns `None` if no skill source contributes anything.
+    #[instrument(name = "skill.skills_context_for_scope", skip(self, scope))]
+    pub async fn skills_context_for_scope(
+        &self,
+        scope: &AgentScope,
+    ) -> Result<Option<String>, SkillError> {
+        let project_and_global = self.list_for_project_inner(scope.project_id).await?;
+
+        let mut space_skills: Vec<Skill> = Vec::new();
+        for space_id in &scope.mounted_space_ids {
+            let res = self
+                .repo
+                .list_for_space_id_by_created_at(
+                    Some(*space_id),
+                    es_entity::PaginatedQueryArgs {
+                        first: 100,
+                        after: None,
+                    },
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            space_skills.extend(res.entities);
+        }
+
+        let sandbox_skills = match self
+            .sandboxes
+            .exported_skills_for_sandbox(scope.attached_sandbox_id)
+            .await
+        {
             Ok(skills) => skills,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to fetch sandbox exported skills");
@@ -301,25 +341,31 @@ impl Skills {
             }
         };
 
+        // Precedence (highest first): Space > Sandbox > Project > Global.
+        // First insert wins; later same-name entries are dropped.
         let mut seen_names = std::collections::HashSet::new();
-        let mut entries: Vec<(&str, &str, String)> = Vec::new();
+        let mut entries: Vec<(String, &'static str, String)> = Vec::new();
 
-        for skill in &db_skills {
-            seen_names.insert(skill.name.as_str());
-            let scope = if skill.project_id.is_some() {
-                ""
-            } else {
-                " [global]"
-            };
-            entries.push((&skill.name, scope, skill.description.clone()));
+        for skill in &space_skills {
+            if seen_names.insert(skill.name.clone()) {
+                entries.push((skill.name.clone(), " [space]", skill.description.clone()));
+            }
         }
         for skill in &sandbox_skills {
-            if seen_names.contains(skill.name.as_str()) {
-                continue;
+            if seen_names.insert(skill.name.clone()) {
+                let desc = skill.description.clone().unwrap_or_default();
+                entries.push((skill.name.clone(), "", desc));
             }
-            seen_names.insert(&skill.name);
-            let desc = skill.description.clone().unwrap_or_default();
-            entries.push((&skill.name, "", desc));
+        }
+        for skill in &project_and_global {
+            if seen_names.insert(skill.name.clone()) {
+                let scope_tag = if skill.project_id.is_some() {
+                    ""
+                } else {
+                    " [global]"
+                };
+                entries.push((skill.name.clone(), scope_tag, skill.description.clone()));
+            }
         }
 
         if entries.is_empty() {

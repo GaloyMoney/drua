@@ -54,6 +54,7 @@ impl SkillRepo {
         }
     }
 
+
     /// Bulk soft-delete all project-scoped skills. No event is generated
     /// because the repo uses `soft_without_queries`, making a column update
     /// equivalent to iterating each entity through `delete_in_op`.
