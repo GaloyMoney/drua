@@ -95,10 +95,6 @@ impl JobRunner for LibrarySyncRunner {
             tokio::select! {
                 _ = current_job.shutdown_requested() => {
                     tracing::debug!("library.sync: shutdown requested");
-                    // RescheduleNow, not Complete: `spawn_unique` is a no-op
-                    // while a row exists, so Complete would mark this
-                    // long-lived consumer terminal forever and the next pod
-                    // boot would silently never re-attach.
                     return Ok(JobCompletion::RescheduleNow);
                 }
                 msg = rx.recv() => {
