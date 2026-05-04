@@ -21,6 +21,10 @@ toolsets:
     enabled: false
     url: ''
     team: ''
+  zenduty:
+    enabled: false
+    url: ''
+    default_team: ''
   code_assistant:
     db_path: ''
   compose:

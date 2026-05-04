@@ -154,6 +154,12 @@ spec:
               name: {{ template "galoyAgents.fullname" . }}
               key: "concourse-password"
               optional: true
+        - name: ZENDUTY_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "zenduty-api-token"
+              optional: true
         {{- range .Values.galoyAgents.config.mcpUpstreams }}
         - name: {{ .name | upper }}_AUTH_HEADER
           valueFrom:

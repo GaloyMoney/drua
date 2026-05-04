@@ -1428,6 +1428,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "uuid",
+ "zenduty-client",
 ]
 
 [[package]]
@@ -7219,6 +7220,19 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "zenduty-client"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

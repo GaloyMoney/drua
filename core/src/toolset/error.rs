@@ -16,6 +16,8 @@ pub enum ToolSetsError {
     MissingArgument(String),
     #[error("ToolSetsError - Concourse: {0}")]
     Concourse(#[from] concourse_client::ConcourseError),
+    #[error("ToolSetsError - Zenduty: {0}")]
+    Zenduty(#[from] zenduty_client::ZendutyError),
     #[error("ToolSetsError - InvalidArgument: {0}")]
     InvalidArgument(String),
     #[error("ToolSetsError - CodeAssistant: {0}")]

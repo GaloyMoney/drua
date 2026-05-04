@@ -9,6 +9,8 @@ pub struct ToolSetsConfig {
     #[serde(default)]
     pub concourse: ConcourseToolSetConfig,
     #[serde(default)]
+    pub zenduty: ZendutyToolSetConfig,
+    #[serde(default)]
     pub code_assistant: CodeAssistantToolSetConfig,
     #[serde(default)]
     pub compose: ComposeConfig,
@@ -145,4 +147,20 @@ pub struct ConcourseToolSetConfig {
     pub username: String,
     #[serde(skip)]
     pub password: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ZendutyToolSetConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional override for the API base URL. Defaults to
+    /// `https://www.zenduty.com/` when empty.
+    #[serde(default)]
+    pub url: String,
+    /// Default team unique_id used by schedule endpoints when none is
+    /// supplied at call time.
+    #[serde(default)]
+    pub default_team: String,
+    #[serde(skip)]
+    pub api_token: String,
 }

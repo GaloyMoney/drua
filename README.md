@@ -59,6 +59,7 @@ A complete `.env.example` is provided at the repo root.
 | `GITHUB_ALLOWED_TEAMS` | No | `""` (all users) | Comma-separated GitHub teams allowed to log in (`org/team-slug`). |
 | `CONCOURSE_USERNAME` | No | — | Concourse CI basic-auth username (when concourse toolset is enabled). |
 | `CONCOURSE_PASSWORD` | No | — | Concourse CI basic-auth password. |
+| `ZENDUTY_API_TOKEN` | No | — | Zenduty API token (sent as `Authorization: Token <token>`). Required when the zenduty toolset is enabled. |
 | `{UPSTREAM}_AUTH_HEADER` | No | — | Auth header for each MCP upstream. Name is uppercased from the config, e.g. `HONEYCOMB_AUTH_HEADER`, `GITHUB_AUTH_HEADER`, `LINGO_AUTH_HEADER`. |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | No | — | Filesystem path to the GitHub App PEM private key (for sandbox token auto-provisioning). Requires `github_app` section in config. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `http://localhost:4317` | OpenTelemetry OTLP gRPC endpoint. |
@@ -99,6 +100,7 @@ the included `drua.yml` for a complete local-dev example. Key sections:
 | `oauth` | GitHub OAuth client ID, redirect URI, allowed teams |
 | `agents.builtin_roles` | Per-role LLM model, system prompt, max tokens, auto-reset timer |
 | `toolsets.concourse` | Concourse CI URL, team, enabled flag |
+| `toolsets.zenduty` | Zenduty API URL override, default team, enabled flag |
 | `toolsets.mcp_upstreams[]` | MCP upstream services (name, URL, category, allowed tools, auth header name) |
 | `toolsets.code_assistant` | Path to the code-assistant SQLite DB |
 | `sandbox.backend` | `local` (child process) or `k8s` (namespace + template) |

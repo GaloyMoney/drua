@@ -251,6 +251,10 @@ impl Config {
             config.toolsets.concourse.password = val;
         }
 
+        if let Ok(val) = std::env::var("ZENDUTY_API_TOKEN") {
+            config.toolsets.zenduty.api_token = val.trim().to_string();
+        }
+
         // {NAME}_AUTH_HEADER env vars override upstream MCP auth headers.
         for upstream in &mut config.toolsets.mcp_upstreams {
             let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
