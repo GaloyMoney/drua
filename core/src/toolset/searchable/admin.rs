@@ -23,7 +23,7 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandb
 use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
-use super::super::inspect::{dispatch_inspect, parse_view_range, require_space_op, InspectTool};
+use super::super::inspect::{dispatch_edit, dispatch_view, parse_view_range, EditOp, ReadOp};
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -129,9 +129,9 @@ struct SandboxParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
 
-    tool: Option<InspectTool>,
+    op: Option<ReadOp>,
     #[serde(default)]
-    tool_args: Option<JsonObject>,
+    op_args: Option<JsonObject>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -215,23 +215,20 @@ enum SpacesCommand {
     /// top-level `spaces` tool instead; this admin variant lets you
     /// reach into any project.
     Unmount,
-    /// Read-only file ops on a space. Mirrors sandbox admin's
-    /// `inspect`: pass `tool` (read|ls|grep|glob) and `tool_args`.
-    Inspect,
-    /// Blind overwrite of `space:<slug>/<path>` with `content`.
-    Write,
-    /// Delete `space:<slug>/<path>`.
-    Delete,
-    /// Rename / move `space:<slug>/<from>` → `space:<slug>/<to>`.
-    Move,
+    /// Read-only file ops on a space. `op` selects the sub-tool
+    /// (read|ls|grep|glob); `op_args` shape depends on it.
+    View,
+    /// Mutating file ops on a space. `op` selects the sub-tool
+    /// (write|str_replace|insert|delete|move); `op_args` shape
+    /// depends on it.
+    Edit,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SpacesParams {
     command: SpacesCommand,
-    /// Slug for `create`, `get`, `mount`, `unmount`, `inspect`,
-    /// `write`, `delete`, `move`. Must match `[a-z0-9-]+` with no
-    /// leading / trailing / double hyphens.
+    /// Slug for `create`, `get`, `mount`, `unmount`, `view`, `edit`.
+    /// Must match `[a-z0-9-]+` with no leading / trailing / double hyphens.
     slug: Option<String>,
     /// Optional human-readable summary, used by `create`.
     description: Option<String>,
@@ -240,22 +237,13 @@ struct SpacesParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `inspect`. Selects the read-only sub-op.
-    tool: Option<InspectTool>,
-    /// Op-specific arguments for `inspect`. Shape mirrors the
-    /// equivalent top-level tool (`Read` / `LS` / `Grep` / `Glob`).
+    /// Required for `view`. Selects read|ls|grep|glob.
+    view_op: Option<ReadOp>,
+    /// Required for `edit`. Selects write|str_replace|insert|delete|move.
+    edit_op: Option<EditOp>,
+    /// Per-op arguments. See command docs for shape.
     #[serde(default)]
-    tool_args: Option<JsonObject>,
-
-    /// Path required for `write` and `delete`; relative to
-    /// `spaces/<slug>/`.
-    path: Option<String>,
-    /// Required for `write`.
-    content: Option<String>,
-    /// Required for `move` (source path within the space).
-    from: Option<String>,
-    /// Required for `move` (destination path within the space).
-    to: Option<String>,
+    op_args: Option<JsonObject>,
 }
 
 static AGENT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<AgentParams>);
@@ -559,13 +547,13 @@ impl AdminToolSet {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for inspect".to_string())
                 })?;
-                let tool = params.tool.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("tool is required for inspect".to_string())
+                let op = params.op.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("op is required for inspect".to_string())
                 })?;
-                let tool_args = params.tool_args.unwrap_or_default();
+                let op_args = params.op_args.unwrap_or_default();
 
                 Audit::record_sandbox_id(sandbox_id);
-                execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
+                execute_inspect(subject, &self.sandboxes, sandbox_id, op, op_args).await
             }
         }
     }
@@ -695,77 +683,28 @@ impl AdminToolSet {
                 ))]))
             }
 
-            SpacesCommand::Inspect => {
+            SpacesCommand::View => {
                 let slug = params.slug.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("slug is required for inspect".to_string())
+                    ToolSetsError::MissingArgument("slug is required for view".to_string())
                 })?;
-                let tool = params.tool.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("tool is required for inspect".to_string())
+                let op = params.view_op.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("view_op is required for view".to_string())
                 })?;
-                let tool_args = params.tool_args.unwrap_or_default();
-                Audit::record_action("spaces.inspect");
-                dispatch_inspect(&self.space_fs, subject, &slug, tool, tool_args).await
+                let op_args = params.op_args.unwrap_or_default();
+                Audit::record_action("spaces.view");
+                dispatch_view(&self.space_fs, subject, &slug, op, op_args).await
             }
 
-            SpacesCommand::Write => {
+            SpacesCommand::Edit => {
                 let slug = params.slug.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("slug is required for write".to_string())
+                    ToolSetsError::MissingArgument("slug is required for edit".to_string())
                 })?;
-                let path = params.path.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("path is required for write".to_string())
+                let op = params.edit_op.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("edit_op is required for edit".to_string())
                 })?;
-                let content = params.content.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("content is required for write".to_string())
-                })?;
-                Audit::record_action("spaces.write");
-                let space_path = format!("space:{slug}/{path}");
-                let result = self
-                    .space_fs
-                    .write_file(subject, &space_path, content)
-                    .await?;
-                require_space_op(result, "write")?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Wrote {space_path}"
-                ))]))
-            }
-
-            SpacesCommand::Delete => {
-                let slug = params.slug.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("slug is required for delete".to_string())
-                })?;
-                let path = params.path.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("path is required for delete".to_string())
-                })?;
-                Audit::record_action("spaces.delete");
-                let space_path = format!("space:{slug}/{path}");
-                let result = self.space_fs.delete_file(subject, &space_path).await?;
-                require_space_op(result, "delete")?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Deleted {space_path}"
-                ))]))
-            }
-
-            SpacesCommand::Move => {
-                let slug = params.slug.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("slug is required for move".to_string())
-                })?;
-                let from = params.from.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("from is required for move".to_string())
-                })?;
-                let to = params.to.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("to is required for move".to_string())
-                })?;
-                Audit::record_action("spaces.move");
-                let from_path = format!("space:{slug}/{from}");
-                let to_path = format!("space:{slug}/{to}");
-                let result = self
-                    .space_fs
-                    .move_file(subject, &from_path, &to_path)
-                    .await?;
-                require_space_op(result, "move")?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Moved {from_path} -> {to_path}"
-                ))]))
+                let op_args = params.op_args.unwrap_or_default();
+                Audit::record_action("spaces.edit");
+                dispatch_edit(&self.space_fs, subject, &slug, op, op_args).await
             }
         }
     }
@@ -775,13 +714,13 @@ async fn execute_inspect(
     sub: &AuthSubject,
     sandboxes: &Sandboxes,
     sandbox_id: SandboxId,
-    tool: InspectTool,
-    tool_args: JsonObject,
+    op: ReadOp,
+    op_args: JsonObject,
 ) -> Result<CallToolResult, ToolSetsError> {
-    let is_ls = matches!(tool, InspectTool::Ls);
+    let is_ls = matches!(op, ReadOp::Ls);
 
     let ls_ignore: Vec<String> = if is_ls {
-        tool_args
+        op_args
             .get("ignore")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -794,17 +733,17 @@ async fn execute_inspect(
         Vec::new()
     };
 
-    let req = match tool {
-        InspectTool::Grep => ExecuteRequest {
+    let req = match op {
+        ReadOp::Grep => ExecuteRequest {
             tool: "Grep".to_string(),
-            input: serde_json::Value::Object(tool_args),
+            input: serde_json::Value::Object(op_args),
         },
-        InspectTool::Glob => ExecuteRequest {
+        ReadOp::Glob => ExecuteRequest {
             tool: "Glob".to_string(),
-            input: serde_json::Value::Object(tool_args),
+            input: serde_json::Value::Object(op_args),
         },
-        InspectTool::Read => build_read_request(&tool_args)?,
-        InspectTool::Ls => build_ls_request(&tool_args)?,
+        ReadOp::Read => build_read_request(&op_args)?,
+        ReadOp::Ls => build_ls_request(&op_args)?,
     };
 
     let client = sandboxes.instance_client_for(sub, sandbox_id).await?;
@@ -1165,26 +1104,24 @@ mod tests {
         assert!(s.contains("\"get\""));
         assert!(s.contains("\"mount\""));
         assert!(s.contains("\"unmount\""));
-        assert!(s.contains("\"inspect\""));
-        assert!(s.contains("\"write\""));
-        assert!(s.contains("\"delete\""));
-        assert!(s.contains("\"move\""));
+        assert!(s.contains("\"view\""));
+        assert!(s.contains("\"edit\""));
     }
 
     #[test]
-    fn spaces_inspect_parses_full_args() {
+    fn spaces_view_parses_full_args() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "inspect",
+            "command": "view",
             "slug": "oncall",
-            "tool": "read",
-            "tool_args": { "path": "runbooks/foo.md" },
+            "view_op": "read",
+            "op_args": { "path": "runbooks/foo.md" },
         })))
         .expect("parse");
-        assert!(matches!(p.command, SpacesCommand::Inspect));
+        assert!(matches!(p.command, SpacesCommand::View));
         assert_eq!(p.slug.as_deref(), Some("oncall"));
-        assert!(matches!(p.tool, Some(InspectTool::Read)));
+        assert!(matches!(p.view_op, Some(ReadOp::Read)));
         assert_eq!(
-            p.tool_args
+            p.op_args
                 .as_ref()
                 .and_then(|a| a.get("path").and_then(|v| v.as_str())),
             Some("runbooks/foo.md")
@@ -1192,80 +1129,101 @@ mod tests {
     }
 
     #[test]
-    fn spaces_inspect_parses_grep_tool() {
+    fn spaces_view_parses_grep_op() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "inspect",
+            "command": "view",
             "slug": "oncall",
-            "tool": "grep",
-            "tool_args": { "pattern": "TODO", "output_mode": "content", "-n": true },
+            "view_op": "grep",
+            "op_args": { "pattern": "TODO", "output_mode": "content", "-n": true },
         })))
         .expect("parse");
-        assert!(matches!(p.command, SpacesCommand::Inspect));
-        assert!(matches!(p.tool, Some(InspectTool::Grep)));
+        assert!(matches!(p.command, SpacesCommand::View));
+        assert!(matches!(p.view_op, Some(ReadOp::Grep)));
     }
 
     #[test]
-    fn spaces_inspect_parses_glob_tool() {
+    fn spaces_view_parses_glob_op() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "inspect",
+            "command": "view",
             "slug": "oncall",
-            "tool": "glob",
-            "tool_args": { "pattern": "**/*.md" },
+            "view_op": "glob",
+            "op_args": { "pattern": "**/*.md" },
         })))
         .expect("parse");
-        assert!(matches!(p.tool, Some(InspectTool::Glob)));
+        assert!(matches!(p.view_op, Some(ReadOp::Glob)));
     }
 
     #[test]
-    fn spaces_inspect_parses_ls_tool() {
+    fn spaces_view_parses_ls_op() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "inspect",
+            "command": "view",
             "slug": "oncall",
-            "tool": "ls",
-            "tool_args": { "path": "" },
+            "view_op": "ls",
+            "op_args": { "path": "" },
         })))
         .expect("parse");
-        assert!(matches!(p.tool, Some(InspectTool::Ls)));
+        assert!(matches!(p.view_op, Some(ReadOp::Ls)));
     }
 
     #[test]
-    fn spaces_write_parses_args() {
+    fn spaces_edit_write_parses() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "write",
+            "command": "edit",
             "slug": "oncall",
-            "path": "notes/x.md",
-            "content": "hello",
+            "edit_op": "write",
+            "op_args": { "path": "notes/x.md", "content": "hello" },
         })))
         .expect("parse");
-        assert!(matches!(p.command, SpacesCommand::Write));
-        assert_eq!(p.path.as_deref(), Some("notes/x.md"));
-        assert_eq!(p.content.as_deref(), Some("hello"));
+        assert!(matches!(p.command, SpacesCommand::Edit));
+        assert!(matches!(p.edit_op, Some(EditOp::Write)));
     }
 
     #[test]
-    fn spaces_delete_parses_args() {
+    fn spaces_edit_str_replace_parses() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "delete",
+            "command": "edit",
             "slug": "oncall",
-            "path": "notes/x.md",
+            "edit_op": "str_replace",
+            "op_args": { "path": "notes/x.md", "old_str": "a", "new_str": "b" },
         })))
         .expect("parse");
-        assert!(matches!(p.command, SpacesCommand::Delete));
-        assert_eq!(p.path.as_deref(), Some("notes/x.md"));
+        assert!(matches!(p.edit_op, Some(EditOp::StrReplace)));
     }
 
     #[test]
-    fn spaces_move_parses_args() {
+    fn spaces_edit_insert_parses() {
         let p: SpacesParams = parse_params(args(serde_json::json!({
-            "command": "move",
+            "command": "edit",
             "slug": "oncall",
-            "from": "a.md",
-            "to": "b.md",
+            "edit_op": "insert",
+            "op_args": { "path": "notes/x.md", "line": 0, "text": "first line\n" },
         })))
         .expect("parse");
-        assert!(matches!(p.command, SpacesCommand::Move));
-        assert_eq!(p.from.as_deref(), Some("a.md"));
-        assert_eq!(p.to.as_deref(), Some("b.md"));
+        assert!(matches!(p.edit_op, Some(EditOp::Insert)));
+    }
+
+    #[test]
+    fn spaces_edit_delete_parses() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "edit",
+            "slug": "oncall",
+            "edit_op": "delete",
+            "op_args": { "path": "notes/x.md" },
+        })))
+        .expect("parse");
+        assert!(matches!(p.edit_op, Some(EditOp::Delete)));
+    }
+
+    #[test]
+    fn spaces_edit_move_parses() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "edit",
+            "slug": "oncall",
+            "edit_op": "move",
+            "op_args": { "from": "a.md", "to": "b.md" },
+        })))
+        .expect("parse");
+        assert!(matches!(p.edit_op, Some(EditOp::Move)));
     }
 
     #[test]

@@ -54,15 +54,6 @@ enum SandboxCreateMode {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum InspectTool {
-    Grep,
-    Glob,
-    Read,
-    Ls,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
 struct ProjectSandboxParams {
     command: SandboxCommand,
 
@@ -77,14 +68,14 @@ struct ProjectSandboxParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
 
-    /// Inspect sub-tool. Each takes a different `tool_args` shape:
+    /// Inspect sub-op. Each takes a different `op_args` shape:
     /// `ls` → `{ path: string, ignore?: string[] }`;
     /// `read` → `{ path: string, offset?: int, limit?: int }`;
     /// `grep` → `{ pattern: string, path?: string, glob?: string, output_mode?: string }`;
     /// `glob` → `{ pattern: string, path?: string }`.
-    tool: Option<InspectTool>,
+    op: Option<crate::toolset::inspect::ReadOp>,
     #[serde(default)]
-    tool_args: Option<JsonObject>,
+    op_args: Option<JsonObject>,
 
     /// On `create` and `restart`: block until state=ready (or fail).
     /// Defaults to `true` so callers don't accidentally race a
@@ -136,8 +127,8 @@ impl TopLevelTool for ProjectSandbox {
          plus `cpu`, `memory`, `disk_size`; blocks until state=ready \
          unless `wait: false`), \
          `list`, `get` (requires `sandbox_id`), \
-         `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`; \
-         per-tool args: ls/read take `path`, grep/glob take `pattern`), \
+         `inspect` (requires `sandbox_id`, `op` (grep/glob/read/ls), `op_args`; \
+         per-op args: ls/read take `path`, grep/glob take `pattern`), \
          `restart` (requires `sandbox_id`; blocks until state=ready unless \
          `wait: false` — wakes a suspended or errored sandbox; cannot run \
          while a sandbox is still provisioning), \
@@ -246,16 +237,16 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for inspect".to_string())
                 })?;
-                let tool = params.tool.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("tool is required for inspect".to_string())
+                let op = params.op.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("op is required for inspect".to_string())
                 })?;
-                let tool_args = params.tool_args.unwrap_or_default();
+                let op_args = params.op_args.unwrap_or_default();
 
                 Audit::record_sandbox_id(sandbox_id);
 
                 let _ = self.sandboxes.find_by_id(subject, sandbox_id).await?;
 
-                execute_inspect(subject, &self.sandboxes, sandbox_id, tool, tool_args).await
+                execute_inspect(subject, &self.sandboxes, sandbox_id, op, op_args).await
             }
 
             SandboxCommand::Restart => {
@@ -297,14 +288,15 @@ async fn execute_inspect(
     sub: &AuthSubject,
     sandboxes: &Sandboxes,
     sandbox_id: SandboxId,
-    tool: InspectTool,
-    tool_args: JsonObject,
+    op: crate::toolset::inspect::ReadOp,
+    op_args: JsonObject,
 ) -> Result<CallToolResult, ToolSetsError> {
-    let is_ls = matches!(tool, InspectTool::Ls);
+    use crate::toolset::inspect::ReadOp;
+    let is_ls = matches!(op, ReadOp::Ls);
 
-    // Extract LS ignore list before tool_args is moved.
+    // Extract LS ignore list before op_args is moved.
     let ls_ignore: Vec<String> = if is_ls {
-        tool_args
+        op_args
             .get("ignore")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -317,17 +309,17 @@ async fn execute_inspect(
         Vec::new()
     };
 
-    let req = match tool {
-        InspectTool::Grep => ExecuteRequest {
+    let req = match op {
+        ReadOp::Grep => ExecuteRequest {
             tool: "Grep".to_string(),
-            input: serde_json::Value::Object(tool_args),
+            input: serde_json::Value::Object(op_args),
         },
-        InspectTool::Glob => ExecuteRequest {
+        ReadOp::Glob => ExecuteRequest {
             tool: "Glob".to_string(),
-            input: serde_json::Value::Object(tool_args),
+            input: serde_json::Value::Object(op_args),
         },
-        InspectTool::Read => build_read_request(&tool_args)?,
-        InspectTool::Ls => build_ls_request(&tool_args)?,
+        ReadOp::Read => build_read_request(&op_args)?,
+        ReadOp::Ls => build_ls_request(&op_args)?,
     };
 
     let client = sandboxes.instance_client_for_read(sub, sandbox_id).await?;
