@@ -90,6 +90,27 @@ impl ToolSets {
             tracing::info!(url = %config.concourse.url, "Concourse toolset initialized");
         }
 
+        if config.zenduty.enabled && !config.zenduty.api_token.is_empty() {
+            match zenduty_client::ZendutyClient::new(&config.zenduty.url, &config.zenduty.api_token)
+            {
+                Ok(client) => {
+                    let default_team = if config.zenduty.default_team.is_empty() {
+                        None
+                    } else {
+                        Some(config.zenduty.default_team.clone())
+                    };
+                    sets.push(Arc::new(ZendutyToolSet::new(client, default_team)));
+                    tracing::info!(
+                        url = %config.zenduty.url,
+                        "Zenduty toolset initialized"
+                    );
+                }
+                Err(e) => {
+                    init_errors.push(("zenduty".to_string(), e.to_string()));
+                }
+            }
+        }
+
         let sets = Arc::new(RwLock::new(sets));
         let top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>> =
             Arc::new(RwLock::new(HashMap::new()));

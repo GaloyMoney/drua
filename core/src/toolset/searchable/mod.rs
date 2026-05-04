@@ -8,9 +8,11 @@ pub mod code_assistant;
 pub mod concourse;
 pub mod library;
 pub mod upstream;
+pub mod zenduty;
 
 pub use admin::AdminToolSet;
 pub use code_assistant::CodeAssistantToolSet;
 pub use concourse::ConcourseToolSet;
 pub use library::LibraryToolSet;
 pub use upstream::*;
+pub use zenduty::ZendutyToolSet;

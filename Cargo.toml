@@ -4,6 +4,7 @@ members = [
   "client",
   "server",
   "lib/concourse-client",
+  "lib/zenduty-client",
   "core",
   "core/crates/library",
   "mcp-gateway",
@@ -47,6 +48,7 @@ name = "drua"
 [workspace.dependencies]
 # Internal crates
 concourse-client = { path = "lib/concourse-client" }
+zenduty-client = { path = "lib/zenduty-client" }
 sandbox = { path = "lib/sandbox" }
 js-engine = { path = "lib/js-engine" }
 json-schema-ts = { path = "lib/json-schema-ts" }

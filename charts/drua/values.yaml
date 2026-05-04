@@ -173,6 +173,7 @@ galoyAgents:
     githubClientSecret: ""
     concourseUsername: ""
     concoursePassword: ""
+    zendutyApiToken: ""
     anthropicApiKey: ""
     openaiApiKey: ""
     annotations:
