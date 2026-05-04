@@ -1,11 +1,13 @@
-//! Shared helpers for inspect-style tool dispatch:
-//! - `InspectTool` enum (Read|Ls|Grep|Glob), shared by sandbox and
-//!   space inspect commands across top-level and admin toolsets.
+//! Shared helpers for sub-discriminator tool dispatch:
+//! - `ReadOp` (Read|Ls|Grep|Glob): consumed by `sandbox.inspect`
+//!   (admin + top-level) and `spaces.view`.
+//! - `EditOp` (Write|StrReplace|Insert|Delete|Move): consumed by
+//!   `spaces.edit` (admin + top-level).
 //! - `parse_view_range`: zero-based `{offset, limit}` → 1-based
-//!   `(start, end)` view-range conversion. Also reused by sandbox
+//!   `(start, end)` view-range conversion. Reused by sandbox
 //!   `build_read_request` to construct the editor `view_range` arg.
-//! - `dispatch_inspect` / `require_space_op`: space-specific helpers
-//!   that funnel through `SpaceFs`.
+//! - `dispatch_view` / `dispatch_edit` / `require_space_op`: space
+//!   helpers that funnel through `SpaceFs`.
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
@@ -19,11 +21,21 @@ use super::error::ToolSetsError;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum InspectTool {
+pub(crate) enum ReadOp {
     Read,
     Ls,
     Grep,
     Glob,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EditOp {
+    Write,
+    StrReplace,
+    Insert,
+    Delete,
+    Move,
 }
 
 /// Translates `{offset, limit}` (zero-based) into the 1-based,
@@ -47,27 +59,27 @@ pub(crate) fn parse_view_range(args: &JsonObject) -> Option<(i64, i64)> {
     Some((start, end))
 }
 
-/// Runs an `InspectTool` against `space:<slug>/<tool_args.path>`,
+/// Runs a `ReadOp` against `space:<slug>/<op_args.path>`,
 /// formatting the response as plain text. `Ok(None)` from `SpaceFs`
 /// (only reachable for an empty slug, since callers always prefix
 /// `space:`) is converted to an error so callers never see a silent
 /// success.
-pub(crate) async fn dispatch_inspect(
+pub(crate) async fn dispatch_view(
     space_fs: &SpaceFs,
     subject: &AuthSubject,
     slug: &str,
-    tool: InspectTool,
-    tool_args: JsonObject,
+    op: ReadOp,
+    op_args: JsonObject,
 ) -> Result<CallToolResult, ToolSetsError> {
-    let path = tool_args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let path = op_args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let space_path = format!("space:{slug}/{path}");
     let invalid = || -> ToolSetsError {
         ToolSetsError::Library(SpaceError::Io(format!("invalid space path: {space_path}")).into())
     };
 
-    match tool {
-        InspectTool::Read => {
-            let view_range = parse_view_range(&tool_args);
+    match op {
+        ReadOp::Read => {
+            let view_range = parse_view_range(&op_args);
             let view = space_fs
                 .view_file(subject, &space_path, view_range)
                 .await?
@@ -78,7 +90,7 @@ pub(crate) async fn dispatch_inspect(
             };
             Ok(CallToolResult::success(vec![Content::text(text)]))
         }
-        InspectTool::Ls => {
+        ReadOp::Ls => {
             let entries = space_fs
                 .view_dir(subject, &space_path)
                 .await?
@@ -87,8 +99,8 @@ pub(crate) async fn dispatch_inspect(
                 entries.join("\n"),
             )]))
         }
-        InspectTool::Glob => {
-            let pattern = tool_args
+        ReadOp::Glob => {
+            let pattern = op_args
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
@@ -100,8 +112,8 @@ pub(crate) async fn dispatch_inspect(
                 matches.join("\n"),
             )]))
         }
-        InspectTool::Grep => {
-            let args = serde_json::Value::Object(tool_args);
+        ReadOp::Grep => {
+            let args = serde_json::Value::Object(op_args);
             let out = space_fs
                 .grep(subject, &space_path, &args)
                 .await?
@@ -111,9 +123,102 @@ pub(crate) async fn dispatch_inspect(
     }
 }
 
+/// Runs an `EditOp` against the relevant `space:<slug>/...` path(s).
+/// Per-op required args:
+/// - `write`: `path`, `content`
+/// - `str_replace`: `path`, `old_str`, `new_str`
+/// - `insert`: `path`, `line` (1-based; insert AFTER; `0` prepends), `text`
+/// - `delete`: `path`
+/// - `move`: `from`, `to`
+pub(crate) async fn dispatch_edit(
+    space_fs: &SpaceFs,
+    subject: &AuthSubject,
+    slug: &str,
+    op: EditOp,
+    op_args: JsonObject,
+) -> Result<CallToolResult, ToolSetsError> {
+    let str_arg = |key: &str| -> Result<String, ToolSetsError> {
+        op_args
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
+    };
+    let int_arg = |key: &str| -> Result<i64, ToolSetsError> {
+        op_args
+            .get(key)
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
+    };
+
+    match op {
+        EditOp::Write => {
+            let path = str_arg("path")?;
+            let content = str_arg("content")?;
+            let space_path = format!("space:{slug}/{path}");
+            let result = space_fs.write_file(subject, &space_path, content).await?;
+            require_space_op(result, "write")?;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Wrote {space_path}"
+            ))]))
+        }
+        EditOp::StrReplace => {
+            let path = str_arg("path")?;
+            let old_str = str_arg("old_str")?;
+            let new_str = str_arg("new_str")?;
+            let space_path = format!("space:{slug}/{path}");
+            let result = space_fs
+                .str_replace(subject, &space_path, old_str, new_str)
+                .await?;
+            require_space_op(result, "str_replace")?;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Replaced in {space_path}"
+            ))]))
+        }
+        EditOp::Insert => {
+            let path = str_arg("path")?;
+            let line = int_arg("line")?;
+            if line < 0 {
+                return Err(ToolSetsError::InvalidArgument(
+                    "line must be >= 0".to_string(),
+                ));
+            }
+            let text = str_arg("text")?;
+            let space_path = format!("space:{slug}/{path}");
+            let result = space_fs
+                .insert_line(subject, &space_path, line as usize, text)
+                .await?;
+            require_space_op(result, "insert")?;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Inserted into {space_path}"
+            ))]))
+        }
+        EditOp::Delete => {
+            let path = str_arg("path")?;
+            let space_path = format!("space:{slug}/{path}");
+            let result = space_fs.delete_file(subject, &space_path).await?;
+            require_space_op(result, "delete")?;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Deleted {space_path}"
+            ))]))
+        }
+        EditOp::Move => {
+            let from = str_arg("from")?;
+            let to = str_arg("to")?;
+            let from_path = format!("space:{slug}/{from}");
+            let to_path = format!("space:{slug}/{to}");
+            let result = space_fs.move_file(subject, &from_path, &to_path).await?;
+            require_space_op(result, "move")?;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Moved {from_path} -> {to_path}"
+            ))]))
+        }
+    }
+}
+
 /// Errors `Ok(None)` (empty slug → `parse_space_path` returns None)
-/// as `InvalidArgument` so write/delete/move callers can't silently
-/// no-op. Successful ops just propagate.
+/// as `InvalidArgument` so callers can't silently no-op. Successful
+/// ops just propagate.
 pub(crate) fn require_space_op(result: Option<()>, what: &str) -> Result<(), ToolSetsError> {
     if result.is_none() {
         return Err(ToolSetsError::InvalidArgument(format!(
