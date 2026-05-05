@@ -336,6 +336,10 @@ impl Executor {
                 let arguments = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
+                // `interpolate_skill` resolves the project's mounted-space
+                // skills internally via the held `SpaceMounts` — a workflow
+                // step naming a space-scoped skill resolves correctly as
+                // long as the workflow's project mounts the space.
                 let prompt = self
                     .skills
                     .interpolate_skill(skill, Some(project_id), sandbox_id, Some(&arguments))

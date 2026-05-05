@@ -17,6 +17,7 @@ use tracing::instrument;
 
 use crate::agent::AgentScope;
 use crate::audit::Audit;
+use crate::library::SpaceMounts;
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::user::Users;
@@ -61,6 +62,12 @@ pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
     library: Option<drua_library::Library>,
+    /// Read facade for the project↔space mount relationship — held
+    /// alongside `sandboxes` so `find_by_name` / `interpolate_skill`
+    /// can resolve mounted-space skills internally without callers
+    /// passing the scope through. `None` in `new_without_library` test
+    /// contexts; mounted spaces resolve as empty there.
+    space_mounts: Option<Arc<SpaceMounts>>,
     /// `None` in test contexts (`new_without_library`); `Some` everywhere
     /// else. Used to wire `ContextBumpHook` onto mutation ops.
     pool: Option<sqlx::PgPool>,
@@ -77,6 +84,7 @@ impl Skills {
         pool: &sqlx::PgPool,
         sandboxes: Arc<Sandboxes>,
         library: drua_library::Library,
+        space_mounts: Arc<SpaceMounts>,
         users: Arc<Users>,
         context_generation: ContextGeneration,
     ) -> Self {
@@ -85,9 +93,27 @@ impl Skills {
             repo,
             sandboxes,
             library: Some(library),
+            space_mounts: Some(space_mounts),
             pool: Some(pool.clone()),
             users: Some(users),
             context_generation,
+        }
+    }
+
+    /// Resolves the agent's mounted-space ids via the held `SpaceMounts`.
+    /// Returns empty when there's no project context, no `SpaceMounts`
+    /// wired (test contexts), or the lookup itself fails (logged + swallowed
+    /// — skill resolution always falls through to project + global tiers).
+    async fn mounted_space_ids_for(&self, project_id: Option<ProjectId>) -> Vec<SpaceId> {
+        let (Some(pid), Some(sm)) = (project_id, self.space_mounts.as_ref()) else {
+            return Vec::new();
+        };
+        match sm.space_ids_for_project(pid).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "space_ids_for_project failed; resolving without space tier");
+                Vec::new()
+            }
         }
     }
 
@@ -146,8 +172,16 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Lookup order (project shadows global):
-    /// 1. Project-scoped, 2. Global, 3. Sandbox-exported.
+    /// Lookup order (highest precedence first):
+    /// 1. Mounted space the agent's project has — Space > all (matches the
+    ///    `<available_skills>` precedence so a space skill the agent saw
+    ///    listed is always invocable). Mounted spaces are resolved
+    ///    internally via the held `SpaceMounts`; callers only pass
+    ///    `project_id`.
+    /// 2. Project-scoped (the agent's own project).
+    /// 3. Truly-global (no project AND no space).
+    /// 4. Sandbox-exported (only the agent's attached sandbox).
+    ///
     /// `Ok(None)` when no source matches.
     #[instrument(name = "skill.find_by_name", skip_all, fields(name = %name, sandbox_id))]
     pub async fn find_by_name(
@@ -156,7 +190,8 @@ impl Skills {
         project_id: Option<ProjectId>,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<SkillBody>, SkillError> {
-        // Single query fetches project-scoped + global; project wins.
+        // Single query fetches every skill with this name across all scopes;
+        // we filter by precedence here.
         let query = es_entity::PaginatedQueryArgs {
             first: 10,
             after: None,
@@ -170,11 +205,19 @@ impl Skills {
             )
             .await?;
         let candidates = result.entities;
-        // Truly-global means no project AND no space — space-scoped skills
-        // (project_id NULL but space_id Some) are reachable via the
-        // space-mount path, not via the global fallback.
-        let best = project_id
-            .and_then(|project_id| candidates.iter().find(|s| s.project_id == Some(project_id)))
+        let mounted_space_ids = self.mounted_space_ids_for(project_id).await;
+
+        let best = candidates
+            .iter()
+            // Mounted-space skill — Space > Sandbox > Project > Global per
+            // `skills_context_for_scope`'s precedence.
+            .find(|s| {
+                s.space_id
+                    .is_some_and(|sid| mounted_space_ids.contains(&sid))
+            })
+            .or_else(|| {
+                project_id.and_then(|pid| candidates.iter().find(|s| s.project_id == Some(pid)))
+            })
             .or_else(|| {
                 candidates
                     .iter()
@@ -768,10 +811,21 @@ impl Skills {
             repo,
             sandboxes,
             library: None,
+            space_mounts: None,
             pool: None,
             users: None,
             context_generation: ContextGeneration::new(),
         }
+    }
+
+    /// Test-only chainable setter — production goes through [`Self::new`]
+    /// which always wires `SpaceMounts`. Lets `new_without_library`
+    /// callers exercise the mounted-space resolution path in
+    /// `find_by_name` without standing up the full library stack.
+    #[doc(hidden)]
+    pub fn with_space_mounts(mut self, space_mounts: Arc<SpaceMounts>) -> Self {
+        self.space_mounts = Some(space_mounts);
+        self
     }
 }
 

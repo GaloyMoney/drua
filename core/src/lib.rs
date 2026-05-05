@@ -175,10 +175,21 @@ impl App {
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
+
+        // Read facade for the project↔space mount relationship. Built
+        // before `Skills` so Skills can resolve mounted-space skills
+        // internally (mirrors how it holds `Arc<Sandboxes>`); also
+        // shared with `Agents` for `<spaces>` block + `AgentScope`.
+        let space_mounts = Arc::new(library::SpaceMounts::new(
+            Arc::new(project::repo::ProjectRepo::new(pool)),
+            Arc::clone(&spaces),
+        ));
+
         let skills = Arc::new(Skills::new(
             pool,
             Arc::clone(&sandboxes),
             library.clone(),
+            Arc::clone(&space_mounts),
             Arc::clone(&users),
             context_generation.clone(),
         ));
@@ -200,13 +211,6 @@ impl App {
             context_generation.clone(),
         ));
 
-        // Read facade for the project↔space mount relationship. Holds its
-        // own `ProjectRepo` + `AuthedSpaces`; no upward dep on `Projects`,
-        // so `Agents` can derive `AgentScope` without the old
-        // `set_projects` cycle workaround.
-        let space_mounts =
-            library::SpaceMounts::new(project::repo::ProjectRepo::new(pool), (*spaces).clone());
-
         let agents = Arc::new(Agents::new(
             pool,
             config.agents,
@@ -216,7 +220,7 @@ impl App {
             Arc::clone(&skills),
             Some(Arc::clone(&notes)),
             context_generation.clone(),
-            space_mounts,
+            Arc::clone(&space_mounts),
         ));
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));

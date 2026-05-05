@@ -79,7 +79,7 @@ pub struct Agents {
     /// `<spaces>` system block. Holds its own `ProjectRepo` + library
     /// `AuthedSpaces` internally — no upward dep on the `Projects`
     /// service, so the previous `OnceLock<Projects>` cycle is gone.
-    space_mounts: SpaceMounts,
+    space_mounts: Arc<SpaceMounts>,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -98,7 +98,7 @@ impl Agents {
         skills: Arc<Skills>,
         notes: Option<Arc<Notes>>,
         context_generation: ContextGeneration,
-        space_mounts: SpaceMounts,
+        space_mounts: Arc<SpaceMounts>,
     ) -> Self {
         Self {
             repo: AgentRepo::new(pool),

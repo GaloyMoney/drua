@@ -12,6 +12,8 @@
 //! used by `Agents` and similar internal renderers; public surfaces go
 //! through `Projects`.
 
+use std::sync::Arc;
+
 use drua_library::Space;
 use thiserror::Error;
 use tracing::instrument;
@@ -43,12 +45,12 @@ pub struct SpaceMounts {
 
 #[derive(Clone)]
 struct Inner {
-    project_repo: ProjectRepo,
-    spaces: AuthedSpaces,
+    project_repo: Arc<ProjectRepo>,
+    spaces: Arc<AuthedSpaces>,
 }
 
 impl SpaceMounts {
-    pub fn new(project_repo: ProjectRepo, spaces: AuthedSpaces) -> Self {
+    pub fn new(project_repo: Arc<ProjectRepo>, spaces: Arc<AuthedSpaces>) -> Self {
         Self {
             inner: Some(Inner {
                 project_repo,
