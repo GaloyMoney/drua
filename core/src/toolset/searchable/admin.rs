@@ -414,6 +414,7 @@ enum SkillCommand {
     List,
     Get,
     Update,
+    Delete,
     Invoke,
 }
 
@@ -425,7 +426,7 @@ struct SkillParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`.
+    /// Required for `get`, `update`, `delete`.
     #[schemars(with = "Option<uuid::Uuid>")]
     skill_id: Option<SkillId>,
 
@@ -543,6 +544,9 @@ static TOOLS: &[ToolDef] = &[
                        `get` (requires `skill_id`, `project_id`), \
                        `update` (requires `skill_id`, `project_id`; any of \
                        `name`/`description`/`body`), \
+                       `delete` (requires `skill_id`, `project_id`; project- or \
+                       global-scoped skills only — for space-scoped skills use \
+                       the `spaces` tool), \
                        `invoke` (requires `project_id`, `name`; optional \
                        `arguments` for `$ARGUMENTS` substitution; resolves \
                        across mounted-space, project, global, sandbox tiers).",
@@ -1248,6 +1252,23 @@ impl AdminToolSet {
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_skill(
                     &skill, false,
+                ))]))
+            }
+
+            SkillCommand::Delete => {
+                let skill_id = params.skill_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("skill_id is required for delete".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for delete".to_string())
+                })?;
+                Audit::record_action("skill.delete");
+                self.skills
+                    .delete(subject, skill_id, project_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Skill deleted (id {skill_id})."
                 ))]))
             }
 
@@ -2228,9 +2249,24 @@ mod tests {
     }
 
     #[test]
+    fn skill_delete_takes_ids() {
+        let skill_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let p: SkillParams = parse_params(args(serde_json::json!({
+            "command": "delete",
+            "skill_id": skill_id,
+            "project_id": project_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SkillCommand::Delete));
+        assert_eq!(p.skill_id.map(uuid::Uuid::from), Some(skill_id));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+    }
+
+    #[test]
     fn skill_schema_includes_command_enum() {
         let s = serde_json::to_string(&*SKILL_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update", "invoke"] {
+        for v in ["create", "list", "get", "update", "delete", "invoke"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }

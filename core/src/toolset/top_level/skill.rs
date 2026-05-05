@@ -140,7 +140,9 @@ impl TopLevelTool for SkillTool {
          placeholder, arguments are appended as `ARGUMENTS: <value>`. \
          Commands: `create` (requires `name`, `description`, `body`), \
          `update` (requires `skill_id`; any of `name`/`description`/`body`), \
-         `delete` (requires `skill_id`), `list`, `get` (requires `skill_id`)."
+         `delete` (requires `skill_id`; project- or global-scoped skills only \
+         — for space-scoped skills use the `spaces` tool), \
+         `list`, `get` (requires `skill_id`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

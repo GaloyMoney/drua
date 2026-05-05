@@ -10,9 +10,22 @@ use super::entity::*;
 #[es_repo(
     entity = "Skill",
     columns(
-        project_id(ty = "Option<ProjectId>", list_for(by(created_at))),
-        space_id(ty = "Option<SpaceId>", list_for(by(created_at))),
-        name(ty = "String", list_for(by(created_at)))
+        project_id(
+            ty = "Option<ProjectId>",
+            list_for(by(created_at)),
+            constraint = "idx_skills_project_name",
+        ),
+        space_id(
+            ty = "Option<SpaceId>",
+            list_for(by(created_at)),
+            constraint = "idx_skills_space_name",
+        ),
+        name(
+            ty = "String",
+            list_for(by(created_at)),
+            constraint = "idx_skills_global_name",
+        ),
+        path(ty = "String", update(persist = "false"),),
     ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")

@@ -188,7 +188,7 @@ async fn skill_create_propagates_to_search_and_upstream() {
             &sub,
             project.id,
             &project.name,
-            "Deploy Prod".into(),
+            "deploy-prod".into(),
             "Deploys the app to production".into(),
             "#!/bin/bash\necho deploy".into(),
         )
@@ -209,33 +209,30 @@ async fn skill_create_propagates_to_search_and_upstream() {
         .find(|h| h.fields.doc_id == uuid::Uuid::from(skill.id))
         .unwrap_or_else(|| panic!("skill not in search index; got {hits:#?}"));
     assert_eq!(hit.fields.doc_type, SKILL_DOC_TYPE);
-    assert_eq!(hit.fields.name, "Deploy Prod");
+    assert_eq!(hit.fields.name, "deploy-prod");
 
     // 2. Upstream commit lands asynchronously via the LibraryWriteJob.
-    // Poll until the canonical path appears in the bare upstream's HEAD
-    // tree (or fail after a generous timeout).
-    let id_prefix = &uuid::Uuid::from(skill.id).to_string()[..8];
-    let canonical_path = format!(
-        "runtime/projects/{}/skills/deploy-prod-{id_prefix}.md",
-        project.name
-    );
+    // Poll until the path lands in the bare upstream's HEAD tree
+    // (or fail after a generous timeout). With path-as-identity the
+    // path is just `<scope>/skills/<name>.md` — no id-suffix.
+    let path = format!("runtime/projects/{}/skills/deploy-prod.md", project.name);
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if read_blob(&upstream, &canonical_path).is_some() {
+        if read_blob(&upstream, &path).is_some() {
             break;
         }
         if Instant::now() >= deadline {
-            panic!("upstream commit for {canonical_path} did not land within timeout");
+            panic!("upstream commit for {path} did not land within timeout");
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
-    let bytes = read_blob(&upstream, &canonical_path).expect("blob present");
+    let bytes = read_blob(&upstream, &path).expect("blob present");
     let rendered = String::from_utf8(bytes).expect("utf8");
     assert!(
-        rendered.contains("name: \"Deploy Prod\""),
-        "expected canonical frontmatter; got: {rendered}"
+        rendered.contains("name: \"deploy-prod\""),
+        "expected frontmatter; got: {rendered}"
     );
     assert!(
         rendered.contains("#!/bin/bash"),

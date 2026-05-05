@@ -6,6 +6,7 @@ use super::sandbox::*;
 
 use super::project::*;
 use super::project_secret::*;
+use super::skill::*;
 
 pub struct Mutation;
 
@@ -180,6 +181,18 @@ impl Mutation {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         app.project_secrets().delete(sub, input.id).await?;
         Ok(ProjectSecretDeletePayload {
+            deleted_id: input.id,
+        })
+    }
+
+    async fn skill_delete(
+        &self,
+        ctx: &Context<'_>,
+        input: SkillDeleteInput,
+    ) -> async_graphql::Result<SkillDeletePayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        app.skills().delete(sub, input.id, input.project_id).await?;
+        Ok(SkillDeletePayload {
             deleted_id: input.id,
         })
     }

@@ -4,14 +4,14 @@ pub mod file;
 pub mod importer;
 pub(crate) mod repo;
 
-pub use file::{name_from_filename, parse_skill_markdown, ParsedSkill};
+pub use file::{default_skill_path, name_from_filename, parse_skill_markdown, ParsedSkill};
 pub use importer::SkillsImporter;
 
 pub const SKILL_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("skill");
 
 use std::sync::Arc;
 
-use drua_library::SearchHit;
+use drua_library::{CommitAttribution, SearchHit, WriteOp};
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
@@ -117,13 +117,19 @@ impl Skills {
         }
     }
 
-    /// Side-effect: populates `EventContext` with the rich
+    /// Populates `EventContext` with the rich
     /// [`drua_library::CommitAttribution`] so post-persist library
-    /// sync hooks pick it up. No-op when `users` isn't wired (test
-    /// constructors via `new_without_library`).
-    async fn populate_attribution(&self) {
+    /// sync hooks pick it up, and returns the resolved attribution for
+    /// callers (e.g. delete) that need to enqueue a write op of their
+    /// own. Returns the library default when `users` isn't wired
+    /// (test constructors via `new_without_library`).
+    async fn populate_attribution(&self) -> CommitAttribution {
         if let Some(users) = self.users.as_ref() {
-            let _ = users.commit_attribution().await;
+            users.commit_attribution().await
+        } else {
+            let attribution = CommitAttribution::library_default();
+            attribution.put_in_event_context();
+            attribution
         }
     }
 
@@ -158,6 +164,46 @@ impl Skills {
 
     pub fn sandboxes(&self) -> &Sandboxes {
         &self.sandboxes
+    }
+
+    /// Wipe the search-store row in the same DbOp and queue a
+    /// [`WriteOp::DeleteFile`] so the upstream git repo loses the
+    /// markdown on the next library write tick. No-op when no library
+    /// is wired (test constructors via `new_without_library`).
+    ///
+    /// The search-row delete is what `Skills::delete` was missing
+    /// pre-PR — soft-delete events don't fire the post_persist_hook,
+    /// so without an explicit `deletes:` entry the `library_documents`
+    /// row would orphan and stale `library.search` results would
+    /// keep returning the deleted skill.
+    async fn enqueue_skill_delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        skill: &Skill,
+        attribution: CommitAttribution,
+    ) -> Result<(), SkillError> {
+        let Some(library) = self.library.as_ref() else {
+            return Ok(());
+        };
+        let id_uuid: uuid::Uuid = skill.id.into();
+        let message = format!(
+            "skill: delete {}-{}",
+            &skill.name,
+            &id_uuid.to_string()[..8]
+        );
+        library
+            .enqueue_full_in_op(
+                op,
+                None,
+                vec![(id_uuid, SKILL_DOC_TYPE)],
+                Some(WriteOp::DeleteFile {
+                    path: skill.path.clone(),
+                    message,
+                }),
+                attribution,
+            )
+            .await?;
+        Ok(())
     }
 
     #[instrument(name = "skill.find_by_id", skip_all)]
@@ -508,6 +554,7 @@ impl Skills {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
 
+        let path = default_skill_path(&name, Some(project_name), None);
         let new = NewSkill::builder()
             .id(SkillId::new())
             .project_id(project_id)
@@ -515,6 +562,7 @@ impl Skills {
             .name(name)
             .description(description)
             .body(body)
+            .path(path)
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
 
@@ -556,9 +604,11 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Soft-delete only — the on-disk file is left in the library
-    /// until the owning project is deleted (single-file removal
-    /// isn't plumbed through `WriteToRuntime` yet).
+    /// Soft-deletes the skill row and enqueues a [`WriteOp::DeleteFile`]
+    /// for the canonical markdown path so the next library write tick
+    /// removes it from the upstream git repo. Space-scoped skills are
+    /// rejected — callers must route through the spaces tool to keep
+    /// the project / space surfaces cleanly separated.
     #[instrument(name = "skill.delete", skip(self))]
     pub async fn delete(
         &self,
@@ -572,139 +622,21 @@ impl Skills {
         Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if skill.space_id.is_some() {
+            return Err(SkillError::SpaceScopedDeleteViaSpaces);
+        }
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Delete,
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
-        self.populate_attribution().await;
-        self.repo.delete_in_op(&mut op, skill).await?;
-        op.commit().await?;
-        Ok(())
-    }
-
-    /// Create a space-owned skill. Auth: `AuthVerb::Create` against
-    /// `AuthResource::SpaceSkill(space_id, None)` — admin-only by
-    /// default (no `permits` rule for non-admin scopes). Twin-writes to
-    /// `runtime/spaces/{slug}/skills/{name-slug}-{id_prefix}.md` via
-    /// the entity's `LibrarySynced::write_op`.
-    #[instrument(name = "skill.create_in_space", skip(self, body))]
-    pub async fn create_in_space(
-        &self,
-        sub: &AuthSubject,
-        space_id: SpaceId,
-        space_slug: &str,
-        name: String,
-        description: String,
-        body: String,
-    ) -> Result<Skill, SkillError> {
-        sub.can(AuthVerb::Create, AuthResource::SpaceSkill(space_id, None))?;
-        Audit::record_action_if_unset("skill.create_in_space");
-        Audit::record_space_id(space_id);
-        if name.trim().is_empty() {
-            return Err(SkillError::BuildEntity("skill name required".into()));
-        }
-        let new = NewSkill::builder()
-            .id(SkillId::new())
-            .space_id(space_id)
-            .space_slug(space_slug.to_string())
-            .name(name)
-            .description(description)
-            .body(body)
-            .build()
-            .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
-
-        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
-        self.populate_attribution().await;
-        let skill = self.repo.create_in_op(&mut op, new).await?;
-        Audit::record_skill_id(skill.id);
-        op.commit().await?;
-        Ok(skill)
-    }
-
-    #[instrument(name = "skill.update_in_space", skip(self, body))]
-    pub async fn update_in_space(
-        &self,
-        sub: &AuthSubject,
-        id: SkillId,
-        space_id: SpaceId,
-        name: Option<String>,
-        description: Option<String>,
-        body: Option<String>,
-    ) -> Result<Skill, SkillError> {
-        sub.can(
-            AuthVerb::Update,
-            AuthResource::SpaceSkill(space_id, Some(id)),
-        )?;
-        Audit::record_action_if_unset("skill.update_in_space");
-        Audit::record_space_id(space_id);
-        Audit::record_skill_id(id);
-        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
-        let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
-        if skill.space_id != Some(space_id) {
-            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
-                verb: AuthVerb::Update,
-                resource: AuthResource::SpaceSkill(space_id, Some(id)),
-            }));
-        }
-        if skill.update_content(name, description, body).did_execute() {
-            self.populate_attribution().await;
-            self.repo.update_in_op(&mut op, &mut skill).await?;
-        }
-        op.commit().await?;
-        Ok(skill)
-    }
-
-    /// Soft-delete only — same caveat as [`Self::delete`].
-    #[instrument(name = "skill.delete_in_space", skip(self))]
-    pub async fn delete_in_space(
-        &self,
-        sub: &AuthSubject,
-        id: SkillId,
-        space_id: SpaceId,
-    ) -> Result<(), SkillError> {
-        sub.can(
-            AuthVerb::Delete,
-            AuthResource::SpaceSkill(space_id, Some(id)),
-        )?;
-        Audit::record_action_if_unset("skill.delete_in_space");
-        Audit::record_space_id(space_id);
-        Audit::record_skill_id(id);
-        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
-        let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
-        if skill.space_id != Some(space_id) {
-            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
-                verb: AuthVerb::Delete,
-                resource: AuthResource::SpaceSkill(space_id, Some(id)),
-            }));
-        }
-        self.populate_attribution().await;
-        self.repo.delete_in_op(&mut op, skill).await?;
-        op.commit().await?;
-        Ok(())
-    }
-
-    /// List skills owned by `space_id` (no global fold-in). Admin-only.
-    #[instrument(name = "skill.list_for_space", skip(self, sub))]
-    pub async fn list_for_space(
-        &self,
-        sub: &AuthSubject,
-        space_id: SpaceId,
-    ) -> Result<Vec<Skill>, SkillError> {
-        sub.can(AuthVerb::Read, AuthResource::SpaceSkill(space_id, None))?;
-        let result = self
-            .repo
-            .list_for_space_id_by_created_at(
-                Some(space_id),
-                es_entity::PaginatedQueryArgs {
-                    first: 100,
-                    after: None,
-                },
-                es_entity::ListDirection::Descending,
-            )
+        let attribution = self.populate_attribution().await;
+        self.enqueue_skill_delete_in_op(&mut op, &skill, attribution)
             .await?;
-        Ok(result.entities)
+        self.repo.delete_in_op(&mut op, skill).await?;
+        op.commit().await?;
+        Ok(())
     }
 }
 
@@ -735,6 +667,52 @@ impl Skills {
             .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
+    }
+
+    /// Reverse-sync delete: soft-deletes the skill whose canonical
+    /// markdown lives at `path` and bumps the appropriate
+    /// `ContextGeneration` so agents stop seeing the skill in their
+    /// `<available_skills>` block on the next turn. Returns
+    /// `Ok(Some(skill_id))` when a row was actually deleted (caller
+    /// uses this to wipe the search row), or `Ok(None)` when nothing
+    /// matched (file authored without an id suffix, already-deleted
+    /// row, etc.). Skips the library write op — the file is already
+    /// gone in git, this is the inbound direction.
+    ///
+    /// Resolves `path → doc_id` via `library_documents` rather than an
+    /// id-prefix scan: the search-store row is rewritten in lockstep
+    /// with the entity's canonical path (post_persist_hook owns both),
+    /// so an exact path match is unambiguous and avoids the
+    /// ~N²/2³³ UUIDv7 prefix collision risk a `LIKE 'XXXXXXXX%'`
+    /// query would have at scale.
+    pub(crate) async fn delete_by_path_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<Option<SkillId>, SkillError> {
+        let doc_type = SKILL_DOC_TYPE;
+        let row = sqlx::query!(
+            "SELECT doc_id
+             FROM library_documents
+             WHERE path = $1 AND doc_type = $2",
+            path,
+            doc_type.as_str(),
+        )
+        .fetch_optional(op.as_executor())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let id = SkillId::from(row.doc_id);
+        let skill = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let scope = match (skill.space_id, skill.project_id) {
+            (Some(sid), _) => ScopeId::Space(sid),
+            (None, Some(pid)) => ScopeId::Project(pid),
+            (None, None) => ScopeId::Global,
+        };
+        self.repo.delete_in_op(op, skill).await?;
+        self.register_context_bump(op, scope);
+        Ok(Some(id))
     }
 
     /// Reverse-sync entry point: persist a `ParsedSkill` produced by
@@ -777,7 +755,7 @@ impl Skills {
             .name(parsed.name)
             .description(parsed.description)
             .body(parsed.body)
-            .original_path(parsed.original_path);
+            .path(parsed.path);
         match &scope {
             ImportScope::Project {
                 project_id,

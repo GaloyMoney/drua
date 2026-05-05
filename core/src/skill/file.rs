@@ -25,9 +25,10 @@ pub fn render_skill_markdown(
 }
 
 /// Parsed skill from on-disk content. `needs_rewrite` signals the
-/// importer should re-render to canonical form (legacy/imported
-/// formats normalise on first sync). `project_name` and `space_slug`
-/// are mutually exclusive — the path determines which (if any) is set.
+/// importer should re-render the file (e.g. to inject an `id:`
+/// frontmatter that wasn't there before) — but always at the same
+/// `path`; never as a rename. `project_name` and `space_slug` are
+/// mutually exclusive — the path determines which (if any) is set.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ParsedSkill {
@@ -39,7 +40,7 @@ pub struct ParsedSkill {
     pub body: String,
     pub created_at: String,
     pub updated_at: String,
-    pub original_path: String,
+    pub path: String,
     pub needs_rewrite: bool,
 }
 
@@ -83,7 +84,7 @@ pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkill> {
         parse_skill_without_frontmatter(content, project_name, space_slug, path)?
     };
 
-    parsed.original_path = path.to_string();
+    parsed.path = path.to_string();
     Some(parsed)
 }
 
@@ -140,13 +141,11 @@ fn parse_skill_with_frontmatter(
     let created_at = fm.created.unwrap_or_default();
     let updated_at = fm.updated.unwrap_or_default();
 
-    let canonical_path = canonical_skill_path(
-        skill_id,
-        &name,
-        project_name.as_deref(),
-        space_slug.as_deref(),
-    );
-    let needs_rewrite = !has_id || !has_fm_name || canonical_path != path;
+    // Rewrite the file in place when frontmatter is missing critical
+    // fields. The path itself is sacred — never renamed; this rewrite
+    // is content-only.
+    let _ = path;
+    let needs_rewrite = !has_id || !has_fm_name;
 
     Some(ParsedSkill {
         skill_id,
@@ -157,7 +156,7 @@ fn parse_skill_with_frontmatter(
         body,
         created_at,
         updated_at,
-        original_path: String::new(),
+        path: String::new(),
         needs_rewrite,
     })
 }
@@ -184,7 +183,7 @@ fn parse_skill_without_frontmatter(
         body,
         created_at: String::new(),
         updated_at: String::new(),
-        original_path: String::new(),
+        path: String::new(),
         needs_rewrite: true,
     })
 }
@@ -232,48 +231,28 @@ pub fn space_slug_from_skill_path(relative_path: &str) -> Option<String> {
     }
 }
 
-/// `runtime/skills/ci-check-019dc56a.md` → `"Ci Check"`.
+/// Derive a kebab-case skill name from a file path. Used by the
+/// importer when the file has no `name:` frontmatter — the filename
+/// stem is the source of truth.
+///
+/// Examples:
+/// - `runtime/skills/deploy.md` → `Some("deploy")`
+/// - `spaces/team/skills/Hello World.md` → `Some("hello-world")`
+/// - `spaces/team/skills/.md` → `None`
 pub fn name_from_filename(path: &str) -> Option<String> {
     let filename = path.rsplit('/').next()?;
     let stem = filename
         .strip_suffix(".md")
         .or_else(|| filename.strip_suffix(".yml"))
         .unwrap_or(filename);
-
-    let base = if let Some((prefix, suffix)) = stem.rsplit_once('-') {
-        if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
-            prefix
-        } else {
-            stem
-        }
-    } else {
-        stem
-    };
-
-    if base.is_empty() {
+    if stem.is_empty() {
         return None;
     }
-
-    let name = base
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(c) => {
-                    let upper: String = c.to_uppercase().collect();
-                    format!("{upper}{}", chars.as_str())
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if name.is_empty() {
+    let slug = slugify(stem);
+    if slug.is_empty() {
         None
     } else {
-        Some(name)
+        Some(slug)
     }
 }
 
@@ -290,23 +269,21 @@ pub fn slugify(title: &str) -> String {
         .join("-")
 }
 
-pub fn canonical_skill_path(
-    id: SkillId,
+/// Default repo-relative path for a skill created through the
+/// DB-driven service surface (`Skills::create` / `create_in_space`).
+/// The importer does NOT use this — paths it sees are whatever the
+/// author wrote.
+pub fn default_skill_path(
     name: &str,
     project_name: Option<&str>,
     space_slug: Option<&str>,
 ) -> String {
-    let id_uuid = uuid::Uuid::from(id);
-    let id_prefix = &id_uuid.to_string()[..8];
-    let slug = slugify(name);
     if let Some(space) = space_slug {
-        // Spaces use the flat `spaces/<slug>/...` layout (no `runtime/`
-        // prefix) — matches `library::Spaces::write_file`.
-        format!("spaces/{space}/skills/{slug}-{id_prefix}.md")
+        format!("spaces/{space}/skills/{name}.md")
     } else if let Some(project) = project_name {
-        format!("runtime/projects/{project}/skills/{slug}-{id_prefix}.md")
+        format!("runtime/projects/{project}/skills/{name}.md")
     } else {
-        format!("runtime/skills/{slug}-{id_prefix}.md")
+        format!("runtime/skills/{name}.md")
     }
 }
 
@@ -348,26 +325,24 @@ mod path_tests {
     }
 
     #[test]
-    fn canonical_path_renders_each_tier() {
-        let id = SkillId::from(uuid::uuid!("019dabcd-1234-7000-8000-000000000000"));
-        // 8-char id prefix is the first hex group.
+    fn default_path_renders_each_tier() {
         assert_eq!(
-            canonical_skill_path(id, "Deploy", None, Some("team")),
-            "spaces/team/skills/deploy-019dabcd.md"
+            default_skill_path("deploy", None, Some("team")),
+            "spaces/team/skills/deploy.md"
         );
         assert_eq!(
-            canonical_skill_path(id, "Deploy", Some("alpha"), None),
-            "runtime/projects/alpha/skills/deploy-019dabcd.md"
+            default_skill_path("deploy", Some("alpha"), None),
+            "runtime/projects/alpha/skills/deploy.md"
         );
         assert_eq!(
-            canonical_skill_path(id, "Deploy", None, None),
-            "runtime/skills/deploy-019dabcd.md"
+            default_skill_path("deploy", None, None),
+            "runtime/skills/deploy.md"
         );
         // Defensive: if both somehow set (CHECK normally prevents),
         // space wins. Documents precedence.
         assert_eq!(
-            canonical_skill_path(id, "Deploy", Some("alpha"), Some("team")),
-            "spaces/team/skills/deploy-019dabcd.md"
+            default_skill_path("deploy", Some("alpha"), Some("team")),
+            "spaces/team/skills/deploy.md"
         );
     }
 }

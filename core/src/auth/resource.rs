@@ -3,6 +3,9 @@ use crate::primitives::{
     WorkflowDefinitionId,
 };
 
+// `SpaceId` is referenced via `AuthResource::Space`; no other auth
+// surface keys off space scope today.
+
 /// Each variant encodes its parent container so authorization checks
 /// don't need a separate "container" parameter.
 ///
@@ -18,11 +21,6 @@ pub enum AuthResource {
     McpCreds(Option<McpCredsId>),
     Note(ProjectId, Option<NoteId>),
     Skill(ProjectId, Option<SkillId>),
-    /// Space-owned skill. Writes are admin-only today: `project_id()`
-    /// returns `None` so `ProjectAdmin` falls through (no `permits` rule
-    /// for non-admin scopes). Reads happen indirectly via the project's
-    /// `mounted_spaces`, resolved in `Skills::skills_context_for_scope`.
-    SpaceSkill(SpaceId, Option<SkillId>),
     Workflow(ProjectId, Option<WorkflowDefinitionId>),
     AuditLog(ProjectId),
     /// Library-wide; not project-scoped.
@@ -42,10 +40,7 @@ impl AuthResource {
             | AuthResource::Skill(project, _)
             | AuthResource::Workflow(project, _)
             | AuthResource::AuditLog(project) => Some(*project),
-            AuthResource::SpaceSkill(_, _)
-            | AuthResource::McpCreds(_)
-            | AuthResource::Space(_)
-            | AuthResource::External(_) => None,
+            AuthResource::McpCreds(_) | AuthResource::Space(_) | AuthResource::External(_) => None,
         }
     }
 }

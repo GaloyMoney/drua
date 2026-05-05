@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 
 use crate::primitives::*;
-use crate::skill::file::{canonical_skill_path, render_skill_markdown, slugify};
+use crate::skill::file::render_skill_markdown;
 use crate::skill::SKILL_DOC_TYPE;
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -22,8 +22,6 @@ pub enum SkillEvent {
         #[serde(default)]
         space_id: Option<SpaceId>,
         /// Denormalised space slug — mirrors the `project_name` denorm.
-        /// Used to render `runtime/spaces/{slug}/skills/...` canonical
-        /// paths without round-tripping the spaces table on every write.
         #[serde(default)]
         space_slug: Option<String>,
         name: String,
@@ -31,7 +29,18 @@ pub enum SkillEvent {
         body: String,
         #[serde(default)]
         file_hash: Option<GitFileHash>,
-        /// Original file path before canonicalisation (reverse-sync only).
+        /// Repo-relative on-disk path. Sacred — never mutated by the
+        /// importer. New events always set this; legacy events that
+        /// predate path-as-identity deserialise with `""` and
+        /// hydration falls back to the legacy `original_path` or a
+        /// derived value (kept here so old events still round-trip
+        /// to the same `Skill`).
+        #[serde(default)]
+        path: String,
+        /// Legacy: original file path captured by the pre-path-identity
+        /// reverse-sync importer. Deserialised for back-compat;
+        /// emitted only when re-serialising old events. New `Initialized`
+        /// events leave it `None`.
         #[serde(default)]
         original_path: Option<String>,
     },
@@ -60,8 +69,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
-    #[builder(default)]
-    pub(crate) original_path: Option<String>,
+    /// Repo-relative on-disk path. The importer never mutates this —
+    /// whatever the user wrote is the path of record.
+    pub path: String,
     events: EntityEvents<SkillEvent>,
 }
 
@@ -173,13 +183,11 @@ impl drua_library::LibrarySynced for Skill {
     }
 
     fn searchable_fields(&self) -> SearchableFields {
-        let project_name = self.project_name.as_deref();
-        let space_slug = self.space_slug.as_deref();
         // Space-scoped skills surface under their space; project- and
         // global-scoped under the project (or unscoped).
         let (scope_id, scope_slug) = match (self.space_id, self.project_id) {
-            (Some(s), _) => (Some(uuid::Uuid::from(s)), space_slug.map(str::to_string)),
-            (None, Some(p)) => (Some(uuid::Uuid::from(p)), project_name.map(str::to_string)),
+            (Some(s), _) => (Some(uuid::Uuid::from(s)), self.space_slug.clone()),
+            (None, Some(p)) => (Some(uuid::Uuid::from(p)), self.project_name.clone()),
             (None, None) => (None, None),
         };
         SearchableFields {
@@ -188,42 +196,19 @@ impl drua_library::LibrarySynced for Skill {
             scope_id,
             scope_slug,
             name: self.name.clone(),
-            path: Some(canonical_skill_path(
-                self.id,
-                &self.name,
-                project_name,
-                space_slug,
-            )),
+            path: Some(self.path.clone()),
             content: self.description.clone(),
         }
     }
 
     fn write_op(&self) -> WriteOp {
-        let canonical = canonical_skill_path(
-            self.id,
-            &self.name,
-            self.project_name.as_deref(),
-            self.space_slug.as_deref(),
-        );
         let content = self.rendered().into_bytes();
         let id_uuid: uuid::Uuid = self.id.into();
-        let message = format!(
-            "skill: {}-{}",
-            slugify(&self.name),
-            &id_uuid.to_string()[..8]
-        );
-        match self.original_path.as_deref() {
-            Some(orig) if orig != canonical => WriteOp::WriteFileWithRename {
-                old_path: orig.to_string(),
-                new_path: canonical,
-                content,
-                message,
-            },
-            _ => WriteOp::WriteFile {
-                path: canonical,
-                content,
-                message,
-            },
+        let message = format!("skill: {}-{}", &self.name, &id_uuid.to_string()[..8]);
+        WriteOp::WriteFile {
+            path: self.path.clone(),
+            content,
+            message,
         }
     }
 }
@@ -468,9 +453,18 @@ impl TryFromEvents<SkillEvent> for Skill {
                     name,
                     description,
                     body,
+                    path,
                     original_path,
                     ..
                 } => {
+                    // Path-as-identity events set `path`; pre-migration
+                    // events left only `original_path`. Either is fine
+                    // — pick whichever is non-empty.
+                    let resolved_path = if !path.is_empty() {
+                        path.clone()
+                    } else {
+                        original_path.clone().unwrap_or_default()
+                    };
                     builder = builder
                         .id(*id)
                         .project_id(*project_id)
@@ -480,7 +474,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
-                        .original_path(original_path.clone());
+                        .path(resolved_path);
                 }
 
                 SkillEvent::Updated {
@@ -525,8 +519,12 @@ pub struct NewSkill {
     pub(super) description: String,
     #[builder(setter(into))]
     pub(super) body: String,
-    #[builder(default, setter(into, strip_option))]
-    pub(super) original_path: Option<String>,
+    /// Repo-relative on-disk path. Required — there's no canonicalisation
+    /// fallback. `Skills::create` derives it from
+    /// `(scope, name)`; the importer passes through whatever the file's
+    /// real path is.
+    #[builder(setter(into))]
+    pub(super) path: String,
 }
 
 impl NewSkill {
@@ -549,7 +547,8 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 description: self.description,
                 body: self.body,
                 file_hash: None,
-                original_path: self.original_path,
+                path: self.path,
+                original_path: None,
             }],
         )
     }

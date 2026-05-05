@@ -35,6 +35,13 @@ pub enum SpaceError {
     Io(String),
     #[error("SpaceError - InvalidRelPath: {path:?} ({reason})")]
     InvalidRelPath { path: String, reason: String },
+    /// `delete_file` (and `move_file`'s source) target a path that
+    /// doesn't exist at HEAD. Replaces the prior silent no-op so
+    /// callers learn the operation was a miss — important when the
+    /// importer has canonicalised the file and the original path
+    /// the caller knows about no longer points anywhere.
+    #[error("SpaceError - PathNotFound: {path:?} does not exist at HEAD in space {slug:?}")]
+    PathNotFound { slug: String, path: String },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {

@@ -71,16 +71,34 @@ pub struct LibrarySearchHit {
 impl LibrarySearchHit {
     pub fn from_domain(hit: SearchHit) -> Self {
         let snippet = make_snippet(&hit.fields.content, 240);
-        let is_space = hit.fields.doc_type.as_str() == SPACE_FILE_DOC_TYPE_STR;
-        let project_id = if is_space {
+        // Two flavours of space-scoped hits:
+        //   1. raw space files     (doc_type = "space_file")
+        //   2. entity-backed skills under `spaces/<slug>/skills/...`
+        //      (doc_type = "skill" but path lives under `spaces/`)
+        // Both must surface the space slug + a project_id of `null`
+        // so the UI doesn't mislabel a space-scoped entity as a
+        // project-scoped one.
+        let is_space_file = hit.fields.doc_type.as_str() == SPACE_FILE_DOC_TYPE_STR;
+        let path_under_space = hit
+            .fields
+            .path
+            .as_deref()
+            .is_some_and(|p| p.starts_with("spaces/"));
+        let is_space_scoped = is_space_file || path_under_space;
+        let project_id = if is_space_scoped {
             None
         } else {
             hit.fields.scope_id.map(ProjectId::from)
         };
-        let (space_slug, relative_path) = if is_space {
-            (hit.fields.scope_slug, hit.fields.path)
+        let space_slug = if is_space_scoped {
+            hit.fields.scope_slug.clone()
         } else {
-            (None, None)
+            None
+        };
+        let relative_path = if is_space_file {
+            hit.fields.path.clone()
+        } else {
+            None
         };
         Self {
             id: UUID::from(hit.fields.doc_id),
