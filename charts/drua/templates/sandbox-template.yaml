@@ -30,7 +30,6 @@ spec:
         {{- else }}
         image: {{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}
         {{- end }}
-        command: ["sandbox-tool-server"]
         ports:
         - name: http
           containerPort: 3000
@@ -57,6 +56,12 @@ spec:
         {{- if .Values.sandbox.mcpGatewayUrl }}
         - name: MCP_GATEWAY_URL
           value: {{ .Values.sandbox.mcpGatewayUrl | quote }}
+        {{- end }}
+        {{- if .Values.sandbox.nixSubstituters }}
+        - name: NIX_CONFIG
+          value: |-
+            substituters ={{ range .Values.sandbox.nixSubstituters }} {{ .url }}{{ end }} https://cache.nixos.org/
+            trusted-public-keys ={{ range .Values.sandbox.nixSubstituters }} {{ .publicKey }}{{ end }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
         {{- end }}
         volumeMounts:
         - name: mcp-token

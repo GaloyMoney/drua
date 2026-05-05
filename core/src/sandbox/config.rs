@@ -19,7 +19,23 @@ pub enum SandboxBackendConfig {
         storage_class: Option<String>,
         #[serde(default)]
         mount_path: Option<String>,
+        /// Per-sandbox `/nix` PVC. Required for workloads whose nix
+        /// closure exceeds the sandbox container's writable layer
+        /// (e.g. `nix develop` on lana-bank pulls > 20 GiB). Seeded
+        /// from the image's baked-in store on first boot via an init
+        /// container — without seeding the empty mount shadows every
+        /// binary in the sandbox image.
+        #[serde(default)]
+        nix_store: Option<NixStorePersistenceConfig>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NixStorePersistenceConfig {
+    pub storage_class: String,
+    /// e.g. `"50Gi"`. Sized for the full nix closure of whatever flake
+    /// the sandbox builds plus headroom for cargo build artifacts.
+    pub size: String,
 }
 
 impl Default for SandboxBackendConfig {

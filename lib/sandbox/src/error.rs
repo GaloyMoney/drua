@@ -30,6 +30,9 @@ pub enum AdminError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("Sandbox template invalid: {0}")]
+    TemplateInvalid(String),
 }
 
 /// Errors from [`crate::InstanceClient`] HTTP calls.

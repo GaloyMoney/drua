@@ -292,18 +292,32 @@ sandbox:
     taintValue: gvisor
   nodeSelector:
     sandbox.gke.io/runtime: gvisor
+  ## Free-form extra env vars on the sandbox container. NIX_CONFIG
+  ## should normally come from `nixSubstituters` below, not here.
   env: []
   ## Namespace of the OTel collector for trace export.
   ## When set, adds an egress rule allowing port 4318 (OTLP HTTP).
   otelCollectorNamespace: ""
-  ## Example: Override or supplement nix cache config at runtime
-  # env:
-  # - name: NIX_CONFIG
-  #   value: "extra-substituters = https://galoy-agents.cachix.org\nextra-trusted-public-keys = galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY="
+  ## Nix substituters placed before cache.nixos.org in the sandbox's
+  ## NIX_CONFIG. Point this at a private Cachix or in-cluster nix-serve
+  ## so sandbox flakes pull from the local/project cache first.
+  nixSubstituters:
+  - url: https://galoy-agents.cachix.org
+    publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
   persistence:
     mountPath: /workspace
     size: 10Gi
     storageClassName: standard-rwo
+    ## Per-sandbox `/nix` volume. Without this, nix builds inside the
+    ## sandbox write to the container's writable layer — bounded under
+    ## gVisor and far too small for `nix develop` on lana-bank
+    ## (~20 GiB closure). The volume is seeded from the image's baked-in
+    ## /nix on first boot and is owned by the sandbox controller.
+    nixStore:
+      enabled: true
+      size: 50Gi
+      ## Falls back to `persistence.storageClassName` when empty.
+      storageClassName: ""
 postgresql:
   enabled: true
   image:
