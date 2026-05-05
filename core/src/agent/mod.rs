@@ -743,6 +743,61 @@ impl Agents {
         Ok(agent)
     }
 
+    /// Pre-step helper for the workflow runtime. For every agent currently
+    /// attached to `sandbox_id` whose `workflow_run_id` is `None` (i.e. a
+    /// user-owned agent), runs the full per-agent detach choreography in
+    /// the caller's op: agent-side detach event, sandbox-side detach,
+    /// session detach notification, and skills-block refresh. Workflow-
+    /// spawned attachments are left in place — the subsequent attach will
+    /// surface `WriteSlotTaken` and the run will fail rather than steal
+    /// between concurrent workflow runs.
+    ///
+    /// Returns the detached agent ids so the caller can drop their
+    /// `cached_dynamic_blocks` entries after committing.
+    #[instrument(
+        name = "domain.agent.detach_non_workflow_agents_from_sandbox_in_op",
+        skip(self, op),
+        fields(%sandbox_id)
+    )]
+    pub async fn detach_non_workflow_agents_from_sandbox_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        sandbox_id: SandboxId,
+    ) -> Result<Vec<AgentId>, AgentError> {
+        Audit::record_sandbox_id(sandbox_id);
+
+        let sandbox = self.sandboxes.find_by_id_in_op(op, sandbox_id).await?;
+        let candidates: Vec<AgentId> = sandbox.attached_agents.iter().map(|(id, _)| *id).collect();
+
+        let mut detached = Vec::new();
+        for agent_id in candidates {
+            let mut agent = self.repo.find_by_id_in_op(&mut *op, agent_id).await?;
+            if agent.workflow_run_id.is_some() {
+                continue;
+            }
+            let project_id = agent.project_id;
+            if agent.sandbox_detached(sandbox_id).did_execute() {
+                self.repo.update_in_op(&mut *op, &mut agent).await?;
+            }
+            let sandbox = self
+                .sandboxes
+                .detach_from_agent_in_op(op, sandbox_id, agent_id)
+                .await?;
+            self.sessions
+                .sandbox_notification_in_op(
+                    op,
+                    agent_id,
+                    sandbox.name,
+                    session::message::SandboxOperation::Detach,
+                )
+                .await?;
+            self.refresh_skills_block_in_op(op, agent_id, project_id, None)
+                .await;
+            detached.push(agent_id);
+        }
+        Ok(detached)
+    }
+
     /// Recomputes the `Skills` system block for `agent_id` scoped to
     /// `sandbox_id` and pushes it. Idempotent: when the block content matches
     /// the latest persisted skills block no event is emitted. Errors from the
@@ -799,7 +854,7 @@ impl Agents {
     /// `cached_dynamic_blocks` call rebuilds. Used when `agent_id`'s scope
     /// changes (e.g. sandbox attach/detach) without bumping the global
     /// `ContextGeneration`.
-    fn invalidate_agent_cache(&self, agent_id: AgentId) {
+    pub(crate) fn invalidate_agent_cache(&self, agent_id: AgentId) {
         if let Ok(mut cache) = self.context_cache.write() {
             cache.remove(&agent_id);
         }

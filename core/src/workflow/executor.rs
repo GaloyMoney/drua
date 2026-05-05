@@ -278,19 +278,29 @@ impl Executor {
             }
         };
         for decl in &definition.sandboxes {
-            // Preexisting sandboxes are user-managed; never suspend them.
-            let WorkflowSandboxDecl::Provisioned { name, .. } = decl else {
-                continue;
+            // Both decl variants are suspended at end-of-run: workflow-
+            // scoped sandboxes resume on the next trigger; preexisting
+            // ones the workflow borrowed (and may have detached from a
+            // user agent) get the same lifecycle as workflow-scoped
+            // sandboxes — the user re-attaches manually if they need
+            // them again.
+            let lookup = match decl {
+                WorkflowSandboxDecl::Provisioned { name, .. } => self
+                    .sandboxes
+                    .find_for_workflow(project_id, workflow_id, name)
+                    .await
+                    .map(|opt| (name, opt)),
+                WorkflowSandboxDecl::Preexisting { name } => self
+                    .sandboxes
+                    .find_by_name_in_project_unchecked(project_id, name)
+                    .await
+                    .map(|sb| (name, Some(sb))),
             };
-            let sandbox = match self
-                .sandboxes
-                .find_for_workflow(project_id, workflow_id, name)
-                .await
-            {
-                Ok(Some(sb)) => sb,
-                Ok(None) => continue,
+            let (name, sandbox) = match lookup {
+                Ok((name, Some(sb))) => (name, sb),
+                Ok((_, None)) => continue,
                 Err(e) => {
-                    tracing::warn!(error = %e, sandbox = %name, "post-flight: lookup failed");
+                    tracing::warn!(error = %e, "post-flight: lookup failed");
                     continue;
                 }
             };
@@ -298,7 +308,12 @@ impl Executor {
                 continue;
             }
             if let Err(e) = self.sandboxes.suspend_in_op(&mut op, sandbox.id).await {
-                tracing::warn!(error = %e, sandbox_id = %sandbox.id, "post-flight: suspend failed");
+                tracing::warn!(
+                    error = %e,
+                    sandbox_id = %sandbox.id,
+                    sandbox = %name,
+                    "post-flight: suspend failed",
+                );
             }
         }
         if let Err(e) = op.commit().await {
@@ -357,6 +372,25 @@ impl Executor {
                     .begin_op()
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+
+                // Borrow semantics: any non-workflow agent currently
+                // attached to the target sandbox must be detached in the
+                // same op as the workflow agent's create+attach so the
+                // sandbox is never simultaneously attached to two
+                // writers and never observed detached-from-old-but-not-
+                // yet-attached-to-new. Existing workflow attachments are
+                // left intact — the subsequent attach surfaces
+                // `WriteSlotTaken` and the run fails rather than steal
+                // between concurrent workflow runs.
+                let detached_agents = match attach_sandbox {
+                    Some((sandbox_id, _)) => self
+                        .agents
+                        .detach_non_workflow_agents_from_sandbox_in_op(&mut op, sandbox_id)
+                        .await
+                        .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+                    None => Vec::new(),
+                };
+
                 let agent = self
                     .agents
                     .create_for_workflow_run_in_op(
@@ -372,6 +406,10 @@ impl Executor {
                 op.commit()
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+
+                for prior in detached_agents {
+                    self.agents.invalidate_agent_cache(prior);
+                }
 
                 let result = self
                     .stream_agent_response(&agent, prompt, name, *timeout_seconds)
