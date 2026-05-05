@@ -21,6 +21,7 @@ use auth::sa_token::SaTokenValidator;
 use auth::session_store::PgSessionStore;
 use domain::code_assistant::CodeAssistant;
 
+// Dummy CI trigger: 2026-05-05.
 /// Parsed once at boot from `config.server.tunnel.deployments`.
 pub type TunnelPublicKeys = Arc<HashMap<String, ed25519_dalek::VerifyingKey>>;
 
