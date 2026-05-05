@@ -45,6 +45,25 @@ impl NoteRepo {
         Ok(())
     }
 
+    /// Flip `deleted = FALSE` on a soft-deleted note row with this id.
+    /// Mirrors `SkillRepo::maybe_revive_in_op` — used by reverse-sync
+    /// when a `spaces edit op=move` re-imports the previously-deleted
+    /// frontmatter id at a new path.
+    pub async fn maybe_revive_in_op(
+        &self,
+        op: &mut impl AtomicOperation,
+        id: NoteId,
+    ) -> Result<bool, sqlx::Error> {
+        let row_id: uuid::Uuid = id.into();
+        let result = sqlx::query!(
+            "UPDATE notes SET deleted = FALSE WHERE id = $1 AND deleted = TRUE",
+            row_id
+        )
+        .execute(op.as_executor())
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Fires only on content events (Initialized/Updated); skips pin/unpin.
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,

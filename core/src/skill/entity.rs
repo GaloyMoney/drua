@@ -47,6 +47,12 @@ pub enum SkillEvent {
         description: Option<String>,
         body: Option<String>,
     },
+    /// Records a file move detected by reverse-sync — the importer
+    /// re-imports a previously-known frontmatter id at a new on-disk
+    /// path. Distinct from `Updated` because file content didn't
+    /// change, only its location; not a content event so no library
+    /// write-back is fired (the move happened in git already).
+    PathChanged { path: String },
 }
 
 #[derive(EsEntity, Builder)]
@@ -133,6 +139,20 @@ impl Skill {
         Idempotent::Executed(())
     }
 
+    /// Records a path change on the entity. Idempotent — same path is
+    /// a no-op. Only invoked by reverse-sync when an existing skill is
+    /// re-imported at a new on-disk location (e.g. user moved the
+    /// markdown via `spaces edit op=move`). Pure metadata: doesn't
+    /// affect rendered content or fire a library write-back.
+    pub fn change_path(&mut self, new_path: String) -> Idempotent<()> {
+        if self.path == new_path {
+            return Idempotent::AlreadyApplied;
+        }
+        self.path = new_path.clone();
+        self.events.push(SkillEvent::PathChanged { path: new_path });
+        Idempotent::Executed(())
+    }
+
     /// User-driven path (no file_hash compare; that's [`Self::update`]).
     pub fn update_content(
         &mut self,
@@ -174,6 +194,8 @@ impl drua_library::LibrarySynced for Skill {
     type Event = SkillEvent;
 
     fn is_content_event(ev: &SkillEvent) -> bool {
+        // `PathChanged` is metadata-only — the file move happened in
+        // git already; no write-back to fire.
         matches!(
             ev,
             SkillEvent::Initialized { .. } | SkillEvent::Updated { .. }
@@ -490,6 +512,9 @@ impl TryFromEvents<SkillEvent> for Skill {
                     if let Some(body) = body {
                         builder = builder.body(body.clone());
                     }
+                }
+                SkillEvent::PathChanged { path } => {
+                    builder = builder.path(path.clone());
                 }
             }
         }

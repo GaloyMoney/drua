@@ -25,7 +25,7 @@ use super::entity::*;
             list_for(by(created_at)),
             constraint = "idx_skills_global_name",
         ),
-        path(ty = "String", update(persist = "false"),),
+        path(ty = "String"),
     ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")
@@ -80,5 +80,27 @@ impl SkillRepo {
             .execute(op.as_executor())
             .await?;
         Ok(())
+    }
+
+    /// Flip `deleted = FALSE` on a soft-deleted row with this id.
+    /// Returns `true` when a row was revived. Reverse-sync uses this
+    /// when the importer re-imports a frontmatter id that points at a
+    /// previously soft-deleted row — the user moved the markdown file
+    /// (delete-old-path + add-new-path), and we want the entity to
+    /// follow the file rather than create a fresh entity (which would
+    /// PK-collide on the soft-deleted row anyway).
+    pub async fn maybe_revive_in_op(
+        &self,
+        op: &mut impl AtomicOperation,
+        id: SkillId,
+    ) -> Result<bool, sqlx::Error> {
+        let row_id: uuid::Uuid = id.into();
+        let result = sqlx::query!(
+            "UPDATE skills SET deleted = FALSE WHERE id = $1 AND deleted = TRUE",
+            row_id
+        )
+        .execute(op.as_executor())
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 }

@@ -462,12 +462,10 @@ impl Notes {
     }
 
     /// Reverse-sync entry point: persist a `ParsedNote` produced by the
-    /// library importer. Creates or updates depending on whether the
-    /// note already exists. `Ok(None)` signals idempotency — the
-    /// existing entity already matches the on-disk content (including
-    /// pin state). Pin state and content are reconciled separately so
-    /// flipping `pinned: true` in the frontmatter pushes a `Pinned`
-    /// event without spuriously generating an `Updated`.
+    /// library importer. Creates, updates, or revives depending on
+    /// whether the note already exists. Content / pin / path deltas
+    /// are reconciled as separate events so an external move
+    /// (`spaces edit op=move`) doesn't spuriously fire an `Updated`.
     pub(crate) async fn import_from_library<OP: AtomicOperation>(
         &self,
         op: &mut OP,
@@ -476,43 +474,30 @@ impl Notes {
     ) -> Result<Option<Note>, NoteError> {
         let file_hash = parsed.file_hash();
 
-        if let Some(mut existing) = self
+        // Live row → reconcile.
+        if let Some(existing) = self
             .repo
             .maybe_find_by_id_in_op(&mut *op, parsed.note_id)
             .await?
         {
-            let mut changed = false;
-            // Content delta: title/content/tags are checked together
-            // — `Note::update`'s hash guard catches the all-equal case.
-            if existing
-                .update(
-                    parsed.title.clone(),
-                    parsed.content.clone(),
-                    parsed.tags.clone(),
-                    file_hash,
-                )
-                .did_execute()
-            {
-                changed = true;
-            }
-            // Pin delta: separate event; idempotent guards inside the
-            // entity make repeated `pin()`/`unpin()` calls cheap.
-            if parsed.pinned != existing.pinned {
-                let pin_changed = if parsed.pinned {
-                    existing.pin().did_execute()
-                } else {
-                    existing.unpin().did_execute()
-                };
-                changed = changed || pin_changed;
-            }
-            if !changed {
-                return Ok(None);
-            }
-            self.repo.update_in_op(op, &mut existing).await?;
-            self.register_context_bump(op, scope.bump_scope());
-            return Ok(Some(existing));
+            return reconcile_existing_note(self, op, existing, parsed, file_hash, scope).await;
         }
 
+        // Soft-deleted row at the same id? `spaces edit op=move`
+        // delivers delete-old-path → soft-delete; the matching
+        // add-new-path then re-imports the same frontmatter id. Revive
+        // instead of `create_in_op` (which would PK-conflict on the
+        // soft-deleted row).
+        if self
+            .repo
+            .maybe_revive_in_op(&mut *op, parsed.note_id)
+            .await?
+        {
+            let existing = self.repo.find_by_id_in_op(&mut *op, parsed.note_id).await?;
+            return reconcile_existing_note(self, op, existing, parsed, file_hash, scope).await;
+        }
+
+        // Truly new — fresh create.
         let mut builder = NewNote::builder();
         builder = builder
             .id(parsed.note_id)
@@ -676,4 +661,44 @@ impl Notes {
     pub fn space_mounts(&self) -> &Arc<SpaceMounts> {
         &self.space_mounts
     }
+}
+
+/// Reconcile content (Updated event), pin (Pinned/Unpinned) and path
+/// (PathChanged event) on an existing live note against an incoming
+/// `ParsedNote` from the reverse-sync importer. `Ok(None)` when no
+/// delta produced an event. Free function so the live and revival
+/// branches in `import_from_library` can share it without fighting
+/// the borrow checker over `&mut self`.
+async fn reconcile_existing_note<OP: AtomicOperation>(
+    notes: &Notes,
+    op: &mut OP,
+    mut existing: Note,
+    parsed: ParsedNote,
+    file_hash: drua_library::GitFileHash,
+    scope: ImportScope,
+) -> Result<Option<Note>, NoteError> {
+    let content_changed = existing
+        .update(
+            parsed.title.clone(),
+            parsed.content.clone(),
+            parsed.tags.clone(),
+            file_hash,
+        )
+        .did_execute();
+    let pin_changed = if parsed.pinned != existing.pinned {
+        if parsed.pinned {
+            existing.pin().did_execute()
+        } else {
+            existing.unpin().did_execute()
+        }
+    } else {
+        false
+    };
+    let path_changed = existing.change_path(parsed.path).did_execute();
+    if !content_changed && !pin_changed && !path_changed {
+        return Ok(None);
+    }
+    notes.repo.update_in_op(op, &mut existing).await?;
+    notes.register_context_bump(op, scope.bump_scope());
+    Ok(Some(existing))
 }

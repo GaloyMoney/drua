@@ -48,6 +48,12 @@ pub enum NoteEvent {
     },
     Pinned {},
     Unpinned {},
+    /// Records a file move detected by reverse-sync — the importer
+    /// re-imports a previously-known frontmatter id at a new on-disk
+    /// path. Distinct from `Updated` because file content didn't
+    /// change, only its location; not a content event so no library
+    /// write-back is fired (the move happened in git already).
+    PathChanged { path: String },
 }
 
 #[derive(EsEntity, Builder)]
@@ -161,6 +167,20 @@ impl Note {
         Idempotent::Executed(())
     }
 
+    /// Records a path change on the entity. Idempotent — same path is
+    /// a no-op. Only invoked by reverse-sync when a note is re-imported
+    /// at a new on-disk location (e.g. user moved the markdown via
+    /// `spaces edit op=move`). Pure metadata; doesn't fire a library
+    /// write-back.
+    pub fn change_path(&mut self, new_path: String) -> Idempotent<()> {
+        if self.path == new_path {
+            return Idempotent::AlreadyApplied;
+        }
+        self.path = new_path.clone();
+        self.events.push(NoteEvent::PathChanged { path: new_path });
+        Idempotent::Executed(())
+    }
+
     pub fn update(
         &mut self,
         title: String,
@@ -188,9 +208,8 @@ impl drua_library::LibrarySynced for Note {
 
     fn is_content_event(ev: &NoteEvent) -> bool {
         // Pin/unpin flips the `pinned: true` line in the frontmatter,
-        // so they're content events: the hook fires and the next
-        // library write tick rewrites the markdown to keep the on-disk
-        // state in lockstep with the entity.
+        // so they're content events. `PathChanged` is metadata-only —
+        // the file move happened in git already, no write-back to fire.
         matches!(
             ev,
             NoteEvent::Initialized { .. }
@@ -293,6 +312,9 @@ impl TryFromEvents<NoteEvent> for Note {
                 }
                 NoteEvent::Unpinned {} => {
                     builder = builder.pinned(false);
+                }
+                NoteEvent::PathChanged { path } => {
+                    builder = builder.path(path.clone());
                 }
             }
         }

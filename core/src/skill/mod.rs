@@ -727,27 +727,30 @@ impl Skills {
     ) -> Result<Option<Skill>, SkillError> {
         let file_hash = parsed.file_hash();
 
-        if let Some(mut existing) = self
+        // Live row → content/path reconciliation.
+        if let Some(existing) = self
             .repo
             .maybe_find_by_id_in_op(&mut *op, parsed.skill_id)
             .await?
         {
-            if !existing
-                .update(
-                    Some(parsed.name.clone()),
-                    Some(parsed.description.clone()),
-                    Some(parsed.body.clone()),
-                    file_hash,
-                )
-                .did_execute()
-            {
-                return Ok(None);
-            }
-            self.repo.update_in_op(op, &mut existing).await?;
-            self.register_context_bump(op, scope.bump_scope());
-            return Ok(Some(existing));
+            return reconcile_existing_skill(self, op, existing, parsed, file_hash, scope).await;
         }
 
+        // Soft-deleted row at the same id? `spaces edit op=move` first
+        // delivers a delete-old-path → soft-deletes the row. The
+        // matching add-new-path then re-imports the *same* frontmatter
+        // id at a new path. Revive instead of attempting `create_in_op`
+        // (which would PK-conflict on the soft-deleted row).
+        if self
+            .repo
+            .maybe_revive_in_op(&mut *op, parsed.skill_id)
+            .await?
+        {
+            let existing = self.repo.find_by_id_in_op(&mut *op, parsed.skill_id).await?;
+            return reconcile_existing_skill(self, op, existing, parsed, file_hash, scope).await;
+        }
+
+        // Truly new — fresh create.
         let mut builder = NewSkill::builder()
             .id(parsed.skill_id)
             .name(parsed.name)
@@ -793,6 +796,37 @@ impl Skills {
             context_generation: ContextGeneration::new(),
         }
     }
+}
+
+/// Reconcile content (Updated event) and path (PathChanged event) on
+/// an existing live skill against an incoming `ParsedSkill` from the
+/// reverse-sync importer. Returns `Ok(None)` if neither delta produced
+/// an event (round-trip already in sync). Free function so the live
+/// and revival branches in `import_from_library` can share it without
+/// fighting the borrow checker over `&mut self`.
+async fn reconcile_existing_skill<OP: AtomicOperation>(
+    skills: &Skills,
+    op: &mut OP,
+    mut existing: Skill,
+    parsed: ParsedSkill,
+    file_hash: drua_library::GitFileHash,
+    scope: ImportScope,
+) -> Result<Option<Skill>, SkillError> {
+    let content_changed = existing
+        .update(
+            Some(parsed.name.clone()),
+            Some(parsed.description.clone()),
+            Some(parsed.body.clone()),
+            file_hash,
+        )
+        .did_execute();
+    let path_changed = existing.change_path(parsed.path).did_execute();
+    if !content_changed && !path_changed {
+        return Ok(None);
+    }
+    skills.repo.update_in_op(op, &mut existing).await?;
+    skills.register_context_bump(op, scope.bump_scope());
+    Ok(Some(existing))
 }
 
 #[cfg(test)]
