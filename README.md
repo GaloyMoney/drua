@@ -207,3 +207,4 @@ charts/         Helm chart for Kubernetes deployment
 | `make build-sandbox` | Build only the sandbox tool server |
 | `make sqlx-prepare` | Regenerate SQLx offline query data |
 | `make start` | Full reset: `reset-deps` then server with dev login |
+
