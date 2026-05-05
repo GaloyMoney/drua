@@ -49,14 +49,14 @@ galoyAgents:
     ## `agents.builtin_roles.agent` is missing.
     ##
     ## Resolution precedence (highest first):
-    ##   builtin_roles.<role>.chain  >  builtin_roles.<role>.model (legacy)  >
-    ##   workflow_default_chain (workflow agents only)              >
-    ##   default_chain
+    ##   1. chain_override passed at the call site (workflow definition /
+    ##      per-step override; GraphQL/web UI creation form)
+    ##   2. agents.<role>.chain — optional per-role override
+    ##   3. agents.defaultChain
     ##
-    ## `default_chain` and `workflow_default_chain` are the new way to
-    ## express drua's primary + fallback model list. They accept a bare
-    ## string ("claude-haiku-4-5-20251001") as a length-1 chain, or the
-    ## full object form below.
+    ## `defaultChain` accepts the full object form below. Workflow agents
+    ## share `defaultChain`; per-workflow overrides live on the
+    ## WorkflowDefinition entity itself rather than a separate config key.
     agents:
       defaultChain:
         primary: { name: "claude-haiku-4-5-20251001" }
@@ -64,9 +64,11 @@ galoyAgents:
         # fallbacks:
         #   - { name: "anthropic/claude-sonnet-4-6" }
         #   - { name: "openai/gpt-4o" }
-      workflowDefaultChain:
-        primary: { name: "claude-haiku-4-5-20251001" }
       projectLead:
+        ## Optional per-role chain override:
+        # chain:
+        #   primary: { name: "..." }
+        #   fallbacks: [ ... ]
         compaction:
           ## When a user message arrives more than this many seconds after
           ## the previous assistant response, start a fresh thread.

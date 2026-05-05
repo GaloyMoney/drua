@@ -82,8 +82,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
         builtin_roles.insert(
             role,
             RoleConfig {
-                chain: None,
-                model: Some(model_name.clone()),
+                chain: Some(drua_core::ModelChain::new(model_name.clone())),
                 compaction: Default::default(),
             },
         );

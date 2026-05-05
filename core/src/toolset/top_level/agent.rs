@@ -131,7 +131,7 @@ impl TopLevelTool for ProjectAgent {
                 })?;
                 let agent = self
                     .agents
-                    .create_agent(subject, project_id, &name, None)
+                    .create_agent(subject, project_id, &name, None, None)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agent(

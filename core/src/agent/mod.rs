@@ -237,6 +237,7 @@ impl Agents {
                 project_name,
                 None,
                 None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -244,6 +245,8 @@ impl Agents {
     }
 
     /// Project name is resolved from the existing lead agent.
+    /// `chain_override` lets a creation form (GraphQL / web UI) supply a
+    /// user-chosen chain that overrides the role/default.
     #[instrument(name = "domain.agent.create_agent", skip(self, sub))]
     pub async fn create_agent(
         &self,
@@ -251,6 +254,7 @@ impl Agents {
         project_id: ProjectId,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+        chain_override: Option<llm::ModelChain>,
     ) -> Result<Agent, AgentError> {
         sub.can(AuthVerb::Create, AuthResource::Agent(project_id, None))?;
         Audit::record_action_if_unset("agent.create_agent");
@@ -270,6 +274,7 @@ impl Agents {
                 &project_name,
                 None,
                 None,
+                chain_override,
             )
             .await?;
         op.commit().await?;
@@ -278,6 +283,9 @@ impl Agents {
 
     /// Caller commits the op. Stamping `(workflow_id, workflow_run_id)`
     /// is what excludes the agent from [`Self::list_for_project`].
+    /// `chain_override` lets the executor thread through a chain resolved
+    /// from the WorkflowDefinition (or per-step `WorkflowStepDef`) — once
+    /// those fields land. Today the executor passes `None`.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
@@ -288,6 +296,7 @@ impl Agents {
         workflow_run_id: WorkflowRunId,
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
+        chain_override: Option<llm::ModelChain>,
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
         Audit::record_project_id(project_id);
@@ -306,6 +315,7 @@ impl Agents {
             &project_name,
             Some(workflow_id),
             Some(workflow_run_id),
+            chain_override,
         )
         .await
     }
@@ -352,6 +362,7 @@ impl Agents {
             project_name,
             None,
             None,
+            None,
         )
         .await
     }
@@ -369,6 +380,7 @@ impl Agents {
         project_name: &str,
         workflow_id: Option<WorkflowDefinitionId>,
         workflow_run_id: Option<WorkflowRunId>,
+        chain_override: Option<llm::ModelChain>,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -377,14 +389,11 @@ impl Agents {
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
-        // Resolution: workflow agents get the workflow chain; user agents
-        // get the role/default chain. Per-agent overrides land in a
-        // follow-up commit.
-        let chain = if workflow_id.is_some() {
-            self.config.resolve_workflow_chain(agent_role)?
-        } else {
-            self.config.resolve_chain(agent_role)?
-        };
+        // Resolution precedence: explicit override (workflow def / step,
+        // GraphQL form) > role override > default. Workflow agents and
+        // user agents share the same resolution path; the only difference
+        // is what the caller supplies for `chain_override`.
+        let chain = self.config.resolve_chain(agent_role, chain_override)?;
         let primary_model_id = chain.primary.name.clone();
         let model_defaults = self
             .config

@@ -65,7 +65,7 @@ impl Mutation {
         };
         let agent = app
             .agents()
-            .create_agent(sub, input.project_id, input.name, attach)
+            .create_agent(sub, input.project_id, input.name, attach, None)
             .await?;
         Ok(AgentCreatePayload::from(Agent::from(agent)))
     }

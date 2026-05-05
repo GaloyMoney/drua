@@ -121,16 +121,14 @@ fn agents_config_for_tests() -> AgentsConfig {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            chain: None,
-            model: Some(model.clone()),
+            chain: Some(llm::ModelChain::new(model.clone())),
             compaction: Default::default(),
         },
     );
     builtin_roles.insert(
         AgentRole::Agent,
         RoleConfig {
-            chain: None,
-            model: Some(model.clone()),
+            chain: Some(llm::ModelChain::new(model.clone())),
             compaction: Default::default(),
         },
     );

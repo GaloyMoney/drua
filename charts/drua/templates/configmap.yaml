@@ -61,27 +61,24 @@ data:
           {{- end }}
         {{- end }}
       {{- end }}
-      {{- with .Values.galoyAgents.config.agents.workflowDefaultChain }}
-      workflow_default_chain:
-        primary:
-          name: {{ .primary.name | quote }}
-          {{- with .primary.maxTokens }}
-          max_tokens: {{ . }}
-          {{- end }}
-        {{- with .fallbacks }}
-        fallbacks:
-          {{- range . }}
-          - name: {{ .name | quote }}
-            {{- with .maxTokens }}
-            max_tokens: {{ . }}
-            {{- end }}
-          {{- end }}
-        {{- end }}
-      {{- end }}
       builtin_roles:
         project_lead:
-          {{- with .Values.galoyAgents.config.agents.projectLead.model }}
-          model: {{ . | quote }}
+          {{- with .Values.galoyAgents.config.agents.projectLead.chain }}
+          chain:
+            primary:
+              name: {{ .primary.name | quote }}
+              {{- with .primary.maxTokens }}
+              max_tokens: {{ . }}
+              {{- end }}
+            {{- with .fallbacks }}
+            fallbacks:
+              {{- range . }}
+              - name: {{ .name | quote }}
+                {{- with .maxTokens }}
+                max_tokens: {{ . }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
           {{- end }}
           {{- with .Values.galoyAgents.config.agents.projectLead.compaction }}
           compaction:
@@ -94,8 +91,22 @@ data:
           {{- end }}
         {{- with .Values.galoyAgents.config.agents.agent }}
         agent:
-          {{- with .model }}
-          model: {{ . | quote }}
+          {{- with .chain }}
+          chain:
+            primary:
+              name: {{ .primary.name | quote }}
+              {{- with .primary.maxTokens }}
+              max_tokens: {{ . }}
+              {{- end }}
+            {{- with .fallbacks }}
+            fallbacks:
+              {{- range . }}
+              - name: {{ .name | quote }}
+                {{- with .maxTokens }}
+                max_tokens: {{ . }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
           {{- end }}
           {{- with .compaction }}
           compaction:

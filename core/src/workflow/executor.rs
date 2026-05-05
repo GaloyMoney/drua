@@ -480,6 +480,7 @@ impl Executor {
                             run_id,
                             &agent_name,
                             attach_sandbox,
+                            None,
                         )
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?;

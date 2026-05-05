@@ -43,16 +43,14 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            chain: None,
-            model: Some(model_name.clone()),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
     builtin_roles.insert(
         AgentRole::Agent,
         RoleConfig {
-            chain: None,
-            model: Some(model_name.clone()),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
@@ -110,8 +108,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            chain: None,
-            model: Some(model_name.clone()),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
@@ -271,8 +268,7 @@ async fn send_message_dispatches_registered_tool_call() {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            chain: None,
-            model: Some(model_name.clone()),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
@@ -527,6 +523,7 @@ async fn delete_detaches_attached_sandbox() {
             project_id,
             "worker",
             Some((sandbox.id, SandboxAgentMode::Read)),
+            None,
         )
         .await
         .expect("create attached agent");
