@@ -148,10 +148,7 @@ impl StreamAccumulator {
         }
 
         if let Some(text) = self.text {
-            content.push(AssistantBlock::Text {
-                text,
-                cache_control: None,
-            });
+            content.push(AssistantBlock::Text { text });
         }
 
         for tc in self.tool_calls {
@@ -168,7 +165,6 @@ impl StreamAccumulator {
                 id: tc.id,
                 name: tc.name,
                 input,
-                cache_control: None,
             });
         }
 
@@ -176,6 +172,7 @@ impl StreamAccumulator {
             content,
             usage: self.usage,
             stop_reason: self.stop_reason,
+            model_used: None,
         }
     }
 }
