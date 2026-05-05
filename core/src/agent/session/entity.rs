@@ -125,6 +125,33 @@ pub struct AgentSession {
     pub(super) threads: Nested<SessionThread>,
 }
 
+/// Aggregated tool-call telemetry for a single agent session. Designed
+/// for the workflow-tier `--include=steps` projection: counts and
+/// ordered timeline only — no tool inputs, no result bodies.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallSummary {
+    pub rounds: u64,
+    pub model: Option<String>,
+    pub tool_calls_count: u64,
+    pub tool_calls_by_name: std::collections::BTreeMap<String, u64>,
+    pub tool_call_sequence: Vec<ToolCallTimelineEntry>,
+    pub tokens: ToolCallTokens,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallTimelineEntry {
+    pub ts: chrono::DateTime<chrono::Utc>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolUseRequest {
     pub id: String,
@@ -727,6 +754,55 @@ impl AgentSession {
             thread.prompt_definition(),
             &self.events,
         ))
+    }
+
+    /// Workflow-tier projection: counts of tool calls by name, an
+    /// ordered timeline of tool-call invocations (no inputs/outputs),
+    /// assistant-round count, last-known model name, and aggregated
+    /// token usage. Counts span every event (persisted + in-memory);
+    /// the `tool_call_sequence` timeline only carries entries for
+    /// persisted events whose `recorded_at` is known.
+    pub fn tool_call_summary(&self) -> ToolCallSummary {
+        let mut summary = ToolCallSummary::default();
+        for event in self.events.iter_all() {
+            if let AgentSessionEvent::AssistantResponseReceived {
+                content, metadata, ..
+            } = event
+            {
+                summary.rounds += 1;
+                if !metadata.model.is_empty() {
+                    summary.model = Some(metadata.model.clone());
+                }
+                summary.tokens.input += metadata.usage.input;
+                summary.tokens.output += metadata.usage.output;
+                summary.tokens.cache_read += metadata.usage.cache_read;
+                summary.tokens.cache_write += metadata.usage.cache_write;
+                for block in content {
+                    if let AssistantBlock::ToolUse { name, .. } = block {
+                        summary.tool_calls_count += 1;
+                        *summary.tool_calls_by_name.entry(name.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        // Timeline needs timestamps, so it walks the persisted log
+        // separately. In production every event is persisted (the
+        // session is loaded via the repo); in tests this can be
+        // empty, which is fine — the counts above already cover the
+        // assertions tests care about.
+        for pe in self.events.iter_persisted() {
+            if let AgentSessionEvent::AssistantResponseReceived { content, .. } = &pe.event {
+                for block in content {
+                    if let AssistantBlock::ToolUse { name, .. } = block {
+                        summary.tool_call_sequence.push(ToolCallTimelineEntry {
+                            ts: pe.recorded_at,
+                            name: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        summary
     }
 
     /// Flat list of every system block ever pushed in this session, ordered
@@ -2061,5 +2137,82 @@ mod tests {
             )
             .expect("assistant response on refreshed thread must succeed");
         assert!(matches!(response, AgentSessionResponse::Done));
+    }
+
+    #[test]
+    fn tool_call_summary_counts_assistant_rounds_and_tool_uses() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "go".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        let mut metadata = dummy_metadata();
+        metadata.model = "deepseek/deepseek-v4-pro".into();
+        metadata.usage = Usage {
+            input: 100,
+            output: 50,
+            cache_read: 10,
+            cache_write: 0,
+            total_tokens: 150,
+        };
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![
+                    AssistantBlock::Text {
+                        text: "calling".into(),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "spaces.search".into(),
+                        input: serde_json::json!({}),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "spaces.search".into(),
+                        input: serde_json::json!({}),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "t3".into(),
+                        name: "honeycomb_get_query_results".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                StopReason::ToolUse,
+                None,
+                metadata,
+            )
+            .unwrap();
+
+        let summary = session.tool_call_summary();
+        assert_eq!(summary.rounds, 1);
+        assert_eq!(summary.model.as_deref(), Some("deepseek/deepseek-v4-pro"));
+        assert_eq!(summary.tool_calls_count, 3);
+        assert_eq!(summary.tool_calls_by_name.get("spaces.search"), Some(&2));
+        assert_eq!(
+            summary
+                .tool_calls_by_name
+                .get("honeycomb_get_query_results"),
+            Some(&1)
+        );
+        // `tool_call_sequence` is only populated from persisted events
+        // (it needs timestamps). In-memory events drive the counts above.
+        assert_eq!(summary.tokens.input, 100);
+        assert_eq!(summary.tokens.output, 50);
+        assert_eq!(summary.tokens.cache_read, 10);
+    }
+
+    #[test]
+    fn tool_call_summary_default_when_no_assistant_rounds() {
+        let session = new_session();
+        let summary = session.tool_call_summary();
+        assert_eq!(summary.rounds, 0);
+        assert_eq!(summary.tool_calls_count, 0);
+        assert!(summary.tool_calls_by_name.is_empty());
+        assert!(summary.tool_call_sequence.is_empty());
+        assert!(summary.model.is_none());
     }
 }

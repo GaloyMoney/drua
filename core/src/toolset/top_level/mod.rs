@@ -153,7 +153,7 @@ mod spaces;
 mod text_editor;
 mod use_skill;
 mod whoami;
-mod workflow;
+pub(crate) mod workflow;
 
 pub use agent::ProjectAgent;
 pub use bash::Bash;

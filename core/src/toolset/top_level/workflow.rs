@@ -9,8 +9,9 @@ use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
 use crate::project::Projects;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
-    StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
-    WorkflowStepDef, WorkflowTrigger, Workflows,
+    RunStateFilter, RunWithStepDetails, StepAgentDetails, StepResult, WorkflowDefinition,
+    WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+    Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -64,9 +65,17 @@ enum WorkflowParams {
     },
     Runs {
         definition_id: WorkflowDefinitionId,
+        #[serde(default)]
+        state: Option<RunStateParam>,
+        #[serde(default)]
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        limit: Option<usize>,
     },
     Run {
         run_id: WorkflowRunId,
+        #[serde(default)]
+        include: Option<RunIncludeParam>,
     },
     Update {
         definition_id: WorkflowDefinitionId,
@@ -95,6 +104,33 @@ enum WorkflowParams {
         #[serde(default)]
         manual: bool,
     },
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum RunStateParam {
+    Succeeded,
+    Failed,
+    Running,
+    Any,
+}
+
+impl RunStateParam {
+    fn into_filter(self) -> Option<RunStateFilter> {
+        match self {
+            Self::Succeeded => Some(RunStateFilter::Succeeded),
+            Self::Failed => Some(RunStateFilter::Failed),
+            Self::Running => Some(RunStateFilter::Running),
+            Self::Any => None,
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum RunIncludeParam {
+    Summary,
+    Steps,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -424,6 +460,26 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "format": "uuid",
                 "description": "Workflow run ID (run)."
             },
+            "state": {
+                "type": "string",
+                "enum": ["succeeded", "failed", "running", "any"],
+                "description": "Filter runs by state (runs). `running` matches pending+running. Defaults to `any`."
+            },
+            "before": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Cursor for `runs`: drop runs whose `started_at` is at or after this RFC3339 timestamp."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Max runs returned by `runs`. Defaults to 20."
+            },
+            "include": {
+                "type": "string",
+                "enum": ["summary", "steps"],
+                "description": "`run` projection: `summary` (default — header + per-step state/error/output) or `steps` (adds tool-call telemetry per step: `tool_calls_by_name`, `tool_call_sequence`, model, rounds, tokens). NO transcript, NO tool inputs/outputs — those are session-tier and reached via direct DB."
+            },
             "payload": {
                 "description": "Trigger context payload (trigger). Defaults to {}."
             },
@@ -468,8 +524,14 @@ impl TopLevelTool for WorkflowTool {
          optional `payload`; returns immediately with the spawned run), \
          `await_run` (requires `run_id`; blocks until terminal — pair with \
          `trigger` when you need the final state inline), `runs` \
-         (requires `definition_id`; truncated step outputs), `run` \
-         (requires `run_id`; full per-step outputs), \
+         (requires `definition_id`; optional `state` filter \
+         succeeded/failed/running/any, `before` RFC3339 cursor, `limit` \
+         default 20 — tabular header with trigger summary), `run` \
+         (requires `run_id`; optional `include`: `summary` (default — \
+         header + per-step state/error/output) or `steps` (adds \
+         tool-call telemetry per step: `tool_calls_by_name`, \
+         `tool_call_sequence`, model, rounds, tokens — NO transcript / \
+         tool inputs / message bodies, those are session-tier)), \
          `update` (requires `definition_id`; optional `name`, \
          `description`+`clear_description`, `steps`+`update_steps`, \
          `sandboxes`+`update_sandboxes`, `provider`/`manual`+`update_trigger`)."
@@ -653,10 +715,16 @@ impl TopLevelTool for WorkflowTool {
                 (text, out)
             }
 
-            WorkflowParams::Runs { definition_id } => {
+            WorkflowParams::Runs {
+                definition_id,
+                state,
+                before,
+                limit,
+            } => {
+                let filter = state.and_then(RunStateParam::into_filter);
                 let runs = self
                     .workflows
-                    .list_runs(subject, definition_id)
+                    .list_runs_filtered(subject, definition_id, filter, before, limit)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
                 let text = format_runs_text(&runs);
@@ -668,20 +736,36 @@ impl TopLevelTool for WorkflowTool {
                 (text, out)
             }
 
-            WorkflowParams::Run { run_id } => {
-                let run = self
-                    .workflows
-                    .find_run_by_id(subject, run_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let text = format_run_text(&run);
-                let out = WorkflowOutput {
-                    command: "run".to_string(),
-                    run: Some(run_to_output(&run)),
-                    ..Default::default()
-                };
-                (text, out)
-            }
+            WorkflowParams::Run { run_id, include } => match include {
+                Some(RunIncludeParam::Steps) => {
+                    let details = self
+                        .workflows
+                        .find_run_with_step_details(subject, run_id)
+                        .await
+                        .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                    let text = format_run_with_details_text(&details);
+                    let out = WorkflowOutput {
+                        command: "run".to_string(),
+                        run: Some(run_to_output(&details.run)),
+                        ..Default::default()
+                    };
+                    (text, out)
+                }
+                _ => {
+                    let run = self
+                        .workflows
+                        .find_run_by_id(subject, run_id)
+                        .await
+                        .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                    let text = format_run_text(&run);
+                    let out = WorkflowOutput {
+                        command: "run".to_string(),
+                        run: Some(run_to_output(&run)),
+                        ..Default::default()
+                    };
+                    (text, out)
+                }
+            },
 
             WorkflowParams::Update {
                 definition_id,
@@ -1034,53 +1118,123 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
     out
 }
 
-fn format_runs_text(runs: &[WorkflowRun]) -> String {
+pub(crate) fn format_runs_text(runs: &[WorkflowRun]) -> String {
     if runs.is_empty() {
         return "No runs found.".to_string();
     }
     let mut lines = Vec::with_capacity(runs.len() + 2);
     lines.push(format!(
-        "{:<38} {:<12} {:<28} {}",
-        "RUN_ID", "STATE", "STARTED_AT", "OUTPUT"
+        "{:<38} {:<10} {:<20} {:<20} {:<8} {}",
+        "RUN_ID", "STATE", "STARTED", "ENDED", "DUR", "TRIGGER_SUMMARY"
     ));
-    lines.push("-".repeat(120));
+    lines.push("-".repeat(140));
     for r in runs {
-        let started = r.started_at().format("%Y-%m-%d %H:%M:%SZ").to_string();
-        let failed_step = r.step_results.iter().find(|sr| sr.error.is_some());
-        // Errors get a longer truncation cap (200 vs 60 for normal output)
-        // so context-window/api errors stay legible in the listing.
-        let (output, max_chars) = if let Some(sr) = failed_step {
-            let err = sr.error.as_deref().unwrap_or("unknown");
-            (format!("FAILED [{}]: {err}", sr.name), 200)
-        } else {
-            let text = r
-                .step_results
-                .last()
-                .and_then(|sr| {
-                    sr.output.as_ref().map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                })
-                .unwrap_or_else(|| "—".to_string());
-            (text, 60)
+        let started = r.started_at().format("%Y-%m-%d %H:%M:%S").to_string();
+        let ended = r
+            .completed_at
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let dur = match r.completed_at {
+            Some(end) => format_duration(end - r.started_at()),
+            None => "—".to_string(),
         };
+        let trigger = render_trigger_summary(&r.trigger_context);
         lines.push(format!(
-            "{:<38} {:<12} {:<28} {}",
+            "{:<38} {:<10} {:<20} {:<20} {:<8} {}",
             r.id,
             run_state_str(r.state),
             started,
-            truncate(&output.replace('\n', " "), max_chars)
+            ended,
+            dur,
+            truncate(&trigger.replace('\n', " "), 80)
         ));
     }
     if runs.iter().any(|r| r.state == WorkflowRunState::Failed) {
         lines.push(String::new());
-        lines.push("Inspect a run with: workflow command=run run_id=<id>".to_string());
+        lines.push(
+            "Inspect a run with: workflow command=run run_id=<id> [include=steps]".to_string(),
+        );
     }
     lines.join("\n")
 }
 
-fn format_run_text(r: &WorkflowRun) -> String {
+/// One-line render of the trigger context. Tries to surface a
+/// recognisable signature for each provider; falls back to compact
+/// JSON when the shape isn't known.
+fn render_trigger_summary(ctx: &serde_json::Value) -> String {
+    let obj = match ctx.as_object() {
+        Some(o) => o,
+        None => return ctx.to_string(),
+    };
+    if obj.is_empty() {
+        return "manual".to_string();
+    }
+    let provider = obj
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let trigger_name = obj
+        .get("trigger")
+        .and_then(|v| v.as_object())
+        .and_then(|t| t.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let trigger_id = obj
+        .get("trigger")
+        .and_then(|v| v.as_object())
+        .and_then(|t| t.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = provider.as_ref() {
+        parts.push(p.clone());
+    }
+    if let Some(name) = trigger_name.as_ref() {
+        parts.push(name.clone());
+    }
+    if let Some(groups) = obj.get("result_groups").and_then(|v| v.as_array()) {
+        if let Some(first) = groups.first().and_then(|v| v.as_object()) {
+            let kv: Vec<String> = first
+                .iter()
+                .map(|(k, v)| format!("{k}={}", json_scalar(v)))
+                .collect();
+            if !kv.is_empty() {
+                parts.push(kv.join(","));
+            }
+        }
+    }
+    if let Some(id) = trigger_id.as_ref() {
+        parts.push(id.clone());
+    }
+    if parts.is_empty() {
+        return ctx.to_string();
+    }
+    parts.join(" / ")
+}
+
+fn json_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn format_duration(d: chrono::Duration) -> String {
+    let total = d.num_seconds().max(0);
+    let m = total / 60;
+    let s = total % 60;
+    if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+pub(crate) fn format_run_text(r: &WorkflowRun) -> String {
     let mut out = String::new();
     out.push_str(&format!("run_id:        {}\n", r.id));
     out.push_str(&format!("definition_id: {}\n", r.definition_id));
@@ -1134,10 +1288,248 @@ fn format_run_text(r: &WorkflowRun) -> String {
     out
 }
 
+/// Renders the `--include=steps` projection: per-step tool-call
+/// telemetry, model, rounds, tokens, and the step's `output_text`
+/// (the agent's last assistant turn, already captured as the step's
+/// return value). NO transcript, NO tool inputs/outputs.
+pub(crate) fn format_run_with_details_text(d: &RunWithStepDetails) -> String {
+    const TOOL_CALL_SEQUENCE_CAP: usize = 200;
+
+    let r = &d.run;
+    let mut out = String::new();
+    out.push_str(&format!("run_id:        {}\n", r.id));
+    out.push_str(&format!("definition_id: {}\n", r.definition_id));
+    out.push_str(&format!("project_id:    {}\n", r.project_id));
+    out.push_str(&format!("state:         {}\n", run_state_str(r.state)));
+    out.push_str(&format!("started_at:    {}\n", r.started_at().to_rfc3339()));
+    if let Some(t) = r.completed_at {
+        out.push_str(&format!("ended_at:      {}\n", t.to_rfc3339()));
+        let dur = (t - r.started_at()).num_milliseconds().max(0);
+        out.push_str(&format!("duration_ms:   {dur}\n"));
+    }
+    out.push_str("\ntrigger_context:\n");
+    let ctx_pretty = serde_json::to_string_pretty(&r.trigger_context)
+        .unwrap_or_else(|_| r.trigger_context.to_string());
+    for line in ctx_pretty.lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut total_cache_read: u64 = 0;
+    for step in &d.steps {
+        if let Some(det) = &step.details {
+            total_in += det.summary.tokens.input;
+            total_out += det.summary.tokens.output;
+            total_cache_read += det.summary.tokens.cache_read;
+        }
+    }
+    out.push_str(&format!(
+        "\ntokens (run total): input={total_in} output={total_out} cache_read={total_cache_read}\n"
+    ));
+
+    out.push_str("\nsteps:\n");
+    for (i, step) in d.steps.iter().enumerate() {
+        out.push_str(&format!("  - step {} : {}\n", i + 1, step.step_name));
+        let state_label = match (step.error.as_ref(), step.completed_at) {
+            (Some(_), _) => "failed",
+            (None, Some(_)) => "succeeded",
+            _ => "running",
+        };
+        out.push_str(&format!("    state:        {state_label}\n"));
+        if let Some(t) = step.completed_at {
+            out.push_str(&format!("    completed_at: {}\n", t.to_rfc3339()));
+        }
+        if let Some(err) = &step.error {
+            out.push_str("    error:\n");
+            for line in err.lines() {
+                out.push_str(&format!("      {line}\n"));
+            }
+        }
+        if let Some(det) = &step.details {
+            format_step_details(&mut out, det, TOOL_CALL_SEQUENCE_CAP);
+        } else {
+            out.push_str("    (no agent session — step did not start an agent)\n");
+        }
+        if let Some(v) = &step.output {
+            let text = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.push_str("    output_text: |\n");
+            for line in text.lines() {
+                out.push_str(&format!("      {line}\n"));
+            }
+            if text.is_empty() {
+                out.push_str("      (empty)\n");
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn format_step_details(out: &mut String, det: &StepAgentDetails, sequence_cap: usize) {
+    out.push_str(&format!("    agent_id:     {}\n", det.agent_id));
+    out.push_str(&format!("    session_id:   {}\n", det.session_id));
+    if let Some(model) = &det.summary.model {
+        out.push_str(&format!("    model:        {model}\n"));
+    }
+    out.push_str(&format!("    rounds:       {}\n", det.summary.rounds));
+    out.push_str(&format!(
+        "    tool_calls_count: {}\n",
+        det.summary.tool_calls_count
+    ));
+    if !det.summary.tool_calls_by_name.is_empty() {
+        out.push_str("    tool_calls_by_name:\n");
+        for (name, count) in &det.summary.tool_calls_by_name {
+            out.push_str(&format!("      {name}: {count}\n"));
+        }
+    }
+    let seq = &det.summary.tool_call_sequence;
+    if !seq.is_empty() {
+        out.push_str("    tool_call_sequence:\n");
+        for entry in seq.iter().take(sequence_cap) {
+            out.push_str(&format!(
+                "      - {{ ts: {}, name: {} }}\n",
+                entry.ts.to_rfc3339(),
+                entry.name
+            ));
+        }
+        if seq.len() > sequence_cap {
+            out.push_str(&format!(
+                "      (... +{} more truncated)\n",
+                seq.len() - sequence_cap
+            ));
+        }
+    }
+    let t = &det.summary.tokens;
+    out.push_str(&format!(
+        "    tokens:       input={} output={} cache_read={} cache_write={}\n",
+        t.input, t.output, t.cache_read, t.cache_write
+    ));
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(value: serde_json::Value) -> WorkflowParams {
+        let obj: rmcp::model::JsonObject = serde_json::from_value(value).expect("object");
+        super::super::parse_params(Some(obj)).expect("parse")
+    }
+
+    #[test]
+    fn runs_parses_optional_filters_and_cursor() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p = parse(serde_json::json!({
+            "command": "runs",
+            "definition_id": definition_id,
+            "state": "failed",
+            "before": "2026-05-05T05:50:00Z",
+            "limit": 5,
+        }));
+        match p {
+            WorkflowParams::Runs {
+                definition_id: d,
+                state,
+                before,
+                limit,
+            } => {
+                assert_eq!(uuid::Uuid::from(d), definition_id);
+                assert!(matches!(state, Some(RunStateParam::Failed)));
+                assert!(before.is_some());
+                assert_eq!(limit, Some(5));
+            }
+            other => panic!("expected Runs, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn runs_state_any_resolves_to_no_filter() {
+        assert!(RunStateParam::Any.into_filter().is_none());
+        assert!(matches!(
+            RunStateParam::Failed.into_filter(),
+            Some(RunStateFilter::Failed)
+        ));
+        assert!(matches!(
+            RunStateParam::Running.into_filter(),
+            Some(RunStateFilter::Running)
+        ));
+    }
+
+    #[test]
+    fn run_parses_include_steps() {
+        let run_id = uuid::Uuid::new_v4();
+        let p = parse(serde_json::json!({
+            "command": "run",
+            "run_id": run_id,
+            "include": "steps",
+        }));
+        match p {
+            WorkflowParams::Run { run_id: r, include } => {
+                assert_eq!(uuid::Uuid::from(r), run_id);
+                assert!(matches!(include, Some(RunIncludeParam::Steps)));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_include_defaults_to_none() {
+        let run_id = uuid::Uuid::new_v4();
+        let p = parse(serde_json::json!({
+            "command": "run",
+            "run_id": run_id,
+        }));
+        match p {
+            WorkflowParams::Run { include, .. } => assert!(include.is_none()),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn render_trigger_summary_honeycomb_shape() {
+        let ctx = serde_json::json!({
+            "provider": "honeycomb",
+            "trigger": { "id": "EuZfD1Qbn2x", "name": "lana-stale-pending-jobs" },
+            "result_groups": [{ "Result": 2 }]
+        });
+        let s = render_trigger_summary(&ctx);
+        assert!(s.contains("honeycomb"));
+        assert!(s.contains("lana-stale-pending-jobs"));
+        assert!(s.contains("Result=2"));
+        assert!(s.contains("EuZfD1Qbn2x"));
+    }
+
+    #[test]
+    fn render_trigger_summary_empty_object() {
+        let s = render_trigger_summary(&serde_json::json!({}));
+        assert_eq!(s, "manual");
+    }
+
+    #[test]
+    fn schema_includes_new_runs_and_include_props() {
+        let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
+        for token in [
+            "\"runs\"",
+            "\"run\"",
+            "\"include\"",
+            "\"state\"",
+            "\"before\"",
+            "\"limit\"",
+            "\"steps\"",
+            "\"summary\"",
+        ] {
+            assert!(s.contains(token), "schema missing {token}");
+        }
     }
 }

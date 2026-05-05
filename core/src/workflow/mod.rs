@@ -32,6 +32,65 @@ pub use entity::*;
 pub use error::*;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
+use crate::agent::session::{AgentSessionId, ToolCallSummary};
+
+/// Filter passed to [`Workflows::list_runs_filtered`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStateFilter {
+    Succeeded,
+    Failed,
+    Running,
+}
+
+impl RunStateFilter {
+    pub fn matches(&self, state: WorkflowRunState) -> bool {
+        matches!(
+            (self, state),
+            (Self::Succeeded, WorkflowRunState::Succeeded)
+                | (Self::Failed, WorkflowRunState::Failed)
+                | (
+                    Self::Running,
+                    WorkflowRunState::Pending | WorkflowRunState::Running
+                )
+        )
+    }
+}
+
+/// Output of [`Workflows::find_run_with_step_details`].
+pub struct RunWithStepDetails {
+    pub run: WorkflowRun,
+    pub steps: Vec<StepWithDetails>,
+}
+
+pub struct StepWithDetails {
+    pub step_name: String,
+    pub error: Option<String>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub output: Option<serde_json::Value>,
+    pub details: Option<StepAgentDetails>,
+}
+
+pub struct StepAgentDetails {
+    pub agent_id: AgentId,
+    pub session_id: AgentSessionId,
+    pub summary: ToolCallSummary,
+}
+
+/// Mirrors the executor's agent-name format:
+/// `workflow-{run_id_short}-{step_name}`. Step names may contain
+/// hyphens themselves, so consumers must match by prefix + suffix.
+pub(crate) fn workflow_agent_name_prefix(run_id: WorkflowRunId) -> String {
+    let s = run_id.to_string();
+    let short = s.split_once('-').map(|(p, _)| p.to_string()).unwrap_or(s);
+    format!("workflow-{short}-")
+}
+
+fn matches_step_agent(agent_name: &str, prefix: &str, step_name: &str) -> bool {
+    agent_name
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest == step_name)
+}
+
 use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
 use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
@@ -43,6 +102,10 @@ pub struct Workflows {
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
     users: Arc<Users>,
+    /// Held so run-inspection commands can join a run's per-step
+    /// agents and their sessions for tool-call telemetry. Not used by
+    /// any mutation path.
+    agents: Arc<Agents>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
@@ -68,7 +131,7 @@ impl Workflows {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
             WorkflowRunRepo::new(pool),
             WorkflowDefinitionRepo::new_without_library(pool),
-            agents,
+            Arc::clone(&agents),
             Arc::clone(&skills),
             sandboxes,
         ));
@@ -82,6 +145,7 @@ impl Workflows {
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             users,
+            agents,
             execute_run_spawner,
             cron_spawner,
             jobs: jobs.clone(),
@@ -592,13 +656,33 @@ impl Workflows {
         sub: &AuthSubject,
         definition_id: WorkflowDefinitionId,
     ) -> Result<Vec<WorkflowRun>, WorkflowError> {
+        self.list_runs_filtered(sub, definition_id, None, None, None)
+            .await
+    }
+
+    /// Filtered variant for the `runs` MCP command. `state` filters
+    /// the returned set; `before` drops runs whose `started_at` is at
+    /// or after the cursor (RFC3339); `limit` caps the final page.
+    /// Defaults match the memo: `limit=20`. Returns runs newest-first.
+    #[instrument(name = "core.workflow.list_runs_filtered", skip_all)]
+    pub async fn list_runs_filtered(
+        &self,
+        sub: &AuthSubject,
+        definition_id: WorkflowDefinitionId,
+        state: Option<RunStateFilter>,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<WorkflowRun>, WorkflowError> {
         let definition = self.repo.find_by_id(definition_id).await?;
         sub.can(
             AuthVerb::Read,
             AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
+        // Pull a wide page from the repo and post-filter — runs are
+        // bounded per-definition and the memo's `state` + `before`
+        // filters are auxiliary, not the primary access path.
         let query = es_entity::PaginatedQueryArgs {
-            first: 100,
+            first: 200,
             after: None,
         };
         let result = self
@@ -609,7 +693,16 @@ impl Workflows {
                 es_entity::ListDirection::Descending,
             )
             .await?;
-        Ok(result.entities)
+
+        let cap = limit.unwrap_or(20);
+        let filtered: Vec<WorkflowRun> = result
+            .entities
+            .into_iter()
+            .filter(|r| state.as_ref().is_none_or(|s| s.matches(r.state)))
+            .filter(|r| before.is_none_or(|cutoff| r.started_at() < cutoff))
+            .take(cap)
+            .collect();
+        Ok(filtered)
     }
 
     #[instrument(name = "core.workflow.find_run_by_id", skip_all)]
@@ -624,6 +717,54 @@ impl Workflows {
             AuthResource::Workflow(run.project_id, Some(run.definition_id)),
         )?;
         Ok(run)
+    }
+
+    /// Returns the run plus per-step telemetry (one entry per
+    /// `step_results[i]`). Telemetry is `None` when the step never
+    /// spawned an agent (e.g. it failed before agent creation, or the
+    /// run is still pending). Agent / session reads piggy-back on the
+    /// caller's workflow read scope — both live in the same project.
+    #[instrument(name = "core.workflow.find_run_with_step_details", skip_all)]
+    pub async fn find_run_with_step_details(
+        &self,
+        sub: &AuthSubject,
+        run_id: WorkflowRunId,
+    ) -> Result<RunWithStepDetails, WorkflowError> {
+        let run = self.find_run_by_id(sub, run_id).await?;
+        let agents = self
+            .agents
+            .list_for_workflow_run(sub, run.project_id, run.id)
+            .await
+            .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+
+        let prefix = workflow_agent_name_prefix(run.id);
+
+        let mut steps = Vec::with_capacity(run.step_results.len());
+        for sr in &run.step_results {
+            let agent = agents
+                .iter()
+                .find(|a| matches_step_agent(&a.name, &prefix, &sr.name));
+            let telemetry = match agent {
+                Some(a) => match self.agents.find_session(sub, a.id).await {
+                    Ok(session) => Some(StepAgentDetails {
+                        agent_id: a.id,
+                        session_id: session.id,
+                        summary: session.tool_call_summary(),
+                    }),
+                    Err(_) => None,
+                },
+                None => None,
+            };
+            steps.push(StepWithDetails {
+                step_name: sr.name.clone(),
+                error: sr.error.clone(),
+                completed_at: sr.completed_at,
+                output: sr.output.clone(),
+                details: telemetry,
+            });
+        }
+
+        Ok(RunWithStepDetails { run, steps })
     }
 
     /// Block until the run reaches a terminal state, then return it.
@@ -703,6 +844,55 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidCronExpression(_)));
+    }
+
+    #[test]
+    fn run_state_filter_matches_each_state() {
+        assert!(RunStateFilter::Succeeded.matches(WorkflowRunState::Succeeded));
+        assert!(!RunStateFilter::Succeeded.matches(WorkflowRunState::Failed));
+        assert!(RunStateFilter::Failed.matches(WorkflowRunState::Failed));
+        assert!(RunStateFilter::Running.matches(WorkflowRunState::Pending));
+        assert!(RunStateFilter::Running.matches(WorkflowRunState::Running));
+        assert!(!RunStateFilter::Running.matches(WorkflowRunState::Succeeded));
+    }
+
+    #[test]
+    fn matches_step_agent_strips_run_prefix_and_compares_step_name() {
+        // executor.rs builds names as "workflow-{short}-{step_name}".
+        let prefix = "workflow-019df6b8-".to_string();
+        let agent_name = format!("{prefix}classify-and-comment");
+        assert!(super::matches_step_agent(
+            &agent_name,
+            &prefix,
+            "classify-and-comment"
+        ));
+        assert!(!super::matches_step_agent(
+            &agent_name,
+            &prefix,
+            "different-step"
+        ));
+        let other_prefix = "workflow-019df6b3-".to_string();
+        assert!(!super::matches_step_agent(
+            &agent_name,
+            &other_prefix,
+            "classify-and-comment"
+        ));
+        // Step names with embedded hyphens still match when the suffix is exact.
+        let with_hyphens = format!("{prefix}step-with-hyphens");
+        assert!(super::matches_step_agent(
+            &with_hyphens,
+            &prefix,
+            "step-with-hyphens"
+        ));
+    }
+
+    #[test]
+    fn workflow_agent_name_prefix_uses_first_uuid_segment() {
+        let run_id = WorkflowRunId::new();
+        let prefix = workflow_agent_name_prefix(run_id);
+        let s = run_id.to_string();
+        let short = s.split_once('-').unwrap().0;
+        assert_eq!(prefix, format!("workflow-{short}-"));
     }
 
     #[test]

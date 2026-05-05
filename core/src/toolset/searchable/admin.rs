@@ -19,7 +19,7 @@ use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::AuthedSpaces;
 use crate::note::{Note, Notes};
 use crate::primitives::{
-    AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId,
+    AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
@@ -261,6 +261,35 @@ enum WorkflowCommand {
     List,
     Get,
     Update,
+    Runs,
+    GetRun,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowRunStateParam {
+    Succeeded,
+    Failed,
+    Running,
+    Any,
+}
+
+impl WorkflowRunStateParam {
+    fn into_filter(self) -> Option<crate::workflow::RunStateFilter> {
+        match self {
+            Self::Succeeded => Some(crate::workflow::RunStateFilter::Succeeded),
+            Self::Failed => Some(crate::workflow::RunStateFilter::Failed),
+            Self::Running => Some(crate::workflow::RunStateFilter::Running),
+            Self::Any => None,
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowRunIncludeParam {
+    Summary,
+    Steps,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -372,9 +401,27 @@ struct WorkflowParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`.
+    /// Required for `get`, `update`, `runs`.
     #[schemars(with = "Option<uuid::Uuid>")]
     definition_id: Option<WorkflowDefinitionId>,
+
+    /// Required for `get_run`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    run_id: Option<WorkflowRunId>,
+
+    /// `runs`: filter by run state. Defaults to `any`.
+    #[serde(default)]
+    state: Option<WorkflowRunStateParam>,
+    /// `runs`: drop runs whose `started_at` is at or after this timestamp (RFC3339).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    before: Option<chrono::DateTime<chrono::Utc>>,
+    /// `runs`: max returned. Defaults to 20.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// `get_run`: `summary` (default) or `steps` (adds tool-call telemetry).
+    #[serde(default)]
+    include: Option<WorkflowRunIncludeParam>,
 
     /// `create`: required. `update`: optional rename.
     name: Option<String>,
@@ -531,7 +578,16 @@ static TOOLS: &[ToolDef] = &[
                        `update` (requires `definition_id`; optional `name`, \
                        `description`+`clear_description` for None semantics, \
                        `provider`+`update_trigger`, `steps`+`update_steps`, \
-                       `sandboxes`+`update_sandboxes`).",
+                       `sandboxes`+`update_sandboxes`), \
+                       `runs` (requires `definition_id`; optional `state` \
+                       (succeeded/failed/running/any, default any), `before` \
+                       RFC3339 cursor, `limit` (default 20)), \
+                       `get_run` (requires `run_id`; optional `include`: \
+                       `summary` (default — header + per-step state/error \
+                       /output) or `steps` (adds tool-call telemetry per \
+                       step: `tool_calls_by_name`, `tool_call_sequence`, \
+                       model, rounds, tokens). NO transcript / tool inputs \
+                       / message bodies — those are session-tier).",
         schema: &WORKFLOW_SCHEMA,
     },
     ToolDef {
@@ -1156,6 +1212,54 @@ impl AdminToolSet {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflow(&definition, false),
                 )]))
+            }
+
+            WorkflowCommand::Runs => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("definition_id is required for runs".to_string())
+                })?;
+                Audit::record_action("workflow.runs");
+                let filter = params.state.and_then(WorkflowRunStateParam::into_filter);
+                let runs = self
+                    .workflows
+                    .list_runs_filtered(subject, definition_id, filter, params.before, params.limit)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    crate::toolset::top_level::workflow::format_runs_text(&runs),
+                )]))
+            }
+
+            WorkflowCommand::GetRun => {
+                let run_id = params.run_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("run_id is required for get_run".to_string())
+                })?;
+                Audit::record_action("workflow.get_run");
+                let include = params.include.unwrap_or(WorkflowRunIncludeParam::Summary);
+                match include {
+                    WorkflowRunIncludeParam::Steps => {
+                        let details = self
+                            .workflows
+                            .find_run_with_step_details(subject, run_id)
+                            .await
+                            .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                        Ok(CallToolResult::success(vec![Content::text(
+                            crate::toolset::top_level::workflow::format_run_with_details_text(
+                                &details,
+                            ),
+                        )]))
+                    }
+                    WorkflowRunIncludeParam::Summary => {
+                        let run = self
+                            .workflows
+                            .find_run_by_id(subject, run_id)
+                            .await
+                            .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                        Ok(CallToolResult::success(vec![Content::text(
+                            crate::toolset::top_level::workflow::format_run_text(&run),
+                        )]))
+                    }
+                }
             }
         }
     }
@@ -2160,9 +2264,55 @@ mod tests {
     #[test]
     fn workflow_schema_includes_command_enum() {
         let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update"] {
+        for v in [
+            "create", "list", "get", "update", "runs", "get_run", "include", "summary", "steps",
+            "before", "limit", "state",
+        ] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
+    }
+
+    #[test]
+    fn workflow_runs_parses_filter_args() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "runs",
+            "definition_id": definition_id,
+            "state": "failed",
+            "before": "2026-05-05T05:50:00Z",
+            "limit": 5,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Runs));
+        assert_eq!(p.definition_id.map(uuid::Uuid::from), Some(definition_id));
+        assert!(matches!(p.state, Some(WorkflowRunStateParam::Failed)));
+        assert!(p.before.is_some());
+        assert_eq!(p.limit, Some(5));
+    }
+
+    #[test]
+    fn workflow_get_run_parses_with_include_steps() {
+        let run_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "get_run",
+            "run_id": run_id,
+            "include": "steps",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::GetRun));
+        assert_eq!(p.run_id.map(uuid::Uuid::from), Some(run_id));
+        assert!(matches!(p.include, Some(WorkflowRunIncludeParam::Steps)));
+    }
+
+    #[test]
+    fn workflow_get_run_include_defaults_to_summary_at_dispatch() {
+        let run_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "get_run",
+            "run_id": run_id,
+        })))
+        .expect("parse");
+        assert!(p.include.is_none());
     }
 
     #[test]
