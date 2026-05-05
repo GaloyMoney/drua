@@ -57,11 +57,11 @@ spec:
         - name: MCP_GATEWAY_URL
           value: {{ .Values.sandbox.mcpGatewayUrl | quote }}
         {{- end }}
-        {{- if .Values.sandbox.nixSubstituters }}
+        {{- if or .Values.sandbox.nixSubstituters (and .Values.sandbox.attic.enabled .Values.sandbox.attic.publicKey) }}
         - name: NIX_CONFIG
           value: |-
-            substituters ={{ range .Values.sandbox.nixSubstituters }} {{ .url }}{{ end }} https://cache.nixos.org/
-            trusted-public-keys ={{ range .Values.sandbox.nixSubstituters }} {{ .publicKey }}{{ end }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            substituters = {{- if and .Values.sandbox.attic.enabled .Values.sandbox.attic.publicKey }} {{ include "galoyAgents.attic.cacheUrl" . }}{{- end }}{{ range .Values.sandbox.nixSubstituters }} {{ .url }}{{ end }} https://cache.nixos.org/
+            trusted-public-keys = {{- if and .Values.sandbox.attic.enabled .Values.sandbox.attic.publicKey }} {{ .Values.sandbox.attic.publicKey }}{{- end }}{{ range .Values.sandbox.nixSubstituters }} {{ .publicKey }}{{ end }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
         {{- end }}
         volumeMounts:
         - name: mcp-token

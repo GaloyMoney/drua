@@ -1,0 +1,110 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.attic.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "galoyAgents.attic.fullname" . }}
+  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    app.kubernetes.io/component: sandbox-attic
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: {{ .Values.sandbox.attic.service.port }}
+    targetPort: http
+    protocol: TCP
+  selector:
+    app: {{ template "galoyAgents.fullname" . }}
+    app.kubernetes.io/component: sandbox-attic
+    release: "{{ .Release.Name }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "galoyAgents.attic.fullname" . }}-data
+  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    app.kubernetes.io/component: sandbox-attic
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: {{ default .Values.sandbox.persistence.storageClassName .Values.sandbox.attic.persistence.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.sandbox.attic.persistence.size | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "galoyAgents.attic.fullname" . }}
+  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    app.kubernetes.io/component: sandbox-attic
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ template "galoyAgents.fullname" . }}
+      app.kubernetes.io/component: sandbox-attic
+      release: "{{ .Release.Name }}"
+  template:
+    metadata:
+      labels:
+        app: {{ template "galoyAgents.fullname" . }}
+        app.kubernetes.io/component: sandbox-attic
+        release: "{{ .Release.Name }}"
+      {{- with .Values.galoyAgents.labels }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: attic
+        {{- if .Values.sandbox.attic.image.digest }}
+        image: {{ .Values.sandbox.attic.image.repository }}@{{ .Values.sandbox.attic.image.digest }}
+        {{- else }}
+        image: {{ .Values.sandbox.attic.image.repository }}:{{ .Values.sandbox.attic.image.tag }}
+        {{- end }}
+        imagePullPolicy: {{ .Values.sandbox.attic.image.pullPolicy }}
+        args:
+        - --config
+        - /etc/attic/server.toml
+        ports:
+        - name: http
+          containerPort: {{ .Values.sandbox.attic.service.port }}
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.sandbox.attic.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/attic/server.toml
+          subPath: server.toml
+          readOnly: true
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: config
+        secret:
+          secretName: {{ include "galoyAgents.attic.configSecretName" . }}
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ include "galoyAgents.attic.fullname" . }}-data
+{{- end }}
