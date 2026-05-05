@@ -825,6 +825,22 @@ async fn reconcile_existing_skill<OP: AtomicOperation>(
         return Ok(None);
     }
     skills.repo.update_in_op(op, &mut existing).await?;
+    // `sync_entity_in_op` only fires when the new events include a
+    // content event (Initialized/Updated). A pure-move case (revive +
+    // `PathChanged` only) leaves the `library_documents` row that
+    // `delete_by_path_in_op` wiped permanently empty. Re-upsert the
+    // search row directly here so the entity stays findable. Skipped
+    // in the `content_changed` case — the post-persist hook already
+    // does it. Skipped when no library is wired (test contexts).
+    if path_changed && !content_changed {
+        if let Some(library) = skills.library.as_ref() {
+            use drua_library::LibrarySynced;
+            library
+                .search()
+                .upsert_in_op(op, &existing.searchable_fields())
+                .await?;
+        }
+    }
     skills.register_context_bump(op, scope.bump_scope());
     Ok(Some(existing))
 }

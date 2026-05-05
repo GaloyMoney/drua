@@ -697,6 +697,21 @@ async fn reconcile_existing_note<OP: AtomicOperation>(
         return Ok(None);
     }
     notes.repo.update_in_op(op, &mut existing).await?;
+    // `sync_entity_in_op` only fires for content events (Initialized/
+    // Updated/Pinned/Unpinned). A pure-move case where only
+    // `PathChanged` was pushed leaves the `library_documents` row that
+    // `delete_by_path_in_op` wiped permanently empty. Re-upsert the
+    // search row directly so the note stays searchable. The
+    // content/pin paths already trigger the hook, so skip the explicit
+    // upsert there.
+    if path_changed && !content_changed && !pin_changed {
+        use drua_library::LibrarySynced;
+        notes
+            .library
+            .search()
+            .upsert_in_op(op, &existing.searchable_fields())
+            .await?;
+    }
     notes.register_context_bump(op, scope.bump_scope());
     Ok(Some(existing))
 }
