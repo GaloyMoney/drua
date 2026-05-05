@@ -181,6 +181,26 @@ impl AnthropicClient {
     }
 }
 
+/// Map an `AnthropicError` to a classified `PromptError` so the chain
+/// walker can decide whether to fall back. Connection / SSE / stream
+/// errors are Transient; HTTP API errors classify by status code.
+fn classify(err: AnthropicError) -> PromptError {
+    match err {
+        AnthropicError::Http(e) => {
+            if e.is_timeout() {
+                PromptError::transient(llm::TransientKind::Timeout, e.to_string())
+            } else if e.is_connect() {
+                PromptError::transient(llm::TransientKind::Connection, e.to_string())
+            } else {
+                PromptError::transient(llm::TransientKind::ServerError, e.to_string())
+            }
+        }
+        AnthropicError::Api { status, message } => PromptError::from_http_status(status, message),
+        AnthropicError::Sse(msg) => PromptError::transient(llm::TransientKind::SseDecode, msg),
+        AnthropicError::Stream(msg) => PromptError::transient(llm::TransientKind::ServerError, msg),
+    }
+}
+
 #[async_trait]
 impl LlmProvider for AnthropicClient {
     fn name(&self) -> &str {
@@ -193,13 +213,13 @@ impl LlmProvider for AnthropicClient {
     ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
         let rx = AnthropicClient::send_prompt_streaming(self, prompt)
             .await
-            .map_err(|e| PromptError::Provider(e.to_string()))?;
+            .map_err(classify)?;
 
         let (tx, out_rx) = tokio::sync::mpsc::channel(128);
         tokio::spawn(async move {
             let mut rx = rx;
             while let Some(result) = rx.recv().await {
-                let mapped = result.map_err(|e| PromptError::Provider(e.to_string()));
+                let mapped = result.map_err(classify);
                 if tx.send(mapped).await.is_err() {
                     break;
                 }

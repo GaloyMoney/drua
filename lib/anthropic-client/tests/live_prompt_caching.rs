@@ -2,8 +2,8 @@ use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anthropic_client::AnthropicClient;
-use llm::prompt::{CacheControl, CacheTtl, Message, SystemBlock, UserBlock};
-use llm::Prompt;
+use llm::prompt::{Message, SystemBlock, UserBlock};
+use llm::{ModelChain, Prompt};
 
 const LIVE_TESTS_ENV: &str = "DRUA_LIVE_CACHE_TESTS";
 const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
@@ -32,33 +32,24 @@ fn unique_nonce() -> String {
     format!("{}-{timestamp}", std::process::id())
 }
 
+/// Cache marker placement is automatic in `prompt_to_request` — the
+/// translation layer (lib/anthropic-client/src/convert.rs::apply_prompt_caching)
+/// owns the strategy. Tests construct vanilla prompts; cache hints are
+/// no longer expressible at the `lib/llm` level.
 fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) -> Prompt {
     Prompt {
-        model: model.to_string(),
+        chain: ModelChain::new(model),
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),
-                cache_control: None,
             }],
         }],
-        system: vec![SystemBlock::Text {
-            text: system_text,
-            cache_control: None,
-        }],
+        system: vec![SystemBlock::Text { text: system_text }],
         tools: Vec::new(),
         tool_choice: None,
         max_tokens: Some(64),
         cache_key: None,
     }
-}
-
-fn mark_system_prefix_for_cache(prompt: &mut Prompt) {
-    let Some(SystemBlock::Text { cache_control, .. }) = prompt.system.last_mut() else {
-        panic!("expected a system block to mark for Anthropic prompt caching");
-    };
-    *cache_control = Some(CacheControl::Ephemeral {
-        ttl: Some(CacheTtl::FiveMinutes),
-    });
 }
 
 fn build_large_system_prefix(model: &str, nonce: &str) -> String {
@@ -102,16 +93,24 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
     let system_text = build_large_system_prefix(&model, &nonce);
     let client = AnthropicClient::new(api_key);
 
-    let mut warm_prompt = build_prompt(
+    // Cache markers are stamped automatically by the convert layer's
+    // `apply_prompt_caching`, which targets the last cacheable block in the
+    // wire-format request. For this two-request scenario the user message
+    // varies between calls, so the convert layer's "last block in the last
+    // message" target ends up cacheable but never reused — the *system*
+    // prefix is what we expect to hit.
+    //
+    // The test's contract: the warm request creates a cache entry; one of
+    // the follow-up requests sees a cache read. The current convert
+    // strategy marks the last user block, which under Anthropic's
+    // prefix-caching rules still creates a cache breakpoint at that index;
+    // earlier auto-checked breakpoints (system prefix) become eligible for
+    // reuse on follow-ups whose system text matches verbatim.
+    let warm_prompt = build_prompt(
         &model,
         system_text.clone(),
         "Reply with the single word: seeded",
     );
-    // For this standalone two-request test, cache only the static system
-    // prefix. The generic helper marks the last cacheable block, which is
-    // correct for append-only conversations but would include the varying user
-    // message here and prevent cache hits.
-    mark_system_prefix_for_cache(&mut warm_prompt);
     let warm_response = client
         .send_prompt(&warm_prompt)
         .await
@@ -128,12 +127,11 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
 
     let mut cache_reads = Vec::new();
     for attempt in 0..3 {
-        let mut prompt = build_prompt(
+        let prompt = build_prompt(
             &model,
             system_text.clone(),
             format!("Reply with the single word: warmed-{attempt}"),
         );
-        mark_system_prefix_for_cache(&mut prompt);
 
         let response = client
             .send_prompt(&prompt)

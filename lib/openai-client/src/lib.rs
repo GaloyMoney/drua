@@ -323,6 +323,32 @@ fn parse_retry_after_seconds(body: &str) -> Option<u64> {
         .as_u64()
 }
 
+/// Map an `OpenAiChatCompletionsError` to a classified `PromptError` so the
+/// chain walker can decide whether to fall back. HTTP API errors classify
+/// by status code; transport errors are Transient.
+fn classify(err: OpenAiChatCompletionsError) -> PromptError {
+    match err {
+        OpenAiChatCompletionsError::Http(e) => {
+            if e.is_timeout() {
+                PromptError::transient(llm::TransientKind::Timeout, e.to_string())
+            } else if e.is_connect() {
+                PromptError::transient(llm::TransientKind::Connection, e.to_string())
+            } else {
+                PromptError::transient(llm::TransientKind::ServerError, e.to_string())
+            }
+        }
+        OpenAiChatCompletionsError::Api { status, message } => {
+            PromptError::from_http_status(status, message)
+        }
+        OpenAiChatCompletionsError::Sse(msg) => {
+            PromptError::transient(llm::TransientKind::SseDecode, msg)
+        }
+        OpenAiChatCompletionsError::Stream(msg) => {
+            PromptError::transient(llm::TransientKind::ServerError, msg)
+        }
+    }
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiClient {
     fn name(&self) -> &str {
@@ -336,13 +362,13 @@ impl LlmProvider for OpenAiClient {
         let rx = self
             .send_prompt_streaming_internal(prompt)
             .await
-            .map_err(|e| PromptError::Provider(e.to_string()))?;
+            .map_err(classify)?;
 
         let (tx, out_rx) = tokio::sync::mpsc::channel(128);
         tokio::spawn(async move {
             let mut rx = rx;
             while let Some(result) = rx.recv().await {
-                let mapped = result.map_err(|e| PromptError::Provider(e.to_string()));
+                let mapped = result.map_err(classify);
                 if tx.send(mapped).await.is_err() {
                     break;
                 }
