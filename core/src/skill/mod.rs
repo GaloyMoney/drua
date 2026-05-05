@@ -573,6 +573,7 @@ impl Skills {
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
 
         let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        self.populate_attribution().await;
         let skill = self.repo.create_in_op(&mut op, new).await?;
         Audit::record_skill_id(skill.id);
         op.commit().await?;
@@ -605,6 +606,7 @@ impl Skills {
             }));
         }
         if skill.update_content(name, description, body).did_execute() {
+            self.populate_attribution().await;
             self.repo.update_in_op(&mut op, &mut skill).await?;
         }
         op.commit().await?;
@@ -634,6 +636,7 @@ impl Skills {
                 resource: AuthResource::SpaceSkill(space_id, Some(id)),
             }));
         }
+        self.populate_attribution().await;
         self.repo.delete_in_op(&mut op, skill).await?;
         op.commit().await?;
         Ok(())

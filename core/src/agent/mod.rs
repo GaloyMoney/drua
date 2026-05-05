@@ -749,6 +749,12 @@ impl Agents {
     /// skills service or session push are logged and swallowed — sandbox
     /// attach/detach must not fail because of a transient skills-context
     /// problem.
+    ///
+    /// Resolves the FULL agent scope (project + global + mounted spaces +
+    /// sandbox) so the refreshed block matches what `cached_dynamic_blocks`
+    /// would build on the next `send_message`. Calling
+    /// `skills_context_for_agent` here would silently drop space-tier
+    /// skills (it carries an empty `mounted_space_ids`).
     async fn refresh_skills_block_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -756,15 +762,23 @@ impl Agents {
         project_id: ProjectId,
         sandbox_id: Option<SandboxId>,
     ) {
-        let skills_text = match self
-            .skills
-            .skills_context_for_agent(project_id, sandbox_id)
-            .await
-        {
+        let mounted_space_ids = match self.space_mounts.space_ids_for_project(project_id).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "space_ids_for_project failed during skills refresh");
+                Vec::new()
+            }
+        };
+        let scope = scope::AgentScope {
+            project_id,
+            attached_sandbox_id: sandbox_id,
+            mounted_space_ids,
+        };
+        let skills_text = match self.skills.skills_context_for_scope(&scope).await {
             Ok(Some(text)) => text,
             Ok(None) => return,
             Err(e) => {
-                tracing::warn!(error = %e, "skills_context_for_agent failed during refresh");
+                tracing::warn!(error = %e, "skills_context_for_scope failed during refresh");
                 return;
             }
         };
