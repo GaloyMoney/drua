@@ -69,7 +69,7 @@ spec:
           kubernetes.io/metadata.name: {{ .Values.sandbox.otelCollectorNamespace }}
   {{- end }}
   # 4. Sandbox-local Attic binary cache.
-  {{- if and .Values.sandbox.attic.enabled .Values.sandbox.attic.publicKey }}
+  {{- if .Values.sandbox.attic.enabled }}
   - ports:
     - protocol: TCP
       port: {{ .Values.sandbox.attic.service.port }}

@@ -1,0 +1,15 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.attic.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "galoyAgents.sandbox.nixConfigMapName" . }}
+  namespace: {{ include "galoyAgents.sandboxNamespace" . }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    app.kubernetes.io/component: sandbox-nix-config
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+data:
+  NIX_CONFIG: |-
+{{ include "galoyAgents.sandbox.nixConfig" . | indent 4 }}
+{{- end }}
