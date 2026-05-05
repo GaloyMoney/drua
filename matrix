@@ -1,8 +1,0 @@
-attached-to-other-workflow | attached-to-non-workflow | wants          | outcome | suspends after
-          none             |       none               |  read / write  |  run  |    yes
-          read             |       none               |  read          |  run  |    no (yes if other workflow complete)
-          read             |       none               |  write         |  run  |    no (yes if other workflow complete)
-          write            |       none               |  write         |  error  |    no
-          none             |       read               |  read / write  |  run | no
-          none             |       write               |  read         |  run | no
-          none             |       write               |  write        |  run (steal) | yes
