@@ -6,7 +6,7 @@ use crate::agent::{Agent, Agents};
 use crate::primitives::{
     AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
 };
-use crate::sandbox::{SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
+use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
@@ -180,8 +180,12 @@ impl Executor {
         let mut preexisting_ids: HashSet<SandboxId> = HashSet::new();
         for decl in decls {
             let (decl_name, sandbox) = match decl {
-                // Reference an already-existing sandbox in the
-                // project by its (unique) name; attach only.
+                // Reference an already-existing sandbox in the project
+                // by its (unique) name. Auto-restart if Suspended or
+                // Errored — borrowed sandboxes share the workflow-scoped
+                // wake-up lifecycle: the user might have suspended it
+                // explicitly or via a prior workflow's post-flight, and
+                // the next trigger should bring it back to Ready.
                 WorkflowSandboxDecl::Preexisting { name } => {
                     let sb = self
                         .sandboxes
@@ -192,6 +196,7 @@ impl Executor {
                                 "preexisting sandbox '{name}': {e}"
                             ))
                         })?;
+                    let sb = self.restart_if_dormant(sb, name).await?;
                     (name, sb)
                 }
                 // Workflow-scoped sandbox: find / create / restart.
@@ -232,26 +237,7 @@ impl Executor {
                             self.sandboxes.spawn_sandbox_creation(sb.id);
                             sb
                         }
-                        Some(sb)
-                            if matches!(
-                                sb.state,
-                                SandboxState::Suspended | SandboxState::Errored
-                            ) =>
-                        {
-                            if sb.state == SandboxState::Errored {
-                                tracing::warn!(
-                                    sandbox_id = %sb.id,
-                                    sandbox_name = %name,
-                                    last_error = ?sb.last_error,
-                                    "pre-flight: restarting sandbox in Errored state",
-                                );
-                            }
-                            self.sandboxes
-                                .restart_for_workflow(sb.id)
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?
-                        }
-                        Some(sb) => sb,
+                        Some(sb) => self.restart_if_dormant(sb, name).await?,
                     };
                     (name, sandbox)
                 }
@@ -270,6 +256,34 @@ impl Executor {
             ids.insert(decl_name.clone(), sandbox.id);
         }
         Ok((ids, preexisting_ids))
+    }
+
+    /// Wakes a Suspended or Errored sandbox so the workflow can attach.
+    /// Errored is logged at warn so the prior failure stays visible in
+    /// observability.
+    async fn restart_if_dormant(
+        &self,
+        sandbox: Sandbox,
+        decl_name: &str,
+    ) -> Result<Sandbox, WorkflowError> {
+        if !matches!(
+            sandbox.state,
+            SandboxState::Suspended | SandboxState::Errored
+        ) {
+            return Ok(sandbox);
+        }
+        if sandbox.state == SandboxState::Errored {
+            tracing::warn!(
+                sandbox_id = %sandbox.id,
+                sandbox_name = %decl_name,
+                last_error = ?sandbox.last_error,
+                "pre-flight: restarting sandbox in Errored state",
+            );
+        }
+        self.sandboxes
+            .restart_for_workflow(sandbox.id)
+            .await
+            .map_err(|e| WorkflowError::Sandbox(e.to_string()))
     }
 
     async fn suspend_workflow_sandboxes(
