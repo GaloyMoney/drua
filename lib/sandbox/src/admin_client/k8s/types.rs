@@ -25,6 +25,14 @@ pub struct SandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SandboxLifecycle>,
 
+    /// "Delete" or "Retain". The CRD default is "Retain"; sandboxes with
+    /// controller-owned ephemeral volumes should opt into "Delete".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_policy: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_time: Option<Time>,
+
     /// Only 0 (paused) or 1 (active) are valid.
     #[serde(default = "default_replicas")]
     pub replicas: i32,

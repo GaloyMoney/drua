@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
-    EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
-    Pod, PodSecurityContext, ResourceRequirements, Volume, VolumeMount, VolumeResourceRequirements,
+    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, ResourceRequirements, Volume,
+    VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
@@ -28,8 +29,46 @@ pub struct PersistenceConfig {
     pub mount_path: String,
 }
 
+/// Per-sandbox `/nix` volume. Empty on first boot; an init container seeds it
+/// from the image's baked-in store via the `nix-store-seed` script. The volume
+/// is expressed as a Sandbox `volumeClaimTemplate`, so the sandbox controller
+/// owns its PVC lifecycle instead of the app retaining it independently.
+#[derive(Clone, Debug)]
+pub struct NixStoreConfig {
+    pub storage_class: String,
+    /// Persistent volume request, e.g. `"50Gi"`. Sized for the whole nix
+    /// closure of whatever flake the sandbox builds.
+    pub size: String,
+}
+
 /// Matches `ExposedPorts` in `images/sandbox/default.nix`.
 const DEFAULT_SANDBOX_PORT: u16 = 3000;
+
+const NIX_STORE_VOLUME: &str = "nix-store";
+const NIX_STORE_MOUNT_PATH: &str = "/nix";
+const NIX_STORE_SEED_PATH: &str = "/seed";
+const NIX_STORE_SEED_CONTAINER: &str = "nix-store-seed";
+
+fn nix_store_claim_template(sandbox_name: &str, config: &NixStoreConfig) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": {
+            "name": NIX_STORE_VOLUME,
+            "labels": {
+                (MANAGED_BY_LABEL): MANAGED_BY_VALUE,
+                "sandbox-name": sandbox_name,
+            },
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "storageClassName": config.storage_class.as_str(),
+            "resources": {
+                "requests": {
+                    "storage": config.size.as_str(),
+                },
+            },
+        },
+    })
+}
 
 #[derive(Clone)]
 pub struct K8sAdminClient {
@@ -37,6 +76,7 @@ pub struct K8sAdminClient {
     namespace: String,
     template_name: String,
     persistence: Option<PersistenceConfig>,
+    nix_store: Option<NixStoreConfig>,
     extra_env: Vec<(String, String)>,
     sandbox_port: u16,
 }
@@ -48,6 +88,7 @@ impl K8sAdminClient {
             namespace,
             template_name,
             persistence: None,
+            nix_store: None,
             extra_env: Vec::new(),
             sandbox_port: DEFAULT_SANDBOX_PORT,
         }
@@ -55,6 +96,11 @@ impl K8sAdminClient {
 
     pub fn with_persistence(mut self, config: PersistenceConfig) -> Self {
         self.persistence = Some(config);
+        self
+    }
+
+    pub fn with_nix_store(mut self, config: NixStoreConfig) -> Self {
+        self.nix_store = Some(config);
         self
     }
 
@@ -91,41 +137,46 @@ impl K8sAdminClient {
             .map_err(AdminError::Kube)
     }
 
-    /// Idempotent: no-op if the PVC already exists.
-    #[instrument(name = "sandbox.admin.k8s.ensure_pvc", skip_all, fields(%name, %disk_size))]
+    /// Idempotent: no-op if the PVC already exists. Caller picks the
+    /// `pvc_name`; one sandbox can own multiple PVCs (workspace + nix-store).
+    #[instrument(
+        name = "sandbox.admin.k8s.ensure_pvc",
+        skip_all,
+        fields(%pvc_name, %storage_class, %size)
+    )]
     async fn ensure_pvc(
         &self,
-        name: &str,
-        persistence: &PersistenceConfig,
-        disk_size: &str,
-    ) -> Result<String, AdminError> {
-        let pvc_name = format!("workspace-{name}");
+        sandbox_name: &str,
+        pvc_name: &str,
+        storage_class: &str,
+        size: &str,
+    ) -> Result<(), AdminError> {
         let pvcs: Api<PersistentVolumeClaim> =
             Api::namespaced(self.client.clone(), &self.namespace);
 
-        match pvcs.get(&pvc_name).await {
+        match pvcs.get(pvc_name).await {
             Ok(_) => {
                 tracing::info!(pvc = %pvc_name, "PVC already exists, reusing");
             }
             Err(kube::Error::Api(resp)) if resp.code == 404 => {
                 let mut labels = BTreeMap::new();
                 labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
-                labels.insert("sandbox-name".to_string(), name.to_string());
+                labels.insert("sandbox-name".to_string(), sandbox_name.to_string());
 
                 let pvc = PersistentVolumeClaim {
                     metadata: kube::api::ObjectMeta {
-                        name: Some(pvc_name.clone()),
+                        name: Some(pvc_name.to_string()),
                         namespace: Some(self.namespace.clone()),
                         labels: Some(labels),
                         ..Default::default()
                     },
                     spec: Some(PersistentVolumeClaimSpec {
                         access_modes: Some(vec!["ReadWriteOnce".to_string()]),
-                        storage_class_name: Some(persistence.storage_class.clone()),
+                        storage_class_name: Some(storage_class.to_string()),
                         resources: Some(VolumeResourceRequirements {
                             requests: Some(BTreeMap::from([(
                                 "storage".to_string(),
-                                Quantity(disk_size.to_string()),
+                                Quantity(size.to_string()),
                             )])),
                             ..Default::default()
                         }),
@@ -140,11 +191,11 @@ impl K8sAdminClient {
             Err(e) => return Err(AdminError::Kube(e)),
         }
 
-        Ok(pvc_name)
+        Ok(())
     }
 
-    /// PVC lifecycle is independent of the Sandbox — it survives sandbox
-    /// deletion and is reused on recreation with the same name.
+    /// Workspace PVC lifecycle is independent of the Sandbox — it survives
+    /// sandbox deletion and is reused on recreation with the same name.
     #[instrument(name = "sandbox.admin.k8s.create_sandbox", skip_all, fields(%name))]
     pub async fn create_sandbox(
         &self,
@@ -170,7 +221,14 @@ impl K8sAdminClient {
         }
 
         if let Some(ref persistence) = self.persistence {
-            let pvc_name = self.ensure_pvc(name, persistence, &specs.disk_size).await?;
+            let pvc_name = format!("workspace-{name}");
+            self.ensure_pvc(
+                name,
+                &pvc_name,
+                &persistence.storage_class,
+                &specs.disk_size,
+            )
+            .await?;
 
             if let Some(ref mut spec) = pod_template.spec {
                 let mut volumes = spec.volumes.take().unwrap_or_default();
@@ -195,12 +253,62 @@ impl K8sAdminClient {
                 }
 
                 // fsGroup so the mounted PVC is writable by the sandbox user.
+                // OnRootMismatch skips the recursive chgrp on subsequent
+                // boots — important once /nix/store accumulates a large
+                // nix closure on the per-sandbox nix PVC below.
                 let sc = spec
                     .security_context
                     .get_or_insert_with(PodSecurityContext::default);
                 if sc.fs_group.is_none() {
                     sc.fs_group = Some(1000);
                 }
+                if sc.fs_group_change_policy.is_none() {
+                    sc.fs_group_change_policy = Some("OnRootMismatch".to_string());
+                }
+            }
+        }
+
+        if self.nix_store.is_some() {
+            // Reuse the sandbox image for the seed init container — only it
+            // has the baked-in /nix store the PVC needs to be primed with.
+            let sandbox_image = pod_template
+                .spec
+                .as_ref()
+                .and_then(|s| s.containers.first())
+                .and_then(|c| c.image.clone())
+                .ok_or_else(|| {
+                    AdminError::TemplateInvalid("sandbox container has no image".to_string())
+                })?;
+
+            if let Some(ref mut spec) = pod_template.spec {
+                if let Some(container) = spec.containers.first_mut() {
+                    let mut mounts = container.volume_mounts.take().unwrap_or_default();
+                    mounts.push(VolumeMount {
+                        name: NIX_STORE_VOLUME.to_string(),
+                        mount_path: NIX_STORE_MOUNT_PATH.to_string(),
+                        ..Default::default()
+                    });
+                    container.volume_mounts = Some(mounts);
+                }
+
+                let mut init_containers = spec.init_containers.take().unwrap_or_default();
+                init_containers.push(Container {
+                    name: NIX_STORE_SEED_CONTAINER.to_string(),
+                    image: Some(sandbox_image),
+                    command: Some(vec!["nix-store-seed".to_string()]),
+                    env: Some(vec![EnvVar {
+                        name: "SEED_TARGET".to_string(),
+                        value: Some(NIX_STORE_SEED_PATH.to_string()),
+                        value_from: None,
+                    }]),
+                    volume_mounts: Some(vec![VolumeMount {
+                        name: NIX_STORE_VOLUME.to_string(),
+                        mount_path: NIX_STORE_SEED_PATH.to_string(),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                });
+                spec.init_containers = Some(init_containers);
             }
         }
 
@@ -223,12 +331,21 @@ impl K8sAdminClient {
         let mut labels = BTreeMap::new();
         labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
 
+        let mut volume_claim_templates = Vec::new();
+        let mut shutdown_policy = None;
+        if let Some(ref nix_store) = self.nix_store {
+            volume_claim_templates.push(nix_store_claim_template(name, nix_store));
+            shutdown_policy = Some("Delete".to_string());
+        }
+
         let mut sandbox = Sandbox::new(
             name,
             SandboxSpec {
                 pod_template,
-                volume_claim_templates: Vec::new(),
+                volume_claim_templates,
                 lifecycle: None,
+                shutdown_policy,
+                shutdown_time: None,
                 replicas: 1,
             },
         );
@@ -573,5 +690,30 @@ impl AdminClient for K8sAdminClient {
             .as_ref()
             .map(|p| p.mount_path.clone())
             .unwrap_or_else(|| DEFAULT_WORKSPACE_ROOT.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nix_store_claim_template_matches_mount_name_and_delete_owned_labels() {
+        let claim = nix_store_claim_template(
+            "sb-test",
+            &NixStoreConfig {
+                storage_class: "standard-rwo".to_string(),
+                size: "50Gi".to_string(),
+            },
+        );
+
+        assert_eq!(claim["metadata"]["name"], NIX_STORE_VOLUME);
+        assert_eq!(
+            claim["metadata"]["labels"][MANAGED_BY_LABEL],
+            MANAGED_BY_VALUE
+        );
+        assert_eq!(claim["metadata"]["labels"]["sandbox-name"], "sb-test");
+        assert_eq!(claim["spec"]["storageClassName"], "standard-rwo");
+        assert_eq!(claim["spec"]["resources"]["requests"]["storage"], "50Gi");
     }
 }

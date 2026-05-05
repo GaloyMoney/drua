@@ -194,5 +194,10 @@ data:
         {{- with .Values.sandbox.persistence }}
         storage_class: {{ .storageClassName | quote }}
         mount_path: {{ .mountPath | quote }}
+        {{- if and .nixStore .nixStore.enabled }}
+        nix_store:
+          storage_class: {{ default .storageClassName .nixStore.storageClassName | quote }}
+          size: {{ .nixStore.size | quote }}
+        {{- end }}
         {{- end }}
     {{- end }}

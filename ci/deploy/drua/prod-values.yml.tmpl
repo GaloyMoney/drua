@@ -145,6 +145,13 @@ sandbox:
     mountPath: /workspace
     size: 10Gi
     storageClassName: standard-rwo
+    nixStore:
+      enabled: true
+      size: 50Gi
+      storageClassName: standard-rwo
+  nixSubstituters:
+  - url: https://galoy-agents.cachix.org
+    publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
   otelCollectorNamespace: galoy-agents-otel
   mcpGatewayUrl: "http://galoy-agents.galoy-agents.svc.cluster.local:5254/mcp"
 

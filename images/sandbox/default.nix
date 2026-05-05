@@ -26,6 +26,127 @@ let
     sandbox = false
   '';
 
+  # gVisor's PTY emulation breaks Nix builder setup messages for local
+  # uncached builds. Use a pipe for builder stderr in the sandbox image.
+  nixGvisorPtyPipePatch = pkgs.writeText "nix-gvisor-pty-pipe.patch" ''
+    diff -ruN a/src/libstore/include/nix/store/build/derivation-builder.hh b/src/libstore/include/nix/store/build/derivation-builder.hh
+    --- a/src/libstore/include/nix/store/build/derivation-builder.hh
+    +++ b/src/libstore/include/nix/store/build/derivation-builder.hh
+    @@ -141,12 +141,16 @@
+         virtual ~DerivationBuilder() = default;
+    ${" "}
+         /**
+    -     * Master side of the pseudoterminal used for the builder's
+    -     * standard output/error.
+    +     * Read side of the pipe used for the builder's standard error.
+          */
+         AutoCloseFD builderOut;
+    ${" "}
+    +    /**
+    +     * Write side of the pipe used for the builder's standard error.
+    +     */
+    +    AutoCloseFD builderOutWrite;
+    +
+         /**
+          * Set up build environment / sandbox, acquiring resources (e.g.
+          * locks as needed). After this is run, the builder should be
+          * started.
+    diff -ruN a/src/libstore/unix/build/derivation-builder.cc b/src/libstore/unix/build/derivation-builder.cc
+    --- a/src/libstore/unix/build/derivation-builder.cc
+    +++ b/src/libstore/unix/build/derivation-builder.cc
+    @@ -849,28 +849,14 @@
+         /* Create the log file. */
+         miscMethods->openLogFile();
+    ${" "}
+    -    /* Create a pseudoterminal to get the output of the builder. */
+    -    builderOut = posix_openpt(O_RDWR | O_NOCTTY);
+    -    if (!builderOut)
+    -        throw SysError("opening pseudoterminal master");
+    -
+    -    std::string slaveName = getPtsName(builderOut.get());
+    -
+    -    if (buildUser) {
+    -        chmod(slaveName, 0600);
+    -
+    -        if (chown(slaveName.c_str(), buildUser->getUID(), 0))
+    -            throw SysError("changing owner of pseudoterminal slave");
+    -    }
+    -#ifdef __APPLE__
+    -    else {
+    -        if (grantpt(builderOut.get()))
+    -            throw SysError("granting access to pseudoterminal slave");
+    -    }
+    -#endif
+    -
+    -    if (unlockpt(builderOut.get()))
+    -        throw SysError("unlocking pseudoterminal");
+    +    /* Create a pipe to get the output of the builder. gVisor's PTY
+    +       emulation can drop the setup marker Nix writes before execing the
+    +       builder, which makes every uncached build fail during environment
+    +       initialisation. A pipe is enough for sandboxed agent builds. */
+    +    Pipe builderOutPipe;
+    +    builderOutPipe.create();
+    +    builderOut = std::move(builderOutPipe.readSide);
+    +    builderOutWrite = std::move(builderOutPipe.writeSide);
+    ${" "}
+         buildResult.startTime = time(nullptr);
+    ${" "}
+    @@ -878,6 +864,7 @@
+         startChild();
+    ${" "}
+         pid.setSeparatePG(true);
+    +    builderOutWrite.close();
+    ${" "}
+         processSandboxSetupMessages();
+    ${" "}
+    @@ -967,24 +954,14 @@
+    ${" "}
+     void DerivationBuilderImpl::openSlave()
+     {
+    -    std::string slaveName = getPtsName(builderOut.get());
+    -
+    -    AutoCloseFD builderOut = open(slaveName.c_str(), O_RDWR | O_NOCTTY);
+    -    if (!builderOut)
+    -        throw SysError("opening pseudoterminal slave");
+    -
+    -    // Put the pt into raw mode to prevent \n -> \r\n translation.
+    -    struct termios term;
+    -    if (tcgetattr(builderOut.get(), &term))
+    -        throw SysError("getting pseudoterminal attributes");
+    -
+    -    cfmakeraw(&term);
+    -
+    -    if (tcsetattr(builderOut.get(), TCSANOW, &term))
+    -        throw SysError("putting pseudoterminal into raw mode");
+    +    if (!builderOutWrite)
+    +        throw Error("builder output pipe write side is not open");
+    ${" "}
+    -    if (dup2(builderOut.get(), STDERR_FILENO) == -1)
+    +    if (dup2(builderOutWrite.get(), STDERR_FILENO) == -1)
+             throw SysError("cannot pipe standard error into log file");
+    +
+    +    builderOut.close();
+    +    builderOutWrite.close();
+     }
+    ${" "}
+     #if NIX_WITH_AWS_AUTH
+     std::optional<AwsCredentials> DerivationBuilderImpl::preResolveAwsCredentials()
+    diff -ruN a/src/libstore/unix/build/linux-derivation-builder.cc b/src/libstore/unix/build/linux-derivation-builder.cc
+    --- a/src/libstore/unix/build/linux-derivation-builder.cc
+    +++ b/src/libstore/unix/build/linux-derivation-builder.cc
+    @@ -474,6 +474,7 @@
+             sendPid.writeSide.close();
+    ${"  "}
+             if (helper.wait() != 0) {
+    +            builderOutWrite.close();
+                 processSandboxSetupMessages();
+                 // Only reached if the child process didn't send an exception.
+                 throw Error("unable to start build process");
+  '';
+  nix = pkgs.nix.appendPatches [
+    nixGvisorPtyPipePatch
+  ];
+
   # Git credential helper: reads token from /run/secrets/github-token.
   # Used by the root server process as a fallback; the agent user uses
   # the workspace-level .git-credentials file written during /initialize.
@@ -66,7 +187,9 @@ let
     mkdir -p /workspace/tmp /nix/var/nix/daemon-socket /var/empty
     chown 1000:1000 /workspace /workspace/tmp 2>/dev/null || true
 
-    nix-daemon &
+    # Clients use NIX_REMOTE=daemon, but the daemon itself must open the local
+    # store or it recursively connects back to its own socket.
+    env -u NIX_REMOTE ${nix}/bin/nix-daemon &
 
     for i in $(seq 1 100); do
       [ -S /nix/var/nix/daemon-socket/socket ] && break
@@ -74,6 +197,27 @@ let
     done
 
     exec sandbox-tool-server
+  '';
+
+  # Init-container entrypoint for the per-sandbox /nix PVC. When the PVC
+  # is empty, copy the image's baked-in /nix into it; otherwise no-op.
+  # Must run inside *this* image (not busybox) — only this image carries
+  # the seed contents. SEED_TARGET defaults to /seed.
+  nixStoreSeed = pkgs.writeShellScriptBin "nix-store-seed" ''
+    set -euo pipefail
+    target="''${SEED_TARGET:-/seed}"
+    if [ ! -d "$target" ]; then
+      echo "nix-store-seed: target $target does not exist" >&2
+      exit 1
+    fi
+    # `store` is the canonical sentinel — every populated /nix has it.
+    if [ -d "$target/store" ] && [ -n "$(ls -A "$target/store" 2>/dev/null)" ]; then
+      echo "nix-store-seed: $target already populated, skipping seed"
+      exit 0
+    fi
+    echo "nix-store-seed: seeding $target from /nix..."
+    cp -a /nix/. "$target/"
+    echo "nix-store-seed: done"
   '';
 in
 pkgs.dockerTools.buildLayeredImage {
@@ -92,10 +236,11 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.gnused
     pkgs.gnugrep
     pkgs.ripgrep
-    pkgs.nix
+    nix
     gitCredentialHelper
     gitconfig
     entrypoint
+    nixStoreSeed
     sandbox-tool-server
   ];
   fakeRootCommands = ''

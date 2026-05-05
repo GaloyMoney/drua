@@ -57,3 +57,28 @@ otherwise "agent-sandbox-system" (upstream default).
 agent-sandbox-system
 {{- end -}}
 {{- end -}}
+
+{{/*
+Sandbox-local Attic fullname: <app>-attic
+*/}}
+{{- define "galoyAgents.attic.fullname" -}}
+{{- printf "%s-attic" (include "galoyAgents.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Attic config secret. Defaults to <app>-attic-config unless overridden.
+*/}}
+{{- define "galoyAgents.attic.configSecretName" -}}
+{{- if .Values.sandbox.attic.configSecret.name -}}
+{{- .Values.sandbox.attic.configSecret.name -}}
+{{- else -}}
+{{- printf "%s-config" (include "galoyAgents.attic.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Internal Attic binary cache URL for sandbox NIX_CONFIG.
+*/}}
+{{- define "galoyAgents.attic.cacheUrl" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%v/%s" (include "galoyAgents.attic.fullname" .) (include "galoyAgents.sandboxNamespace" .) .Values.sandbox.attic.service.port .Values.sandbox.attic.cacheName -}}
+{{- end -}}

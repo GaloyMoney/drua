@@ -53,6 +53,7 @@ impl Sandboxes {
                 template_name,
                 storage_class,
                 mount_path,
+                nix_store,
             } => {
                 let mut client = K8sAdminClient::try_from_env(namespace, template_name).await?;
                 // PVC-backed mount; without it pods use ephemeral storage.
@@ -62,6 +63,12 @@ impl Sandboxes {
                             storage_class: sc,
                             mount_path: mp,
                         });
+                }
+                if let Some(ns) = nix_store {
+                    client = client.with_nix_store(sandbox::admin_client::k8s::NixStoreConfig {
+                        storage_class: ns.storage_class,
+                        size: ns.size,
+                    });
                 }
                 Arc::new(client)
             }
