@@ -105,14 +105,24 @@ spec:
               sleep 2
             done
 
-            attic cache create --public \
+            if ! attic cache create --public \
               --priority "$ATTIC_PRIORITY" \
               --upstream-cache-key-name cache.nixos.org-1 \
-              "$ATTIC_CACHE" >/tmp/attic-cache-create.log 2>&1 || \
-            attic cache configure --public \
-              --priority "$ATTIC_PRIORITY" \
-              --upstream-cache-key-name cache.nixos.org-1 \
-              "$ATTIC_CACHE"
+              "$ATTIC_CACHE" >/tmp/attic-cache-create.log 2>&1; then
+              if ! attic cache info "$ATTIC_CACHE" >/tmp/attic-cache-info.log 2>&1; then
+                cat /tmp/attic-cache-create.log >&2 || true
+                cat /tmp/attic-cache-info.log >&2 || true
+                exit 1
+              fi
+
+              attic cache configure --public \
+                --priority "$ATTIC_PRIORITY" \
+                --upstream-cache-key-name cache.nixos.org-1 \
+                "$ATTIC_CACHE" >/tmp/attic-cache-configure.log 2>&1 || {
+                  echo "Attic cache $ATTIC_CACHE already exists; continuing with existing configuration." >&2
+                  cat /tmp/attic-cache-configure.log >&2 || true
+                }
+            fi
 
             cache_info="$(attic cache info "$ATTIC_CACHE" 2>&1)"
             public_key="$(printf "%s\\n" "$cache_info" | grep -o "$ATTIC_CACHE:[^[:space:]]*" | sed -n "1p")"
