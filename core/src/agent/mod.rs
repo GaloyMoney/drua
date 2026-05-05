@@ -764,6 +764,7 @@ impl Agents {
         op: &mut es_entity::DbOp<'_>,
         sandbox_id: SandboxId,
     ) -> Result<Vec<AgentId>, AgentError> {
+        Audit::record_action_if_unset("agent.detach_non_workflow_agents_from_sandbox");
         Audit::record_sandbox_id(sandbox_id);
 
         let sandbox = self.sandboxes.find_by_id_in_op(op, sandbox_id).await?;

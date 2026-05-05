@@ -278,12 +278,9 @@ impl Executor {
             }
         };
         for decl in &definition.sandboxes {
-            // Both decl variants are suspended at end-of-run: workflow-
-            // scoped sandboxes resume on the next trigger; preexisting
-            // ones the workflow borrowed (and may have detached from a
-            // user agent) get the same lifecycle as workflow-scoped
-            // sandboxes — the user re-attaches manually if they need
-            // them again.
+            // Suspend both decl variants: borrowed preexisting sandboxes
+            // share the workflow-scoped lifecycle (user re-attaches
+            // manually).
             let lookup = match decl {
                 WorkflowSandboxDecl::Provisioned { name, .. } => self
                     .sandboxes
@@ -373,15 +370,10 @@ impl Executor {
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-                // Borrow semantics: any non-workflow agent currently
-                // attached to the target sandbox must be detached in the
-                // same op as the workflow agent's create+attach so the
-                // sandbox is never simultaneously attached to two
-                // writers and never observed detached-from-old-but-not-
-                // yet-attached-to-new. Existing workflow attachments are
-                // left intact — the subsequent attach surfaces
-                // `WriteSlotTaken` and the run fails rather than steal
-                // between concurrent workflow runs.
+                // Detach in the SAME op as create+attach so the sandbox
+                // is never observed double-attached or detached-but-not-
+                // yet-reattached. Skip-workflow-agents policy lives on
+                // the helper.
                 let detached_agents = match attach_sandbox {
                     Some((sandbox_id, _)) => self
                         .agents
