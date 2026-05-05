@@ -449,17 +449,20 @@ enum NoteCommand {
     Update,
     Pin,
     Unpin,
+    Delete,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct NoteParams {
     command: NoteCommand,
 
-    /// Required for `create` and `list`.
+    /// Project owner. Required for every command. Space-scoped notes
+    /// are managed via the `spaces` tool — the admin `note` surface
+    /// covers project notes only.
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`, `pin`, `unpin`.
+    /// Required for `get`, `update`, `pin`, `unpin`, `delete`.
     #[schemars(with = "Option<uuid::Uuid>")]
     note_id: Option<NoteId>,
 
@@ -554,7 +557,14 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "note",
-        description: "Manage notes across any project. Commands: \
+        description: "Manage project-scoped notes. Space-scoped notes are managed \
+                       via the `spaces` tool (their markdown files at \
+                       `spaces/<slug>/notes/*.md` flow through reverse-sync). \
+                       Pinning is shared across every project that mounts \
+                       the owning space — flip via the `spaces` tool's \
+                       `edit op=write` after the note's `pinned` frontmatter \
+                       is synced (or use the project surface for project notes). \
+                       Commands: \
                        `create` (requires `project_id`, `title`, `content`; \
                        optional `tags`), \
                        `list` (requires `project_id`; optional `limit`), \
@@ -562,7 +572,9 @@ static TOOLS: &[ToolDef] = &[
                        `update` (requires `note_id`, `project_id`, `title`, \
                        `content`; optional `tags`), \
                        `pin` (requires `note_id`, `project_id`; idempotent), \
-                       `unpin` (requires `note_id`, `project_id`; idempotent).",
+                       `unpin` (requires `note_id`, `project_id`; idempotent), \
+                       `delete` (requires `note_id`, `project_id`; rejects \
+                       space-scoped notes — use the `spaces` tool for those).",
         schema: &NOTE_SCHEMA,
     },
     ToolDef {
@@ -1423,6 +1435,23 @@ impl AdminToolSet {
                     .map_err(|e| ToolSetsError::Note(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_note(
                     &note, false,
+                ))]))
+            }
+
+            NoteCommand::Delete => {
+                let note_id = params.note_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("note_id is required for delete".to_string())
+                })?;
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for delete".to_string())
+                })?;
+                Audit::record_action("note.delete");
+                self.notes
+                    .delete(subject, project_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Note deleted (id {note_id})."
                 ))]))
             }
         }
@@ -2406,7 +2435,7 @@ mod tests {
     #[test]
     fn note_schema_includes_command_enum() {
         let s = serde_json::to_string(&*NOTE_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update", "pin", "unpin"] {
+        for v in ["create", "list", "get", "update", "pin", "unpin", "delete"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }

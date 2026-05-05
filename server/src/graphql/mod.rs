@@ -5,6 +5,7 @@ mod audit;
 mod library;
 mod mcp_creds;
 mod mutation;
+mod note;
 pub(crate) mod primitives;
 mod project;
 mod project_secret;

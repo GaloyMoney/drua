@@ -234,6 +234,7 @@ type Mutation {
 	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
+	noteDelete(input: NoteDeleteInput!): NoteDeletePayload!
 	ping: String!
 	projectCreate(input: ProjectCreateInput!): ProjectCreatePayload!
 	projectDelete(input: ProjectDeleteInput!): ProjectDeletePayload!
@@ -245,6 +246,17 @@ type Mutation {
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
 	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
 }
+
+input NoteDeleteInput {
+	id: NoteId!
+	projectId: ProjectId!
+}
+
+type NoteDeletePayload {
+	deletedId: NoteId!
+}
+
+scalar NoteId
 
 """
 Information about pagination in a connection

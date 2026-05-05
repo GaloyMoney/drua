@@ -5,18 +5,22 @@ use crate::primitives::SkillId;
 /// Renders a skill as markdown with frontmatter — the canonical
 /// on-disk form. Identical bytes round-trip via the library's git
 /// hash short-circuit.
+///
+/// Frontmatter intentionally omits `name:` — the filename is the
+/// canonical name (matches Claude Code, Hugo, GitHub Actions, etc.)
+/// and writing it twice creates two sources of truth that drift on
+/// rename. `_name` is taken to match the public signature for now.
 pub fn render_skill_markdown(
     doc_id: uuid::Uuid,
-    name: &str,
+    _name: &str,
     description: &str,
     body: &str,
     created_at: &str,
     updated_at: &str,
 ) -> String {
     format!(
-        "---\nid: {}\nname: \"{}\"\ndescription: \"{}\"\ncreated: {}\nupdated: {}\n---\n\n{}\n",
+        "---\nid: {}\ndescription: \"{}\"\ncreated: {}\nupdated: {}\n---\n\n{}\n",
         doc_id,
-        name.replace('"', "\\\""),
         description.replace('"', "\\\""),
         created_at,
         updated_at,
@@ -93,8 +97,6 @@ struct SkillFrontmatter {
     #[serde(default)]
     id: Option<uuid::Uuid>,
     #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     created: Option<String>,
@@ -102,10 +104,12 @@ struct SkillFrontmatter {
     updated: Option<String>,
 }
 
-/// Name/description priority:
-/// 1. Frontmatter `name:`/`description:` (canonical)
-/// 2. `# Heading` / first paragraph (legacy)
-/// 3. Filename (last resort)
+/// Name = filename slug (e.g. `data-validator.md` → `data-validator`).
+/// Always — the skill's invocation handle is the slug, not the heading
+/// or frontmatter `name:`. Description falls back through:
+/// 1. Frontmatter `description:`
+/// 2. `# Heading` text (when no description in frontmatter)
+/// 3. Empty
 fn parse_skill_with_frontmatter(
     content: &str,
     project_name: Option<String>,
@@ -122,30 +126,17 @@ fn parse_skill_with_frontmatter(
         None => (SkillId::new(), false),
     };
 
-    let has_fm_name = fm.name.is_some();
-
-    let (name, description, body) = if let Some(fm_name) = fm.name {
-        let desc = fm.description.unwrap_or_default();
-        let body = after_fm.trim().to_string();
-        (fm_name, desc, body)
-    } else if let Some((h_name, h_desc, h_body)) = parse_heading_and_body(after_fm) {
-        let desc = fm.description.unwrap_or(h_desc);
-        (h_name, desc, h_body)
-    } else {
-        let name = name_from_filename(path)?;
-        let desc = fm.description.unwrap_or_default();
-        let body = after_fm.trim().to_string();
-        (name, desc, body)
-    };
+    let name = name_from_filename(path)?;
+    let body = after_fm.trim().to_string();
+    let description = fm
+        .description
+        .or_else(|| heading_text(&body))
+        .unwrap_or_default();
 
     let created_at = fm.created.unwrap_or_default();
     let updated_at = fm.updated.unwrap_or_default();
 
-    // Rewrite the file in place when frontmatter is missing critical
-    // fields. The path itself is sacred — never renamed; this rewrite
-    // is content-only.
-    let _ = path;
-    let needs_rewrite = !has_id || !has_fm_name;
+    let needs_rewrite = !has_id;
 
     Some(ParsedSkill {
         skill_id,
@@ -167,12 +158,9 @@ fn parse_skill_without_frontmatter(
     space_slug: Option<String>,
     path: &str,
 ) -> Option<ParsedSkill> {
-    let (name, description, body) = if let Some(parsed) = parse_heading_and_body(content) {
-        parsed
-    } else {
-        let name = name_from_filename(path)?;
-        (name, String::new(), content.trim().to_string())
-    };
+    let name = name_from_filename(path)?;
+    let body = content.trim().to_string();
+    let description = heading_text(&body).unwrap_or_default();
 
     Some(ParsedSkill {
         skill_id: SkillId::new(),
@@ -188,24 +176,10 @@ fn parse_skill_without_frontmatter(
     })
 }
 
-fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
-    let content = content.trim_start_matches('\n');
-
-    let name_line = content.lines().next()?;
-    let name = name_line.strip_prefix("# ")?.trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-
-    let after_name = &content[name_line.len()..].trim_start_matches('\n');
-
-    let (description, body) = if let Some((desc, bod)) = after_name.split_once("\n---\n") {
-        (desc.trim().to_string(), bod.trim().to_string())
-    } else {
-        (after_name.trim().to_string(), String::new())
-    };
-
-    Some((name, description, body))
+/// First `# heading` line text, if present at the start of the body.
+fn heading_text(body: &str) -> Option<String> {
+    let line = body.lines().next()?;
+    line.strip_prefix("# ").map(|s| s.trim().to_string())
 }
 
 /// `runtime/projects/{project}/skills/*.md` → `Some(project)`;

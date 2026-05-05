@@ -149,10 +149,24 @@ impl Query {
             .collect();
         let limit = input.limit.clamp(1, 200) as usize;
 
+        // When `projectId` is set, also include the project's mounted
+        // space ids in the scope filter — agents in that project can
+        // see content from those spaces, so a project-scoped search
+        // must surface them too. Without this, `library_search` and
+        // `notes.search` silently hide space-scoped content from any
+        // project-filtered query.
         let project_ids: Vec<uuid::Uuid> = match input.project_id {
             Some(id) => {
                 app.projects().find_by_id(sub, id).await?;
-                vec![uuid::Uuid::from(id)]
+                let mut ids = Vec::with_capacity(1);
+                ids.push(uuid::Uuid::from(id));
+                match app.notes().space_mounts().space_ids_for_project(id).await {
+                    Ok(mounted) => ids.extend(mounted.into_iter().map(uuid::Uuid::from)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "space_ids_for_project failed; project-only search");
+                    }
+                }
+                ids
             }
             None => Vec::new(),
         };

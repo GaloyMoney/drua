@@ -554,7 +554,9 @@ impl Skills {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
 
-        let path = default_skill_path(&name, Some(project_name), None);
+        // `path` is derived inside `NewSkillBuilder::build()` from the
+        // `(name, project_name, space_slug)` triple — no need to set it
+        // explicitly on the create surface.
         let new = NewSkill::builder()
             .id(SkillId::new())
             .project_id(project_id)
@@ -562,7 +564,6 @@ impl Skills {
             .name(name)
             .description(description)
             .body(body)
-            .path(path)
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
 
@@ -690,26 +691,23 @@ impl Skills {
         op: &mut es_entity::DbOp<'_>,
         path: &str,
     ) -> Result<Option<SkillId>, SkillError> {
-        let doc_type = SKILL_DOC_TYPE;
-        let row = sqlx::query!(
-            "SELECT doc_id
-             FROM library_documents
-             WHERE path = $1 AND doc_type = $2",
-            path,
-            doc_type.as_str(),
-        )
-        .fetch_optional(op.as_executor())
-        .await?;
-        let Some(row) = row else {
+        let Some(skill) = self.repo.maybe_find_by_path_in_op(&mut *op, path).await? else {
             return Ok(None);
         };
-        let id = SkillId::from(row.doc_id);
-        let skill = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let id = skill.id;
         let scope = match (skill.space_id, skill.project_id) {
             (Some(sid), _) => ScopeId::Space(sid),
             (None, Some(pid)) => ScopeId::Project(pid),
             (None, None) => ScopeId::Global,
         };
+        // Wipe the search-store row in the same op. `delete_in_op` is a
+        // no-op when no library is wired (test contexts).
+        if let Some(library) = self.library.as_ref() {
+            library
+                .search()
+                .delete_in_op(op, id.into(), SKILL_DOC_TYPE)
+                .await?;
+        }
         self.repo.delete_in_op(op, skill).await?;
         self.register_context_bump(op, scope);
         Ok(Some(id))
@@ -727,29 +725,26 @@ impl Skills {
         parsed: ParsedSkill,
         scope: ImportScope,
     ) -> Result<Option<Skill>, SkillError> {
-        let file_hash = parsed.file_hash();
-
-        if let Some(mut existing) = self
+        // `maybe_find_by_id_include_deleted_in_op` returns soft-deleted
+        // rows too — we need them so `spaces edit op=move` can revive
+        // the row that `delete-old-path` just soft-deleted (otherwise
+        // `create_in_op` would PK-conflict on the same id). The default
+        // `maybe_find_by_id_in_op` filters deleted; this one doesn't.
+        if let Some(existing) = self
             .repo
-            .maybe_find_by_id_in_op(&mut *op, parsed.skill_id)
+            .maybe_find_by_id_include_deleted_in_op(&mut *op, parsed.skill_id)
             .await?
         {
-            if !existing
-                .update(
-                    Some(parsed.name.clone()),
-                    Some(parsed.description.clone()),
-                    Some(parsed.body.clone()),
-                    file_hash,
-                )
-                .did_execute()
-            {
-                return Ok(None);
-            }
-            self.repo.update_in_op(op, &mut existing).await?;
-            self.register_context_bump(op, scope.bump_scope());
-            return Ok(Some(existing));
+            // Flip the soft-delete flag if it's still set; idempotent
+            // SQL — clears `deleted = TRUE` only if it was set. No
+            // separate "is it deleted?" probe needed.
+            self.repo.revive_in_op(&mut *op, parsed.skill_id).await?;
+            return self
+                .reconcile_existing_skill_in_op(op, existing, parsed, scope)
+                .await;
         }
 
+        // Truly new — fresh create.
         let mut builder = NewSkill::builder()
             .id(parsed.skill_id)
             .name(parsed.name)
@@ -794,6 +789,41 @@ impl Skills {
             users: None,
             context_generation: ContextGeneration::new(),
         }
+    }
+
+    /// Reconcile content (Updated event) and path (PathChanged event)
+    /// on an existing live skill against an incoming `ParsedSkill`
+    /// from the reverse-sync importer. `Ok(None)` when no delta
+    /// produced an event (round-trip already in sync).
+    ///
+    /// Granular comparison rather than hash-based: the rendered file
+    /// doesn't include `name:` (Model A — filename is the canonical
+    /// name), so a stale DB row whose `name` differs from the filename
+    /// slug renders to the same bytes as the parsed file. The hash
+    /// would say "no change" while the entity-level fields are wrong.
+    /// `update_content` walks the fields and pushes an Updated event
+    /// only when something actually differs.
+    async fn reconcile_existing_skill_in_op<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        mut existing: Skill,
+        parsed: ParsedSkill,
+        scope: ImportScope,
+    ) -> Result<Option<Skill>, SkillError> {
+        let mut updated = existing
+            .update_content(
+                Some(parsed.name.clone()),
+                Some(parsed.description.clone()),
+                Some(parsed.body.clone()),
+            )
+            .did_execute();
+        updated |= existing.change_path(parsed.path).did_execute();
+        if !updated {
+            return Ok(None);
+        }
+        self.repo.update_in_op(op, &mut existing).await?;
+        self.register_context_bump(op, scope.bump_scope());
+        Ok(Some(existing))
     }
 }
 

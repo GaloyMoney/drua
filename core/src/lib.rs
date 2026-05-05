@@ -207,6 +207,7 @@ impl App {
         let notes = Arc::new(Notes::new(
             pool,
             library.clone(),
+            Arc::clone(&space_mounts),
             Arc::clone(&users),
             context_generation.clone(),
         ));
@@ -318,6 +319,13 @@ impl App {
             .register_importer(Arc::new(workflow::WorkflowsImporter::new(
                 Arc::clone(&workflows),
                 Arc::clone(&projects),
+            )))
+            .await;
+        library
+            .register_importer(Arc::new(note::NotesImporter::new(
+                Arc::clone(&notes),
+                Arc::clone(&projects),
+                (*spaces).clone(),
             )))
             .await;
 

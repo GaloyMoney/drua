@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE skills SET project_id = $2, space_id = $3, name = $4 WHERE id = $1",
+  "query": "UPDATE notes SET project_id = $2, space_id = $3, path = $4 WHERE id = $1",
   "describe": {
     "columns": [],
     "parameters": {
@@ -8,10 +8,10 @@
         "Uuid",
         "Uuid",
         "Uuid",
-        "Varchar"
+        "Text"
       ]
     },
     "nullable": []
   },
-  "hash": "9751fec1de42e0326166d5d41583cc9defbd69129b5ab2a7b0cea8db9975f2f4"
+  "hash": "82a126c21a1844aab1093c1169f8c9ab7990c4bd9485880b8e099428b8b5a170"
 }

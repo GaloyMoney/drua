@@ -133,19 +133,41 @@ impl Agents {
 
         let project_id = agent.project_id;
 
-        let notes_block = match &self.notes {
-            Some(notes) => notes
-                .pinned_context_for_project(project_id)
+        // Resolve scope once; both notes and skills blocks consume it
+        // (so a project-mounted space's auto-pinned notes line up with
+        // its skills in the same render pass).
+        let scope_result = scope::AgentScope::for_agent(agent, &self.space_mounts).await;
+
+        let notes_block = match (&self.notes, &scope_result) {
+            (Some(notes), Ok(scope)) => notes
+                .pinned_context_for_scope(scope)
                 .await
                 .ok()
                 .flatten()
                 .map(|text| session::message::SystemBlock::Notes { text }),
-            None => None,
+            (Some(notes), Err(e)) => {
+                tracing::warn!(error = %e, "AgentScope::for_agent failed; rendering notes block without space tier");
+                // Fall back to a project-only scope so project-pinned
+                // notes still render. Space auto-pin is degraded only
+                // when SpaceMounts is unavailable.
+                let project_only = scope::AgentScope {
+                    project_id,
+                    attached_sandbox_id: agent.attached_sandbox_id(),
+                    mounted_space_ids: Vec::new(),
+                };
+                notes
+                    .pinned_context_for_scope(&project_only)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|text| session::message::SystemBlock::Notes { text })
+            }
+            (None, _) => None,
         };
-        let skills_block = match scope::AgentScope::for_agent(agent, &self.space_mounts).await {
+        let skills_block = match &scope_result {
             Ok(scope) => self
                 .skills
-                .skills_context_for_scope(&scope)
+                .skills_context_for_scope(scope)
                 .await
                 .ok()
                 .flatten()
@@ -394,14 +416,6 @@ impl Agents {
             &agent.project_name,
         );
 
-        if let Some(notes) = &self.notes {
-            if let Ok(Some(pinned_content)) = notes.pinned_context_for_project(project_id).await {
-                system_blocks.push(session::message::SystemBlock::Notes {
-                    text: pinned_content,
-                });
-            }
-        }
-
         // Apply attach to the entity first so the initial skills block reflects
         // the attached sandbox's exported skills. Rejects ProjectLead before
         // the sandbox round-trip (`sandbox_attached` enforces it).
@@ -414,16 +428,41 @@ impl Agents {
             None
         };
 
-        let initial_skills = match scope::AgentScope::for_agent(&agent, &self.space_mounts).await {
+        // Resolve scope once; both notes (auto-pin from mounted spaces)
+        // and skills consume it.
+        let initial_scope = match scope::AgentScope::for_agent(&agent, &self.space_mounts).await {
             Ok(mut scope) => {
-                // Reflect the (just-applied) attachment in the initial
-                // scope — `attached_sandbox_id()` reads the entity,
-                // which we updated above.
                 scope.attached_sandbox_id = initial_sandbox_id;
-                self.skills.skills_context_for_scope(&scope).await
+                Some(scope)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "AgentScope::for_agent failed at create; rendering initial skills block without space tier");
+                tracing::warn!(error = %e, "AgentScope::for_agent failed at create; rendering initial blocks without space tier");
+                None
+            }
+        };
+
+        if let Some(notes) = &self.notes {
+            let pinned = match &initial_scope {
+                Some(scope) => notes.pinned_context_for_scope(scope).await,
+                None => {
+                    let project_only = scope::AgentScope {
+                        project_id,
+                        attached_sandbox_id: initial_sandbox_id,
+                        mounted_space_ids: Vec::new(),
+                    };
+                    notes.pinned_context_for_scope(&project_only).await
+                }
+            };
+            if let Ok(Some(pinned_content)) = pinned {
+                system_blocks.push(session::message::SystemBlock::Notes {
+                    text: pinned_content,
+                });
+            }
+        }
+
+        let initial_skills = match &initial_scope {
+            Some(scope) => self.skills.skills_context_for_scope(scope).await,
+            None => {
                 self.skills
                     .skills_context_for_agent(project_id, initial_sandbox_id)
                     .await
