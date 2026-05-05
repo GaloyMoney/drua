@@ -642,6 +642,26 @@ async fn detach_non_workflow_agents_skips_workflow_owned_attachment() {
     // workflow run holding the sandbox. The helper must leave it alone.
     let workflow_id = WorkflowDefinitionId::new();
     let run_id = WorkflowRunId::new();
+    sqlx::query(
+        "INSERT INTO workflow_definitions (id, project_id, name, created_at) \
+         VALUES ($1, $2, $3, NOW())",
+    )
+    .bind(workflow_id)
+    .bind(project_id)
+    .bind(format!("test-wf-{}", uuid::Uuid::from(workflow_id)))
+    .execute(&pool)
+    .await
+    .expect("insert workflow_definition");
+    sqlx::query(
+        "INSERT INTO workflow_runs (id, project_id, definition_id, created_at) \
+         VALUES ($1, $2, $3, NOW())",
+    )
+    .bind(run_id)
+    .bind(project_id)
+    .bind(workflow_id)
+    .execute(&pool)
+    .await
+    .expect("insert workflow_run");
     let mut op = agents.begin_op().await.expect("begin op");
     let workflow_agent = agents
         .create_for_workflow_run_in_op(
