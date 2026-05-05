@@ -53,7 +53,9 @@ pub enum NoteEvent {
     /// path. Distinct from `Updated` because file content didn't
     /// change, only its location; not a content event so no library
     /// write-back is fired (the move happened in git already).
-    PathChanged { path: String },
+    PathChanged {
+        path: String,
+    },
 }
 
 #[derive(EsEntity, Builder)]

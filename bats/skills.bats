@@ -215,10 +215,12 @@ wait_for_skill_row() {
   #    → library write → importer creates the `Skill { space_id }` row).
   #    Body uses $ARGUMENTS so the invoke assertion below sees substitution.
   alpha_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  # Filename is the canonical slug (Model A) — `alpha-skill.md` →
+  # `alpha-skill` is the invocation handle.
   alpha_md="$(render_skill_md "$alpha_id" "alpha-skill" "alpha description" "echo alpha \$ARGUMENTS")"
-  run write_skill_to_space "$slug_a" "skills/alpha.md" "$alpha_md"
+  run write_skill_to_space "$slug_a" "skills/alpha-skill.md" "$alpha_md"
   echo "$output"
-  [[ "$output" == *"Wrote space:$slug_a/skills/alpha.md"* ]]
+  [[ "$output" == *"Wrote space:$slug_a/skills/alpha-skill.md"* ]]
 
   # 4. Mount space-A onto project P.
   run admin_call "spaces" "$(jq -nc --arg slug "$slug_a" --arg pid "$project_id" '{
@@ -256,9 +258,9 @@ wait_for_skill_row() {
   echo "$output"
   beta_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   beta_md="$(render_skill_md "$beta_id" "beta-skill" "beta description" "echo beta")"
-  run write_skill_to_space "$slug_b" "skills/beta.md" "$beta_md"
+  run write_skill_to_space "$slug_b" "skills/beta-skill.md" "$beta_md"
   echo "$output"
-  [[ "$output" == *"Wrote space:$slug_b/skills/beta.md"* ]]
+  [[ "$output" == *"Wrote space:$slug_b/skills/beta-skill.md"* ]]
   run wait_for_skill_row "beta-skill"
   [ "$status" -eq 0 ] || { echo "importer never landed beta-skill"; return 1; }
 
