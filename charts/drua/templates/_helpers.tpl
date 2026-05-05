@@ -79,6 +79,46 @@ Attic config secret. Defaults to <app>-attic-config unless overridden.
 {{/*
 Internal Attic binary cache URL for sandbox NIX_CONFIG.
 */}}
+{{- define "galoyAgents.attic.endpoint" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%v" (include "galoyAgents.attic.fullname" .) (include "galoyAgents.sandboxNamespace" .) .Values.sandbox.attic.service.port -}}
+{{- end -}}
+
 {{- define "galoyAgents.attic.cacheUrl" -}}
-{{- printf "http://%s.%s.svc.cluster.local:%v/%s" (include "galoyAgents.attic.fullname" .) (include "galoyAgents.sandboxNamespace" .) .Values.sandbox.attic.service.port .Values.sandbox.attic.cacheName -}}
+{{- printf "%s/%s" (include "galoyAgents.attic.endpoint" .) .Values.sandbox.attic.cacheName -}}
+{{- end -}}
+
+{{/*
+Sandbox NIX_CONFIG ConfigMap name. The Attic bootstrap job updates this
+ConfigMap with Attic's generated public signing key.
+*/}}
+{{- define "galoyAgents.sandbox.nixConfigMapName" -}}
+{{- printf "%s-sandbox-nix-config" (include "galoyAgents.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Sandbox NIX_CONFIG contents. Before the bootstrap job discovers Attic's generated
+public key, this safely falls back to the configured remote substituters.
+*/}}
+{{- define "galoyAgents.sandbox.nixSubstituterUrls" -}}
+{{- range $i, $substituter := .Values.sandbox.nixSubstituters -}}
+{{- if $i }} {{ end -}}{{ $substituter.url -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "galoyAgents.sandbox.nixPublicKeys" -}}
+{{- range $i, $substituter := .Values.sandbox.nixSubstituters -}}
+{{- if $i }} {{ end -}}{{ $substituter.publicKey -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "galoyAgents.sandbox.nixConfig" -}}
+substituters = {{- if and .Values.sandbox.attic.enabled .Values.sandbox.attic.publicKey }} {{ include "galoyAgents.attic.cacheUrl" . }}{{- end }}{{- with (include "galoyAgents.sandbox.nixSubstituterUrls" .) }} {{ . }}{{- end }} https://cache.nixos.org/
+trusted-public-keys = {{- if and .Values.sandbox.attic.enabled .Values.sandbox.attic.publicKey }} {{ .Values.sandbox.attic.publicKey }}{{- end }}{{- with (include "galoyAgents.sandbox.nixPublicKeys" .) }} {{ . }}{{- end }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+{{- end -}}
+
+{{/*
+Attic bootstrap service account name.
+*/}}
+{{- define "galoyAgents.attic.bootstrapServiceAccountName" -}}
+{{- printf "%s-bootstrap" (include "galoyAgents.attic.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
