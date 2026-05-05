@@ -786,6 +786,52 @@ impl Skills {
         Ok(())
     }
 
+    /// Reverse-sync delete: soft-deletes the skill whose canonical
+    /// markdown lives at `path` and bumps the appropriate
+    /// `ContextGeneration` so agents stop seeing the skill in their
+    /// `<available_skills>` block on the next turn. Returns
+    /// `Ok(Some(skill_id))` when a row was actually deleted (caller
+    /// uses this to wipe the search row), or `Ok(None)` when nothing
+    /// matched (file authored without an id suffix, already-deleted
+    /// row, etc.). Skips the library write op — the file is already
+    /// gone in git, this is the inbound direction.
+    ///
+    /// Resolves `path → doc_id` via `library_documents` rather than an
+    /// id-prefix scan: the search-store row is rewritten in lockstep
+    /// with the entity's canonical path (post_persist_hook owns both),
+    /// so an exact path match is unambiguous and avoids the
+    /// ~N²/2³³ UUIDv7 prefix collision risk a `LIKE 'XXXXXXXX%'`
+    /// query would have at scale.
+    pub(crate) async fn delete_by_path_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<Option<SkillId>, SkillError> {
+        let doc_type = SKILL_DOC_TYPE;
+        let row = sqlx::query!(
+            "SELECT doc_id
+             FROM library_documents
+             WHERE path = $1 AND doc_type = $2",
+            path,
+            doc_type.as_str(),
+        )
+        .fetch_optional(op.as_executor())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let id = SkillId::from(row.doc_id);
+        let skill = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let scope = match (skill.space_id, skill.project_id) {
+            (Some(sid), _) => ScopeId::Space(sid),
+            (None, Some(pid)) => ScopeId::Project(pid),
+            (None, None) => ScopeId::Global,
+        };
+        self.repo.delete_in_op(op, skill).await?;
+        self.register_context_bump(op, scope);
+        Ok(Some(id))
+    }
+
     /// Reverse-sync entry point: persist a `ParsedSkill` produced by
     /// the library importer. Creates or updates depending on whether
     /// the skill already exists. `Ok(None)` signals idempotency — the

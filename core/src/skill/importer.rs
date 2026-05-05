@@ -129,4 +129,23 @@ impl LibraryImporter for SkillsImporter {
 
         Ok(None)
     }
+
+    /// Reverse-sync delete: an external author removed the skill's
+    /// markdown file in git. Soft-delete the matching DB row by
+    /// id-prefix lookup and return its id so the runner also wipes
+    /// the search row. Hand-authored files without a canonical
+    /// `<slug>-<id8>.md` suffix can't be resolved and are silently
+    /// skipped (same as upsert when the path doesn't parse).
+    async fn delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<Option<uuid::Uuid>, UpsertError> {
+        let deleted = self
+            .skills
+            .delete_by_path_in_op(op, path)
+            .await
+            .map_err(|e| UpsertError::Other(format!("skill reverse-delete: {e}")))?;
+        Ok(deleted.map(uuid::Uuid::from))
+    }
 }
