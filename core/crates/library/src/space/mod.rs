@@ -98,7 +98,10 @@ impl Spaces {
             .map_err(|e| SpaceError::Git(e.to_string()))
     }
 
-    /// Removes `spaces/{slug}/{relative_path}`. No-op if absent at HEAD.
+    /// Removes `spaces/{slug}/{relative_path}`. Returns
+    /// [`SpaceError::PathNotFound`] when the path is absent at HEAD —
+    /// callers (and agents) need to learn this rather than silently
+    /// succeed and walk away thinking they deleted something.
     #[tracing::instrument(name = "library.spaces.delete_file", skip_all, fields(%slug, %relative_path))]
     pub async fn delete_file(
         &self,
@@ -107,6 +110,18 @@ impl Spaces {
         attribution: CommitAttribution,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
+        if self
+            .git
+            .read_blob_at_head(&path)
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))?
+            .is_none()
+        {
+            return Err(SpaceError::PathNotFound {
+                slug: slug.to_string(),
+                path: relative_path.to_string(),
+            });
+        }
         self.git
             .delete_file(
                 path,

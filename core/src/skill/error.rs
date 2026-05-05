@@ -2,14 +2,16 @@ use thiserror::Error;
 
 use crate::auth::error::AuthorizationError;
 
-use super::repo::{SkillCreateError, SkillFindError, SkillModifyError, SkillQueryError};
+use super::repo::{
+    SkillColumn, SkillCreateError, SkillFindError, SkillModifyError, SkillQueryError,
+};
 
 #[derive(Error, Debug)]
 pub enum SkillError {
     #[error("SkillError - Create: {0}")]
-    Create(#[from] SkillCreateError),
+    Create(SkillCreateError),
     #[error("SkillError - Modify: {0}")]
-    Modify(#[from] SkillModifyError),
+    Modify(SkillModifyError),
     #[error("SkillError - Find: {0}")]
     Find(#[from] SkillFindError),
     #[error("SkillError - Query: {0}")]
@@ -28,4 +30,38 @@ pub enum SkillError {
     Authorization(#[from] AuthorizationError),
     #[error("SkillError - skill is space-scoped; delete via the spaces tool")]
     SpaceScopedDeleteViaSpaces,
+    /// A name + scope collision tripped one of the partial unique indexes
+    /// (`idx_skills_global_name`, `idx_skills_project_name`, or
+    /// `idx_skills_space_name`). Surfaced as a typed variant so callers
+    /// can render a clear message instead of leaking a generic SQL error.
+    #[error("SkillError - duplicate name in scope: {0}")]
+    DuplicateName(String),
+}
+
+impl From<SkillCreateError> for SkillError {
+    fn from(e: SkillCreateError) -> Self {
+        if let SkillCreateError::ConstraintViolation { column, value, .. } = &e {
+            if matches!(
+                column,
+                Some(SkillColumn::Name | SkillColumn::ProjectId | SkillColumn::SpaceId)
+            ) {
+                return SkillError::DuplicateName(value.clone().unwrap_or_default());
+            }
+        }
+        SkillError::Create(e)
+    }
+}
+
+impl From<SkillModifyError> for SkillError {
+    fn from(e: SkillModifyError) -> Self {
+        if let SkillModifyError::ConstraintViolation { column, value, .. } = &e {
+            if matches!(
+                column,
+                Some(SkillColumn::Name | SkillColumn::ProjectId | SkillColumn::SpaceId)
+            ) {
+                return SkillError::DuplicateName(value.clone().unwrap_or_default());
+            }
+        }
+        SkillError::Modify(e)
+    }
 }

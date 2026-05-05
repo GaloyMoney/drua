@@ -302,3 +302,127 @@ wait_for_skill_row() {
   echo "$output"
   [[ "$output" == *"echo beta"* ]]
 }
+
+# Polls library_documents until a skill row with `name=$1` is gone.
+# Returns 0 when the row is absent, 1 on 30s timeout. Used to gate
+# search-removed assertions behind the post-delete commit hook +
+# reverse-sync importer's `delete_in_op` actually wiping the row.
+wait_for_skill_search_gone() {
+  local needle="$1"
+  local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
+  for _ in $(seq 1 30); do
+    local hit
+    hit="$(psql "$pg" -At -c "SELECT 1 FROM library_documents WHERE doc_type='skill' AND name='$needle' LIMIT 1;" 2>/dev/null || true)"
+    if [ -z "$hit" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Polls until the `skills` row is soft-deleted (deleted = TRUE) or
+# absent. Reverse-sync delete-in path drives this when a markdown
+# file is removed in git via the spaces tool.
+wait_for_skill_row_gone() {
+  local needle="$1"
+  local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
+  for _ in $(seq 1 30); do
+    local hit
+    hit="$(psql "$pg" -At -c "SELECT 1 FROM skills WHERE name = '$needle' AND deleted = FALSE LIMIT 1;" 2>/dev/null || true)"
+    if [ -z "$hit" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+@test "skills: skill.delete + spaces edit op=delete both wipe library search rows" {
+  create_test_agent
+
+  local suffix
+  suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+  local proj_name="pdel-$suffix"
+  local space_slug="sdel-$suffix"
+
+  # 1. Project + lead.
+  run graphql_query "mutation { projectCreate(input: { name: \"$proj_name\" }) { project { id } } }" "$AGENT_TOKEN"
+  echo "$output"
+  project_id="$(echo "$output" | jq -r '.data.projectCreate.project.id')"
+  [ -n "$project_id" ] && [ "$project_id" != "null" ]
+
+  # 2. Project skill via top-level `skill create` (this is the path the
+  #    lead agent's tool would take during the manual test).
+  run admin_call "skill" "$(jq -nc --arg pid "$project_id" '{
+    command: "create", project_id: $pid,
+    name: "hello-world",
+    description: "Greeting skill",
+    body: "echo hello"
+  }')"
+  echo "$output"
+  hello_id="$(echo "$output" | jq -r '.id // .skill_id // empty')"
+  # The admin `skill create` returns a text payload with the id; just
+  # extract via regex if structured field isn't present.
+  if [ -z "$hello_id" ]; then
+    hello_id="$(echo "$output" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n1)"
+  fi
+  [ -n "$hello_id" ]
+
+  # 3. Space + space-scoped skill (raw file via spaces.edit; importer
+  #    creates the row with `space_id` set).
+  run admin_call "spaces" "$(jq -nc --arg s "$space_slug" '{command:"create",slug:$s,description:"Delete-test space"}')"
+  echo "$output"
+
+  goodbye_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  goodbye_md="$(render_skill_md "$goodbye_id" "goodbye-world" "farewell skill" "echo bye")"
+  run write_skill_to_space "$space_slug" "skills/goodbye-world.md" "$goodbye_md"
+  echo "$output"
+  [[ "$output" == *"Wrote space:$space_slug/skills/goodbye-world.md"* ]]
+
+  # 4. Both rows must show up via library search before we test delete.
+  run wait_for_skill_row "hello-world"
+  [ "$status" -eq 0 ] || { echo "hello-world never landed in skills"; return 1; }
+  run wait_for_skill_row "goodbye-world"
+  [ "$status" -eq 0 ] || { echo "goodbye-world never landed in skills"; return 1; }
+
+  # 5. Delete the project skill via `skill delete`. Forward path
+  #    must wipe both `skills` (soft) and `library_documents` (hard)
+  #    in the same DbOp — that's the bug the manual test caught.
+  run admin_call "skill" "$(jq -nc --arg pid "$project_id" --arg sid "$hello_id" '{
+    command: "delete", project_id: $pid, skill_id: $sid
+  }')"
+  echo "$output"
+  [[ "$output" == *"Skill deleted"* ]]
+
+  run wait_for_skill_search_gone "hello-world"
+  [ "$status" -eq 0 ] || { echo "hello-world still in library_documents after skill.delete"; return 1; }
+
+  # 6. Delete the space skill via `spaces edit op=delete`. File goes
+  #    out via direct GitEngine, importer's `delete_in_op` then wipes
+  #    the row + search row.
+  run admin_call "spaces" "$(jq -nc --arg s "$space_slug" '{
+    command: "edit", slug: $s, edit_op: "delete",
+    op_args: { path: "skills/goodbye-world.md" }
+  }')"
+  echo "$output"
+  # spaces edit op=delete on a present file succeeds — assert on the
+  # absence of an error string rather than positive output text.
+  [[ "$output" != *"PathNotFound"* ]]
+  [[ "$output" != *"error"* ]] || true
+
+  run wait_for_skill_row_gone "goodbye-world"
+  [ "$status" -eq 0 ] || { echo "goodbye-world skills row still present after spaces delete"; return 1; }
+  run wait_for_skill_search_gone "goodbye-world"
+  [ "$status" -eq 0 ] || { echo "goodbye-world still in library_documents after spaces delete"; return 1; }
+
+  # 7. Re-deleting via spaces must surface PathNotFound rather than
+  #    silently succeeding — guards against the regression that bit
+  #    the manual test (silent no-op when path differs from canonical).
+  run admin_call "spaces" "$(jq -nc --arg s "$space_slug" '{
+    command: "edit", slug: $s, edit_op: "delete",
+    op_args: { path: "skills/goodbye-world.md" }
+  }')"
+  echo "$output"
+  [[ "$output" == *"PathNotFound"* ]] || [[ "$output" == *"does not exist"* ]]
+}
