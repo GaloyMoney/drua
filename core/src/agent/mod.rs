@@ -743,60 +743,76 @@ impl Agents {
         Ok(agent)
     }
 
-    /// Pre-step helper for the workflow runtime. For every agent currently
-    /// attached to `sandbox_id` whose `workflow_run_id` is `None` (i.e. a
-    /// user-owned agent), runs the full per-agent detach choreography in
-    /// the caller's op: agent-side detach event, sandbox-side detach,
-    /// session detach notification, and skills-block refresh. Workflow-
-    /// spawned attachments are left in place — the subsequent attach will
-    /// surface `WriteSlotTaken` and the run will fail rather than steal
-    /// between concurrent workflow runs.
+    /// Pre-step helper for the workflow runtime. Detaches a single
+    /// conflicting non-workflow Writer when the workflow agent is about
+    /// to attach in `Write` mode; no-op otherwise.
     ///
-    /// Returns the detached agent ids so the caller can drop their
-    /// `cached_dynamic_blocks` entries after committing.
+    /// Conflict policy:
+    /// - `workflow_mode == Read`: never detach (Read is unbounded; we
+    ///   coexist with whatever's there).
+    /// - `workflow_mode == Write` and a non-workflow agent currently
+    ///   holds Write: run the full detach choreography (agent event,
+    ///   sandbox detach, session notification, skills refresh).
+    /// - `workflow_mode == Write` and the current Writer is itself a
+    ///   workflow agent (`workflow_run_id.is_some()`): no-op; the
+    ///   subsequent attach will surface `WriteSlotTaken` and the run
+    ///   will fail rather than steal between concurrent workflow runs.
+    /// - `workflow_mode == Write` and only Readers (or nothing) are
+    ///   attached: no-op; Read+Write is allowed at the entity layer.
+    ///
+    /// Returns the detached agent id (single-element vec or empty) so
+    /// the caller can drop its `cached_dynamic_blocks` entry after
+    /// committing.
     #[instrument(
-        name = "domain.agent.detach_non_workflow_agents_from_sandbox_in_op",
+        name = "domain.agent.detach_conflicting_writer_in_op",
         skip(self, op),
-        fields(%sandbox_id)
+        fields(%sandbox_id, ?workflow_mode)
     )]
-    pub async fn detach_non_workflow_agents_from_sandbox_in_op(
+    pub async fn detach_conflicting_writer_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         sandbox_id: SandboxId,
+        workflow_mode: SandboxAgentMode,
     ) -> Result<Vec<AgentId>, AgentError> {
-        Audit::record_action_if_unset("agent.detach_non_workflow_agents_from_sandbox");
+        if workflow_mode != SandboxAgentMode::Write {
+            return Ok(Vec::new());
+        }
+        Audit::record_action_if_unset("agent.detach_conflicting_writer");
         Audit::record_sandbox_id(sandbox_id);
 
         let sandbox = self.sandboxes.find_by_id_in_op(op, sandbox_id).await?;
-        let candidates: Vec<AgentId> = sandbox.attached_agents.iter().map(|(id, _)| *id).collect();
+        let writer_id = sandbox
+            .attached_agents
+            .iter()
+            .find(|(_, m)| *m == SandboxAgentMode::Write)
+            .map(|(id, _)| *id);
+        let Some(agent_id) = writer_id else {
+            return Ok(Vec::new());
+        };
 
-        let mut detached = Vec::new();
-        for agent_id in candidates {
-            let mut agent = self.repo.find_by_id_in_op(&mut *op, agent_id).await?;
-            if agent.workflow_run_id.is_some() {
-                continue;
-            }
-            let project_id = agent.project_id;
-            if agent.sandbox_detached(sandbox_id).did_execute() {
-                self.repo.update_in_op(&mut *op, &mut agent).await?;
-            }
-            let sandbox = self
-                .sandboxes
-                .detach_from_agent_in_op(op, sandbox_id, agent_id)
-                .await?;
-            self.sessions
-                .sandbox_notification_in_op(
-                    op,
-                    agent_id,
-                    sandbox.name,
-                    session::message::SandboxOperation::Detach,
-                )
-                .await?;
-            self.refresh_skills_block_in_op(op, agent_id, project_id, None)
-                .await;
-            detached.push(agent_id);
+        let mut agent = self.repo.find_by_id_in_op(&mut *op, agent_id).await?;
+        if agent.workflow_run_id.is_some() {
+            return Ok(Vec::new());
         }
-        Ok(detached)
+        let project_id = agent.project_id;
+        if agent.sandbox_detached(sandbox_id).did_execute() {
+            self.repo.update_in_op(&mut *op, &mut agent).await?;
+        }
+        let sandbox = self
+            .sandboxes
+            .detach_from_agent_in_op(op, sandbox_id, agent_id)
+            .await?;
+        self.sessions
+            .sandbox_notification_in_op(
+                op,
+                agent_id,
+                sandbox.name,
+                session::message::SandboxOperation::Detach,
+            )
+            .await?;
+        self.refresh_skills_block_in_op(op, agent_id, project_id, None)
+            .await;
+        Ok(vec![agent_id])
     }
 
     /// Recomputes the `Skills` system block for `agent_id` scoped to

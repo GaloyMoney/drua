@@ -536,25 +536,30 @@ async fn delete_detaches_attached_sandbox() {
     );
 }
 
-#[tokio::test]
-async fn detach_non_workflow_agents_releases_user_owned_attachment() {
-    use drua_core::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
-
-    let pool = pool().await;
-    let (agents, sandboxes) = build_agents(&pool).await;
-    let project_id = insert_project(&pool).await;
+/// Test fixture: build agents + project + a sandbox in the given test name,
+/// without seeding any attached agents. Returns (agents, sandboxes, sandbox_id).
+async fn fixture_for_detach_test(
+    pool: &sqlx::PgPool,
+    sandbox_name: &str,
+) -> (
+    drua_core::agent::Agents,
+    std::sync::Arc<drua_core::sandbox::Sandboxes>,
+    drua_core::primitives::SandboxId,
+    drua_core::primitives::ProjectId,
+) {
+    use drua_core::sandbox::{SandboxMode, SandboxSpecs};
+    let (agents, sandboxes) = build_agents(pool).await;
+    let project_id = insert_project(pool).await;
     let sub = AuthSubject::User(UserId::new());
-
     let _lead = agents
         .create_project_lead(&sub, project_id, "lead", "test-project")
         .await
         .expect("create lead");
-
     let sandbox = sandboxes
         .create(
             &sub,
             project_id,
-            "sb-borrow",
+            sandbox_name,
             SandboxSpecs {
                 cpu: "100m".to_string(),
                 memory: "128Mi".to_string(),
@@ -564,82 +569,19 @@ async fn detach_non_workflow_agents_releases_user_owned_attachment() {
         )
         .await
         .expect("create sandbox");
-
-    let user_agent = agents
-        .create_agent(
-            &sub,
-            project_id,
-            "user-worker",
-            Some((sandbox.id, SandboxAgentMode::Write)),
-        )
-        .await
-        .expect("create user-owned agent");
-
-    let mut op = agents.begin_op().await.expect("begin op");
-    let detached = agents
-        .detach_non_workflow_agents_from_sandbox_in_op(&mut op, sandbox.id)
-        .await
-        .expect("detach helper");
-    op.commit().await.expect("commit");
-
-    assert_eq!(
-        detached,
-        vec![user_agent.id],
-        "helper should report the user-owned agent it detached",
-    );
-
-    let after_sandbox = sandboxes
-        .find_by_id(&sub, sandbox.id)
-        .await
-        .expect("find sandbox");
-    assert!(
-        after_sandbox.attached_agents.is_empty(),
-        "sandbox.attached_agents should be empty after detach: {:?}",
-        after_sandbox.attached_agents,
-    );
-
-    let after_agent = agents
-        .find_by_id(&sub, user_agent.id)
-        .await
-        .expect("find user agent");
-    assert!(
-        after_agent.attached_sandbox_id().is_none(),
-        "user agent's attached_sandbox_id should be None after detach",
-    );
+    (agents, sandboxes, sandbox.id, project_id)
 }
 
-#[tokio::test]
-async fn detach_non_workflow_agents_skips_workflow_owned_attachment() {
+/// Seeds an FK-valid `workflow_definitions` + `workflow_runs` row pair so
+/// `create_for_workflow_run_in_op` can attach a workflow-stamped agent.
+async fn seed_workflow_run(
+    pool: &sqlx::PgPool,
+    project_id: drua_core::primitives::ProjectId,
+) -> (
+    drua_core::primitives::WorkflowDefinitionId,
+    drua_core::primitives::WorkflowRunId,
+) {
     use drua_core::primitives::{WorkflowDefinitionId, WorkflowRunId};
-    use drua_core::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
-
-    let pool = pool().await;
-    let (agents, sandboxes) = build_agents(&pool).await;
-    let project_id = insert_project(&pool).await;
-    let sub = AuthSubject::User(UserId::new());
-
-    let _lead = agents
-        .create_project_lead(&sub, project_id, "lead", "test-project")
-        .await
-        .expect("create lead");
-
-    let sandbox = sandboxes
-        .create(
-            &sub,
-            project_id,
-            "sb-shared",
-            SandboxSpecs {
-                cpu: "100m".to_string(),
-                memory: "128Mi".to_string(),
-                disk_size: "1Gi".to_string(),
-            },
-            SandboxMode::Scratch,
-        )
-        .await
-        .expect("create sandbox");
-
-    // A workflow-stamped agent already attached: simulates a concurrent
-    // workflow run holding the sandbox. The helper must leave it alone.
     let workflow_id = WorkflowDefinitionId::new();
     let run_id = WorkflowRunId::new();
     sqlx::query(
@@ -649,7 +591,7 @@ async fn detach_non_workflow_agents_skips_workflow_owned_attachment() {
     .bind(workflow_id)
     .bind(project_id)
     .bind(format!("test-wf-{}", uuid::Uuid::from(workflow_id)))
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("insert workflow_definition");
     sqlx::query(
@@ -659,9 +601,130 @@ async fn detach_non_workflow_agents_skips_workflow_owned_attachment() {
     .bind(run_id)
     .bind(project_id)
     .bind(workflow_id)
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("insert workflow_run");
+    (workflow_id, run_id)
+}
+
+#[tokio::test]
+async fn detach_conflicting_writer_steals_user_writer_when_wants_write() {
+    use drua_core::sandbox::SandboxAgentMode;
+
+    let pool = pool().await;
+    let (agents, sandboxes, sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-borrow-w").await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let user_agent = agents
+        .create_agent(
+            &sub,
+            project_id,
+            "user-writer",
+            Some((sandbox_id, SandboxAgentMode::Write)),
+        )
+        .await
+        .expect("create user agent");
+
+    let mut op = agents.begin_op().await.expect("begin op");
+    let detached = agents
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .await
+        .expect("detach helper");
+    op.commit().await.expect("commit");
+
+    assert_eq!(detached, vec![user_agent.id]);
+
+    let after_sandbox = sandboxes.find_by_id(&sub, sandbox_id).await.expect("find");
+    assert!(after_sandbox.attached_agents.is_empty());
+    let after_agent = agents.find_by_id(&sub, user_agent.id).await.expect("find");
+    assert!(after_agent.attached_sandbox_id().is_none());
+}
+
+#[tokio::test]
+async fn detach_conflicting_writer_does_not_steal_user_reader_when_wants_write() {
+    use drua_core::sandbox::SandboxAgentMode;
+
+    let pool = pool().await;
+    let (agents, sandboxes, sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-coexist-r").await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let user_agent = agents
+        .create_agent(
+            &sub,
+            project_id,
+            "user-reader",
+            Some((sandbox_id, SandboxAgentMode::Read)),
+        )
+        .await
+        .expect("create user agent");
+
+    let mut op = agents.begin_op().await.expect("begin op");
+    let detached = agents
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .await
+        .expect("detach helper");
+    op.commit().await.expect("commit");
+
+    assert!(
+        detached.is_empty(),
+        "helper must not steal a Reader when wanting Write: got {detached:?}",
+    );
+    let after = sandboxes.find_by_id(&sub, sandbox_id).await.expect("find");
+    assert!(after
+        .attached_agents
+        .iter()
+        .any(|(id, _)| *id == user_agent.id));
+}
+
+#[tokio::test]
+async fn detach_conflicting_writer_is_noop_when_wants_read() {
+    use drua_core::sandbox::SandboxAgentMode;
+
+    let pool = pool().await;
+    let (agents, sandboxes, sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-read-want").await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let user_agent = agents
+        .create_agent(
+            &sub,
+            project_id,
+            "user-writer",
+            Some((sandbox_id, SandboxAgentMode::Write)),
+        )
+        .await
+        .expect("create user agent");
+
+    let mut op = agents.begin_op().await.expect("begin op");
+    let detached = agents
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Read)
+        .await
+        .expect("detach helper");
+    op.commit().await.expect("commit");
+
+    assert!(
+        detached.is_empty(),
+        "helper must not detach anything when wanting Read: got {detached:?}",
+    );
+    let after = sandboxes.find_by_id(&sub, sandbox_id).await.expect("find");
+    assert!(after
+        .attached_agents
+        .iter()
+        .any(|(id, _)| *id == user_agent.id));
+}
+
+#[tokio::test]
+async fn detach_conflicting_writer_skips_workflow_owned_writer() {
+    use drua_core::sandbox::SandboxAgentMode;
+
+    let pool = pool().await;
+    let (agents, sandboxes, sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-wf-writer").await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let (workflow_id, run_id) = seed_workflow_run(&pool, project_id).await;
     let mut op = agents.begin_op().await.expect("begin op");
     let workflow_agent = agents
         .create_for_workflow_run_in_op(
@@ -669,84 +732,53 @@ async fn detach_non_workflow_agents_skips_workflow_owned_attachment() {
             project_id,
             workflow_id,
             run_id,
-            "wf-agent",
-            Some((sandbox.id, SandboxAgentMode::Read)),
+            "wf-writer",
+            Some((sandbox_id, SandboxAgentMode::Write)),
         )
         .await
         .expect("create workflow agent");
-    op.commit().await.expect("commit workflow agent create");
+    op.commit().await.expect("commit");
 
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_non_workflow_agents_from_sandbox_in_op(&mut op, sandbox.id)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
 
     assert!(
         detached.is_empty(),
-        "helper must not detach workflow-owned attachments, got {detached:?}",
+        "helper must not detach a workflow-owned Writer: got {detached:?}",
     );
-
-    let after_sandbox = sandboxes
-        .find_by_id(&sub, sandbox.id)
-        .await
-        .expect("find sandbox");
-    assert!(
-        after_sandbox
-            .attached_agents
-            .iter()
-            .any(|(id, _)| *id == workflow_agent.id),
-        "workflow agent should still be attached: {:?}",
-        after_sandbox.attached_agents,
-    );
+    let after = sandboxes.find_by_id(&sub, sandbox_id).await.expect("find");
+    assert!(after
+        .attached_agents
+        .iter()
+        .any(|(id, _)| *id == workflow_agent.id));
 }
 
 #[tokio::test]
-async fn detach_non_workflow_agents_is_noop_when_unattached() {
-    use drua_core::sandbox::{SandboxMode, SandboxSpecs};
+async fn detach_conflicting_writer_is_noop_when_unattached() {
+    use drua_core::sandbox::SandboxAgentMode;
 
     let pool = pool().await;
-    let (agents, sandboxes) = build_agents(&pool).await;
-    let project_id = insert_project(&pool).await;
-    let sub = AuthSubject::User(UserId::new());
-
-    let _lead = agents
-        .create_project_lead(&sub, project_id, "lead", "test-project")
-        .await
-        .expect("create lead");
-
-    let sandbox = sandboxes
-        .create(
-            &sub,
-            project_id,
-            "sb-empty",
-            SandboxSpecs {
-                cpu: "100m".to_string(),
-                memory: "128Mi".to_string(),
-                disk_size: "1Gi".to_string(),
-            },
-            SandboxMode::Scratch,
-        )
-        .await
-        .expect("create sandbox");
+    let (agents, _sandboxes, sandbox_id, _project_id) =
+        fixture_for_detach_test(&pool, "sb-empty").await;
 
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_non_workflow_agents_from_sandbox_in_op(&mut op, sandbox.id)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
-
     assert!(detached.is_empty());
 
-    // Re-running on an already-empty sandbox stays a no-op.
+    // Idempotent re-run.
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_non_workflow_agents_from_sandbox_in_op(&mut op, sandbox.id)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
         .await
         .expect("idempotent re-run");
     op.commit().await.expect("commit");
-
     assert!(detached.is_empty());
 }

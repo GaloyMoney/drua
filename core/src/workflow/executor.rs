@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,11 +78,11 @@ impl Executor {
         // fails the run terminates as Failed without running any step.
         // The synthetic `<pre-flight>` step keeps the diagnostic visible
         // in `runs` listings.
-        let sandbox_ids = match self
+        let (sandbox_ids, preexisting_ids) = match self
             .ensure_sandboxes_ready(project_id, workflow_id, &sandbox_decls)
             .await
         {
-            Ok(map) => map,
+            Ok(pair) => pair,
             Err(err) => {
                 let step_name = "<pre-flight>".to_string();
                 if run.step_started(step_name.clone()).did_execute() {
@@ -94,13 +94,19 @@ impl Executor {
                 if run.run_completed(WorkflowRunState::Failed).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
-                self.suspend_workflow_sandboxes(project_id, workflow_id)
+                self.suspend_workflow_sandboxes(project_id, workflow_id, &HashSet::new())
                     .await;
                 return Ok(());
             }
         };
 
         let mut any_failed = run.any_step_failed();
+        // Preexisting sandboxes the workflow successfully attached to.
+        // Drives the post-flight suspend decision: a Preexisting sandbox
+        // is suspended at end-of-run only if (a) we attached at least
+        // once during the run AND (b) no other agent (workflow or user)
+        // is still attached at post-flight time.
+        let mut borrowed_preexisting: HashSet<SandboxId> = HashSet::new();
 
         for step in &steps {
             let step_name = step.name().to_string();
@@ -121,6 +127,8 @@ impl Executor {
                     step,
                     &trigger_context,
                     &sandbox_ids,
+                    &preexisting_ids,
+                    &mut borrowed_preexisting,
                 )
                 .await;
 
@@ -149,9 +157,10 @@ impl Executor {
             self.runs.update(&mut run).await?;
         }
 
-        // Post-flight: suspend every workflow-scoped sandbox. Always
-        // runs (even when a step failed). Best-effort.
-        self.suspend_workflow_sandboxes(project_id, workflow_id)
+        // Post-flight: always runs (even when a step failed).
+        // Best-effort. Workflow-scoped sandboxes always suspend; borrowed
+        // preexisting sandboxes only suspend if uncontested.
+        self.suspend_workflow_sandboxes(project_id, workflow_id, &borrowed_preexisting)
             .await;
 
         Ok(())
@@ -159,14 +168,16 @@ impl Executor {
 
     /// For each declared sandbox: find or create scoped to the workflow,
     /// restart if Suspended, then wait until Ready. Returns a name → id
-    /// map the step loop uses to resolve `sandbox: Some(name)` references.
+    /// map plus the set of Preexisting sandbox ids (used by post-flight
+    /// to apply the borrowed-and-uncontested suspend rule).
     async fn ensure_sandboxes_ready(
         &self,
         project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         decls: &[WorkflowSandboxDecl],
-    ) -> Result<HashMap<String, SandboxId>, WorkflowError> {
+    ) -> Result<(HashMap<String, SandboxId>, HashSet<SandboxId>), WorkflowError> {
         let mut ids: HashMap<String, SandboxId> = HashMap::with_capacity(decls.len());
+        let mut preexisting_ids: HashSet<SandboxId> = HashSet::new();
         for decl in decls {
             let (decl_name, sandbox) = match decl {
                 // Reference an already-existing sandbox in the
@@ -253,15 +264,19 @@ impl Executor {
                     name: decl_name.clone(),
                     state: e.to_string(),
                 })?;
+            if matches!(decl, WorkflowSandboxDecl::Preexisting { .. }) {
+                preexisting_ids.insert(sandbox.id);
+            }
             ids.insert(decl_name.clone(), sandbox.id);
         }
-        Ok(ids)
+        Ok((ids, preexisting_ids))
     }
 
     async fn suspend_workflow_sandboxes(
         &self,
         project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
+        borrowed_preexisting: &HashSet<SandboxId>,
     ) {
         let definition = match self.definitions.find_by_id(workflow_id).await {
             Ok(d) => d,
@@ -278,27 +293,52 @@ impl Executor {
             }
         };
         for decl in &definition.sandboxes {
-            // Suspend both decl variants: borrowed preexisting sandboxes
-            // share the workflow-scoped lifecycle (user re-attaches
-            // manually).
-            let lookup = match decl {
-                WorkflowSandboxDecl::Provisioned { name, .. } => self
-                    .sandboxes
-                    .find_for_workflow(project_id, workflow_id, name)
-                    .await
-                    .map(|opt| (name, opt)),
-                WorkflowSandboxDecl::Preexisting { name } => self
-                    .sandboxes
-                    .find_by_name_in_project_unchecked(project_id, name)
-                    .await
-                    .map(|sb| (name, Some(sb))),
-            };
-            let (name, sandbox) = match lookup {
-                Ok((name, Some(sb))) => (name, sb),
-                Ok((_, None)) => continue,
-                Err(e) => {
-                    tracing::warn!(error = %e, "post-flight: lookup failed");
-                    continue;
+            let (name, sandbox) = match decl {
+                // Workflow-private; always suspend.
+                WorkflowSandboxDecl::Provisioned { name, .. } => {
+                    match self
+                        .sandboxes
+                        .find_for_workflow(project_id, workflow_id, name)
+                        .await
+                    {
+                        Ok(Some(sb)) => (name, sb),
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::warn!(error = %e, sandbox = %name, "post-flight: lookup failed");
+                            continue;
+                        }
+                    }
+                }
+                // Borrowed-and-uncontested: suspend iff (a) the workflow
+                // attached to this sandbox at least once during the run
+                // AND (b) no other agent (workflow or user) is currently
+                // attached. Whichever run is the last one out flips it
+                // to Suspended.
+                WorkflowSandboxDecl::Preexisting { name } => {
+                    let sb = match self
+                        .sandboxes
+                        .find_by_name_in_project_unchecked(project_id, name)
+                        .await
+                    {
+                        Ok(sb) => sb,
+                        Err(e) => {
+                            tracing::warn!(error = %e, sandbox = %name, "post-flight: lookup failed");
+                            continue;
+                        }
+                    };
+                    if !borrowed_preexisting.contains(&sb.id) {
+                        continue;
+                    }
+                    if !sb.attached_agents.is_empty() {
+                        tracing::info!(
+                            sandbox_id = %sb.id,
+                            sandbox = %name,
+                            still_attached = sb.attached_agents.len(),
+                            "post-flight: deferring suspend; other agents still attached",
+                        );
+                        continue;
+                    }
+                    (name, sb)
                 }
             };
             if sandbox.state == SandboxState::Suspended {
@@ -318,6 +358,7 @@ impl Executor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_step(
         &self,
         project_id: ProjectId,
@@ -326,6 +367,8 @@ impl Executor {
         step: &WorkflowStepDef,
         trigger_context: &serde_json::Value,
         sandbox_ids: &HashMap<String, SandboxId>,
+        preexisting_ids: &HashSet<SandboxId>,
+        borrowed_preexisting: &mut HashSet<SandboxId>,
     ) -> Result<serde_json::Value, WorkflowError> {
         match step {
             WorkflowStepDef::AgentStep {
@@ -370,14 +413,13 @@ impl Executor {
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-                // Detach in the SAME op as create+attach so the sandbox
-                // is never observed double-attached or detached-but-not-
-                // yet-reattached. Skip-workflow-agents policy lives on
-                // the helper.
+                // Conflict-only steal: detach a non-workflow Writer iff
+                // we want Write. Same op as create+attach so the sandbox
+                // is never observed double-attached.
                 let detached_agents = match attach_sandbox {
-                    Some((sandbox_id, _)) => self
+                    Some((sandbox_id, mode)) => self
                         .agents
-                        .detach_non_workflow_agents_from_sandbox_in_op(&mut op, sandbox_id)
+                        .detach_conflicting_writer_in_op(&mut op, sandbox_id, mode)
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?,
                     None => Vec::new(),
@@ -398,6 +440,12 @@ impl Executor {
                 op.commit()
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+
+                if let Some((sandbox_id, _)) = attach_sandbox {
+                    if preexisting_ids.contains(&sandbox_id) {
+                        borrowed_preexisting.insert(sandbox_id);
+                    }
+                }
 
                 for prior in detached_agents {
                     self.agents.invalidate_agent_cache(prior);
