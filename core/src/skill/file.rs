@@ -96,7 +96,13 @@ pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkill> {
 struct SkillFrontmatter {
     #[serde(default)]
     id: Option<uuid::Uuid>,
+    /// Tolerated for backwards-compatibility with files written before
+    /// Model A (filename-as-name): we no longer read it, but legacy
+    /// files still carry the `name:` line in their frontmatter and
+    /// serde would otherwise reject the field as deny-unknown isn't
+    /// set anyway. Keep deserialised but ignored.
     #[serde(default)]
+    #[allow(dead_code)]
     name: Option<String>,
     #[serde(default)]
     description: Option<String>,
