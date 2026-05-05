@@ -727,26 +727,20 @@ impl Skills {
     ) -> Result<Option<Skill>, SkillError> {
         let file_hash = parsed.file_hash();
 
-        // Live row → content/path reconciliation.
+        // `maybe_find_by_id_include_deleted_in_op` returns soft-deleted
+        // rows too — we need them so `spaces edit op=move` can revive
+        // the row that `delete-old-path` just soft-deleted (otherwise
+        // `create_in_op` would PK-conflict on the same id). The default
+        // `maybe_find_by_id_in_op` filters deleted; this one doesn't.
         if let Some(existing) = self
             .repo
-            .maybe_find_by_id_in_op(&mut *op, parsed.skill_id)
+            .maybe_find_by_id_include_deleted_in_op(&mut *op, parsed.skill_id)
             .await?
         {
-            return reconcile_existing_skill(self, op, existing, parsed, file_hash, scope).await;
-        }
-
-        // Soft-deleted row at the same id? `spaces edit op=move` first
-        // delivers a delete-old-path → soft-deletes the row. The
-        // matching add-new-path then re-imports the *same* frontmatter
-        // id at a new path. Revive instead of attempting `create_in_op`
-        // (which would PK-conflict on the soft-deleted row).
-        if self
-            .repo
-            .maybe_revive_in_op(&mut *op, parsed.skill_id)
-            .await?
-        {
-            let existing = self.repo.find_by_id_in_op(&mut *op, parsed.skill_id).await?;
+            // Flip the soft-delete flag if it's still set; idempotent
+            // SQL — clears `deleted = TRUE` only if it was set. No
+            // separate "is it deleted?" probe needed.
+            self.repo.revive_in_op(&mut *op, parsed.skill_id).await?;
             return reconcile_existing_skill(self, op, existing, parsed, file_hash, scope).await;
         }
 

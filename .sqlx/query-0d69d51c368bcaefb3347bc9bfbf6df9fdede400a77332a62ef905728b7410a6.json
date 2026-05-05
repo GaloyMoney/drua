@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notes SET deleted = FALSE WHERE id = $1 AND deleted = TRUE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0d69d51c368bcaefb3347bc9bfbf6df9fdede400a77332a62ef905728b7410a6"
+}

@@ -14,7 +14,7 @@ use super::entity::*;
         space_id(ty = "Option<SpaceId>", list_for(by(created_at))),
         path(ty = "String"),
     ),
-    delete = "soft_without_queries",
+    delete = "soft",
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")
 )]
 pub struct NoteRepo {
@@ -46,22 +46,17 @@ impl NoteRepo {
     }
 
     /// Flip `deleted = FALSE` on a soft-deleted note row with this id.
-    /// Mirrors `SkillRepo::maybe_revive_in_op` — used by reverse-sync
-    /// when a `spaces edit op=move` re-imports the previously-deleted
-    /// frontmatter id at a new path.
-    pub async fn maybe_revive_in_op(
+    /// Mirrors `SkillRepo::revive_in_op`.
+    pub async fn revive_in_op(
         &self,
         op: &mut impl AtomicOperation,
         id: NoteId,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<(), sqlx::Error> {
         let row_id: uuid::Uuid = id.into();
-        let result = sqlx::query!(
-            "UPDATE notes SET deleted = FALSE WHERE id = $1 AND deleted = TRUE",
-            row_id
-        )
-        .execute(op.as_executor())
-        .await?;
-        Ok(result.rows_affected() > 0)
+        sqlx::query!("UPDATE notes SET deleted = FALSE WHERE id = $1", row_id)
+            .execute(op.as_executor())
+            .await?;
+        Ok(())
     }
 
     /// Fires only on content events (Initialized/Updated); skips pin/unpin.

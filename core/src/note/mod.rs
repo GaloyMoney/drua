@@ -474,26 +474,16 @@ impl Notes {
     ) -> Result<Option<Note>, NoteError> {
         let file_hash = parsed.file_hash();
 
-        // Live row → reconcile.
+        // `_include_deleted` returns soft-deleted rows too — needed so
+        // `spaces edit op=move` can revive the row that
+        // `delete-old-path` just soft-deleted. Otherwise `create_in_op`
+        // would PK-conflict.
         if let Some(existing) = self
             .repo
-            .maybe_find_by_id_in_op(&mut *op, parsed.note_id)
+            .maybe_find_by_id_include_deleted_in_op(&mut *op, parsed.note_id)
             .await?
         {
-            return reconcile_existing_note(self, op, existing, parsed, file_hash, scope).await;
-        }
-
-        // Soft-deleted row at the same id? `spaces edit op=move`
-        // delivers delete-old-path → soft-delete; the matching
-        // add-new-path then re-imports the same frontmatter id. Revive
-        // instead of `create_in_op` (which would PK-conflict on the
-        // soft-deleted row).
-        if self
-            .repo
-            .maybe_revive_in_op(&mut *op, parsed.note_id)
-            .await?
-        {
-            let existing = self.repo.find_by_id_in_op(&mut *op, parsed.note_id).await?;
+            self.repo.revive_in_op(&mut *op, parsed.note_id).await?;
             return reconcile_existing_note(self, op, existing, parsed, file_hash, scope).await;
         }
 
