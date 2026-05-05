@@ -172,7 +172,6 @@ async fn send_message_round_trip_via_prompt_channel() {
         .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::Text {
                 text: "Hi user".to_string(),
-                cache_control: None,
             }],
             usage: Usage {
                 input_tokens: 5,
@@ -181,6 +180,7 @@ async fn send_message_round_trip_via_prompt_channel() {
                 cache_creation_input_tokens: 0,
             },
             stop_reason: None,
+            model_used: None,
         })))
         .expect("send response");
 
@@ -342,7 +342,6 @@ async fn send_message_dispatches_registered_tool_call() {
                 id: "tu_1".to_string(),
                 name: "ping".to_string(),
                 input: serde_json::json!({}),
-                cache_control: None,
             }],
             usage: Usage {
                 input_tokens: 7,
@@ -351,6 +350,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 cache_creation_input_tokens: 0,
             },
             stop_reason: Some(StopReason::ToolUse),
+            model_used: None,
         })))
         .expect("send first response");
 
@@ -365,7 +365,6 @@ async fn send_message_dispatches_registered_tool_call() {
         .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::Text {
                 text: "all done".to_string(),
-                cache_control: None,
             }],
             usage: Usage {
                 input_tokens: 9,
@@ -374,6 +373,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 cache_creation_input_tokens: 0,
             },
             stop_reason: None,
+            model_used: None,
         })))
         .expect("send second response");
 

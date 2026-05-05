@@ -175,7 +175,7 @@ pub enum StopReason {
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
         llm::Prompt {
-            model: p.model,
+            chain: llm::ModelChain::new(p.model),
             max_tokens: Some(p.max_tokens_per_response),
             cache_key: p.cache_key,
             system: p
@@ -206,10 +206,7 @@ impl From<SystemBlock> for llm::prompt::SystemBlock {
             | SystemBlock::Skills { text }
             | SystemBlock::Spaces { text } => text,
         };
-        llm::prompt::SystemBlock::Text {
-            text,
-            cache_control: None,
-        }
+        llm::prompt::SystemBlock::Text { text }
     }
 }
 
@@ -219,7 +216,6 @@ impl From<ToolDefinition> for llm::prompt::Tool {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema,
-            cache_control: None,
         }
     }
 }
@@ -246,10 +242,7 @@ impl From<Message> for llm::prompt::Message {
 impl From<UserBlock> for llm::prompt::UserBlock {
     fn from(b: UserBlock) -> Self {
         match b {
-            UserBlock::Text { text } => llm::prompt::UserBlock::Text {
-                text,
-                cache_control: None,
-            },
+            UserBlock::Text { text } => llm::prompt::UserBlock::Text { text },
             UserBlock::ToolResult {
                 tool_use_id,
                 content,
@@ -265,14 +258,12 @@ impl From<UserBlock> for llm::prompt::UserBlock {
                     })
                     .collect(),
                 is_error,
-                cache_control: None,
             },
             UserBlock::SandboxInfo {
                 sandbox_name,
                 sandbox_operation,
             } => llm::prompt::UserBlock::Text {
                 text: sandbox_notification_text(&sandbox_name, &sandbox_operation),
-                cache_control: None,
             },
         }
     }
@@ -281,15 +272,11 @@ impl From<UserBlock> for llm::prompt::UserBlock {
 impl From<AssistantBlock> for llm::prompt::AssistantBlock {
     fn from(b: AssistantBlock) -> Self {
         match b {
-            AssistantBlock::Text { text } => llm::prompt::AssistantBlock::Text {
-                text,
-                cache_control: None,
-            },
+            AssistantBlock::Text { text } => llm::prompt::AssistantBlock::Text { text },
             AssistantBlock::ToolUse { id, name, input } => llm::prompt::AssistantBlock::ToolUse {
                 id,
                 name,
                 input,
-                cache_control: None,
             },
             AssistantBlock::Thinking { text, signature } => {
                 llm::prompt::AssistantBlock::Thinking { text, signature }

@@ -69,7 +69,6 @@ impl From<&dyn TopLevelTool> for llm::prompt::Tool {
             name: t.name().to_string(),
             description: Some(t.description().to_string()),
             input_schema: t.input_schema().clone(),
-            cache_control: None,
         }
     }
 }

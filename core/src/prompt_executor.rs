@@ -6,9 +6,12 @@ use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use anthropic_client::AnthropicClient;
-use llm::prompt::CacheTtl;
 use llm::provider::LlmProvider;
-use llm::{Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel};
+use llm::router::{walk, ChainEntry};
+use llm::{
+    Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel, PromptResult,
+    StreamHandle,
+};
 use openai_client::{
     OpenAiClient, OpenAiResponsesAuth as ClientOpenAiResponsesAuth, OpenAiResponsesClient,
 };
@@ -243,69 +246,91 @@ impl ExecutorState {
         Self { models }
     }
 
-    #[instrument(name = "domain.prompt_executor.dispatch", skip_all)]
-    fn dispatch(&self, mut request: PromptRequest) {
-        let model_name = request.prompt.model.clone();
-        let model = self.models.iter().find(|m| m.name == model_name).cloned();
-        match model {
-            None => {
-                tracing::error!(model = %model_name, "Model not configured");
-                let _ = request
-                    .response_channel
-                    .send(Err(PromptError::Provider(format!(
-                        "model `{model_name}` not configured"
-                    ))));
-            }
-            Some(model) => {
-                tracing::info!(
-                    model = %model.name,
-                    provider = model.client.name(),
-                    "Dispatching prompt",
-                );
-                if request.prompt.max_tokens.is_none() {
-                    request.prompt.max_tokens = model.default_max_tokens;
+    fn find(&self, name: &str) -> Option<&ResolvedModel> {
+        self.models.iter().find(|m| m.name == name)
+    }
+
+    /// Resolves the prompt's chain into `Vec<ChainEntry>` against the
+    /// provider registry. Unknown model ids are skipped with a warn-level
+    /// log; if **every** chain element is unknown we return an error.
+    fn build_chain(&self, prompt: &Prompt) -> Result<Vec<ChainEntry>, PromptError> {
+        let mut entries = Vec::with_capacity(prompt.chain.len());
+        for spec in prompt.chain.iter() {
+            match self.find(&spec.name) {
+                Some(model) => entries.push(ChainEntry {
+                    model_id: spec.name.clone(),
+                    max_tokens: spec.max_tokens.or(model.default_max_tokens),
+                    provider: model.client.clone(),
+                }),
+                None => {
+                    tracing::warn!(
+                        model = %spec.name,
+                        "Chain element references model not in registry; skipping"
+                    );
                 }
-                request.prompt = model.prepare_prompt(request.prompt);
-                let client = model.client.clone();
-                tokio::spawn(async move {
-                    evaluate_streaming(client, request.prompt, request.response_channel).await;
-                });
             }
         }
+        if entries.is_empty() {
+            return Err(PromptError::ModelNotConfigured(
+                prompt.chain.primary.name.clone(),
+            ));
+        }
+        Ok(entries)
+    }
+
+    #[instrument(name = "domain.prompt_executor.dispatch", skip_all)]
+    fn dispatch(&self, request: PromptRequest) {
+        let entries = match self.build_chain(&request.prompt) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(error = %e, "Chain resolution failed");
+                let _ = request.response_channel.send(Err(e));
+                return;
+            }
+        };
+
+        tracing::info!(
+            primary = %request.prompt.chain.primary.name,
+            chain_len = entries.len(),
+            "Dispatching prompt with chain",
+        );
+
+        // Walk the chain in a spawned task so dispatch returns immediately.
+        // The StreamHandle is sent back via response_channel only after the
+        // first upstream call resolves Ok — earlier failures fall through
+        // cleanly to the next chain element.
+        let response_channel = request.response_channel;
+        let prompt = request.prompt;
+        tokio::spawn(async move {
+            evaluate_chain(entries, prompt, response_channel).await;
+        });
     }
 }
 
-#[instrument(name = "domain.prompt_executor.evaluate_streaming", skip_all)]
-async fn evaluate_streaming(
-    client: Arc<dyn LlmProvider>,
+#[instrument(name = "domain.prompt_executor.evaluate_chain", skip_all)]
+async fn evaluate_chain(
+    entries: Vec<ChainEntry>,
     prompt: Prompt,
     response: PromptResponseChannel,
 ) {
-    let (delta_tx, delta_rx) = mpsc::channel(128);
-
-    // Send StreamHandle immediately so agent loop can begin consuming.
-    if response
-        .send(Ok(llm::PromptResult::Stream(llm::StreamHandle {
-            rx: delta_rx,
-        })))
-        .is_err()
-    {
-        return; // caller dropped
-    }
-
-    match client.send_prompt_streaming(&prompt).await {
-        Ok(mut provider_rx) => {
-            tracing::debug!(provider = client.name(), "Stream started");
-            while let Some(result) = provider_rx.recv().await {
-                if delta_tx.send(result).await.is_err() {
-                    break;
-                }
-            }
-            tracing::debug!(provider = client.name(), "Stream completed");
+    match walk(&entries, &prompt).await {
+        Ok(outcome) => {
+            tracing::info!(
+                model_used = %outcome.model_used,
+                attempts = outcome.attempts.len(),
+                "router.walk: success",
+            );
+            // The walker's StreamHandle is what we surface to the caller.
+            // `model_used` could be threaded through PromptResult in a
+            // follow-up; for now the agent loop falls back to chain.primary
+            // when model_used is unknown.
+            let _ = response.send(Ok(PromptResult::Stream(StreamHandle {
+                rx: outcome.stream.rx,
+            })));
         }
         Err(e) => {
-            tracing::error!(provider = client.name(), error = %e, "Provider error");
-            let _ = delta_tx.send(Err(e)).await;
+            tracing::error!(error = %e, "router.walk: chain exhausted or terminal");
+            let _ = response.send(Err(e));
         }
     }
 }
@@ -314,144 +339,32 @@ async fn evaluate_streaming(
 struct ResolvedModel {
     name: String,
     default_max_tokens: Option<u32>,
-    provider_kind: ResolvedProviderKind,
     client: Arc<dyn LlmProvider>,
-}
-
-#[derive(Clone, Copy)]
-enum ResolvedProviderKind {
-    Anthropic,
-    OpenAi,
-    OpenAiResponses,
 }
 
 impl ResolvedModel {
     fn from_config(config: ModelConfig) -> Self {
-        let (provider_kind, client): (ResolvedProviderKind, Arc<dyn LlmProvider>) =
-            match config.provider {
-                Provider::Anthropic { api_key, base_url } => (
-                    ResolvedProviderKind::Anthropic,
-                    Arc::new(AnthropicClient::new(api_key).with_base_url(base_url)),
-                ),
-                Provider::OpenAi { api_key, base_url } => (
-                    ResolvedProviderKind::OpenAi,
-                    Arc::new(OpenAiClient::new(api_key).with_base_url(base_url)),
-                ),
-                Provider::OpenAiResponses { auth, base_url } => (
-                    ResolvedProviderKind::OpenAiResponses,
-                    Arc::new(
-                        OpenAiResponsesClient::new(match auth {
-                            OpenAiResponsesAuth::ApiKey { api_key } => {
-                                ClientOpenAiResponsesAuth::ApiKey { api_key }
-                            }
-                            OpenAiResponsesAuth::Subscription => {
-                                ClientOpenAiResponsesAuth::Subscription
-                            }
-                        })
-                        .with_base_url(base_url),
-                    ),
-                ),
-            };
+        let client: Arc<dyn LlmProvider> = match config.provider {
+            Provider::Anthropic { api_key, base_url } => {
+                Arc::new(AnthropicClient::new(api_key).with_base_url(base_url))
+            }
+            Provider::OpenAi { api_key, base_url } => {
+                Arc::new(OpenAiClient::new(api_key).with_base_url(base_url))
+            }
+            Provider::OpenAiResponses { auth, base_url } => Arc::new(
+                OpenAiResponsesClient::new(match auth {
+                    OpenAiResponsesAuth::ApiKey { api_key } => {
+                        ClientOpenAiResponsesAuth::ApiKey { api_key }
+                    }
+                    OpenAiResponsesAuth::Subscription => ClientOpenAiResponsesAuth::Subscription,
+                })
+                .with_base_url(base_url),
+            ),
+        };
         Self {
             name: config.name,
             default_max_tokens: config.default_max_tokens,
-            provider_kind,
             client,
-        }
-    }
-
-    fn prepare_prompt(&self, mut prompt: Prompt) -> Prompt {
-        if matches!(self.provider_kind, ResolvedProviderKind::Anthropic) {
-            prompt.enable_anthropic_prompt_caching(Some(CacheTtl::FiveMinutes));
-        }
-        prompt
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use llm::prompt::{AssistantBlock, CacheControl, Message, UserBlock};
-
-    fn sample_prompt() -> Prompt {
-        Prompt {
-            model: "test-model".to_string(),
-            system: Vec::new(),
-            messages: vec![Message::Assistant {
-                content: vec![
-                    AssistantBlock::Thinking {
-                        text: "thinking".to_string(),
-                        signature: None,
-                    },
-                    AssistantBlock::Text {
-                        text: "visible".to_string(),
-                        cache_control: None,
-                    },
-                ],
-            }],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: None,
-            cache_key: Some("agent-session:test".to_string()),
-        }
-    }
-
-    #[test]
-    fn prepare_prompt_marks_anthropic_cache_breakpoint() {
-        let model = ResolvedModel {
-            name: "test-model".to_string(),
-            default_max_tokens: None,
-            provider_kind: ResolvedProviderKind::Anthropic,
-            client: Arc::new(AnthropicClient::new("test")),
-        };
-
-        let prompt = model.prepare_prompt(sample_prompt());
-        match &prompt.messages[0] {
-            Message::Assistant { content } => {
-                assert!(matches!(
-                    &content[1],
-                    AssistantBlock::Text {
-                        cache_control: Some(CacheControl::Ephemeral {
-                            ttl: Some(CacheTtl::FiveMinutes)
-                        }),
-                        ..
-                    }
-                ));
-            }
-            _ => panic!("expected assistant message"),
-        }
-    }
-
-    #[test]
-    fn prepare_prompt_leaves_openai_prompt_unmarked() {
-        let model = ResolvedModel {
-            name: "test-model".to_string(),
-            default_max_tokens: None,
-            provider_kind: ResolvedProviderKind::OpenAi,
-            client: Arc::new(OpenAiClient::new("test")),
-        };
-
-        let prompt = model.prepare_prompt(Prompt {
-            messages: vec![Message::User {
-                content: vec![UserBlock::Text {
-                    text: "hello".to_string(),
-                    cache_control: None,
-                }],
-            }],
-            ..sample_prompt()
-        });
-
-        match &prompt.messages[0] {
-            Message::User { content } => {
-                assert!(matches!(
-                    &content[0],
-                    UserBlock::Text {
-                        cache_control: None,
-                        ..
-                    }
-                ));
-            }
-            _ => panic!("expected user message"),
         }
     }
 }

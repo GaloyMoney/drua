@@ -1225,7 +1225,7 @@ impl Agents {
         tx: tokio::sync::mpsc::Sender<ChatOutputEvent>,
         prompt_state: llm::Prompt,
     ) -> Result<(), AgentError> {
-        let model_name = prompt_state.model.clone();
+        let model_name = prompt_state.chain.primary.name.clone();
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
         self.prompt_requests
             .send(request)
@@ -1353,7 +1353,7 @@ impl Agents {
                     _ => break,
                 };
 
-                current_model = next_prompt.model.clone();
+                current_model = next_prompt.chain.primary.name.clone();
                 let (request, rx_next) = llm::PromptRequest::new(next_prompt);
                 if prompt_requests.send(request).await.is_err() {
                     emit_event(

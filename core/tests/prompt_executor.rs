@@ -25,11 +25,10 @@ async fn anthropic_round_trip_via_executor() {
     let (_executor, prompt_tx) = PromptExecutor::init(config).await;
 
     let prompt = Prompt {
-        model: MODEL.to_string(),
+        chain: llm::ModelChain::new(MODEL),
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: "Reply with the single word: pong".to_string(),
-                cache_control: None,
             }],
         }],
         system: Vec::new(),
