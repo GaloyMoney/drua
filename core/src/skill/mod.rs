@@ -47,6 +47,45 @@ pub enum ImportScope {
     },
 }
 
+/// Single-row projection returned by [`Skills::list_for_scope`] —
+/// covers every skill an agent in `project_id` can invoke, regardless
+/// of where it lives. Differs from [`Skill`] because sandbox-exported
+/// skills are runtime-only (no DB row).
+#[derive(Debug, Clone)]
+pub struct ScopedSkill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub source: SkillSource,
+}
+
+#[derive(Debug, Clone)]
+pub enum SkillSource {
+    /// DB-backed, owned by `project_id`. Editable via the project
+    /// surface (`SkillTool` / GraphQL `skillDelete` etc.).
+    Project {
+        skill_id: SkillId,
+        project_id: ProjectId,
+    },
+    /// DB-backed, no owner. Visible to every project; editable only
+    /// via admin.
+    Global { skill_id: SkillId },
+    /// DB-backed, owned by a space `project_id` mounts. Editable only
+    /// via the spaces tool.
+    Space {
+        skill_id: SkillId,
+        space_id: SpaceId,
+        space_slug: String,
+    },
+    /// Runtime-only — exported by a Ready sandbox in the project. No
+    /// DB row, no editing surface; rebuilt every time the sandbox
+    /// reports its `exported_skills`.
+    Sandbox {
+        sandbox_id: SandboxId,
+        sandbox_name: String,
+    },
+}
+
 impl ImportScope {
     fn bump_scope(&self) -> ScopeId {
         match self {
@@ -324,7 +363,10 @@ impl Skills {
         Ok(result.entities)
     }
 
-    /// Project-scoped + global, with auth check.
+    /// Project-scoped + global, with auth check. Returns DB-backed
+    /// entities only — does NOT include mounted-space or sandbox-
+    /// exported skills. Use [`Self::list_for_scope`] for the full set
+    /// an agent in this project can actually invoke.
     #[instrument(name = "skill.list_for_project", skip(self, sub))]
     pub async fn list_for_project(
         &self,
@@ -333,6 +375,101 @@ impl Skills {
     ) -> Result<Vec<Skill>, SkillError> {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
         self.list_for_project_inner(project_id).await
+    }
+
+    /// Every skill an agent in `project_id` can invoke, with
+    /// provenance: project-owned, truly-global, mounted-space, and
+    /// sandbox-exported (runtime). Mirrors the resolution that
+    /// [`Self::skills_context_for_scope`] does for the agent's
+    /// `<available_skills>` block — the UI calls this so the human
+    /// sees the same set the agent does. Lookups against
+    /// `space_mounts` / `sandboxes` failures are logged + swallowed
+    /// so a missing lower tier degrades the result rather than fails
+    /// the whole request.
+    #[instrument(name = "skill.list_for_scope", skip(self, sub))]
+    pub async fn list_for_scope(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+    ) -> Result<Vec<ScopedSkill>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
+        let mut out: Vec<ScopedSkill> = Vec::new();
+
+        // 1. Project + truly-global (existing list_for_project_inner).
+        for s in self.list_for_project_inner(project_id).await? {
+            let source = match s.project_id {
+                Some(pid) => SkillSource::Project {
+                    skill_id: s.id,
+                    project_id: pid,
+                },
+                None => SkillSource::Global { skill_id: s.id },
+            };
+            out.push(ScopedSkill {
+                name: s.name,
+                description: s.description,
+                body: s.body,
+                source,
+            });
+        }
+
+        // 2. Mounted spaces — one query per mount; mount-set is small
+        // (capped at SPACES_BLOCK_LIMIT in space_mounts).
+        let mounted_space_ids = self.mounted_space_ids_for(Some(project_id)).await;
+        for space_id in mounted_space_ids {
+            let res = self
+                .repo
+                .list_for_space_id_by_created_at(
+                    Some(space_id),
+                    es_entity::PaginatedQueryArgs {
+                        first: 100,
+                        after: None,
+                    },
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            for s in res.entities {
+                let space_slug = s.space_slug.clone().unwrap_or_default();
+                out.push(ScopedSkill {
+                    name: s.name,
+                    description: s.description,
+                    body: s.body,
+                    source: SkillSource::Space {
+                        skill_id: s.id,
+                        space_id,
+                        space_slug,
+                    },
+                });
+            }
+        }
+
+        // 3. Sandbox-exported — every Ready sandbox in the project.
+        // Best-effort: a Sandbox-Read denial here just hides this tier
+        // (consistent with the existing `space_mounts` failure path).
+        match self.sandboxes.list_for_project(sub, project_id).await {
+            Ok(sandboxes) => {
+                for sandbox in sandboxes {
+                    if sandbox.state != crate::sandbox::SandboxState::Ready {
+                        continue;
+                    }
+                    for exp in &sandbox.exported_skills {
+                        out.push(ScopedSkill {
+                            name: exp.name.clone(),
+                            description: exp.description.clone().unwrap_or_default(),
+                            body: exp.content.clone(),
+                            source: SkillSource::Sandbox {
+                                sandbox_id: sandbox.id,
+                                sandbox_name: sandbox.name.clone(),
+                            },
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sandboxes.list_for_project failed; sandbox tier hidden from list_for_scope");
+            }
+        }
+
+        Ok(out)
     }
 
     async fn list_for_project_inner(

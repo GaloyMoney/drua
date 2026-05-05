@@ -813,21 +813,72 @@ async fn project_skills_page(
 
     let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    let skills = state
+    // Single call into the service — covers project + global +
+    // mounted-space + sandbox-exported skills with provenance. The
+    // human in the UI sees the same set the agent sees in
+    // `<available_skills>`.
+    let scoped_skills = state
         .app
         .skills()
-        .list_for_project(&sub, project_id)
+        .list_for_scope(&sub, project_id)
         .await
         .unwrap_or_default();
+
+    let skills: Vec<ScopedSkillView> = scoped_skills
+        .into_iter()
+        .map(|s| scoped_skill_to_view(&project, s))
+        .collect();
 
     ProjectSkillsPageTemplate {
         project: project_to_view(&project),
         lead_agent,
         agents: agent_views,
-        skills: skills.iter().map(skill_to_view).collect(),
+        skills,
         library_repo_url: state.library_repo_url.clone(),
     }
     .into_response()
+}
+
+fn scoped_skill_to_view(
+    project: &domain::project::Project,
+    s: domain::skill::ScopedSkill,
+) -> ScopedSkillView {
+    use domain::skill::SkillSource;
+    let (scope_label, scope_class, detail_url) = match s.source {
+        SkillSource::Project {
+            skill_id,
+            project_id,
+        } => (
+            "project".to_string(),
+            "project".to_string(),
+            Some(format!("/projects/{project_id}/skills/{skill_id}")),
+        ),
+        SkillSource::Global { skill_id: _ } => ("global".to_string(), "global".to_string(), None),
+        SkillSource::Space {
+            skill_id: _,
+            space_id: _,
+            space_slug,
+        } => (
+            format!("space: {space_slug}"),
+            "space".to_string(),
+            Some(format!("/projects/{}/spaces", project.id)),
+        ),
+        SkillSource::Sandbox {
+            sandbox_id,
+            sandbox_name,
+        } => (
+            format!("sandbox: {sandbox_name}"),
+            "sandbox".to_string(),
+            Some(format!("/projects/{}/sandboxes/{sandbox_id}", project.id)),
+        ),
+    };
+    ScopedSkillView {
+        name: s.name,
+        description: s.description,
+        scope_label,
+        scope_class,
+        detail_url,
+    }
 }
 
 // ── Spaces ────────────────────────────────────────────────────────────

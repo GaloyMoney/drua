@@ -175,13 +175,30 @@ pub struct SkillView {
     pub is_global: bool,
 }
 
+/// View shape for the project skills *list* page. Covers all four
+/// sources (`project` / `global` / `space:<slug>` / `sandbox:<name>`)
+/// returned by `Skills::list_for_scope`. Distinct from `SkillView`
+/// (single-skill detail page) because sandbox-exported skills have
+/// no DB row + no detail URL.
+#[allow(dead_code)]
+pub struct ScopedSkillView {
+    pub name: String,
+    pub description: String,
+    pub scope_label: String,
+    pub scope_class: String,
+    /// `Some` only when there's a meaningful destination — project
+    /// skills go to their detail page, space skills to the space's
+    /// file listing, sandbox/global have no per-skill destination.
+    pub detail_url: Option<String>,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "project_skills.html")]
 pub struct ProjectSkillsPageTemplate {
     pub project: ProjectView,
     pub lead_agent: Option<AgentView>,
     pub agents: Vec<AgentView>,
-    pub skills: Vec<SkillView>,
+    pub skills: Vec<ScopedSkillView>,
     pub library_repo_url: Option<String>,
 }
 
