@@ -13,7 +13,6 @@ use super::entity::*;
         project_id(ty = "Option<ProjectId>", list_for(by(created_at))),
         space_id(ty = "Option<SpaceId>", list_for(by(created_at))),
         path(ty = "String"),
-        pinned(ty = "bool"),
     ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")

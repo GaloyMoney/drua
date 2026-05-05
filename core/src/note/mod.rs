@@ -21,7 +21,7 @@ use crate::agent::AgentScope;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::library::SpaceMounts;
-use crate::note::file::{default_note_path, render_note_markdown_with_pin};
+use crate::note::file::render_note_markdown_with_pin;
 use crate::primitives::*;
 use crate::user::Users;
 use std::sync::Arc;
@@ -148,21 +148,10 @@ impl Notes {
             .await?;
 
         let note_id = NoteId::new();
-        let created_at = op.now().to_rfc3339();
-        // New project notes default to unpinned — admin pin/unpin is the
-        // surface for flipping the bit afterwards.
-        let rendered = render_note_markdown_with_pin(
-            note_id.into(),
-            &title,
-            &content,
-            &tags,
-            &created_at,
-            &created_at,
-            false,
-        );
-        let file_hash = drua_library::GitFileHash::new(rendered);
-        let path = default_note_path(&title, Some(project_name), None);
-
+        // New project notes default to unpinned (admin `pin`/`unpin` is
+        // the surface for flipping the bit afterwards). `path` is
+        // derived inside `NewNoteBuilder::build()` from the
+        // `(title, project_name, space_slug)` triple.
         let new_note = NewNote::builder()
             .id(note_id)
             .project_id(project_id)
@@ -170,8 +159,6 @@ impl Notes {
             .title(&title)
             .content(&content)
             .tags(tags)
-            .file_hash(file_hash)
-            .path(path)
             .build()
             .expect("NewNote builder should not fail");
 
@@ -456,26 +443,19 @@ impl Notes {
         op: &mut es_entity::DbOp<'_>,
         path: &str,
     ) -> Result<Option<NoteId>, NoteError> {
-        let doc_type = NOTE_DOC_TYPE;
-        let row = sqlx::query!(
-            "SELECT doc_id
-             FROM library_documents
-             WHERE path = $1 AND doc_type = $2",
-            path,
-            doc_type.as_str(),
-        )
-        .fetch_optional(op.as_executor())
-        .await?;
-        let Some(row) = row else {
+        let Some(note) = self.repo.maybe_find_by_path_in_op(&mut *op, path).await? else {
             return Ok(None);
         };
-        let id = NoteId::from(row.doc_id);
-        let note = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let id = note.id;
         let scope = match (note.space_id, note.project_id) {
             (Some(sid), _) => ScopeId::Space(sid),
             (None, Some(pid)) => ScopeId::Project(pid),
             (None, None) => ScopeId::Global,
         };
+        self.library
+            .search()
+            .delete_in_op(op, id.into(), NOTE_DOC_TYPE)
+            .await?;
         self.repo.delete_in_op(op, note).await?;
         self.register_context_bump(op, scope);
         Ok(Some(id))
@@ -539,7 +519,6 @@ impl Notes {
             .title(parsed.title)
             .content(parsed.content)
             .tags(parsed.tags)
-            .file_hash(file_hash)
             .pinned(parsed.pinned)
             .path(parsed.path);
         match &scope {

@@ -27,8 +27,6 @@ pub enum SkillEvent {
         name: String,
         description: String,
         body: String,
-        #[serde(default)]
-        file_hash: Option<GitFileHash>,
         /// Repo-relative on-disk path. Sacred — never mutated by the
         /// importer. New events always set this; legacy events that
         /// predate path-as-identity deserialise with `""` and
@@ -501,7 +499,7 @@ impl TryFromEvents<SkillEvent> for Skill {
 }
 
 #[derive(Debug, Builder)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", build_fn(name = "build_inner"))]
 pub struct NewSkill {
     #[builder(setter(into))]
     pub(super) id: SkillId,
@@ -519,17 +517,43 @@ pub struct NewSkill {
     pub(super) description: String,
     #[builder(setter(into))]
     pub(super) body: String,
-    /// Repo-relative on-disk path. Required — there's no canonicalisation
-    /// fallback. `Skills::create` derives it from
-    /// `(scope, name)`; the importer passes through whatever the file's
-    /// real path is.
-    #[builder(setter(into))]
+    /// Repo-relative on-disk path. Filled lazily on `build()` via
+    /// [`crate::skill::file::default_skill_path`] when the caller didn't
+    /// set one explicitly — the reverse-sync importer always sets it
+    /// (`parsed.path`); DB-driven create surfaces (`Skills::create` /
+    /// future `create_in_space`) skip it and let the builder derive
+    /// from `(name, project_name, space_slug)`.
+    #[builder(default, setter(into))]
     pub(super) path: String,
 }
 
 impl NewSkill {
     pub fn builder() -> NewSkillBuilder {
         NewSkillBuilder::default().id(SkillId::new())
+    }
+}
+
+impl NewSkillBuilder {
+    /// Lazy default for `path`: derived from `(name, project_name,
+    /// space_slug)` when the caller didn't set it explicitly. Wraps
+    /// the auto-generated `build_inner` so callers see the same
+    /// `build()` API regardless of whether they passed a path.
+    pub fn build(self) -> Result<NewSkill, NewSkillBuilderError> {
+        let mut me = self;
+        if me.path.as_deref().map(str::is_empty).unwrap_or(true) {
+            // Builder fields are `Option<T>`; for `Option<String>`
+            // setters they're `Option<Option<String>>`. Flatten before
+            // borrowing.
+            let name = me.name.as_deref().unwrap_or("");
+            let project_name = me.project_name.as_ref().and_then(|p| p.as_deref());
+            let space_slug = me.space_slug.as_ref().and_then(|s| s.as_deref());
+            me.path = Some(crate::skill::file::default_skill_path(
+                name,
+                project_name,
+                space_slug,
+            ));
+        }
+        me.build_inner()
     }
 }
 
@@ -546,7 +570,6 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 name: self.name,
                 description: self.description,
                 body: self.body,
-                file_hash: None,
                 path: self.path,
                 original_path: None,
             }],

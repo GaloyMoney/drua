@@ -30,11 +30,6 @@ pub enum NoteEvent {
         title: String,
         content: String,
         tags: Vec<String>,
-        /// Recorded at create-time as a historical marker. The runtime
-        /// hash is recomputed from `Note::rendered()` on demand
-        /// (mirrors `Skill`), so pin/unpin events stay consistent with
-        /// the on-disk content without bookkeeping.
-        file_hash: GitFileHash,
         /// Repo-relative on-disk path. Sacred — never mutated by the
         /// importer. Pre-path-identity events deserialise with `""`;
         /// hydration falls back to a derived value.
@@ -50,7 +45,6 @@ pub enum NoteEvent {
         title: String,
         content: String,
         tags: Vec<String>,
-        file_hash: GitFileHash,
     },
     Pinned {},
     Unpinned {},
@@ -184,7 +178,6 @@ impl Note {
             title,
             content,
             tags,
-            file_hash: incoming_file_hash,
         });
         Idempotent::Executed(())
     }
@@ -270,7 +263,6 @@ impl TryFromEvents<NoteEvent> for Note {
                     title,
                     content,
                     tags,
-                    file_hash: _,
                     path,
                     pinned,
                 } => {
@@ -290,7 +282,6 @@ impl TryFromEvents<NoteEvent> for Note {
                     title,
                     content,
                     tags,
-                    file_hash: _,
                 } => {
                     builder = builder
                         .title(title.clone())
@@ -311,7 +302,7 @@ impl TryFromEvents<NoteEvent> for Note {
 }
 
 #[derive(Debug, Builder)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", build_fn(name = "build_inner"))]
 pub struct NewNote {
     #[builder(setter(into))]
     pub(super) id: NoteId,
@@ -329,19 +320,39 @@ pub struct NewNote {
     pub(super) content: String,
     #[builder(default)]
     pub(super) tags: Vec<String>,
-    pub(super) file_hash: GitFileHash,
     #[builder(default)]
     pub(super) pinned: bool,
-    /// Repo-relative on-disk path. Required — there's no canonicalisation
-    /// fallback. `Notes::store` derives it from `(project_name, title)`;
-    /// the importer passes through whatever the file's real path is.
-    #[builder(setter(into))]
+    /// Repo-relative on-disk path. Filled lazily on `build()` via
+    /// [`crate::note::file::default_note_path`] when the caller didn't
+    /// set one — the reverse-sync importer always sets it
+    /// (`parsed.path`); `Notes::store` skips it and lets the builder
+    /// derive from `(title, project_name)`.
+    #[builder(default, setter(into))]
     pub(super) path: String,
 }
 
 impl NewNote {
     pub fn builder() -> NewNoteBuilder {
         NewNoteBuilder::default().id(NoteId::new())
+    }
+}
+
+impl NewNoteBuilder {
+    /// Lazy default for `path` — derived from `(title, project_name,
+    /// space_slug)` when the caller didn't set it.
+    pub fn build(self) -> Result<NewNote, NewNoteBuilderError> {
+        let mut me = self;
+        if me.path.as_deref().map(str::is_empty).unwrap_or(true) {
+            let title = me.title.as_deref().unwrap_or("");
+            let project_name = me.project_name.as_ref().and_then(|p| p.as_deref());
+            let space_slug = me.space_slug.as_ref().and_then(|s| s.as_deref());
+            me.path = Some(crate::note::file::default_note_path(
+                title,
+                project_name,
+                space_slug,
+            ));
+        }
+        me.build_inner()
     }
 }
 
@@ -358,7 +369,6 @@ impl IntoEvents<NoteEvent> for NewNote {
                 title: self.title,
                 content: self.content,
                 tags: self.tags,
-                file_hash: self.file_hash,
                 path: self.path,
                 pinned: self.pinned,
             }],
@@ -376,20 +386,6 @@ mod tests {
 
     use super::{NewNote, Note, NoteEvent};
 
-    fn test_hash() -> GitFileHash {
-        let id = NoteId::new();
-        let rendered = super::render_note_markdown_with_pin(
-            id.into(),
-            "Test Note",
-            "Some content here",
-            &["tag1".into(), "tag2".into()],
-            "",
-            "",
-            false,
-        );
-        GitFileHash::new(rendered)
-    }
-
     fn new_note() -> Note {
         let id = NoteId::new();
         let new = NewNote::builder()
@@ -399,7 +395,6 @@ mod tests {
             .title("Test Note")
             .content("Some content here")
             .tags(vec!["tag1".into(), "tag2".into()])
-            .file_hash(test_hash())
             .path("runtime/projects/test/notes/test-note.md".to_string())
             .build()
             .unwrap();
@@ -511,9 +506,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_initialized_event_without_path_deserializes() {
-        // Pre-path-identity events have no `path` key. `#[serde(default)]`
-        // hydrates as empty string.
+    fn legacy_initialized_event_deserializes_with_unknown_fields() {
+        // Pre-path-identity events have no `path` / `pinned` keys but
+        // do carry the now-removed `file_hash` field. `#[serde(default)]`
+        // hydrates the missing keys; unknown keys (`file_hash`) are
+        // ignored by serde.
         let json = serde_json::json!({
             "type": "initialized",
             "id": uuid::Uuid::new_v4(),
