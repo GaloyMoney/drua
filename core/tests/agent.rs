@@ -91,6 +91,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
         skills,
         None,
         ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
     );
     (agents, sandboxes)
 }
