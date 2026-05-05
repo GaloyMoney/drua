@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use drua_core::primitives::{AuthSubject, ProjectId, SandboxId, UserId};
+use drua_core::library::SpaceMounts;
+use drua_core::primitives::{AgentId, AuthSubject, ProjectId, SandboxId, SpaceId, UserId};
+use drua_core::project::repo::ProjectRepo;
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::skill::Skills;
 
@@ -133,6 +135,134 @@ async fn skills_context_isolates_projects_and_unknown_sandbox() {
     assert_eq!(
         ctx_a, ctx_a_with_unknown,
         "unknown sandbox must not change the rendered block"
+    );
+}
+
+/// Seeds a project with `mounted_spaces` containing `space_id` by writing
+/// the canonical `Initialized` + `SpaceMounted` events directly. Avoids
+/// standing up the full `Projects` service stack — `find_by_name` only
+/// needs the entity to hydrate with the right `mounted_spaces` field.
+async fn seed_project_with_mount(
+    pool: &sqlx::PgPool,
+    project: ProjectId,
+    space: SpaceId,
+    name: &str,
+) {
+    let lead_agent_id = AgentId::new();
+    sqlx::query("INSERT INTO projects (id, name, created_at) VALUES ($1, $2, NOW())")
+        .bind(uuid::Uuid::from(project))
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("insert project");
+    let init_event = serde_json::json!({
+        "type": "initialized",
+        "id": uuid::Uuid::from(project),
+        "lead_agent_id": uuid::Uuid::from(lead_agent_id),
+        "name": name,
+        "description": null,
+    });
+    let mount_event = serde_json::json!({
+        "type": "space_mounted",
+        "space_id": uuid::Uuid::from(space),
+    });
+    sqlx::query(
+        "INSERT INTO project_events (id, sequence, event_type, event, recorded_at) \
+         VALUES ($1, 0, 'initialized', $2::jsonb, NOW()), \
+                ($1, 1, 'space_mounted', $3::jsonb, NOW())",
+    )
+    .bind(uuid::Uuid::from(project))
+    .bind(init_event)
+    .bind(mount_event)
+    .execute(pool)
+    .await
+    .expect("insert project events");
+}
+
+/// `find_by_name` resolves a space-scoped skill when the agent's project
+/// has the space mounted. Regression test for cursor finding
+/// `r3185924186` — agents could see `[space]`-tagged skills in the
+/// `<available_skills>` block but invocation via `use_skill` failed
+/// because `find_by_name` ignored space-scoped candidates.
+#[tokio::test]
+async fn find_by_name_resolves_mounted_space_skill() {
+    let pool = pool().await;
+    let sandboxes = Arc::new(
+        Sandboxes::init(&pool, SandboxConfig::default(), None)
+            .await
+            .expect("init sandboxes"),
+    );
+    let project = ProjectId::new();
+    let space = SpaceId::from(uuid::Uuid::new_v4());
+    // Names/slugs must be unique per run against a persisted DB
+    // (re-runs and parallel suites collide otherwise).
+    let project_name = format!("proj-mount-{}", uuid::Uuid::from(project));
+    // Seed the spaces row so the `skills.space_id` FK is satisfied. The
+    // test never reads the entity itself — `find_by_name` only needs
+    // the id to be present in `Project.mounted_spaces`.
+    sqlx::query("INSERT INTO spaces (id, slug, created_at) VALUES ($1, $2, NOW())")
+        .bind(uuid::Uuid::from(space))
+        .bind(format!("test-space-{}", uuid::Uuid::from(space)))
+        .execute(&pool)
+        .await
+        .expect("insert space row");
+    seed_project_with_mount(&pool, project, space, &project_name).await;
+
+    // Insert the skill row directly (no library wired). One Initialized
+    // event with `space_id` set. Skill name carries a per-run suffix
+    // because `idx_skills_global_name` enforces global uniqueness and
+    // sibling tests in this suite use bare `alpha-skill`.
+    let skill_id = uuid::Uuid::new_v4();
+    let skill_name = format!("alpha-mount-{}", &skill_id.to_string()[..8]);
+    let init = serde_json::json!({
+        "type": "initialized",
+        "id": skill_id,
+        "project_id": null,
+        "project_name": null,
+        "space_id": uuid::Uuid::from(space),
+        "space_slug": "test-space",
+        "name": skill_name,
+        "description": "alpha description",
+        "body": "echo alpha",
+    });
+    sqlx::query("INSERT INTO skills (id, project_id, space_id, name, created_at) VALUES ($1, NULL, $2, $3, NOW())")
+        .bind(skill_id)
+        .bind(uuid::Uuid::from(space))
+        .bind(&skill_name)
+        .execute(&pool)
+        .await
+        .expect("insert skill row");
+    sqlx::query("INSERT INTO skill_events (id, sequence, event_type, event, recorded_at) VALUES ($1, 0, 'initialized', $2::jsonb, NOW())")
+        .bind(skill_id)
+        .bind(init)
+        .execute(&pool)
+        .await
+        .expect("insert skill event");
+
+    // Skills with SpaceMounts wired against the same pool — same Project
+    // entity hydration path as production, so the mount is visible.
+    let project_repo = Arc::new(ProjectRepo::new(&pool));
+    // SpaceMounts only consults `spaces` for `spaces_for_project` /
+    // `spaces_block_for_project`; `space_ids_for_project` (the path
+    // `find_by_name` uses) only needs `project_repo`. We don't have an
+    // easy way to construct a real `AuthedSpaces` in this test, so go
+    // through `SpaceMounts::empty` + a workaround: use `with_space_mounts`
+    // on a `Skills` built with `new_without_library`, paired with a
+    // dedicated test-only `SpaceMounts` constructor. Simpler: build
+    // SpaceMounts via the public API by passing dummy spaces (skill
+    // resolution doesn't touch it).
+    let space_mounts = Arc::new(SpaceMounts::with_project_repo_for_test(project_repo));
+    let skills = Skills::new_without_library(&pool, sandboxes).with_space_mounts(space_mounts);
+
+    let body = skills
+        .find_by_name(&skill_name, Some(project), None)
+        .await
+        .expect("find_by_name")
+        .expect("space-scoped skill should be found via mounted space");
+    let rendered: String = body.into();
+    assert!(
+        rendered.contains("echo alpha"),
+        "expected space-skill body, got: {rendered}"
     );
 }
 
