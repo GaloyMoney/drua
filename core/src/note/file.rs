@@ -5,21 +5,12 @@ use crate::skill::file::{name_from_filename, slugify};
 
 /// Renders a note as markdown with frontmatter — the canonical
 /// on-disk form. Identical bytes round-trip via the library's git
-/// hash short-circuit.
-pub fn render_note_markdown(
-    doc_id: uuid::Uuid,
-    title: &str,
-    body: &str,
-    tags: &[String],
-    created_at: &str,
-    updated_at: &str,
-) -> String {
-    render_note_markdown_with_pin(doc_id, title, body, tags, created_at, updated_at, false)
-}
-
-/// Variant that emits `pinned: true` in the frontmatter when set.
-/// Used by space-scoped note authoring (the on-disk markdown is the
-/// source of truth for the pin bit there).
+/// hash short-circuit. `pinned: true` is emitted in the frontmatter
+/// when `pinned` is set; otherwise the line is omitted.
+///
+/// Pin state is round-tripped through both forward (DB → file via
+/// `Note::write_op` / `LibrarySynced::is_content_event`) and reverse
+/// (file → DB via `parse_note_markdown` + `NotesImporter`) sync.
 pub fn render_note_markdown_with_pin(
     doc_id: uuid::Uuid,
     title: &str,
@@ -103,15 +94,18 @@ pub struct ParsedNote {
 }
 
 impl ParsedNote {
-    /// Canonical on-disk form for the parsed note.
+    /// Canonical on-disk form for the parsed note. Includes `pinned: true`
+    /// in the frontmatter when the parsed note is pinned, so the hash
+    /// matches the file as it appears on disk byte-for-byte.
     pub fn render(&self) -> String {
-        render_note_markdown(
+        render_note_markdown_with_pin(
             self.note_id.into(),
             &self.title,
             &self.content,
             &self.tags,
             &self.created_at,
             &self.updated_at,
+            self.pinned,
         )
     }
 
@@ -233,15 +227,18 @@ mod path_tests {
     }
 
     #[test]
-    fn parse_note_round_trip_preserves_id() {
+    fn parse_note_round_trip_preserves_id_and_pin() {
         let id = NoteId::new();
-        let rendered = render_note_markdown(
+        // Pinned render → parse → render → identical bytes. Guards the
+        // forward+reverse sync invariant Option X relies on.
+        let rendered = render_note_markdown_with_pin(
             id.into(),
             "My Note",
             "body content",
             &["t1".to_string()],
             "",
             "",
+            true,
         );
         let parsed = parse_note_markdown(&rendered, "spaces/team/notes/my-note.md").unwrap();
         assert_eq!(parsed.note_id, id);
@@ -249,5 +246,20 @@ mod path_tests {
         assert_eq!(parsed.content, "body content");
         assert_eq!(parsed.space_slug.as_deref(), Some("team"));
         assert_eq!(parsed.path, "spaces/team/notes/my-note.md");
+        assert!(parsed.pinned, "pinned: true must round-trip through parse");
+        assert_eq!(
+            parsed.render(),
+            rendered,
+            "re-render must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn parse_note_unpinned_default() {
+        let id = NoteId::new();
+        let rendered =
+            render_note_markdown_with_pin(id.into(), "Plain", "body", &[], "", "", false);
+        let parsed = parse_note_markdown(&rendered, "spaces/team/notes/plain.md").unwrap();
+        assert!(!parsed.pinned, "no `pinned:` key must hydrate as false");
     }
 }

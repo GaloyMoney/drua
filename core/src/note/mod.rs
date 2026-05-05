@@ -21,7 +21,7 @@ use crate::agent::AgentScope;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::library::SpaceMounts;
-use crate::note::file::{default_note_path, render_note_markdown};
+use crate::note::file::{default_note_path, render_note_markdown_with_pin};
 use crate::primitives::*;
 use crate::user::Users;
 use std::sync::Arc;
@@ -149,13 +149,16 @@ impl Notes {
 
         let note_id = NoteId::new();
         let created_at = op.now().to_rfc3339();
-        let rendered = render_note_markdown(
+        // New project notes default to unpinned — admin pin/unpin is the
+        // surface for flipping the bit afterwards.
+        let rendered = render_note_markdown_with_pin(
             note_id.into(),
             &title,
             &content,
             &tags,
             &created_at,
             &created_at,
+            false,
         );
         let file_hash = drua_library::GitFileHash::new(rendered);
         let path = default_note_path(&title, Some(project_name), None);
@@ -211,13 +214,16 @@ impl Notes {
         let updated_at = op.now().to_rfc3339();
 
         let created_at = note.created_at();
-        let rendered = render_note_markdown(
+        // Render with the entity's current pin state so the
+        // hash compare against `note.file_hash()` is apples-to-apples.
+        let rendered = render_note_markdown_with_pin(
             note.id.into(),
             &title,
             &content,
             &tags,
             &created_at,
             &updated_at,
+            note.pinned,
         );
         let file_hash = drua_library::GitFileHash::new(rendered);
 
@@ -478,7 +484,10 @@ impl Notes {
     /// Reverse-sync entry point: persist a `ParsedNote` produced by the
     /// library importer. Creates or updates depending on whether the
     /// note already exists. `Ok(None)` signals idempotency — the
-    /// existing entity's `file_hash` matches the incoming bytes.
+    /// existing entity already matches the on-disk content (including
+    /// pin state). Pin state and content are reconciled separately so
+    /// flipping `pinned: true` in the frontmatter pushes a `Pinned`
+    /// event without spuriously generating an `Updated`.
     pub(crate) async fn import_from_library<OP: AtomicOperation>(
         &self,
         op: &mut OP,
@@ -492,7 +501,10 @@ impl Notes {
             .maybe_find_by_id_in_op(&mut *op, parsed.note_id)
             .await?
         {
-            if !existing
+            let mut changed = false;
+            // Content delta: title/content/tags are checked together
+            // — `Note::update`'s hash guard catches the all-equal case.
+            if existing
                 .update(
                     parsed.title.clone(),
                     parsed.content.clone(),
@@ -501,6 +513,19 @@ impl Notes {
                 )
                 .did_execute()
             {
+                changed = true;
+            }
+            // Pin delta: separate event; idempotent guards inside the
+            // entity make repeated `pin()`/`unpin()` calls cheap.
+            if parsed.pinned != existing.pinned {
+                let pin_changed = if parsed.pinned {
+                    existing.pin().did_execute()
+                } else {
+                    existing.unpin().did_execute()
+                };
+                changed = changed || pin_changed;
+            }
+            if !changed {
                 return Ok(None);
             }
             self.repo.update_in_op(op, &mut existing).await?;

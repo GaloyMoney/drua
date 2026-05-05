@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use crate::note::file::render_note_markdown;
+use crate::note::file::render_note_markdown_with_pin;
 use crate::note::NOTE_DOC_TYPE;
 use crate::primitives::*;
 use crate::skill::file::slugify;
@@ -30,6 +30,10 @@ pub enum NoteEvent {
         title: String,
         content: String,
         tags: Vec<String>,
+        /// Recorded at create-time as a historical marker. The runtime
+        /// hash is recomputed from `Note::rendered()` on demand
+        /// (mirrors `Skill`), so pin/unpin events stay consistent with
+        /// the on-disk content without bookkeeping.
         file_hash: GitFileHash,
         /// Repo-relative on-disk path. Sacred — never mutated by the
         /// importer. Pre-path-identity events deserialise with `""`;
@@ -70,7 +74,6 @@ pub struct Note {
     pub(crate) title: String,
     pub(crate) content: String,
     pub(crate) tags: Vec<String>,
-    pub(crate) file_hash: Option<GitFileHash>,
     pub(crate) pinned: bool,
     /// Repo-relative on-disk path. The importer never mutates this —
     /// whatever the user wrote is the path of record.
@@ -113,16 +116,25 @@ impl Note {
             .unwrap_or_default()
     }
 
-    /// Canonical on-disk content (markdown w/ frontmatter).
+    /// Canonical on-disk content (markdown w/ frontmatter, including
+    /// `pinned: true` when [`Self::is_pinned`] is set).
     pub(super) fn rendered(&self) -> String {
-        render_note_markdown(
+        render_note_markdown_with_pin(
             self.id.into(),
             &self.title,
             &self.content,
             &self.tags,
             &self.created_at(),
             &self.updated_at_rfc3339(),
+            self.pinned,
         )
+    }
+
+    /// Hash of the canonical runtime form, used for reverse-sync
+    /// idempotency comparisons. Computed on demand so pin/unpin events
+    /// stay consistent with on-disk content (mirrors `Skill::file_hash`).
+    pub(crate) fn file_hash(&self) -> GitFileHash {
+        GitFileHash::new(self.rendered())
     }
 
     fn updated_at_rfc3339(&self) -> String {
@@ -160,20 +172,19 @@ impl Note {
         title: String,
         content: String,
         tags: Vec<String>,
-        file_hash: GitFileHash,
+        incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
-        if self.file_hash.as_ref() == Some(&file_hash) {
+        if self.file_hash() == incoming_file_hash {
             return Idempotent::AlreadyApplied;
         }
         self.title = title.clone();
         self.content = content.clone();
         self.tags = tags.clone();
-        self.file_hash = Some(file_hash.clone());
         self.events.push(NoteEvent::Updated {
             title,
             content,
             tags,
-            file_hash,
+            file_hash: incoming_file_hash,
         });
         Idempotent::Executed(())
     }
@@ -183,9 +194,16 @@ impl drua_library::LibrarySynced for Note {
     type Event = NoteEvent;
 
     fn is_content_event(ev: &NoteEvent) -> bool {
+        // Pin/unpin flips the `pinned: true` line in the frontmatter,
+        // so they're content events: the hook fires and the next
+        // library write tick rewrites the markdown to keep the on-disk
+        // state in lockstep with the entity.
         matches!(
             ev,
-            NoteEvent::Initialized { .. } | NoteEvent::Updated { .. }
+            NoteEvent::Initialized { .. }
+                | NoteEvent::Updated { .. }
+                | NoteEvent::Pinned {}
+                | NoteEvent::Unpinned {}
         )
     }
 
@@ -252,7 +270,7 @@ impl TryFromEvents<NoteEvent> for Note {
                     title,
                     content,
                     tags,
-                    file_hash,
+                    file_hash: _,
                     path,
                     pinned,
                 } => {
@@ -265,7 +283,6 @@ impl TryFromEvents<NoteEvent> for Note {
                         .title(title.clone())
                         .content(content.clone())
                         .tags(tags.clone())
-                        .file_hash(Some(file_hash.clone()))
                         .pinned(*pinned)
                         .path(path.clone());
                 }
@@ -273,13 +290,12 @@ impl TryFromEvents<NoteEvent> for Note {
                     title,
                     content,
                     tags,
-                    file_hash,
+                    file_hash: _,
                 } => {
                     builder = builder
                         .title(title.clone())
                         .content(content.clone())
-                        .tags(tags.clone())
-                        .file_hash(Some(file_hash.clone()));
+                        .tags(tags.clone());
                 }
                 NoteEvent::Pinned {} => {
                     builder = builder.pinned(true);
@@ -362,13 +378,14 @@ mod tests {
 
     fn test_hash() -> GitFileHash {
         let id = NoteId::new();
-        let rendered = super::render_note_markdown(
+        let rendered = super::render_note_markdown_with_pin(
             id.into(),
             "Test Note",
             "Some content here",
             &["tag1".into(), "tag2".into()],
             "",
             "",
+            false,
         );
         GitFileHash::new(rendered)
     }
@@ -397,18 +414,29 @@ mod tests {
         assert_eq!(note.content, "Some content here");
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
         assert_eq!(note.project_name.as_deref(), Some("test"));
-        assert!(note.file_hash.is_some());
         assert_eq!(note.path, "runtime/projects/test/notes/test-note.md");
     }
 
     #[test]
     fn note_update() {
         let mut note = new_note();
+        // Compute the new content's hash so the idempotency guard treats
+        // this as an actual change rather than no-op.
+        let new_rendered = super::render_note_markdown_with_pin(
+            note.id.into(),
+            "Updated Title",
+            "Updated content",
+            &["new-tag".into()],
+            &note.created_at(),
+            &note.updated_at_rfc3339(),
+            note.pinned,
+        );
+        let new_hash = GitFileHash::new(new_rendered);
         let res = note.update(
             "Updated Title".into(),
             "Updated content".into(),
             vec!["new-tag".into()],
-            test_hash(),
+            new_hash,
         );
         assert!(matches!(res, es_entity::Idempotent::Executed(())));
         assert_eq!(note.title, "Updated Title");
@@ -417,13 +445,19 @@ mod tests {
     }
 
     #[test]
-    fn note_update_is_idempotent_on_same_file_hash() {
+    fn note_update_is_idempotent_when_rendered_matches_incoming() {
         let mut note = new_note();
-        let hash = test_hash();
-        let _ = note.update("T".into(), "C".into(), vec!["t".into()], hash.clone());
-        let res = note.update("T2".into(), "C2".into(), vec!["t2".into()], hash);
+        // Hash of current rendered content — guard must treat this as
+        // already applied even when title/content/tags match what's
+        // already there.
+        let current_hash = note.file_hash();
+        let res = note.update(
+            note.title.clone(),
+            note.content.clone(),
+            note.tags.clone(),
+            current_hash,
+        );
         assert!(matches!(res, es_entity::Idempotent::AlreadyApplied));
-        assert_eq!(note.title, "T", "second update must not mutate");
     }
 
     #[test]
@@ -446,6 +480,34 @@ mod tests {
         let result = note.unpin();
         assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
         assert!(!note.pinned);
+    }
+
+    #[test]
+    fn pin_round_trips_through_rendered_and_file_hash() {
+        let mut note = new_note();
+        let unpinned_hash = note.file_hash();
+
+        let _ = note.pin();
+        let pinned_hash = note.file_hash();
+        assert_ne!(
+            unpinned_hash, pinned_hash,
+            "pin must change the canonical render"
+        );
+        assert!(
+            note.rendered().contains("pinned: true"),
+            "rendered output must include `pinned: true` when pinned"
+        );
+
+        let _ = note.unpin();
+        assert_eq!(
+            note.file_hash(),
+            unpinned_hash,
+            "unpin must restore the original hash"
+        );
+        assert!(
+            !note.rendered().contains("pinned: true"),
+            "rendered output must omit `pinned: true` when unpinned"
+        );
     }
 
     #[test]
