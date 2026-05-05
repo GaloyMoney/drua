@@ -352,8 +352,10 @@ wait_for_skill_row_gone() {
   project_id="$(echo "$output" | jq -r '.data.projectCreate.project.id')"
   [ -n "$project_id" ] && [ "$project_id" != "null" ]
 
-  # 2. Project skill via top-level `skill create` (this is the path the
-  #    lead agent's tool would take during the manual test).
+  # 2. Project skill via admin `skill create` (this is the path the
+  #    lead agent's tool would take during the manual test). The MCP
+  #    `tools/call` envelope wraps the result in `result.content[0].text`
+  #    — extract the skill UUID from that, not from the JSON id field.
   run admin_call "skill" "$(jq -nc --arg pid "$project_id" '{
     command: "create", project_id: $pid,
     name: "hello-world",
@@ -361,13 +363,11 @@ wait_for_skill_row_gone() {
     body: "echo hello"
   }')"
   echo "$output"
-  hello_id="$(echo "$output" | jq -r '.id // .skill_id // empty')"
-  # The admin `skill create` returns a text payload with the id; just
-  # extract via regex if structured field isn't present.
-  if [ -z "$hello_id" ]; then
-    hello_id="$(echo "$output" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n1)"
-  fi
-  [ -n "$hello_id" ]
+  hello_id="$(echo "$output" \
+    | jq -r '.result.content[0].text' \
+    | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+    | head -n1)"
+  [ -n "$hello_id" ] || { echo "could not extract hello-world skill id from: $output"; return 1; }
 
   # 3. Space + space-scoped skill (raw file via spaces.edit; importer
   #    creates the row with `space_id` set).
