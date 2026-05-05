@@ -370,6 +370,18 @@ impl Sandboxes {
         Ok(self.repo.begin_op().await?)
     }
 
+    /// In-op lookup for sister services that already hold an open
+    /// `DbOp`. Auth-free; callers must have authorised the enclosing
+    /// operation themselves.
+    #[instrument(name = "domain.sandbox.find_by_id_in_op", skip(self, op))]
+    pub(crate) async fn find_by_id_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        id: SandboxId,
+    ) -> Result<Sandbox, SandboxError> {
+        Ok(self.repo.find_by_id_in_op(op, id).await?)
+    }
+
     /// `(project_id, name)` is unique at the DB level, so workflow-
     /// scoped sandboxes embed the workflow short-id in their stored
     /// name. The user's decl name stays the canonical reference inside

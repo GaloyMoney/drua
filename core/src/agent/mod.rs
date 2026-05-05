@@ -782,6 +782,78 @@ impl Agents {
         Ok(agent)
     }
 
+    /// Pre-step helper for the workflow runtime. Detaches a single
+    /// conflicting non-workflow Writer when the workflow agent is about
+    /// to attach in `Write` mode; no-op otherwise.
+    ///
+    /// Conflict policy:
+    /// - `workflow_mode == Read`: never detach (Read is unbounded; we
+    ///   coexist with whatever's there).
+    /// - `workflow_mode == Write` and a non-workflow agent currently
+    ///   holds Write: run the full detach choreography (agent event,
+    ///   sandbox detach, session notification, skills refresh).
+    /// - `workflow_mode == Write` and the current Writer is itself a
+    ///   workflow agent (`workflow_run_id.is_some()`): no-op; the
+    ///   subsequent attach will surface `WriteSlotTaken` and the run
+    ///   will fail rather than steal between concurrent workflow runs.
+    /// - `workflow_mode == Write` and only Readers (or nothing) are
+    ///   attached: no-op; Read+Write is allowed at the entity layer.
+    ///
+    /// Returns the detached agent id (single-element vec or empty) so
+    /// the caller can drop its `cached_dynamic_blocks` entry after
+    /// committing.
+    #[instrument(
+        name = "domain.agent.detach_conflicting_writer_in_op",
+        skip(self, op),
+        fields(%sandbox_id, ?workflow_mode)
+    )]
+    pub async fn detach_conflicting_writer_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        sandbox_id: SandboxId,
+        workflow_mode: SandboxAgentMode,
+    ) -> Result<Vec<AgentId>, AgentError> {
+        if workflow_mode != SandboxAgentMode::Write {
+            return Ok(Vec::new());
+        }
+        Audit::record_action_if_unset("agent.detach_conflicting_writer");
+        Audit::record_sandbox_id(sandbox_id);
+
+        let sandbox = self.sandboxes.find_by_id_in_op(op, sandbox_id).await?;
+        let writer_id = sandbox
+            .attached_agents
+            .iter()
+            .find(|(_, m)| *m == SandboxAgentMode::Write)
+            .map(|(id, _)| *id);
+        let Some(agent_id) = writer_id else {
+            return Ok(Vec::new());
+        };
+
+        let mut agent = self.repo.find_by_id_in_op(&mut *op, agent_id).await?;
+        if agent.workflow_run_id.is_some() {
+            return Ok(Vec::new());
+        }
+        let project_id = agent.project_id;
+        if agent.sandbox_detached(sandbox_id).did_execute() {
+            self.repo.update_in_op(&mut *op, &mut agent).await?;
+        }
+        let sandbox = self
+            .sandboxes
+            .detach_from_agent_in_op(op, sandbox_id, agent_id)
+            .await?;
+        self.sessions
+            .sandbox_notification_in_op(
+                op,
+                agent_id,
+                sandbox.name,
+                session::message::SandboxOperation::Detach,
+            )
+            .await?;
+        self.refresh_skills_block_in_op(op, agent_id, project_id, None)
+            .await;
+        Ok(vec![agent_id])
+    }
+
     /// Recomputes the `Skills` system block for `agent_id` scoped to
     /// `sandbox_id` and pushes it. Idempotent: when the block content matches
     /// the latest persisted skills block no event is emitted. Errors from the
@@ -838,7 +910,7 @@ impl Agents {
     /// `cached_dynamic_blocks` call rebuilds. Used when `agent_id`'s scope
     /// changes (e.g. sandbox attach/detach) without bumping the global
     /// `ContextGeneration`.
-    fn invalidate_agent_cache(&self, agent_id: AgentId) {
+    pub(crate) fn invalidate_agent_cache(&self, agent_id: AgentId) {
         if let Ok(mut cache) = self.context_cache.write() {
             cache.remove(&agent_id);
         }
