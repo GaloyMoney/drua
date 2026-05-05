@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT project_id, created_at, id FROM notes WHERE ((project_id = $1) AND (COALESCE((created_at, id) > ($4, $3), $3 IS NULL))) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN note_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT created_at, id FROM notes WHERE (NOT $1 OR project_id IS NOT DISTINCT FROM $2) AND (NOT $3 OR space_id IS NOT DISTINCT FROM $4) AND (COALESCE((created_at, id) > ($7, $6), $6 IS NULL)) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $5) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $8 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN note_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,6 +31,9 @@
     ],
     "parameters": {
       "Left": [
+        "Bool",
+        "Uuid",
+        "Bool",
         "Uuid",
         "Int8",
         "Uuid",
@@ -46,5 +49,5 @@
       false
     ]
   },
-  "hash": "4ec0699280fe5a14265b1db963a288f8d7c55aefed93f0eb64e9765a360582d8"
+  "hash": "4dc6ce0d776af19bddf22166f60ddb2e053ccf30df1f7f4d77196e597852b24f"
 }

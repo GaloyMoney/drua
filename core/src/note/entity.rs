@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use crate::note::file::{canonical_note_path, render_note_markdown};
+use crate::note::file::render_note_markdown;
 use crate::note::NOTE_DOC_TYPE;
 use crate::primitives::*;
 use crate::skill::file::slugify;
@@ -15,12 +15,32 @@ use crate::skill::file::slugify;
 pub enum NoteEvent {
     Initialized {
         id: NoteId,
-        project_id: ProjectId,
-        project_name: String,
+        #[serde(default)]
+        project_id: Option<ProjectId>,
+        #[serde(default)]
+        project_name: Option<String>,
+        /// `Some(s)` for space-scoped notes; mutually exclusive with
+        /// `project_id` (enforced by the `notes_owner_exactly_one`
+        /// CHECK constraint).
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+        /// Denormalised space slug — mirrors the `project_name` denorm.
+        #[serde(default)]
+        space_slug: Option<String>,
         title: String,
         content: String,
         tags: Vec<String>,
         file_hash: GitFileHash,
+        /// Repo-relative on-disk path. Sacred — never mutated by the
+        /// importer. Pre-path-identity events deserialise with `""`;
+        /// hydration falls back to a derived value.
+        #[serde(default)]
+        path: String,
+        /// Initial pinned state. Set from frontmatter (`pinned: true`)
+        /// when a space note is imported; defaults to `false` for
+        /// project notes and pre-pinned-tier events.
+        #[serde(default)]
+        pinned: bool,
     },
     Updated {
         title: String,
@@ -36,13 +56,25 @@ pub enum NoteEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Note {
     pub id: NoteId,
-    pub(crate) project_id: ProjectId,
-    pub(crate) project_name: String,
+    #[builder(default)]
+    pub(crate) project_id: Option<ProjectId>,
+    #[builder(default)]
+    pub(crate) project_name: Option<String>,
+    /// `Some(s)` when this note belongs to a space rather than a project.
+    /// Mutually exclusive with `project_id` (DB CHECK constraint).
+    #[builder(default)]
+    pub(crate) space_id: Option<SpaceId>,
+    /// Denormalised space slug — `Some` exactly when `space_id` is `Some`.
+    #[builder(default)]
+    pub(crate) space_slug: Option<String>,
     pub(crate) title: String,
     pub(crate) content: String,
     pub(crate) tags: Vec<String>,
     pub(crate) file_hash: Option<GitFileHash>,
     pub(crate) pinned: bool,
+    /// Repo-relative on-disk path. The importer never mutates this —
+    /// whatever the user wrote is the path of record.
+    pub path: String,
     pub(super) events: EntityEvents<NoteEvent>,
 }
 
@@ -67,8 +99,9 @@ impl Note {
         &self.tags
     }
 
-    /// Whether the note is pinned (injected into the project's
-    /// shared agent context).
+    /// Whether the note is pinned (injected into agents' `<notes>` block).
+    /// The bit is shared globally — pinning a space note pins it for
+    /// every project that mounts the space.
     pub fn is_pinned(&self) -> bool {
         self.pinned
     }
@@ -157,23 +190,25 @@ impl drua_library::LibrarySynced for Note {
     }
 
     fn searchable_fields(&self) -> SearchableFields {
+        let project_name = self.project_name.as_deref();
+        let space_slug = self.space_slug.as_deref();
+        let (scope_id, scope_slug) = match (self.space_id, self.project_id) {
+            (Some(s), _) => (Some(uuid::Uuid::from(s)), space_slug.map(str::to_string)),
+            (None, Some(p)) => (Some(uuid::Uuid::from(p)), project_name.map(str::to_string)),
+            (None, None) => (None, None),
+        };
         SearchableFields {
             doc_id: self.id.into(),
             doc_type: NOTE_DOC_TYPE,
-            scope_id: Some(self.project_id.into()),
-            scope_slug: Some(self.project_name.clone()),
+            scope_id,
+            scope_slug,
             name: self.title.clone(),
-            path: Some(canonical_note_path(
-                self.id,
-                &self.title,
-                &self.project_name,
-            )),
+            path: Some(self.path.clone()),
             content: self.content.clone(),
         }
     }
 
     fn write_op(&self) -> WriteOp {
-        let canonical = canonical_note_path(self.id, &self.title, &self.project_name);
         let content = self.rendered().into_bytes();
         let id_uuid: uuid::Uuid = self.id.into();
         let message = format!(
@@ -182,7 +217,7 @@ impl drua_library::LibrarySynced for Note {
             &id_uuid.to_string()[..8]
         );
         WriteOp::WriteFile {
-            path: canonical,
+            path: self.path.clone(),
             content,
             message,
         }
@@ -212,20 +247,27 @@ impl TryFromEvents<NoteEvent> for Note {
                     id,
                     project_id,
                     project_name,
+                    space_id,
+                    space_slug,
                     title,
                     content,
                     tags,
                     file_hash,
+                    path,
+                    pinned,
                 } => {
                     builder = builder
                         .id(*id)
                         .project_id(*project_id)
                         .project_name(project_name.clone())
+                        .space_id(*space_id)
+                        .space_slug(space_slug.clone())
                         .title(title.clone())
                         .content(content.clone())
                         .tags(tags.clone())
                         .file_hash(Some(file_hash.clone()))
-                        .pinned(false);
+                        .pinned(*pinned)
+                        .path(path.clone());
                 }
                 NoteEvent::Updated {
                     title,
@@ -253,13 +295,18 @@ impl TryFromEvents<NoteEvent> for Note {
 }
 
 #[derive(Debug, Builder)]
+#[builder(pattern = "owned")]
 pub struct NewNote {
     #[builder(setter(into))]
     pub(super) id: NoteId,
-    #[builder(setter(into))]
-    pub(super) project_id: ProjectId,
-    #[builder(setter(into))]
-    pub(super) project_name: String,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) project_id: Option<ProjectId>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) project_name: Option<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) space_id: Option<SpaceId>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) space_slug: Option<String>,
     #[builder(setter(into))]
     pub(super) title: String,
     #[builder(setter(into))]
@@ -269,13 +316,16 @@ pub struct NewNote {
     pub(super) file_hash: GitFileHash,
     #[builder(default)]
     pub(super) pinned: bool,
+    /// Repo-relative on-disk path. Required — there's no canonicalisation
+    /// fallback. `Notes::store` derives it from `(project_name, title)`;
+    /// the importer passes through whatever the file's real path is.
+    #[builder(setter(into))]
+    pub(super) path: String,
 }
 
 impl NewNote {
     pub fn builder() -> NewNoteBuilder {
-        let mut builder = NewNoteBuilder::default();
-        builder.id(NoteId::new());
-        builder
+        NewNoteBuilder::default().id(NoteId::new())
     }
 }
 
@@ -287,10 +337,14 @@ impl IntoEvents<NoteEvent> for NewNote {
                 id: self.id,
                 project_id: self.project_id,
                 project_name: self.project_name,
+                space_id: self.space_id,
+                space_slug: self.space_slug,
                 title: self.title,
                 content: self.content,
                 tags: self.tags,
                 file_hash: self.file_hash,
+                path: self.path,
+                pinned: self.pinned,
             }],
         )
     }
@@ -304,7 +358,7 @@ mod tests {
 
     use crate::primitives::{NoteId, ProjectId};
 
-    use super::{NewNote, Note};
+    use super::{NewNote, Note, NoteEvent};
 
     fn test_hash() -> GitFileHash {
         let id = NoteId::new();
@@ -324,11 +378,12 @@ mod tests {
         let new = NewNote::builder()
             .id(id)
             .project_id(ProjectId::new())
-            .project_name("test")
+            .project_name("test".to_string())
             .title("Test Note")
             .content("Some content here")
             .tags(vec!["tag1".into(), "tag2".into()])
             .file_hash(test_hash())
+            .path("runtime/projects/test/notes/test-note.md".to_string())
             .build()
             .unwrap();
 
@@ -341,8 +396,9 @@ mod tests {
         assert_eq!(note.title, "Test Note");
         assert_eq!(note.content, "Some content here");
         assert_eq!(note.tags, vec!["tag1", "tag2"]);
-        assert_eq!(note.project_name, "test");
+        assert_eq!(note.project_name.as_deref(), Some("test"));
         assert!(note.file_hash.is_some());
+        assert_eq!(note.path, "runtime/projects/test/notes/test-note.md");
     }
 
     #[test]
@@ -390,5 +446,37 @@ mod tests {
         let result = note.unpin();
         assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
         assert!(!note.pinned);
+    }
+
+    #[test]
+    fn legacy_initialized_event_without_path_deserializes() {
+        // Pre-path-identity events have no `path` key. `#[serde(default)]`
+        // hydrates as empty string.
+        let json = serde_json::json!({
+            "type": "initialized",
+            "id": uuid::Uuid::new_v4(),
+            "project_id": uuid::Uuid::new_v4(),
+            "project_name": "proj",
+            "title": "t",
+            "content": "c",
+            "tags": [],
+            "file_hash": "abc",
+        });
+        let ev: NoteEvent = serde_json::from_value(json).expect("legacy event");
+        match ev {
+            NoteEvent::Initialized {
+                space_id,
+                space_slug,
+                path,
+                pinned,
+                ..
+            } => {
+                assert!(space_id.is_none());
+                assert!(space_slug.is_none());
+                assert!(path.is_empty(), "legacy events default path to empty");
+                assert!(!pinned, "legacy events default pinned to false");
+            }
+            _ => panic!("expected Initialized"),
+        }
     }
 }

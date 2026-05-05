@@ -23,4 +23,8 @@ pub enum NoteError {
     Library(#[from] crate::library::LibraryError),
     #[error("NoteError - Drua: {0}")]
     Drua(#[from] drua_library::LibraryError),
+    #[error("NoteError - BuildEntity: {0}")]
+    BuildEntity(String),
+    #[error("Space-scoped notes must be deleted via the spaces tool (`spaces edit op=delete`)")]
+    SpaceScopedDeleteViaSpaces,
 }

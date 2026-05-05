@@ -4,6 +4,7 @@ use super::agent::*;
 use super::mcp_creds::*;
 use super::sandbox::*;
 
+use super::note::*;
 use super::project::*;
 use super::project_secret::*;
 use super::skill::*;
@@ -193,6 +194,18 @@ impl Mutation {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         app.skills().delete(sub, input.id, input.project_id).await?;
         Ok(SkillDeletePayload {
+            deleted_id: input.id,
+        })
+    }
+
+    async fn note_delete(
+        &self,
+        ctx: &Context<'_>,
+        input: NoteDeleteInput,
+    ) -> async_graphql::Result<NoteDeletePayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        app.notes().delete(sub, input.project_id, input.id).await?;
+        Ok(NoteDeletePayload {
             deleted_id: input.id,
         })
     }

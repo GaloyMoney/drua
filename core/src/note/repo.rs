@@ -10,7 +10,9 @@ use super::entity::*;
 #[es_repo(
     entity = "Note",
     columns(
-        project_id(ty = "ProjectId", list_for(by(created_at))),
+        project_id(ty = "Option<ProjectId>", list_for(by(created_at))),
+        space_id(ty = "Option<SpaceId>", list_for(by(created_at))),
+        path(ty = "String"),
         pinned(ty = "bool"),
     ),
     delete = "soft_without_queries",

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notes (id, project_id, space_id, path, pinned, created_at) VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "586cafbeddbec9d0a6072f8f2e935165b4140b13b7435cbf549feeb987236379"
+}

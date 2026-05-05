@@ -1,24 +1,52 @@
 mod entity;
 pub mod error;
 pub mod file;
+pub mod importer;
 pub(crate) mod repo;
 
-use drua_library::SearchHit;
+use drua_library::{CommitAttribution, SearchHit, WriteOp};
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
 pub use entity::Note;
 use entity::*;
 pub use error::*;
+pub use file::{parse_note_markdown, ParsedNote};
+pub use importer::NotesImporter;
 use repo::*;
 
 pub const NOTE_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("note");
 
+use crate::agent::AgentScope;
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::note::file::render_note_markdown;
+use crate::library::SpaceMounts;
+use crate::note::file::{default_note_path, render_note_markdown};
 use crate::primitives::*;
 use crate::user::Users;
 use std::sync::Arc;
+
+/// Resolved scope for `Notes::import_from_library`. Mirrors `skill::ImportScope`.
+#[derive(Debug, Clone)]
+pub enum ImportScope {
+    Project {
+        project_id: ProjectId,
+        project_name: String,
+    },
+    Space {
+        space_id: SpaceId,
+        space_slug: String,
+    },
+}
+
+impl ImportScope {
+    fn bump_scope(&self) -> ScopeId {
+        match self {
+            ImportScope::Project { project_id, .. } => ScopeId::Project(*project_id),
+            ImportScope::Space { space_id, .. } => ScopeId::Space(*space_id),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Notes {
@@ -26,6 +54,11 @@ pub struct Notes {
     library: drua_library::Library,
     pool: sqlx::PgPool,
     users: Arc<Users>,
+    /// Read facade for the project↔space mount relationship — held
+    /// alongside the repo so `pinned_context_for_scope` can resolve
+    /// space-mounted notes internally without callers passing the
+    /// scope through.
+    space_mounts: Arc<SpaceMounts>,
     context_generation: ContextGeneration,
 }
 
@@ -33,6 +66,7 @@ impl Notes {
     pub fn new(
         pool: &sqlx::PgPool,
         library: drua_library::Library,
+        space_mounts: Arc<SpaceMounts>,
         users: Arc<Users>,
         context_generation: ContextGeneration,
     ) -> Self {
@@ -41,6 +75,7 @@ impl Notes {
             library,
             pool: pool.clone(),
             users,
+            space_mounts,
             context_generation,
         }
     }
@@ -48,16 +83,47 @@ impl Notes {
     /// Registers a `ContextBumpHook` so committing the op bumps the local
     /// `ContextGeneration` and fires a `context_changed` PG NOTIFY. All
     /// mutations go through this helper rather than `repo.begin_op()`.
-    async fn begin_op(&self, project_id: ProjectId) -> Result<es_entity::DbOp<'static>, NoteError> {
+    async fn begin_op(&self, scope: ScopeId) -> Result<es_entity::DbOp<'static>, NoteError> {
         let mut op = self.repo.begin_op().await?;
-        let hook = ContextBumpHook::new(
-            self.context_generation.clone(),
-            self.pool.clone(),
-            ScopeId::Project(project_id),
-        );
+        let hook = ContextBumpHook::new(self.context_generation.clone(), self.pool.clone(), scope);
         op.add_commit_hook(hook)
             .expect("DbOp supports commit hooks");
         Ok(op)
+    }
+
+    /// Composable variant: registers the bump hook on the caller's op.
+    pub(crate) fn register_context_bump<OP: AtomicOperation>(&self, op: &mut OP, scope: ScopeId) {
+        let hook = ContextBumpHook::new(self.context_generation.clone(), self.pool.clone(), scope);
+        if op.add_commit_hook(hook).is_err() {
+            tracing::warn!("AtomicOperation rejected ContextBumpHook; context bump skipped");
+        }
+    }
+
+    /// Wipe the search-store row in the same DbOp and queue a
+    /// [`WriteOp::DeleteFile`] so the upstream git repo loses the
+    /// markdown on the next library write tick. Mirrors
+    /// `Skills::enqueue_skill_delete_in_op`.
+    async fn enqueue_note_delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        note: &Note,
+        attribution: CommitAttribution,
+    ) -> Result<(), NoteError> {
+        let id_uuid: uuid::Uuid = note.id.into();
+        let message = format!("note: delete {}-{}", &note.title, &id_uuid.to_string()[..8]);
+        self.library
+            .enqueue_full_in_op(
+                op,
+                None,
+                vec![(id_uuid, NOTE_DOC_TYPE)],
+                Some(WriteOp::DeleteFile {
+                    path: note.path.clone(),
+                    message,
+                }),
+                attribution,
+            )
+            .await?;
+        Ok(())
     }
 
     #[instrument(name = "note.store", skip(self))]
@@ -75,7 +141,11 @@ impl Notes {
         }
         sub.can(AuthVerb::Create, AuthResource::Note(project_id, None))?;
 
-        let mut op = self.begin_op(project_id).await?.with_db_time().await?;
+        let mut op = self
+            .begin_op(ScopeId::Project(project_id))
+            .await?
+            .with_db_time()
+            .await?;
 
         let note_id = NoteId::new();
         let created_at = op.now().to_rfc3339();
@@ -88,20 +158,20 @@ impl Notes {
             &created_at,
         );
         let file_hash = drua_library::GitFileHash::new(rendered);
+        let path = default_note_path(&title, Some(project_name), None);
 
         let new_note = NewNote::builder()
             .id(note_id)
             .project_id(project_id)
-            .project_name(project_name)
+            .project_name(project_name.to_string())
             .title(&title)
             .content(&content)
             .tags(tags)
             .file_hash(file_hash)
+            .path(path)
             .build()
             .expect("NewNote builder should not fail");
 
-        // Populate EventContext so the Note's post_persist_hook (which
-        // calls library.sync_entity_in_op) picks up rich attribution.
         self.users.commit_attribution().await;
         let note = self.repo.create_in_op(&mut op, new_note).await?;
         op.commit().await?;
@@ -126,9 +196,13 @@ impl Notes {
             AuthResource::Note(project_id, Some(note_id)),
         )?;
 
-        let mut op = self.begin_op(project_id).await?.with_db_time().await?;
+        let mut op = self
+            .begin_op(ScopeId::Project(project_id))
+            .await?
+            .with_db_time()
+            .await?;
         let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
-        if note.project_id != project_id {
+        if note.project_id != Some(project_id) {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Read,
                 resource: AuthResource::Project(Some(project_id)),
@@ -188,9 +262,9 @@ impl Notes {
             AuthVerb::Update,
             AuthResource::Note(project_id, Some(note_id)),
         )?;
-        let mut op = self.begin_op(project_id).await?;
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
-        if note.project_id != project_id {
+        if note.project_id != Some(project_id) {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
                 resource: AuthResource::Project(Some(project_id)),
@@ -214,9 +288,9 @@ impl Notes {
             AuthVerb::Update,
             AuthResource::Note(project_id, Some(note_id)),
         )?;
-        let mut op = self.begin_op(project_id).await?;
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let mut note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
-        if note.project_id != project_id {
+        if note.project_id != Some(project_id) {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
                 resource: AuthResource::Project(Some(project_id)),
@@ -243,7 +317,7 @@ impl Notes {
         let result = self
             .repo
             .list_for_project_id_by_created_at(
-                project_id,
+                Some(project_id),
                 query,
                 es_entity::ListDirection::Descending,
             )
@@ -263,7 +337,7 @@ impl Notes {
             AuthResource::Note(project_id, Some(note_id)),
         )?;
         let note = self.repo.find_by_id(note_id).await?;
-        if note.project_id != project_id {
+        if note.project_id != Some(project_id) {
             return Err(NoteError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Read,
                 resource: AuthResource::Project(Some(project_id)),
@@ -310,12 +384,49 @@ impl Notes {
         let result = self
             .repo
             .list_for_project_id_by_created_at(
-                project_id,
+                Some(project_id),
                 query,
                 es_entity::ListDirection::Descending,
             )
             .await?;
         Ok(result.entities)
+    }
+
+    /// Soft-deletes the note row and enqueues a [`WriteOp::DeleteFile`]
+    /// for the canonical markdown path so the next library write tick
+    /// removes it from the upstream git repo. Space-scoped notes are
+    /// rejected — callers must route through the spaces tool to keep
+    /// the project / space surfaces cleanly separated.
+    #[instrument(name = "note.delete", skip(self))]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+        note_id: NoteId,
+    ) -> Result<(), NoteError> {
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Note(project_id, Some(note_id)),
+        )?;
+        Audit::record_action_if_unset("note.delete");
+        Audit::record_project_id(project_id);
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
+        let note = self.repo.find_by_id_in_op(&mut op, note_id).await?;
+        if note.space_id.is_some() {
+            return Err(NoteError::SpaceScopedDeleteViaSpaces);
+        }
+        if note.project_id != Some(project_id) {
+            return Err(NoteError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Delete,
+                resource: AuthResource::Note(project_id, Some(note_id)),
+            }));
+        }
+        let attribution = self.users.commit_attribution().await;
+        self.enqueue_note_delete_in_op(&mut op, &note, attribution)
+            .await?;
+        self.repo.delete_in_op(&mut op, note).await?;
+        op.commit().await?;
+        Ok(())
     }
 
     /// Used during project cascade deletion.
@@ -331,40 +442,161 @@ impl Notes {
         Ok(())
     }
 
-    /// Char budget for pinned-note injection. Notes are included
-    /// most-recently-updated-first; remaining pinned notes are omitted
-    /// with a hint to use `notes search`.
+    /// Reverse-sync delete: soft-deletes the note whose canonical
+    /// markdown lives at `path` and bumps the appropriate
+    /// `ContextGeneration`. Mirrors `Skills::delete_by_path_in_op`.
+    pub(crate) async fn delete_by_path_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<Option<NoteId>, NoteError> {
+        let doc_type = NOTE_DOC_TYPE;
+        let row = sqlx::query!(
+            "SELECT doc_id
+             FROM library_documents
+             WHERE path = $1 AND doc_type = $2",
+            path,
+            doc_type.as_str(),
+        )
+        .fetch_optional(op.as_executor())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let id = NoteId::from(row.doc_id);
+        let note = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let scope = match (note.space_id, note.project_id) {
+            (Some(sid), _) => ScopeId::Space(sid),
+            (None, Some(pid)) => ScopeId::Project(pid),
+            (None, None) => ScopeId::Global,
+        };
+        self.repo.delete_in_op(op, note).await?;
+        self.register_context_bump(op, scope);
+        Ok(Some(id))
+    }
+
+    /// Reverse-sync entry point: persist a `ParsedNote` produced by the
+    /// library importer. Creates or updates depending on whether the
+    /// note already exists. `Ok(None)` signals idempotency — the
+    /// existing entity's `file_hash` matches the incoming bytes.
+    pub(crate) async fn import_from_library<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        parsed: ParsedNote,
+        scope: ImportScope,
+    ) -> Result<Option<Note>, NoteError> {
+        let file_hash = parsed.file_hash();
+
+        if let Some(mut existing) = self
+            .repo
+            .maybe_find_by_id_in_op(&mut *op, parsed.note_id)
+            .await?
+        {
+            if !existing
+                .update(
+                    parsed.title.clone(),
+                    parsed.content.clone(),
+                    parsed.tags.clone(),
+                    file_hash,
+                )
+                .did_execute()
+            {
+                return Ok(None);
+            }
+            self.repo.update_in_op(op, &mut existing).await?;
+            self.register_context_bump(op, scope.bump_scope());
+            return Ok(Some(existing));
+        }
+
+        let mut builder = NewNote::builder();
+        builder = builder
+            .id(parsed.note_id)
+            .title(parsed.title)
+            .content(parsed.content)
+            .tags(parsed.tags)
+            .file_hash(file_hash)
+            .pinned(parsed.pinned)
+            .path(parsed.path);
+        match &scope {
+            ImportScope::Project {
+                project_id,
+                project_name,
+            } => {
+                builder = builder
+                    .project_id(*project_id)
+                    .project_name(project_name.clone());
+            }
+            ImportScope::Space {
+                space_id,
+                space_slug,
+            } => {
+                builder = builder.space_id(*space_id).space_slug(space_slug.clone());
+            }
+        }
+        let new = builder
+            .build()
+            .map_err(|e| NoteError::BuildEntity(e.to_string()))?;
+        let note = self.repo.create_in_op(op, new).await?;
+        self.register_context_bump(op, scope.bump_scope());
+        Ok(Some(note))
+    }
+
+    /// Char budget for pinned-note injection.
     const PINNED_INJECTION_BUDGET: usize = 8000;
 
     const NOTE_INDEX_LIMIT: usize = 20;
 
     /// Two sections: pinned notes (full content within budget) and a recent
-    /// notes index (title+tags only). `None` if the project has no notes.
-    /// Internal — no auth check, called at agent creation.
-    #[instrument(name = "note.pinned_context_for_project", skip(self))]
-    pub async fn pinned_context_for_project(
+    /// notes index (title+tags only). `None` if neither the project nor
+    /// any of its mounted spaces have notes. Internal — no auth check,
+    /// called at agent creation.
+    ///
+    /// Notes from mounted spaces appear alongside project notes in both
+    /// sections. The pinned bit is global to the note — pinning a space
+    /// note pins it for every mounting project; unpinning does the
+    /// reverse.
+    #[instrument(name = "note.pinned_context_for_scope", skip(self, scope))]
+    pub async fn pinned_context_for_scope(
         &self,
-        project_id: ProjectId,
+        scope: &AgentScope,
     ) -> Result<Option<String>, NoteError> {
-        let query = es_entity::PaginatedQueryArgs {
-            first: 100,
-            after: None,
-        };
-        let result = self
+        let project_notes = self
             .repo
             .list_for_project_id_by_created_at(
-                project_id,
-                query,
+                Some(scope.project_id),
+                es_entity::PaginatedQueryArgs {
+                    first: 100,
+                    after: None,
+                },
                 es_entity::ListDirection::Descending,
             )
-            .await?;
+            .await?
+            .entities;
 
-        if result.entities.is_empty() {
+        let mut space_notes: Vec<Note> = Vec::new();
+        for space_id in &scope.mounted_space_ids {
+            let res = self
+                .repo
+                .list_for_space_id_by_created_at(
+                    Some(*space_id),
+                    es_entity::PaginatedQueryArgs {
+                        first: 100,
+                        after: None,
+                    },
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            space_notes.extend(res.entities);
+        }
+
+        if project_notes.is_empty() && space_notes.is_empty() {
             return Ok(None);
         }
 
-        let mut pinned: Vec<&Note> = result.entities.iter().filter(|n| n.pinned).collect();
-        let non_pinned: Vec<&Note> = result.entities.iter().filter(|n| !n.pinned).collect();
+        let mut pinned: Vec<&Note> = project_notes.iter().filter(|n| n.pinned).collect();
+        pinned.extend(space_notes.iter().filter(|n| n.pinned));
+        let mut non_pinned: Vec<&Note> = project_notes.iter().filter(|n| !n.pinned).collect();
+        non_pinned.extend(space_notes.iter().filter(|n| !n.pinned));
 
         let header = "# Project Notes\n\n\
              Use the `notes` tool with command `search` to retrieve full content.\n";
@@ -385,7 +617,12 @@ impl Notes {
             let total = pinned.len();
 
             for note in &pinned {
-                let entry = format!("\n### {}\n{}\n", note.title, note.content);
+                let scope_tag = if note.space_slug.is_some() {
+                    " [space]"
+                } else {
+                    ""
+                };
+                let entry = format!("\n### {}{}\n{}\n", note.title, scope_tag, note.content);
                 if entry.len() > remaining {
                     break;
                 }
@@ -429,5 +666,10 @@ impl Notes {
         }
 
         Ok(Some(buf))
+    }
+
+    /// Read facade (for diagnostic / admin tools).
+    pub fn space_mounts(&self) -> &Arc<SpaceMounts> {
+        &self.space_mounts
     }
 }
