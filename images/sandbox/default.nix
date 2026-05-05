@@ -97,8 +97,6 @@ pkgs.dockerTools.buildLayeredImage {
     gitconfig
     entrypoint
     sandbox-tool-server
-  ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-    pkgs.bubblewrap
   ];
   fakeRootCommands = ''
     mkdir -p ./workspace
