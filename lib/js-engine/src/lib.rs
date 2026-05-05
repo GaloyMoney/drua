@@ -6,12 +6,12 @@ mod error;
 
 pub use error::JsEngineError;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rquickjs::function::Rest;
+use rquickjs::function::{Opt, Rest};
 use rquickjs::prelude::Promised;
 use rquickjs::{async_with, AsyncContext, AsyncRuntime, CatchResultExt, Function, Object};
 
@@ -152,6 +152,9 @@ impl JsEngine {
             let value_json: String = async_with!(ctx => |ctx| {
                 register_console(&ctx, Arc::clone(&console_buf_inner))
                     .map_err(|e| JsEngineError::Runtime(format!("console registration: {e}")))?;
+
+                register_timers(&ctx)
+                    .map_err(|e| JsEngineError::Runtime(format!("timer registration: {e}")))?;
 
                 register_tool_bridge(
                     &ctx,
@@ -340,6 +343,70 @@ fn register_console(
 
     ctx.globals().set("console", console)?;
     Ok(())
+}
+
+fn register_timers(ctx: &rquickjs::Ctx<'_>) -> Result<(), rquickjs::Error> {
+    let next_timer_id = Arc::new(AtomicUsize::new(1));
+    let active_timers = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    let set_next_timer_id = Arc::clone(&next_timer_id);
+    let set_active_timers = Arc::clone(&active_timers);
+    ctx.globals().set(
+        "setTimeout",
+        Function::new(ctx.clone(), move |ctx, callback, delay_ms, args| {
+            set_timeout(
+                ctx,
+                callback,
+                delay_ms,
+                args,
+                Arc::clone(&set_next_timer_id),
+                Arc::clone(&set_active_timers),
+            )
+        })?,
+    )?;
+
+    ctx.globals().set(
+        "clearTimeout",
+        Function::new(ctx.clone(), move |timer_id: usize| {
+            if let Some(cancel) = active_timers.lock().unwrap().remove(&timer_id) {
+                let _ = cancel.send(());
+            }
+        })?,
+    )?;
+    Ok(())
+}
+
+fn set_timeout<'js>(
+    ctx: rquickjs::Ctx<'js>,
+    callback: Function<'js>,
+    delay_ms: Opt<f64>,
+    args: Rest<rquickjs::Value<'js>>,
+    next_timer_id: Arc<AtomicUsize>,
+    active_timers: Arc<std::sync::Mutex<HashMap<usize, tokio::sync::oneshot::Sender<()>>>>,
+) -> rquickjs::Result<usize> {
+    let timer_id = next_timer_id.fetch_add(1, Ordering::Relaxed);
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    active_timers.lock().unwrap().insert(timer_id, cancel);
+
+    let delay_ms = delay_ms.0.unwrap_or(0.0);
+    let millis = if delay_ms.is_finite() && delay_ms > 0.0 {
+        delay_ms as u64
+    } else {
+        0
+    };
+
+    ctx.spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(millis)) => {
+                if active_timers.lock().unwrap().remove(&timer_id).is_some() {
+                    let _ = callback.call::<_, ()>((Rest(args.0),));
+                }
+            }
+            _ = cancelled => {}
+        }
+    });
+
+    Ok(timer_id)
 }
 
 fn format_console_args<'js>(
@@ -851,6 +918,98 @@ mod tests {
             result.value,
             serde_json::json!({"caught": "tool call failed", "isToolError": true})
         );
+    }
+
+    #[tokio::test]
+    async fn set_timeout_resolves_promise_sleep() {
+        let result = engine()
+            .execute(
+                r#"
+                const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+                let done = false;
+                await sleep(10);
+                done = true;
+                return done;
+                "#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.value, serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn set_timeout_returns_handle_and_supports_callback_args() {
+        let result = engine()
+            .execute(
+                r#"
+                return await new Promise(resolve => {
+                    const id = setTimeout(resolve, 10, "ready");
+                    if (typeof id !== "number") resolve("bad id");
+                });
+                "#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.value, serde_json::json!("ready"));
+    }
+
+    #[tokio::test]
+    async fn fire_and_forget_timeout_runs_before_completion() {
+        let result = engine()
+            .execute(
+                r#"
+                setTimeout(() => console.log("timer fired"), 10);
+                return "done";
+                "#,
+                Arc::new(EchoDispatcher),
+                timeout(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.value, serde_json::json!("done"));
+        assert_eq!(result.console_output, vec!["timer fired"]);
+    }
+
+    #[tokio::test]
+    async fn clear_timeout_aborts_pending_sleep() {
+        let result = engine()
+            .execute(
+                r#"
+                const id = setTimeout(() => console.log("should not run"), 500);
+                clearTimeout(id);
+                return "done";
+                "#,
+                Arc::new(EchoDispatcher),
+                Duration::from_millis(100),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.value, serde_json::json!("done"));
+        assert!(result.console_output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_timeout_delay_counts_against_execution_timeout() {
+        let result = engine()
+            .execute(
+                r#"
+                await new Promise(resolve => setTimeout(resolve, 500));
+                return "late";
+                "#,
+                Arc::new(EchoDispatcher),
+                Duration::from_millis(50),
+            )
+            .await;
+
+        assert!(matches!(result, Err(JsEngineError::Timeout(_))));
     }
 
     #[tokio::test]
