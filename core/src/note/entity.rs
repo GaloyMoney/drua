@@ -147,38 +147,31 @@ impl Note {
             .unwrap_or_default()
     }
 
-    pub fn pin(&mut self) -> Idempotent<()> {
-        idempotency_guard!(
-            self.events.iter_all().rev(),
-            already_applied: NoteEvent::Pinned {},
-            resets_on: NoteEvent::Unpinned { .. }
-        );
-        self.pinned = true;
-        self.events.push(NoteEvent::Pinned {});
-        Idempotent::Executed(())
-    }
-
-    pub fn unpin(&mut self) -> Idempotent<()> {
-        idempotency_guard!(
-            self.events.iter_all().rev(),
-            already_applied: NoteEvent::Unpinned {},
-            resets_on: NoteEvent::Pinned { .. }
-        );
-        self.pinned = false;
-        self.events.push(NoteEvent::Unpinned {});
-        Idempotent::Executed(())
-    }
-
-    /// Set pin state to `pinned`. Wraps `pin` / `unpin` so callers
-    /// driving from a desired-state value (e.g. importer reconciling
-    /// against frontmatter) don't need the `if pinned { pin } else
-    /// { unpin }` dance. Idempotent end-to-end.
+    /// Set pin state to `pinned`. Idempotent — calling with a value
+    /// equal to the current state pushes no event and returns
+    /// `AlreadyApplied`. The two branches inline the
+    /// `idempotency_guard!` matchers because the macro short-circuits
+    /// the enclosing function on `already_applied`, so the guard has
+    /// to live at the same lexical level as the early-return.
     pub fn update_pin(&mut self, pinned: bool) -> Idempotent<()> {
         if pinned {
-            self.pin()
+            idempotency_guard!(
+                self.events.iter_all().rev(),
+                already_applied: NoteEvent::Pinned {},
+                resets_on: NoteEvent::Unpinned { .. }
+            );
+            self.pinned = true;
+            self.events.push(NoteEvent::Pinned {});
         } else {
-            self.unpin()
+            idempotency_guard!(
+                self.events.iter_all().rev(),
+                already_applied: NoteEvent::Unpinned {},
+                resets_on: NoteEvent::Pinned { .. }
+            );
+            self.pinned = false;
+            self.events.push(NoteEvent::Unpinned {});
         }
+        Idempotent::Executed(())
     }
 
     /// Records a path change on the entity. Idempotent — same path is
@@ -496,19 +489,19 @@ mod tests {
         let mut note = new_note();
         assert!(!note.pinned);
 
-        let result = note.pin();
+        let result = note.update_pin(true);
         assert!(matches!(result, es_entity::Idempotent::Executed(())));
         assert!(note.pinned);
 
-        let result = note.pin();
+        let result = note.update_pin(true);
         assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
         assert!(note.pinned);
 
-        let result = note.unpin();
+        let result = note.update_pin(false);
         assert!(matches!(result, es_entity::Idempotent::Executed(())));
         assert!(!note.pinned);
 
-        let result = note.unpin();
+        let result = note.update_pin(false);
         assert!(matches!(result, es_entity::Idempotent::AlreadyApplied));
         assert!(!note.pinned);
     }
@@ -518,7 +511,7 @@ mod tests {
         let mut note = new_note();
         let unpinned_hash = note.file_hash();
 
-        let _ = note.pin();
+        let _ = note.update_pin(true);
         let pinned_hash = note.file_hash();
         assert_ne!(
             unpinned_hash, pinned_hash,
@@ -529,7 +522,7 @@ mod tests {
             "rendered output must include `pinned: true` when pinned"
         );
 
-        let _ = note.unpin();
+        let _ = note.update_pin(false);
         assert_eq!(
             note.file_hash(),
             unpinned_hash,

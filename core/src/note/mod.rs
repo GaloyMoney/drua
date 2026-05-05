@@ -263,7 +263,7 @@ impl Notes {
                 resource: AuthResource::Project(Some(project_id)),
             }));
         }
-        if note.pin().did_execute() {
+        if note.update_pin(true).did_execute() {
             self.repo.update_in_op(&mut op, &mut note).await?;
             op.commit().await?;
         }
@@ -289,7 +289,7 @@ impl Notes {
                 resource: AuthResource::Project(Some(project_id)),
             }));
         }
-        if note.unpin().did_execute() {
+        if note.update_pin(false).did_execute() {
             self.repo.update_in_op(&mut op, &mut note).await?;
             op.commit().await?;
         }
@@ -693,4 +693,3 @@ impl Notes {
         Ok(Some(existing))
     }
 }
-
