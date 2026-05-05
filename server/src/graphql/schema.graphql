@@ -243,6 +243,7 @@ type Mutation {
 	sandboxCreate(input: SandboxCreateInput!): SandboxCreatePayload!
 	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
+	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
 }
 
 """
@@ -535,6 +536,15 @@ type Skill {
 	id: SkillId!
 	name: String!
 	projectId: ProjectId
+}
+
+input SkillDeleteInput {
+	id: SkillId!
+	projectId: ProjectId!
+}
+
+type SkillDeletePayload {
+	deletedId: SkillId!
 }
 
 scalar SkillId

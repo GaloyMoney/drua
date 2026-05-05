@@ -26,4 +26,6 @@ pub enum SkillError {
     Drua(#[from] drua_library::LibraryError),
     #[error("SkillError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
+    #[error("SkillError - skill is space-scoped; delete via the spaces tool")]
+    SpaceScopedDeleteViaSpaces,
 }

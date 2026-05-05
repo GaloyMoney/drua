@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_graphql::{ComplexObject, SimpleObject};
+use async_graphql::{ComplexObject, InputObject, SimpleObject};
 
 use super::primitives::*;
 
@@ -37,4 +37,15 @@ impl From<DomainSkill> for Skill {
             entity: Arc::new(entity),
         }
     }
+}
+
+#[derive(InputObject)]
+pub struct SkillDeleteInput {
+    pub id: SkillId,
+    pub project_id: ProjectId,
+}
+
+#[derive(SimpleObject)]
+pub struct SkillDeletePayload {
+    pub deleted_id: SkillId,
 }

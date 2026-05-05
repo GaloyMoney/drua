@@ -11,7 +11,7 @@ pub const SKILL_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("sk
 
 use std::sync::Arc;
 
-use drua_library::SearchHit;
+use drua_library::{CommitAttribution, SearchHit, WriteOp};
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
@@ -20,6 +20,7 @@ use crate::audit::Audit;
 use crate::library::SpaceMounts;
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
+use crate::skill::file::{canonical_skill_path, slugify};
 use crate::user::Users;
 pub use entity::*;
 pub use error::*;
@@ -117,13 +118,19 @@ impl Skills {
         }
     }
 
-    /// Side-effect: populates `EventContext` with the rich
+    /// Populates `EventContext` with the rich
     /// [`drua_library::CommitAttribution`] so post-persist library
-    /// sync hooks pick it up. No-op when `users` isn't wired (test
-    /// constructors via `new_without_library`).
-    async fn populate_attribution(&self) {
+    /// sync hooks pick it up, and returns the resolved attribution for
+    /// callers (e.g. delete) that need to enqueue a write op of their
+    /// own. Returns the library default when `users` isn't wired
+    /// (test constructors via `new_without_library`).
+    async fn populate_attribution(&self) -> CommitAttribution {
         if let Some(users) = self.users.as_ref() {
-            let _ = users.commit_attribution().await;
+            users.commit_attribution().await
+        } else {
+            let attribution = CommitAttribution::library_default();
+            attribution.put_in_event_context();
+            attribution
         }
     }
 
@@ -158,6 +165,37 @@ impl Skills {
 
     pub fn sandboxes(&self) -> &Sandboxes {
         &self.sandboxes
+    }
+
+    /// Queue a [`WriteOp::DeleteFile`] against the canonical markdown
+    /// path so the next library write tick removes it from the upstream
+    /// repo. No-op when no library is wired (test constructors via
+    /// `new_without_library`).
+    async fn enqueue_skill_delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        skill: &Skill,
+        attribution: CommitAttribution,
+    ) -> Result<(), SkillError> {
+        let Some(library) = self.library.as_ref() else {
+            return Ok(());
+        };
+        let path = canonical_skill_path(
+            skill.id,
+            &skill.name,
+            skill.project_name.as_deref(),
+            skill.space_slug.as_deref(),
+        );
+        let id_uuid: uuid::Uuid = skill.id.into();
+        let message = format!(
+            "skill: delete {}-{}",
+            slugify(&skill.name),
+            &id_uuid.to_string()[..8]
+        );
+        library
+            .enqueue_write_in_op(op, WriteOp::DeleteFile { path, message }, attribution)
+            .await?;
+        Ok(())
     }
 
     #[instrument(name = "skill.find_by_id", skip_all)]
@@ -556,9 +594,11 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Soft-delete only — the on-disk file is left in the library
-    /// until the owning project is deleted (single-file removal
-    /// isn't plumbed through `WriteToRuntime` yet).
+    /// Soft-deletes the skill row and enqueues a [`WriteOp::DeleteFile`]
+    /// for the canonical markdown path so the next library write tick
+    /// removes it from the upstream git repo. Space-scoped skills are
+    /// rejected — callers must route through the spaces tool to keep
+    /// the project / space surfaces cleanly separated.
     #[instrument(name = "skill.delete", skip(self))]
     pub async fn delete(
         &self,
@@ -572,13 +612,18 @@ impl Skills {
         Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if skill.space_id.is_some() {
+            return Err(SkillError::SpaceScopedDeleteViaSpaces);
+        }
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Delete,
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
-        self.populate_attribution().await;
+        let attribution = self.populate_attribution().await;
+        self.enqueue_skill_delete_in_op(&mut op, &skill, attribution)
+            .await?;
         self.repo.delete_in_op(&mut op, skill).await?;
         op.commit().await?;
         Ok(())
@@ -656,7 +701,9 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Soft-delete only — same caveat as [`Self::delete`].
+    /// Space-scoped counterpart of [`Self::delete`] — soft-deletes the row
+    /// and enqueues a [`WriteOp::DeleteFile`] against the canonical
+    /// `spaces/<slug>/skills/...` path.
     #[instrument(name = "skill.delete_in_space", skip(self))]
     pub async fn delete_in_space(
         &self,
@@ -679,7 +726,9 @@ impl Skills {
                 resource: AuthResource::SpaceSkill(space_id, Some(id)),
             }));
         }
-        self.populate_attribution().await;
+        let attribution = self.populate_attribution().await;
+        self.enqueue_skill_delete_in_op(&mut op, &skill, attribution)
+            .await?;
         self.repo.delete_in_op(&mut op, skill).await?;
         op.commit().await?;
         Ok(())
