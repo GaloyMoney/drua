@@ -756,12 +756,10 @@ impl AgentSession {
         ))
     }
 
-    /// Workflow-tier projection: counts of tool calls by name, an
-    /// ordered timeline of tool-call invocations (no inputs/outputs),
-    /// assistant-round count, last-known model name, and aggregated
-    /// token usage. Counts span every event (persisted + in-memory);
-    /// the `tool_call_sequence` timeline only carries entries for
-    /// persisted events whose `recorded_at` is known.
+    /// Counts span every event (persisted + in-memory), but
+    /// `tool_call_sequence` is populated only from persisted events —
+    /// the timeline needs the `recorded_at` timestamp that only
+    /// persisted entries carry.
     pub fn tool_call_summary(&self) -> ToolCallSummary {
         let mut summary = ToolCallSummary::default();
         for event in self.events.iter_all() {
@@ -2198,8 +2196,7 @@ mod tests {
                 .get("honeycomb_get_query_results"),
             Some(&1)
         );
-        // `tool_call_sequence` is only populated from persisted events
-        // (it needs timestamps). In-memory events drive the counts above.
+        // sequence is empty for in-memory events; counts above suffice.
         assert_eq!(summary.tokens.input, 100);
         assert_eq!(summary.tokens.output, 50);
         assert_eq!(summary.tokens.cache_read, 10);

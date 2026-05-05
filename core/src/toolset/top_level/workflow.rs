@@ -1288,10 +1288,9 @@ pub(crate) fn format_run_text(r: &WorkflowRun) -> String {
     out
 }
 
-/// Renders the `--include=steps` projection: per-step tool-call
-/// telemetry, model, rounds, tokens, and the step's `output_text`
-/// (the agent's last assistant turn, already captured as the step's
-/// return value). NO transcript, NO tool inputs/outputs.
+/// `--include=steps` projection. `output_text` is the step's return
+/// value (= the agent's last assistant turn). No transcript, no tool
+/// inputs/outputs — those are session-tier.
 pub(crate) fn format_run_with_details_text(d: &RunWithStepDetails) -> String {
     const TOOL_CALL_SEQUENCE_CAP: usize = 200;
 

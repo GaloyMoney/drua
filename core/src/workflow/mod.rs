@@ -16,7 +16,9 @@ use std::sync::Arc;
 use rand::RngCore;
 use tracing::instrument;
 
-use crate::agent::Agents;
+use crate::agent::session::error::AgentSessionError;
+use crate::agent::session::{AgentSessionId, ToolCallSummary};
+use crate::agent::{AgentError, Agents};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -32,13 +34,12 @@ pub use entity::*;
 pub use error::*;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 
-use crate::agent::session::{AgentSessionId, ToolCallSummary};
-
-/// Filter passed to [`Workflows::list_runs_filtered`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStateFilter {
     Succeeded,
     Failed,
+    /// Matches both `Pending` and `Running` — a run waiting in the
+    /// queue is "running" from the caller's perspective.
     Running,
 }
 
@@ -56,7 +57,6 @@ impl RunStateFilter {
     }
 }
 
-/// Output of [`Workflows::find_run_with_step_details`].
 pub struct RunWithStepDetails {
     pub run: WorkflowRun,
     pub steps: Vec<StepWithDetails>,
@@ -751,7 +751,17 @@ impl Workflows {
                         session_id: session.id,
                         summary: session.tool_call_summary(),
                     }),
-                    Err(_) => None,
+                    // Session not yet created (the executor creates the
+                    // agent then immediately initialises a session;
+                    // there's a brief window where one exists without
+                    // the other). Telemetry is legitimately absent.
+                    Err(AgentError::Session(AgentSessionError::Find(ref e)))
+                        if e.was_not_found() =>
+                    {
+                        None
+                    }
+                    // Auth, DB, hydration etc — surface, don't paper over.
+                    Err(e) => return Err(WorkflowError::Agent(e.to_string())),
                 },
                 None => None,
             };
@@ -877,7 +887,6 @@ mod tests {
             &other_prefix,
             "classify-and-comment"
         ));
-        // Step names with embedded hyphens still match when the suffix is exact.
         let with_hyphens = format!("{prefix}step-with-hyphens");
         assert!(super::matches_step_agent(
             &with_hyphens,
