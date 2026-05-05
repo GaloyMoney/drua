@@ -725,8 +725,6 @@ impl Skills {
         parsed: ParsedSkill,
         scope: ImportScope,
     ) -> Result<Option<Skill>, SkillError> {
-        let file_hash = parsed.file_hash();
-
         // `maybe_find_by_id_include_deleted_in_op` returns soft-deleted
         // rows too — we need them so `spaces edit op=move` can revive
         // the row that `delete-old-path` just soft-deleted (otherwise
@@ -741,7 +739,9 @@ impl Skills {
             // SQL — clears `deleted = TRUE` only if it was set. No
             // separate "is it deleted?" probe needed.
             self.repo.revive_in_op(&mut *op, parsed.skill_id).await?;
-            return reconcile_existing_skill(self, op, existing, parsed, file_hash, scope).await;
+            return self
+                .reconcile_existing_skill_in_op(op, existing, parsed, scope)
+                .await;
         }
 
         // Truly new — fresh create.
@@ -790,59 +790,41 @@ impl Skills {
             context_generation: ContextGeneration::new(),
         }
     }
-}
 
-/// Reconcile content (Updated event) and path (PathChanged event) on
-/// an existing live skill against an incoming `ParsedSkill` from the
-/// reverse-sync importer. Returns `Ok(None)` if neither delta produced
-/// an event (round-trip already in sync). Free function so the live
-/// and revival branches in `import_from_library` can share it without
-/// fighting the borrow checker over `&mut self`.
-async fn reconcile_existing_skill<OP: AtomicOperation>(
-    skills: &Skills,
-    op: &mut OP,
-    mut existing: Skill,
-    parsed: ParsedSkill,
-    _file_hash: drua_library::GitFileHash,
-    scope: ImportScope,
-) -> Result<Option<Skill>, SkillError> {
-    // Granular comparison rather than hash-based: the rendered file
-    // doesn't include `name:` (Model A — filename is the canonical
-    // name), so a stale DB row whose `name` differs from the filename
-    // slug renders to the same bytes as the parsed file. The hash
-    // would say "no change" while the entity-level fields are wrong.
-    // `update_content` walks the fields and pushes an Updated event
-    // only when something actually differs.
-    let content_changed = existing
-        .update_content(
-            Some(parsed.name.clone()),
-            Some(parsed.description.clone()),
-            Some(parsed.body.clone()),
-        )
-        .did_execute();
-    let path_changed = existing.change_path(parsed.path).did_execute();
-    if !content_changed && !path_changed {
-        return Ok(None);
-    }
-    skills.repo.update_in_op(op, &mut existing).await?;
-    // `sync_entity_in_op` only fires when the new events include a
-    // content event (Initialized/Updated). A pure-move case (revive +
-    // `PathChanged` only) leaves the `library_documents` row that
-    // `delete_by_path_in_op` wiped permanently empty. Re-upsert the
-    // search row directly here so the entity stays findable. Skipped
-    // in the `content_changed` case — the post-persist hook already
-    // does it. Skipped when no library is wired (test contexts).
-    if path_changed && !content_changed {
-        if let Some(library) = skills.library.as_ref() {
-            use drua_library::LibrarySynced;
-            library
-                .search()
-                .upsert_in_op(op, &existing.searchable_fields())
-                .await?;
+    /// Reconcile content (Updated event) and path (PathChanged event)
+    /// on an existing live skill against an incoming `ParsedSkill`
+    /// from the reverse-sync importer. `Ok(None)` when no delta
+    /// produced an event (round-trip already in sync).
+    ///
+    /// Granular comparison rather than hash-based: the rendered file
+    /// doesn't include `name:` (Model A — filename is the canonical
+    /// name), so a stale DB row whose `name` differs from the filename
+    /// slug renders to the same bytes as the parsed file. The hash
+    /// would say "no change" while the entity-level fields are wrong.
+    /// `update_content` walks the fields and pushes an Updated event
+    /// only when something actually differs.
+    async fn reconcile_existing_skill_in_op<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        mut existing: Skill,
+        parsed: ParsedSkill,
+        scope: ImportScope,
+    ) -> Result<Option<Skill>, SkillError> {
+        let mut updated = existing
+            .update_content(
+                Some(parsed.name.clone()),
+                Some(parsed.description.clone()),
+                Some(parsed.body.clone()),
+            )
+            .did_execute();
+        updated |= existing.change_path(parsed.path).did_execute();
+        if !updated {
+            return Ok(None);
         }
+        self.repo.update_in_op(op, &mut existing).await?;
+        self.register_context_bump(op, scope.bump_scope());
+        Ok(Some(existing))
     }
-    skills.register_context_bump(op, scope.bump_scope());
-    Ok(Some(existing))
 }
 
 #[cfg(test)]

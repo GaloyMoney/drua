@@ -169,6 +169,18 @@ impl Note {
         Idempotent::Executed(())
     }
 
+    /// Set pin state to `pinned`. Wraps `pin` / `unpin` so callers
+    /// driving from a desired-state value (e.g. importer reconciling
+    /// against frontmatter) don't need the `if pinned { pin } else
+    /// { unpin }` dance. Idempotent end-to-end.
+    pub fn update_pin(&mut self, pinned: bool) -> Idempotent<()> {
+        if pinned {
+            self.pin()
+        } else {
+            self.unpin()
+        }
+    }
+
     /// Records a path change on the entity. Idempotent — same path is
     /// a no-op. Only invoked by reverse-sync when a note is re-imported
     /// at a new on-disk location (e.g. user moved the markdown via

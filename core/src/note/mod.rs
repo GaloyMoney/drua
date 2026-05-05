@@ -492,7 +492,9 @@ impl Notes {
             .await?
         {
             self.repo.revive_in_op(&mut *op, parsed.note_id).await?;
-            return reconcile_existing_note(self, op, existing, parsed, file_hash, scope).await;
+            return self
+                .reconcile_existing_note_in_op(op, existing, parsed, file_hash, scope)
+                .await;
         }
 
         // Truly new — fresh create.
@@ -659,59 +661,36 @@ impl Notes {
     pub fn space_mounts(&self) -> &Arc<SpaceMounts> {
         &self.space_mounts
     }
+
+    /// Reconcile content (Updated event), pin (Pinned/Unpinned) and
+    /// path (PathChanged event) on an existing live note against an
+    /// incoming `ParsedNote` from the reverse-sync importer. Returns
+    /// `Ok(None)` when no delta produced an event — round-trip already
+    /// in sync.
+    async fn reconcile_existing_note_in_op<OP: AtomicOperation>(
+        &self,
+        op: &mut OP,
+        mut existing: Note,
+        parsed: ParsedNote,
+        file_hash: drua_library::GitFileHash,
+        scope: ImportScope,
+    ) -> Result<Option<Note>, NoteError> {
+        let mut updated = existing
+            .update(
+                parsed.title.clone(),
+                parsed.content.clone(),
+                parsed.tags.clone(),
+                file_hash,
+            )
+            .did_execute();
+        updated |= existing.update_pin(parsed.pinned).did_execute();
+        updated |= existing.change_path(parsed.path).did_execute();
+        if !updated {
+            return Ok(None);
+        }
+        self.repo.update_in_op(op, &mut existing).await?;
+        self.register_context_bump(op, scope.bump_scope());
+        Ok(Some(existing))
+    }
 }
 
-/// Reconcile content (Updated event), pin (Pinned/Unpinned) and path
-/// (PathChanged event) on an existing live note against an incoming
-/// `ParsedNote` from the reverse-sync importer. `Ok(None)` when no
-/// delta produced an event. Free function so the live and revival
-/// branches in `import_from_library` can share it without fighting
-/// the borrow checker over `&mut self`.
-async fn reconcile_existing_note<OP: AtomicOperation>(
-    notes: &Notes,
-    op: &mut OP,
-    mut existing: Note,
-    parsed: ParsedNote,
-    file_hash: drua_library::GitFileHash,
-    scope: ImportScope,
-) -> Result<Option<Note>, NoteError> {
-    let content_changed = existing
-        .update(
-            parsed.title.clone(),
-            parsed.content.clone(),
-            parsed.tags.clone(),
-            file_hash,
-        )
-        .did_execute();
-    let pin_changed = if parsed.pinned != existing.pinned {
-        if parsed.pinned {
-            existing.pin().did_execute()
-        } else {
-            existing.unpin().did_execute()
-        }
-    } else {
-        false
-    };
-    let path_changed = existing.change_path(parsed.path).did_execute();
-    if !content_changed && !pin_changed && !path_changed {
-        return Ok(None);
-    }
-    notes.repo.update_in_op(op, &mut existing).await?;
-    // `sync_entity_in_op` only fires for content events (Initialized/
-    // Updated/Pinned/Unpinned). A pure-move case where only
-    // `PathChanged` was pushed leaves the `library_documents` row that
-    // `delete_by_path_in_op` wiped permanently empty. Re-upsert the
-    // search row directly so the note stays searchable. The
-    // content/pin paths already trigger the hook, so skip the explicit
-    // upsert there.
-    if path_changed && !content_changed && !pin_changed {
-        use drua_library::LibrarySynced;
-        notes
-            .library
-            .search()
-            .upsert_in_op(op, &existing.searchable_fields())
-            .await?;
-    }
-    notes.register_context_bump(op, scope.bump_scope());
-    Ok(Some(existing))
-}

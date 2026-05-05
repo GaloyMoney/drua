@@ -59,15 +59,35 @@ impl NoteRepo {
         Ok(())
     }
 
-    /// Fires only on content events (Initialized/Updated); skips pin/unpin.
+    /// Content events (Initialized / Updated / Pinned / Unpinned) go
+    /// through `sync_entity_in_op` which fires the full hook
+    /// (search-row upsert + git write-back). A pure `PathChanged`
+    /// event (file moved with no content delta) only needs the
+    /// search-store row refreshed — git already has the file at the
+    /// new path; firing a `WriteOp::WriteFile` would create an empty
+    /// commit.
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,
         entity: &Note,
         mut new_events: es_entity::LastPersisted<'_, NoteEvent>,
     ) -> Result<(), drua_library::LibraryError> {
-        self.library
-            .sync_entity_in_op(op, entity, &mut new_events)
-            .await
+        let has_content = new_events
+            .clone()
+            .any(|p| <Note as drua_library::LibrarySynced>::is_content_event(&p.event));
+        if has_content {
+            return self
+                .library
+                .sync_entity_in_op(op, entity, &mut new_events)
+                .await;
+        }
+        if new_events.any(|p| matches!(&p.event, NoteEvent::PathChanged { .. })) {
+            use drua_library::LibrarySynced;
+            self.library
+                .search()
+                .upsert_in_op(op, &entity.searchable_fields())
+                .await?;
+        }
+        Ok(())
     }
 }

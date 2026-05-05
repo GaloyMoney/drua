@@ -44,18 +44,35 @@ impl SkillRepo {
         }
     }
 
-    /// Skips when no library is configured (e.g. in tests).
+    /// Content events (Initialized / Updated) go through
+    /// `sync_entity_in_op` which fires the full hook (search-row
+    /// upsert + git write-back). A pure `PathChanged` event (file
+    /// moved with no content delta) only needs the search-store row
+    /// refreshed — git already has the file at the new path. Skips
+    /// entirely when no library is wired (test contexts).
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,
         entity: &Skill,
         mut new_events: es_entity::LastPersisted<'_, SkillEvent>,
     ) -> Result<(), drua_library::LibraryError> {
-        if let Some(library) = &self.library {
-            library.sync_entity_in_op(op, entity, &mut new_events).await
-        } else {
-            Ok(())
+        let Some(library) = &self.library else {
+            return Ok(());
+        };
+        let has_content = new_events
+            .clone()
+            .any(|p| <Skill as drua_library::LibrarySynced>::is_content_event(&p.event));
+        if has_content {
+            return library.sync_entity_in_op(op, entity, &mut new_events).await;
         }
+        if new_events.any(|p| matches!(&p.event, SkillEvent::PathChanged { .. })) {
+            use drua_library::LibrarySynced;
+            library
+                .search()
+                .upsert_in_op(op, &entity.searchable_fields())
+                .await?;
+        }
+        Ok(())
     }
 }
 
