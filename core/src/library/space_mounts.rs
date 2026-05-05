@@ -46,12 +46,7 @@ pub struct SpaceMounts {
 #[derive(Clone)]
 struct Inner {
     project_repo: Arc<ProjectRepo>,
-    /// `None` in test contexts that exercise only the
-    /// `space_ids_for_project` path (which doesn't need to hydrate
-    /// `Space` entities). `spaces_for_project` /
-    /// `spaces_block_for_project` short-circuit to empty when this is
-    /// `None`. Production always sets it.
-    spaces: Option<Arc<AuthedSpaces>>,
+    spaces: Arc<AuthedSpaces>,
 }
 
 impl SpaceMounts {
@@ -59,7 +54,7 @@ impl SpaceMounts {
         Self {
             inner: Some(Inner {
                 project_repo,
-                spaces: Some(spaces),
+                spaces,
             }),
         }
     }
@@ -69,21 +64,6 @@ impl SpaceMounts {
     /// the full library + projects stack.
     pub fn empty() -> Self {
         Self { inner: None }
-    }
-
-    /// Test-only constructor that wires only `project_repo`. Lets unit
-    /// tests for skill resolution exercise the mount lookup
-    /// (`space_ids_for_project`) without standing up an `AuthedSpaces`
-    /// — `spaces_for_project` / `spaces_block_for_project` return empty
-    /// even if the project has mounts.
-    #[doc(hidden)]
-    pub fn with_project_repo_for_test(project_repo: Arc<ProjectRepo>) -> Self {
-        Self {
-            inner: Some(Inner {
-                project_repo,
-                spaces: None,
-            }),
-        }
     }
 
     /// Mount IDs for `project_id`. Used by `AgentScope` to derive which
@@ -115,10 +95,7 @@ impl SpaceMounts {
         if project.mounted_spaces.is_empty() {
             return Ok(Vec::new());
         }
-        let Some(spaces) = inner.spaces.as_ref() else {
-            return Ok(Vec::new());
-        };
-        Ok(spaces.find_by_ids(&project.mounted_spaces).await?)
+        Ok(inner.spaces.find_by_ids(&project.mounted_spaces).await?)
     }
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent

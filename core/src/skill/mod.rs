@@ -817,16 +817,6 @@ impl Skills {
             context_generation: ContextGeneration::new(),
         }
     }
-
-    /// Test-only chainable setter — production goes through [`Self::new`]
-    /// which always wires `SpaceMounts`. Lets `new_without_library`
-    /// callers exercise the mounted-space resolution path in
-    /// `find_by_name` without standing up the full library stack.
-    #[doc(hidden)]
-    pub fn with_space_mounts(mut self, space_mounts: Arc<SpaceMounts>) -> Self {
-        self.space_mounts = Some(space_mounts);
-        self
-    }
 }
 
 #[cfg(test)]

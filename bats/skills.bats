@@ -213,8 +213,9 @@ wait_for_skill_row() {
 
   # 3. Drop a skill markdown into space-A (production path: spaces.edit
   #    → library write → importer creates the `Skill { space_id }` row).
+  #    Body uses $ARGUMENTS so the invoke assertion below sees substitution.
   alpha_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  alpha_md="$(render_skill_md "$alpha_id" "alpha-skill" "alpha description" "echo alpha")"
+  alpha_md="$(render_skill_md "$alpha_id" "alpha-skill" "alpha description" "echo alpha \$ARGUMENTS")"
   run write_skill_to_space "$slug_a" "skills/alpha.md" "$alpha_md"
   echo "$output"
   [[ "$output" == *"Wrote space:$slug_a/skills/alpha.md"* ]]
@@ -240,6 +241,16 @@ wait_for_skill_row() {
   echo "obs-1 SKILLS block: $block_1"
   [[ "$block_1" == *"alpha-skill"* ]]
 
+  # 6b. Invoke alpha via admin `skill invoke` — exercises
+  #     `Skills::interpolate_skill` end-to-end, including the
+  #     mounted-space resolution path that `find_by_name` had skipped
+  #     before this PR (cursor finding r3185924186).
+  run admin_call "skill" "$(jq -nc --arg pid "$project_id" '{
+    command: "invoke", project_id: $pid, name: "alpha-skill", arguments: "PR-7"
+  }')"
+  echo "$output"
+  [[ "$output" == *"echo alpha PR-7"* ]]
+
   # 7. Space-B (NOT mounted yet) + skill in it.
   run admin_call "spaces" "$(jq -nc --arg s "$slug_b" '{command:"create",slug:$s,description:"Beta"}')"
   echo "$output"
@@ -261,6 +272,14 @@ wait_for_skill_row() {
   [[ "$block_2" == *"alpha-skill"* ]]
   [[ "$block_2" != *"beta-skill"* ]]
 
+  # 8b. Invoke beta via admin `skill invoke` from project P — beta lives
+  #     in space-B which P has NOT mounted, so resolution must fail.
+  run admin_call "skill" "$(jq -nc --arg pid "$project_id" '{
+    command: "invoke", project_id: $pid, name: "beta-skill"
+  }')"
+  echo "$output"
+  [[ "$output" == *"Unknown skill: beta-skill"* ]]
+
   # 9. Mount space-B onto project P.
   run admin_call "spaces" "$(jq -nc --arg slug "$slug_b" --arg pid "$project_id" '{
     command: "mount", slug: $slug, project_id: $pid
@@ -275,4 +294,11 @@ wait_for_skill_row() {
   echo "obs-3 SKILLS block: $block_3"
   [[ "$block_3" == *"alpha-skill"* ]]
   [[ "$block_3" == *"beta-skill"* ]]
+
+  # 10b. After mount, beta resolves via admin `skill invoke`.
+  run admin_call "skill" "$(jq -nc --arg pid "$project_id" '{
+    command: "invoke", project_id: $pid, name: "beta-skill"
+  }')"
+  echo "$output"
+  [[ "$output" == *"echo beta"* ]]
 }
