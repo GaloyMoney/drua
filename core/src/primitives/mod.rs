@@ -7,7 +7,7 @@ mod context_generation;
 
 pub use crate::auth::{error::AuthorizationError, AuthResource, AuthScope, AuthSubject, AuthVerb};
 pub use chat_output_event::ChatOutputEvent;
-pub use context_generation::{ContextBumpHook, ContextGeneration};
+pub use context_generation::{ContextBumpHook, ContextGeneration, ScopeId};
 
 // Re-export SpaceId from drua_library so there's a single canonical type.
 pub use drua_library::SpaceId;

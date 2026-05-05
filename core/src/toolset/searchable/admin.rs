@@ -414,13 +414,14 @@ enum SkillCommand {
     List,
     Get,
     Update,
+    Invoke,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SkillParams {
     command: SkillCommand,
 
-    /// Required for `create` and `list`.
+    /// Required for `create`, `list`, `invoke`.
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
@@ -428,12 +429,14 @@ struct SkillParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     skill_id: Option<SkillId>,
 
-    /// `create`: required. `update`: optional rename.
+    /// `create`: required. `update`: optional rename. `invoke`: required (skill name to resolve).
     name: Option<String>,
     /// `create`: required. `update`: optional.
     description: Option<String>,
     /// `create`: required. `update`: optional.
     body: Option<String>,
+    /// `invoke`: optional `$ARGUMENTS` substitution string.
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -539,7 +542,10 @@ static TOOLS: &[ToolDef] = &[
                        `list` (requires `project_id`), \
                        `get` (requires `skill_id`, `project_id`), \
                        `update` (requires `skill_id`, `project_id`; any of \
-                       `name`/`description`/`body`).",
+                       `name`/`description`/`body`), \
+                       `invoke` (requires `project_id`, `name`; optional \
+                       `arguments` for `$ARGUMENTS` substitution; resolves \
+                       across mounted-space, project, global, sandbox tiers).",
         schema: &SKILL_SCHEMA,
     },
     ToolDef {
@@ -1244,6 +1250,27 @@ impl AdminToolSet {
                     &skill, false,
                 ))]))
             }
+
+            SkillCommand::Invoke => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("project_id is required for invoke".to_string())
+                })?;
+                let name = params.name.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("name is required for invoke".to_string())
+                })?;
+                Audit::record_action("skill.invoke");
+                let rendered = self
+                    .skills
+                    .interpolate_skill(&name, Some(project_id), None, params.arguments.as_deref())
+                    .await
+                    .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
+                match rendered {
+                    Some(body) => Ok(CallToolResult::success(vec![Content::text(body)])),
+                    None => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Unknown skill: {name}"
+                    ))])),
+                }
+            }
         }
     }
 
@@ -1704,16 +1731,24 @@ fn format_workflows(defs: &[WorkflowDefinition]) -> String {
     lines.join("\n")
 }
 
-fn format_skill(s: &Skill, created: bool) -> String {
-    let header = if created { "Skill created." } else { "Skill:" };
-    let scope = if s.project_id.is_some() {
+fn skill_scope_label(s: &Skill) -> &'static str {
+    if s.space_id.is_some() {
+        "space"
+    } else if s.project_id.is_some() {
         "project"
     } else {
         "global"
-    };
+    }
+}
+
+fn format_skill(s: &Skill, created: bool) -> String {
+    let header = if created { "Skill created." } else { "Skill:" };
     format!(
         "{header}\n  id: {}\n  name: {}\n  scope: {}\n  description: {}",
-        s.id, s.name, scope, s.description,
+        s.id,
+        s.name,
+        skill_scope_label(s),
+        s.description,
     )
 }
 
@@ -1729,16 +1764,11 @@ fn format_skills(skills: &[Skill]) -> String {
     ));
     lines.push("-".repeat(110));
     for s in skills {
-        let scope = if s.project_id.is_some() {
-            "project"
-        } else {
-            "global"
-        };
         lines.push(format!(
             "{:<38} {:<24} {:<10} {}",
             s.id,
             truncate(&s.name, 24),
-            scope,
+            skill_scope_label(s),
             truncate(&s.description, 50),
         ));
     }
@@ -2182,9 +2212,25 @@ mod tests {
     }
 
     #[test]
+    fn skill_invoke_parses_with_arguments() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: SkillParams = parse_params(args(serde_json::json!({
+            "command": "invoke",
+            "project_id": project_id,
+            "name": "alpha-skill",
+            "arguments": "PR-123",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SkillCommand::Invoke));
+        assert_eq!(p.project_id.map(uuid::Uuid::from), Some(project_id));
+        assert_eq!(p.name.as_deref(), Some("alpha-skill"));
+        assert_eq!(p.arguments.as_deref(), Some("PR-123"));
+    }
+
+    #[test]
     fn skill_schema_includes_command_enum() {
         let s = serde_json::to_string(&*SKILL_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update"] {
+        for v in ["create", "list", "get", "update", "invoke"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
     }

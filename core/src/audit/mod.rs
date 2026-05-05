@@ -74,6 +74,10 @@ impl Audit {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "space_id", space_id));
     }
 
+    pub fn record_skill_id(skill_id: SkillId) {
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "skill_id", skill_id));
+    }
+
     fn set_resource_id(ctx: &mut AuditContextData, key: &str, id: impl Into<uuid::Uuid>) {
         ctx.resource_ids.insert(
             key.to_owned(),

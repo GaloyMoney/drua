@@ -175,10 +175,21 @@ impl App {
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
+
+        // Read facade for the project↔space mount relationship. Built
+        // before `Skills` so Skills can resolve mounted-space skills
+        // internally (mirrors how it holds `Arc<Sandboxes>`); also
+        // shared with `Agents` for `<spaces>` block + `AgentScope`.
+        let space_mounts = Arc::new(library::SpaceMounts::new(
+            Arc::new(project::repo::ProjectRepo::new(pool)),
+            Arc::clone(&spaces),
+        ));
+
         let skills = Arc::new(Skills::new(
             pool,
             Arc::clone(&sandboxes),
             library.clone(),
+            Arc::clone(&space_mounts),
             Arc::clone(&users),
             context_generation.clone(),
         ));
@@ -209,6 +220,7 @@ impl App {
             Arc::clone(&skills),
             Some(Arc::clone(&notes)),
             context_generation.clone(),
+            Arc::clone(&space_mounts),
         ));
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
@@ -236,9 +248,6 @@ impl App {
             Arc::clone(&users),
             context_generation.clone(),
         ));
-        // Late-binding: Agents needs Projects to render the dynamic
-        // `<spaces>` system block, but Projects::new takes Arc<Agents>.
-        agents.set_projects(Arc::clone(&projects));
 
         // Sandboxless read facade for `space:<slug>/...` paths. The
         // five read tools branch on the `space:` prefix and dispatch
@@ -302,6 +311,7 @@ impl App {
             .register_importer(Arc::new(skill::SkillsImporter::new(
                 Arc::clone(&skills),
                 Arc::clone(&projects),
+                (*spaces).clone(),
             )))
             .await;
         library

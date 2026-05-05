@@ -224,6 +224,19 @@ impl AgentSession {
             .map(|info| SessionThread::from_info(info, agent_id))
             .collect())
     }
+
+    /// Session-wide list of every system block ever pushed for this agent,
+    /// ordered by `SystemBlockIndex`. Available before the first prompt
+    /// (when no thread exists yet) — useful for inspecting initial context
+    /// without firing an LLM round trip. Resolved directly off the loaded
+    /// entity; auth was applied by the parent `Query.agent(id)` resolver.
+    async fn system_blocks(&self) -> Vec<SystemBlockInfo> {
+        self.entity
+            .all_system_blocks()
+            .into_iter()
+            .map(SystemBlockInfo::from)
+            .collect()
+    }
 }
 
 impl From<DomainAgentSession> for AgentSession {

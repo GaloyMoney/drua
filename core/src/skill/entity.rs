@@ -16,6 +16,16 @@ pub enum SkillEvent {
         id: SkillId,
         project_id: Option<ProjectId>,
         project_name: Option<String>,
+        /// `Some(s)` for space-scoped skills; mutually exclusive with
+        /// `project_id` (enforced by the `skills_owner_at_most_one`
+        /// CHECK constraint).
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+        /// Denormalised space slug — mirrors the `project_name` denorm.
+        /// Used to render `runtime/spaces/{slug}/skills/...` canonical
+        /// paths without round-tripping the spaces table on every write.
+        #[serde(default)]
+        space_slug: Option<String>,
         name: String,
         description: String,
         body: String,
@@ -40,6 +50,13 @@ pub struct Skill {
     pub project_id: Option<ProjectId>,
     #[builder(default)]
     pub project_name: Option<String>,
+    /// `Some(s)` when this skill belongs to a space rather than a project.
+    /// Mutually exclusive with `project_id` (DB CHECK constraint).
+    #[builder(default)]
+    pub space_id: Option<SpaceId>,
+    /// Denormalised space slug — `Some` exactly when `space_id` is `Some`.
+    #[builder(default)]
+    pub space_slug: Option<String>,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -157,19 +174,37 @@ impl drua_library::LibrarySynced for Skill {
 
     fn searchable_fields(&self) -> SearchableFields {
         let project_name = self.project_name.as_deref();
+        let space_slug = self.space_slug.as_deref();
+        // Space-scoped skills surface under their space; project- and
+        // global-scoped under the project (or unscoped).
+        let (scope_id, scope_slug) = match (self.space_id, self.project_id) {
+            (Some(s), _) => (Some(uuid::Uuid::from(s)), space_slug.map(str::to_string)),
+            (None, Some(p)) => (Some(uuid::Uuid::from(p)), project_name.map(str::to_string)),
+            (None, None) => (None, None),
+        };
         SearchableFields {
             doc_id: self.id.into(),
             doc_type: SKILL_DOC_TYPE,
-            scope_id: self.project_id.map(uuid::Uuid::from),
-            scope_slug: project_name.map(str::to_string),
+            scope_id,
+            scope_slug,
             name: self.name.clone(),
-            path: Some(canonical_skill_path(self.id, &self.name, project_name)),
+            path: Some(canonical_skill_path(
+                self.id,
+                &self.name,
+                project_name,
+                space_slug,
+            )),
             content: self.description.clone(),
         }
     }
 
     fn write_op(&self) -> WriteOp {
-        let canonical = canonical_skill_path(self.id, &self.name, self.project_name.as_deref());
+        let canonical = canonical_skill_path(
+            self.id,
+            &self.name,
+            self.project_name.as_deref(),
+            self.space_slug.as_deref(),
+        );
         let content = self.rendered().into_bytes();
         let id_uuid: uuid::Uuid = self.id.into();
         let message = format!(
@@ -287,6 +322,26 @@ mod tests {
     #[test]
     fn shell_split_simple() {
         assert_eq!(shell_split("staging prod"), vec!["staging", "prod"]);
+    }
+
+    #[test]
+    fn legacy_initialized_event_without_space_id_deserializes() {
+        // Pre-space-tier events have no `space_id` key. `#[serde(default)]`
+        // must hydrate them as `space_id: None`.
+        let json = serde_json::json!({
+            "type": "initialized",
+            "id": uuid::Uuid::new_v4(),
+            "project_id": uuid::Uuid::new_v4(),
+            "project_name": "proj",
+            "name": "skill-x",
+            "description": "desc",
+            "body": "body",
+        });
+        let ev: SkillEvent = serde_json::from_value(json).expect("legacy event");
+        match ev {
+            SkillEvent::Initialized { space_id, .. } => assert!(space_id.is_none()),
+            _ => panic!("expected Initialized"),
+        }
     }
 
     #[test]
@@ -408,6 +463,8 @@ impl TryFromEvents<SkillEvent> for Skill {
                     id,
                     project_id,
                     project_name,
+                    space_id,
+                    space_slug,
                     name,
                     description,
                     body,
@@ -418,6 +475,8 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .id(*id)
                         .project_id(*project_id)
                         .project_name(project_name.clone())
+                        .space_id(*space_id)
+                        .space_slug(space_slug.clone())
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
@@ -456,6 +515,10 @@ pub struct NewSkill {
     pub(super) project_id: Option<ProjectId>,
     #[builder(default, setter(into, strip_option))]
     pub(super) project_name: Option<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) space_id: Option<SpaceId>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) space_slug: Option<String>,
     #[builder(setter(into))]
     pub(super) name: String,
     #[builder(setter(into))]
@@ -480,6 +543,8 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 id: self.id,
                 project_id: self.project_id,
                 project_name: self.project_name.clone(),
+                space_id: self.space_id,
+                space_slug: self.space_slug,
                 name: self.name,
                 description: self.description,
                 body: self.body,

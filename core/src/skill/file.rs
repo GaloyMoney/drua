@@ -26,12 +26,14 @@ pub fn render_skill_markdown(
 
 /// Parsed skill from on-disk content. `needs_rewrite` signals the
 /// importer should re-render to canonical form (legacy/imported
-/// formats normalise on first sync).
+/// formats normalise on first sync). `project_name` and `space_slug`
+/// are mutually exclusive — the path determines which (if any) is set.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ParsedSkill {
     pub skill_id: SkillId,
     pub project_name: Option<String>,
+    pub space_slug: Option<String>,
     pub name: String,
     pub description: String,
     pub body: String,
@@ -69,15 +71,16 @@ impl ParsedSkill {
 /// Returns `None` only if the content has no recognisable form.
 pub fn parse_skill_markdown(content: &str, path: &str) -> Option<ParsedSkill> {
     let project_name = project_name_from_skill_path(path);
+    let space_slug = space_slug_from_skill_path(path);
     let content = content.trim();
     if content.is_empty() {
         return None;
     }
 
     let mut parsed = if content.starts_with("---") {
-        parse_skill_with_frontmatter(content, project_name, path)?
+        parse_skill_with_frontmatter(content, project_name, space_slug, path)?
     } else {
-        parse_skill_without_frontmatter(content, project_name, path)?
+        parse_skill_without_frontmatter(content, project_name, space_slug, path)?
     };
 
     parsed.original_path = path.to_string();
@@ -105,6 +108,7 @@ struct SkillFrontmatter {
 fn parse_skill_with_frontmatter(
     content: &str,
     project_name: Option<String>,
+    space_slug: Option<String>,
     path: &str,
 ) -> Option<ParsedSkill> {
     let rest = content.strip_prefix("---")?;
@@ -136,12 +140,18 @@ fn parse_skill_with_frontmatter(
     let created_at = fm.created.unwrap_or_default();
     let updated_at = fm.updated.unwrap_or_default();
 
-    let canonical_path = canonical_skill_path(skill_id, &name, project_name.as_deref());
+    let canonical_path = canonical_skill_path(
+        skill_id,
+        &name,
+        project_name.as_deref(),
+        space_slug.as_deref(),
+    );
     let needs_rewrite = !has_id || !has_fm_name || canonical_path != path;
 
     Some(ParsedSkill {
         skill_id,
         project_name,
+        space_slug,
         name,
         description,
         body,
@@ -155,6 +165,7 @@ fn parse_skill_with_frontmatter(
 fn parse_skill_without_frontmatter(
     content: &str,
     project_name: Option<String>,
+    space_slug: Option<String>,
     path: &str,
 ) -> Option<ParsedSkill> {
     let (name, description, body) = if let Some(parsed) = parse_heading_and_body(content) {
@@ -167,6 +178,7 @@ fn parse_skill_without_frontmatter(
     Some(ParsedSkill {
         skill_id: SkillId::new(),
         project_name,
+        space_slug,
         name,
         description,
         body,
@@ -198,11 +210,23 @@ fn parse_heading_and_body(content: &str) -> Option<(String, String, String)> {
 }
 
 /// `runtime/projects/{project}/skills/*.md` → `Some(project)`;
-/// `runtime/skills/*.md` → `None` (global skill).
+/// other paths (including `runtime/spaces/*` and `runtime/skills/*`) → `None`.
 pub fn project_name_from_skill_path(relative_path: &str) -> Option<String> {
     let parts: Vec<&str> = relative_path.split('/').collect();
     if parts.len() >= 5 && parts[0] == "runtime" && parts[1] == "projects" && parts[3] == "skills" {
         Some(parts[2].to_string())
+    } else {
+        None
+    }
+}
+
+/// `spaces/{slug}/skills/*.md` → `Some(slug)`; other paths → `None`.
+/// Spaces use the flat `spaces/<slug>/...` layout (no `runtime/` prefix);
+/// see `library/src/space/mod.rs::write_file` for the canonical layout.
+pub fn space_slug_from_skill_path(relative_path: &str) -> Option<String> {
+    let parts: Vec<&str> = relative_path.split('/').collect();
+    if parts.len() >= 4 && parts[0] == "spaces" && parts[2] == "skills" {
+        Some(parts[1].to_string())
     } else {
         None
     }
@@ -266,12 +290,84 @@ pub fn slugify(title: &str) -> String {
         .join("-")
 }
 
-pub fn canonical_skill_path(id: SkillId, name: &str, project_name: Option<&str>) -> String {
+pub fn canonical_skill_path(
+    id: SkillId,
+    name: &str,
+    project_name: Option<&str>,
+    space_slug: Option<&str>,
+) -> String {
     let id_uuid = uuid::Uuid::from(id);
     let id_prefix = &id_uuid.to_string()[..8];
     let slug = slugify(name);
-    match project_name {
-        Some(project) => format!("runtime/projects/{project}/skills/{slug}-{id_prefix}.md"),
-        None => format!("runtime/skills/{slug}-{id_prefix}.md"),
+    if let Some(space) = space_slug {
+        // Spaces use the flat `spaces/<slug>/...` layout (no `runtime/`
+        // prefix) — matches `library::Spaces::write_file`.
+        format!("spaces/{space}/skills/{slug}-{id_prefix}.md")
+    } else if let Some(project) = project_name {
+        format!("runtime/projects/{project}/skills/{slug}-{id_prefix}.md")
+    } else {
+        format!("runtime/skills/{slug}-{id_prefix}.md")
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn project_name_extraction() {
+        assert_eq!(
+            project_name_from_skill_path("runtime/projects/alpha/skills/foo.md"),
+            Some("alpha".to_string())
+        );
+        assert_eq!(
+            project_name_from_skill_path("runtime/spaces/team/skills/foo.md"),
+            None,
+            "space-rooted path must not be parsed as project"
+        );
+        assert_eq!(project_name_from_skill_path("runtime/skills/foo.md"), None);
+    }
+
+    #[test]
+    fn space_slug_extraction() {
+        assert_eq!(
+            space_slug_from_skill_path("spaces/team/skills/foo.md"),
+            Some("team".to_string())
+        );
+        assert_eq!(
+            space_slug_from_skill_path("runtime/projects/alpha/skills/foo.md"),
+            None,
+            "project-rooted path must not be parsed as space"
+        );
+        assert_eq!(space_slug_from_skill_path("runtime/skills/foo.md"), None);
+        assert_eq!(
+            space_slug_from_skill_path("spaces/team/notes/foo.md"),
+            None,
+            "non-skill subtree must not match"
+        );
+    }
+
+    #[test]
+    fn canonical_path_renders_each_tier() {
+        let id = SkillId::from(uuid::uuid!("019dabcd-1234-7000-8000-000000000000"));
+        // 8-char id prefix is the first hex group.
+        assert_eq!(
+            canonical_skill_path(id, "Deploy", None, Some("team")),
+            "spaces/team/skills/deploy-019dabcd.md"
+        );
+        assert_eq!(
+            canonical_skill_path(id, "Deploy", Some("alpha"), None),
+            "runtime/projects/alpha/skills/deploy-019dabcd.md"
+        );
+        assert_eq!(
+            canonical_skill_path(id, "Deploy", None, None),
+            "runtime/skills/deploy-019dabcd.md"
+        );
+        // Defensive: if both somehow set (CHECK normally prevents),
+        // space wins. Documents precedence.
+        assert_eq!(
+            canonical_skill_path(id, "Deploy", Some("alpha"), Some("team")),
+            "spaces/team/skills/deploy-019dabcd.md"
+        );
     }
 }

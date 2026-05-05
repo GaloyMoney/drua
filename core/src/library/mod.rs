@@ -1,6 +1,8 @@
 mod error;
+mod space_mounts;
 
 pub use error::LibraryError;
+pub use space_mounts::{SpaceMounts, SpaceMountsError};
 
 pub use drua_library::{
     DirEntry, DocType, GitFileHash, NewSpace, SearchHit, SearchableFields, Space, SpaceError,

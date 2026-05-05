@@ -119,6 +119,13 @@ impl<'a> MaterializedSession<'a> {
         self.latest_idx_by_kind.get(&kind).copied()
     }
 
+    /// Flat iteration over every system block pushed so far, in insertion
+    /// order. Used by `AgentSession::all_system_blocks` to expose the full
+    /// session-wide list without requiring a thread.
+    pub fn iter_system_blocks(&self) -> impl ExactSizeIterator<Item = &'a SystemBlock> + '_ {
+        self.system_blocks.iter().copied()
+    }
+
     pub fn latest_block_of_kind(&self, kind: SystemBlockKind) -> Option<&'a SystemBlock> {
         self.latest_idx_by_kind
             .get(&kind)

@@ -1,6 +1,6 @@
 mod entity;
 pub mod error;
-pub(crate) mod repo;
+pub mod repo;
 
 use std::sync::Arc;
 
@@ -81,7 +81,7 @@ impl Projects {
         let hook = ContextBumpHook::new(
             self.context_generation.clone(),
             self.pool.clone(),
-            Some(project_id),
+            ScopeId::Project(project_id),
         );
         if op.add_commit_hook(hook).is_err() {
             tracing::warn!(
@@ -467,59 +467,7 @@ impl Projects {
         Audit::record_space_id(space.id);
         Ok(space)
     }
-
-    /// Renders the spaces mounted on `project_id` as a `<spaces>`
-    /// system-block string for inclusion in agent prompts. Caps at
-    /// `SPACES_BLOCK_LIMIT` entries with a "…and N more" footer.
-    /// Returns `None` when no spaces are mounted (block is omitted).
-    /// Internal — no auth check, called at agent context-cache refresh.
-    #[instrument(name = "domain.project.spaces_context_for_project", skip(self))]
-    pub async fn spaces_context_for_project(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Option<String>, ProjectError> {
-        let project = self.repo.find_by_id(project_id).await?;
-        if project.mounted_spaces.is_empty() {
-            return Ok(None);
-        }
-
-        let spaces = self.spaces.find_by_ids(&project.mounted_spaces).await?;
-        if spaces.is_empty() {
-            return Ok(None);
-        }
-        let total = spaces.len();
-
-        let header = "<spaces>\n\
-             This project has the following knowledge spaces mounted — \
-             collaborative folders backed by a shared library. Use the \
-             file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
-             paths prefixed `space:<slug>/` to read or write their \
-             contents. Writes commit to the upstream library automatically; \
-             no sandbox attachment is required.\n";
-
-        let mut buf = String::from(header);
-        for s in spaces.iter().take(SPACES_BLOCK_LIMIT) {
-            match s.description.as_deref() {
-                Some(d) if !d.is_empty() => {
-                    buf.push_str(&format!("- space:{} — {}\n", s.slug, d));
-                }
-                _ => buf.push_str(&format!("- space:{}\n", s.slug)),
-            }
-        }
-        if total > SPACES_BLOCK_LIMIT {
-            buf.push_str(&format!(
-                "…and {} more (use the `spaces` tool with command `list` to enumerate).\n",
-                total - SPACES_BLOCK_LIMIT,
-            ));
-        }
-        buf.push_str("</spaces>\n");
-        Ok(Some(buf))
-    }
 }
-
-/// Cap on the per-project `<spaces>` system block. Above this we render a
-/// truncation footer; the agent uses the `spaces` tool to enumerate the rest.
-const SPACES_BLOCK_LIMIT: usize = 20;
 
 fn build_new_project(
     lead_agent_id: AgentId,

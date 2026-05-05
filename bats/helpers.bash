@@ -6,11 +6,16 @@ PG_CON="${PG_CON:-postgres://user:password@localhost:5432/drua}"
 COMPOSE_CMD="${COMPOSE_CMD:-docker compose}"
 
 start_server() {
-  # Clean up any leftover containers
-  $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+  # Skip the compose dance when the caller is bringing its own
+  # already-running PG (developer iteration, CI sidecar). Set
+  # `SKIP_COMPOSE=1` to opt in.
+  if [ "${SKIP_COMPOSE:-0}" != "1" ]; then
+    # Clean up any leftover containers
+    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
 
-  # Start postgres
-  $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d
+    # Start postgres
+    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d
+  fi
 
   # Wait for postgres
   for _i in $(seq 1 30); do
@@ -24,7 +29,9 @@ start_server() {
   export PG_CON
   export GITHUB_CLIENT_ID="test-client-id"
   export GITHUB_CLIENT_SECRET="test-client-secret"
-  export DRUA_CONFIG="$REPO_ROOT/drua.yml"
+  # Respect a pre-set DRUA_CONFIG so tests can render an isolated
+  # config (e.g. a fake on-disk library) before calling start_server.
+  export DRUA_CONFIG="${DRUA_CONFIG:-$REPO_ROOT/drua.yml}"
   export CODE_ASSISTANT_DB_PATH=""  # disable code assistant in tests
 
   $DRUA_BIN server > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
@@ -44,7 +51,9 @@ stop_server() {
     kill "$(cat "$SERVER_PID_FILE")" 2>/dev/null || true
     rm -f "$SERVER_PID_FILE"
   fi
-  $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+  if [ "${SKIP_COMPOSE:-0}" != "1" ]; then
+    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+  fi
 }
 
 # Create a test user and agent via psql (test fixture setup).

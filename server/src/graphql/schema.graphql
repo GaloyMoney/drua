@@ -63,6 +63,14 @@ type AgentSession {
 	"""
 	model: String!
 	"""
+	Session-wide list of every system block ever pushed for this agent,
+	ordered by `SystemBlockIndex`. Available before the first prompt
+	(when no thread exists yet) — useful for inspecting initial context
+	without firing an LLM round trip. Resolved directly off the loaded
+	entity; auth was applied by the parent `Query.agent(id)` resolver.
+	"""
+	systemBlocks: [SystemBlockInfo!]!
+	"""
 	All threads in this session.
 	"""
 	threads: [SessionThread!]!

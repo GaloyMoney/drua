@@ -235,6 +235,11 @@ impl Workflows {
                     let preexisting_sandbox_id = sandbox
                         .as_deref()
                         .and_then(|n| preexisting_ids.get(n).copied());
+                    // `find_by_name` resolves the project's mounted-space
+                    // skills internally via the held `SpaceMounts`, so a
+                    // workflow step referring to a space-scoped skill by
+                    // name is reachable as long as the workflow's project
+                    // mounts the space.
                     let found = self
                         .skills
                         .find_by_name(skill, Some(project_id), preexisting_sandbox_id)

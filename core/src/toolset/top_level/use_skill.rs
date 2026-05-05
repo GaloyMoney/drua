@@ -145,6 +145,9 @@ impl TopLevelTool for UseSkillTool {
             UseSkillAction::Invoke { name, arguments } => {
                 let project_id = subject.project_id();
                 let sandbox_id = subject.readable_sandbox_id();
+                // `Skills::interpolate_skill` resolves mounted-space
+                // skills internally via its held `SpaceMounts` —
+                // callers just pass project + sandbox.
                 let rendered = self
                     .skills
                     .interpolate_skill(&name, project_id, sandbox_id, arguments.as_deref())

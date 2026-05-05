@@ -53,7 +53,7 @@ impl Notes {
         let hook = ContextBumpHook::new(
             self.context_generation.clone(),
             self.pool.clone(),
-            Some(project_id),
+            ScopeId::Project(project_id),
         );
         op.add_commit_hook(hook)
             .expect("DbOp supports commit hooks");

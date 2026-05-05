@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT created_at, id FROM skills WHERE (NOT $1 OR project_id IS NOT DISTINCT FROM $2) AND COALESCE(name = $3, $3 IS NULL) AND (COALESCE((created_at, id) > ($6, $5), $5 IS NULL)) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $4) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $7 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN skill_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT parent_job_id, id FROM jobs WHERE ((parent_job_id IS NOT DISTINCT FROM $1) AND (COALESCE(id < $3, true))) ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN job_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,12 +31,9 @@
     ],
     "parameters": {
       "Left": [
-        "Bool",
         "Uuid",
-        "Text",
         "Int8",
         "Uuid",
-        "Timestamptz",
         "Bool"
       ]
     },
@@ -48,5 +45,5 @@
       false
     ]
   },
-  "hash": "56c965b9f2216035966faf5bdb3dcbc72bff97bb3ba5faa89fe255877206ab9c"
+  "hash": "485ae108b79620f33b6ee77ed238e2b1d3911d07a380de7cc8b8f196b109aa44"
 }

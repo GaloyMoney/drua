@@ -15,6 +15,9 @@ use drua_library::SearchHit;
 use es_entity::AtomicOperation;
 use tracing::instrument;
 
+use crate::agent::AgentScope;
+use crate::audit::Audit;
+use crate::library::SpaceMounts;
 pub use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::user::Users;
@@ -26,17 +29,53 @@ const SKILLS_CONTEXT_MAX: usize = 30;
 const SKILLS_CONTEXT_BUDGET: usize = 4000;
 const MAX_DESCRIPTION_LEN: usize = 200;
 
+/// Resolved scope for `Skills::import_from_library`. The importer maps a
+/// path prefix (`runtime/projects/{p}/skills/...`,
+/// `runtime/spaces/{s}/skills/...`, or `runtime/skills/...`) to one of
+/// these variants by looking up the project / space referenced by the
+/// path segment.
+#[derive(Debug, Clone)]
+pub enum ImportScope {
+    Global,
+    Project {
+        project_id: ProjectId,
+        project_name: String,
+    },
+    Space {
+        space_id: SpaceId,
+        space_slug: String,
+    },
+}
+
+impl ImportScope {
+    fn bump_scope(&self) -> ScopeId {
+        match self {
+            ImportScope::Global => ScopeId::Global,
+            ImportScope::Project { project_id, .. } => ScopeId::Project(*project_id),
+            ImportScope::Space { space_id, .. } => ScopeId::Space(*space_id),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Skills {
     repo: SkillRepo,
     sandboxes: Arc<Sandboxes>,
     library: Option<drua_library::Library>,
-    /// Held for context-bump hooks fired from reverse-sync importers
-    /// (registered in App init); unused on the forward-only paths.
-    #[allow(dead_code)]
+    /// Read facade for the project↔space mount relationship — held
+    /// alongside `sandboxes` so `find_by_name` / `interpolate_skill`
+    /// can resolve mounted-space skills internally without callers
+    /// passing the scope through. `None` in `new_without_library` test
+    /// contexts; mounted spaces resolve as empty there.
+    space_mounts: Option<Arc<SpaceMounts>>,
+    /// `None` in test contexts (`new_without_library`); `Some` everywhere
+    /// else. Used to wire `ContextBumpHook` onto mutation ops.
     pool: Option<sqlx::PgPool>,
+    /// `None` in test contexts (`new_without_library`); `Some` everywhere
+    /// else. Used to populate `EventContext` with `CommitAttribution` so
+    /// the post-persist `library.sync_entity_in_op` hook picks up rich
+    /// commit author / committer info.
     users: Option<Arc<Users>>,
-    #[allow(dead_code)]
     context_generation: ContextGeneration,
 }
 
@@ -45,6 +84,7 @@ impl Skills {
         pool: &sqlx::PgPool,
         sandboxes: Arc<Sandboxes>,
         library: drua_library::Library,
+        space_mounts: Arc<SpaceMounts>,
         users: Arc<Users>,
         context_generation: ContextGeneration,
     ) -> Self {
@@ -53,9 +93,27 @@ impl Skills {
             repo,
             sandboxes,
             library: Some(library),
+            space_mounts: Some(space_mounts),
             pool: Some(pool.clone()),
             users: Some(users),
             context_generation,
+        }
+    }
+
+    /// Resolves the agent's mounted-space ids via the held `SpaceMounts`.
+    /// Returns empty when there's no project context, no `SpaceMounts`
+    /// wired (test contexts), or the lookup itself fails (logged + swallowed
+    /// — skill resolution always falls through to project + global tiers).
+    async fn mounted_space_ids_for(&self, project_id: Option<ProjectId>) -> Vec<SpaceId> {
+        let (Some(pid), Some(sm)) = (project_id, self.space_mounts.as_ref()) else {
+            return Vec::new();
+        };
+        match sm.space_ids_for_project(pid).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "space_ids_for_project failed; resolving without space tier");
+                Vec::new()
+            }
         }
     }
 
@@ -69,17 +127,30 @@ impl Skills {
         }
     }
 
-    /// No-op when `Skills` has no `pool` (test contexts using `new_without_library`).
-    #[allow(dead_code)]
-    pub(crate) fn register_context_bump<OP: AtomicOperation>(
-        &self,
-        op: &mut OP,
-        project_id: Option<ProjectId>,
-    ) {
+    /// Begin a mutation op with a `ContextBumpHook` registered for `scope`,
+    /// so committing the op bumps the local `ContextGeneration` and fires a
+    /// `context_changed` PG NOTIFY. All Skill mutations must go through this
+    /// helper rather than `repo.begin_op()` so agents see fresh skills.
+    /// Falls back to a plain `repo.begin_op()` when `pool` is `None`
+    /// (test contexts using `new_without_library`).
+    async fn begin_op(&self, scope: ScopeId) -> Result<es_entity::DbOp<'static>, SkillError> {
+        let mut op = self.repo.begin_op().await?;
+        if let Some(pool) = self.pool.as_ref() {
+            let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), scope);
+            op.add_commit_hook(hook)
+                .expect("DbOp supports commit hooks");
+        }
+        Ok(op)
+    }
+
+    /// Composable variant: registers a `ContextBumpHook` on the caller's
+    /// `op` for `scope`. Used by reverse-sync importers and other internal
+    /// callers that already own a transaction. No-op when `pool` is `None`.
+    pub(crate) fn register_context_bump<OP: AtomicOperation>(&self, op: &mut OP, scope: ScopeId) {
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
-        let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), project_id);
+        let hook = ContextBumpHook::new(self.context_generation.clone(), pool.clone(), scope);
         if op.add_commit_hook(hook).is_err() {
             tracing::warn!("AtomicOperation rejected ContextBumpHook; context bump skipped");
         }
@@ -101,8 +172,16 @@ impl Skills {
         Ok(skill)
     }
 
-    /// Lookup order (project shadows global):
-    /// 1. Project-scoped, 2. Global, 3. Sandbox-exported.
+    /// Lookup order (highest precedence first):
+    /// 1. Mounted space the agent's project has — Space > all (matches the
+    ///    `<available_skills>` precedence so a space skill the agent saw
+    ///    listed is always invocable). Mounted spaces are resolved
+    ///    internally via the held `SpaceMounts`; callers only pass
+    ///    `project_id`.
+    /// 2. Project-scoped (the agent's own project).
+    /// 3. Truly-global (no project AND no space).
+    /// 4. Sandbox-exported (only the agent's attached sandbox).
+    ///
     /// `Ok(None)` when no source matches.
     #[instrument(name = "skill.find_by_name", skip_all, fields(name = %name, sandbox_id))]
     pub async fn find_by_name(
@@ -111,7 +190,8 @@ impl Skills {
         project_id: Option<ProjectId>,
         sandbox_id: Option<SandboxId>,
     ) -> Result<Option<SkillBody>, SkillError> {
-        // Single query fetches project-scoped + global; project wins.
+        // Single query fetches every skill with this name across all scopes;
+        // we filter by precedence here.
         let query = es_entity::PaginatedQueryArgs {
             first: 10,
             after: None,
@@ -125,9 +205,24 @@ impl Skills {
             )
             .await?;
         let candidates = result.entities;
-        let best = project_id
-            .and_then(|project_id| candidates.iter().find(|s| s.project_id == Some(project_id)))
-            .or_else(|| candidates.iter().find(|s| s.project_id.is_none()));
+        let mounted_space_ids = self.mounted_space_ids_for(project_id).await;
+
+        let best = candidates
+            .iter()
+            // Mounted-space skill — Space > Sandbox > Project > Global per
+            // `skills_context_for_scope`'s precedence.
+            .find(|s| {
+                s.space_id
+                    .is_some_and(|sid| mounted_space_ids.contains(&sid))
+            })
+            .or_else(|| {
+                project_id.and_then(|pid| candidates.iter().find(|s| s.project_id == Some(pid)))
+            })
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|s| s.project_id.is_none() && s.space_id.is_none())
+            });
         if let Some(skill) = best {
             return Ok(Some(SkillBody::new(skill.body.clone())));
         }
@@ -222,7 +317,16 @@ impl Skills {
                 es_entity::ListDirection::Ascending,
             )
             .await?;
-        let global_skills = global_result.entities;
+        // The repo query for `project_id IS NULL` returns BOTH truly-global
+        // skills (no project, no space) AND space-scoped skills (no
+        // project, but `space_id IS Some`). Filter out the space-scoped
+        // ones — those are reachable only via mounted spaces and are
+        // resolved separately in `skills_context_for_scope`.
+        let global_skills: Vec<Skill> = global_result
+            .entities
+            .into_iter()
+            .filter(|s| s.space_id.is_none())
+            .collect();
 
         // Project first, dedup by name; project wins over global.
         let mut seen_names = std::collections::HashSet::new();
@@ -258,21 +362,61 @@ impl Skills {
             .await?)
     }
 
-    /// Build skills context for system prompt injection.
-    ///
-    /// Returns an `<available_skills>` block listing project + global +
-    /// sandbox-exported skills with their descriptions, truncated to fit the
-    /// character budget. DB skills shadow sandbox skills of the same name.
-    /// Returns `None` if there are no skills.
-    #[instrument(name = "skill.skills_context_for_project", skip(self))]
-    pub async fn skills_context_for_project(
+    /// Wraps [`Self::skills_context_for_scope`] with a single-tier scope —
+    /// only `(project_id, attached_sandbox_id)`, no mounted spaces. Kept as
+    /// the entry point used by `attach_sandbox` / `detach_sandbox`'s skills
+    /// refresh, which doesn't need to fold space skills back in (the sandbox
+    /// dimension is the only thing changing in those paths).
+    #[instrument(name = "skill.skills_context_for_agent", skip(self))]
+    pub async fn skills_context_for_agent(
         &self,
         project_id: ProjectId,
+        sandbox_id: Option<SandboxId>,
     ) -> Result<Option<String>, SkillError> {
-        let db_skills = self.list_for_project_inner(project_id).await?;
+        let scope = AgentScope {
+            project_id,
+            attached_sandbox_id: sandbox_id,
+            mounted_space_ids: Vec::new(),
+        };
+        self.skills_context_for_scope(&scope).await
+    }
 
-        // Collect sandbox-exported skills, dedup against DB skills.
-        let sandbox_skills = match self.sandboxes.exported_skills_for_project(project_id).await {
+    /// Build the `<available_skills>` block for an agent.
+    ///
+    /// Folds the agent's full scope: project + global DB skills, every
+    /// mounted space's DB skills, and the attached sandbox's exported
+    /// skills (when `Ready`). Same-name conflicts resolve by precedence —
+    /// **Space > Sandbox > Project > Global** — so a space skill called
+    /// `deploy` shadows a project skill of the same name. Returns `None`
+    /// if no skill source contributes anything.
+    #[instrument(name = "skill.skills_context_for_scope", skip(self, scope))]
+    pub async fn skills_context_for_scope(
+        &self,
+        scope: &AgentScope,
+    ) -> Result<Option<String>, SkillError> {
+        let project_and_global = self.list_for_project_inner(scope.project_id).await?;
+
+        let mut space_skills: Vec<Skill> = Vec::new();
+        for space_id in &scope.mounted_space_ids {
+            let res = self
+                .repo
+                .list_for_space_id_by_created_at(
+                    Some(*space_id),
+                    es_entity::PaginatedQueryArgs {
+                        first: 100,
+                        after: None,
+                    },
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            space_skills.extend(res.entities);
+        }
+
+        let sandbox_skills = match self
+            .sandboxes
+            .exported_skills_for_sandbox(scope.attached_sandbox_id)
+            .await
+        {
             Ok(skills) => skills,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to fetch sandbox exported skills");
@@ -280,26 +424,31 @@ impl Skills {
             }
         };
 
-        // Build a unified listing: (name, scope_tag, description)
+        // Precedence (highest first): Space > Sandbox > Project > Global.
+        // First insert wins; later same-name entries are dropped.
         let mut seen_names = std::collections::HashSet::new();
-        let mut entries: Vec<(&str, &str, String)> = Vec::new();
+        let mut entries: Vec<(String, &'static str, String)> = Vec::new();
 
-        for skill in &db_skills {
-            seen_names.insert(skill.name.as_str());
-            let scope = if skill.project_id.is_some() {
-                ""
-            } else {
-                " [global]"
-            };
-            entries.push((&skill.name, scope, skill.description.clone()));
+        for skill in &space_skills {
+            if seen_names.insert(skill.name.clone()) {
+                entries.push((skill.name.clone(), " [space]", skill.description.clone()));
+            }
         }
         for skill in &sandbox_skills {
-            if seen_names.contains(skill.name.as_str()) {
-                continue;
+            if seen_names.insert(skill.name.clone()) {
+                let desc = skill.description.clone().unwrap_or_default();
+                entries.push((skill.name.clone(), "", desc));
             }
-            seen_names.insert(&skill.name);
-            let desc = skill.description.clone().unwrap_or_default();
-            entries.push((&skill.name, " [sandbox]", desc));
+        }
+        for skill in &project_and_global {
+            if seen_names.insert(skill.name.clone()) {
+                let scope_tag = if skill.project_id.is_some() {
+                    ""
+                } else {
+                    " [global]"
+                };
+                entries.push((skill.name.clone(), scope_tag, skill.description.clone()));
+            }
         }
 
         if entries.is_empty() {
@@ -339,7 +488,9 @@ impl Skills {
     }
 
     /// DB-first; `post_persist_hook(sync_to_library)` writes the
-    /// canonical file asynchronously.
+    /// canonical file asynchronously. Routes through `begin_op` so commit
+    /// fires `ContextBumpHook(Project)` — agents see the new skill on the
+    /// next `send_message`.
     #[instrument(name = "skill.create", skip(self, body))]
     pub async fn create(
         &self,
@@ -351,6 +502,8 @@ impl Skills {
         body: String,
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Create, AuthResource::Skill(project_id, None))?;
+        Audit::record_action_if_unset("skill.create");
+        Audit::record_project_id(project_id);
         if name.trim().is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
@@ -365,8 +518,11 @@ impl Skills {
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
 
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         self.populate_attribution().await;
-        let skill = self.repo.create(new).await?;
+        let skill = self.repo.create_in_op(&mut op, new).await?;
+        Audit::record_skill_id(skill.id);
+        op.commit().await?;
         Ok(skill)
     }
 
@@ -381,7 +537,11 @@ impl Skills {
         body: Option<String>,
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Update, AuthResource::Skill(project_id, Some(id)))?;
-        let mut skill = self.repo.find_by_id(id).await?;
+        Audit::record_action_if_unset("skill.update");
+        Audit::record_project_id(project_id);
+        Audit::record_skill_id(id);
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
+        let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
@@ -390,8 +550,9 @@ impl Skills {
         }
         if skill.update_content(name, description, body).did_execute() {
             self.populate_attribution().await;
-            self.repo.update(&mut skill).await?;
+            self.repo.update_in_op(&mut op, &mut skill).await?;
         }
+        op.commit().await?;
         Ok(skill)
     }
 
@@ -406,18 +567,144 @@ impl Skills {
         project_id: ProjectId,
     ) -> Result<(), SkillError> {
         sub.can(AuthVerb::Delete, AuthResource::Skill(project_id, Some(id)))?;
-        let skill = self.repo.find_by_id(id).await?;
+        Audit::record_action_if_unset("skill.delete");
+        Audit::record_project_id(project_id);
+        Audit::record_skill_id(id);
+        let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
+        let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Delete,
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
-        let mut op = self.repo.begin_op().await?;
         self.populate_attribution().await;
         self.repo.delete_in_op(&mut op, skill).await?;
         op.commit().await?;
         Ok(())
+    }
+
+    /// Create a space-owned skill. Auth: `AuthVerb::Create` against
+    /// `AuthResource::SpaceSkill(space_id, None)` — admin-only by
+    /// default (no `permits` rule for non-admin scopes). Twin-writes to
+    /// `runtime/spaces/{slug}/skills/{name-slug}-{id_prefix}.md` via
+    /// the entity's `LibrarySynced::write_op`.
+    #[instrument(name = "skill.create_in_space", skip(self, body))]
+    pub async fn create_in_space(
+        &self,
+        sub: &AuthSubject,
+        space_id: SpaceId,
+        space_slug: &str,
+        name: String,
+        description: String,
+        body: String,
+    ) -> Result<Skill, SkillError> {
+        sub.can(AuthVerb::Create, AuthResource::SpaceSkill(space_id, None))?;
+        Audit::record_action_if_unset("skill.create_in_space");
+        Audit::record_space_id(space_id);
+        if name.trim().is_empty() {
+            return Err(SkillError::BuildEntity("skill name required".into()));
+        }
+        let new = NewSkill::builder()
+            .id(SkillId::new())
+            .space_id(space_id)
+            .space_slug(space_slug.to_string())
+            .name(name)
+            .description(description)
+            .body(body)
+            .build()
+            .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
+
+        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        self.populate_attribution().await;
+        let skill = self.repo.create_in_op(&mut op, new).await?;
+        Audit::record_skill_id(skill.id);
+        op.commit().await?;
+        Ok(skill)
+    }
+
+    #[instrument(name = "skill.update_in_space", skip(self, body))]
+    pub async fn update_in_space(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        space_id: SpaceId,
+        name: Option<String>,
+        description: Option<String>,
+        body: Option<String>,
+    ) -> Result<Skill, SkillError> {
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::SpaceSkill(space_id, Some(id)),
+        )?;
+        Audit::record_action_if_unset("skill.update_in_space");
+        Audit::record_space_id(space_id);
+        Audit::record_skill_id(id);
+        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if skill.space_id != Some(space_id) {
+            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Update,
+                resource: AuthResource::SpaceSkill(space_id, Some(id)),
+            }));
+        }
+        if skill.update_content(name, description, body).did_execute() {
+            self.populate_attribution().await;
+            self.repo.update_in_op(&mut op, &mut skill).await?;
+        }
+        op.commit().await?;
+        Ok(skill)
+    }
+
+    /// Soft-delete only — same caveat as [`Self::delete`].
+    #[instrument(name = "skill.delete_in_space", skip(self))]
+    pub async fn delete_in_space(
+        &self,
+        sub: &AuthSubject,
+        id: SkillId,
+        space_id: SpaceId,
+    ) -> Result<(), SkillError> {
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::SpaceSkill(space_id, Some(id)),
+        )?;
+        Audit::record_action_if_unset("skill.delete_in_space");
+        Audit::record_space_id(space_id);
+        Audit::record_skill_id(id);
+        let mut op = self.begin_op(ScopeId::Space(space_id)).await?;
+        let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if skill.space_id != Some(space_id) {
+            return Err(SkillError::Authorization(AuthorizationError::Forbidden {
+                verb: AuthVerb::Delete,
+                resource: AuthResource::SpaceSkill(space_id, Some(id)),
+            }));
+        }
+        self.populate_attribution().await;
+        self.repo.delete_in_op(&mut op, skill).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
+    /// List skills owned by `space_id` (no global fold-in). Admin-only.
+    #[instrument(name = "skill.list_for_space", skip(self, sub))]
+    pub async fn list_for_space(
+        &self,
+        sub: &AuthSubject,
+        space_id: SpaceId,
+    ) -> Result<Vec<Skill>, SkillError> {
+        sub.can(AuthVerb::Read, AuthResource::SpaceSkill(space_id, None))?;
+        let result = self
+            .repo
+            .list_for_space_id_by_created_at(
+                Some(space_id),
+                es_entity::PaginatedQueryArgs {
+                    first: 100,
+                    after: None,
+                },
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result.entities)
     }
 }
 
@@ -460,7 +747,7 @@ impl Skills {
         &self,
         op: &mut OP,
         parsed: ParsedSkill,
-        project_id: Option<ProjectId>,
+        scope: ImportScope,
     ) -> Result<Option<Skill>, SkillError> {
         let file_hash = parsed.file_hash();
 
@@ -481,7 +768,7 @@ impl Skills {
                 return Ok(None);
             }
             self.repo.update_in_op(op, &mut existing).await?;
-            self.register_context_bump(op, project_id);
+            self.register_context_bump(op, scope.bump_scope());
             return Ok(Some(existing));
         }
 
@@ -491,17 +778,28 @@ impl Skills {
             .description(parsed.description)
             .body(parsed.body)
             .original_path(parsed.original_path);
-        if let Some(project_id) = project_id {
-            builder = builder.project_id(project_id);
-        }
-        if let Some(name) = parsed.project_name {
-            builder = builder.project_name(name);
+        match &scope {
+            ImportScope::Project {
+                project_id,
+                project_name,
+            } => {
+                builder = builder
+                    .project_id(*project_id)
+                    .project_name(project_name.clone());
+            }
+            ImportScope::Space {
+                space_id,
+                space_slug,
+            } => {
+                builder = builder.space_id(*space_id).space_slug(space_slug.clone());
+            }
+            ImportScope::Global => {}
         }
         let new = builder
             .build()
             .map_err(|e| SkillError::BuildEntity(e.to_string()))?;
         let skill = self.repo.create_in_op(op, new).await?;
-        self.register_context_bump(op, project_id);
+        self.register_context_bump(op, scope.bump_scope());
         Ok(Some(skill))
     }
 
@@ -513,6 +811,7 @@ impl Skills {
             repo,
             sandboxes,
             library: None,
+            space_mounts: None,
             pool: None,
             users: None,
             context_generation: ContextGeneration::new(),
