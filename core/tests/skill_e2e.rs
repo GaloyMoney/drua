@@ -121,14 +121,16 @@ fn agents_config_for_tests() -> AgentsConfig {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model.clone(),
+            chain: None,
+            model: Some(model.clone()),
             compaction: Default::default(),
         },
     );
     builtin_roles.insert(
         AgentRole::Agent,
         RoleConfig {
-            model: model.clone(),
+            chain: None,
+            model: Some(model.clone()),
             compaction: Default::default(),
         },
     );
@@ -144,6 +146,7 @@ fn agents_config_for_tests() -> AgentsConfig {
     AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     }
 }
 

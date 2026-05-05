@@ -82,7 +82,8 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
         builtin_roles.insert(
             role,
             RoleConfig {
-                model: model_name.clone(),
+                chain: None,
+                model: Some(model_name.clone()),
                 compaction: Default::default(),
             },
         );
@@ -112,6 +113,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
         agents: AgentsConfig {
             builtin_roles,
             models,
+            ..Default::default()
         },
         library,
         ..Default::default()

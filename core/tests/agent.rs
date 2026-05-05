@@ -43,14 +43,16 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model_name.clone(),
+            chain: None,
+            model: Some(model_name.clone()),
             compaction: Default::default(),
         },
     );
     builtin_roles.insert(
         AgentRole::Agent,
         RoleConfig {
-            model: model_name.clone(),
+            chain: None,
+            model: Some(model_name.clone()),
             compaction: Default::default(),
         },
     );
@@ -66,6 +68,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
     let config = AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     };
 
     let toolsets = Arc::new(
@@ -107,7 +110,8 @@ async fn send_message_round_trip_via_prompt_channel() {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model_name.clone(),
+            chain: None,
+            model: Some(model_name.clone()),
             compaction: Default::default(),
         },
     );
@@ -123,6 +127,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     let config = AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     };
 
     let toolsets = Arc::new(
@@ -266,7 +271,8 @@ async fn send_message_dispatches_registered_tool_call() {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model_name.clone(),
+            chain: None,
+            model: Some(model_name.clone()),
             compaction: Default::default(),
         },
     );
@@ -282,6 +288,7 @@ async fn send_message_dispatches_registered_tool_call() {
     let config = AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     };
 
     // Build ToolSets, register the test tool, then share via Arc.

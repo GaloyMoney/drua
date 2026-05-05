@@ -377,11 +377,20 @@ impl Agents {
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
+        // Resolution: workflow agents get the workflow chain; user agents
+        // get the role/default chain. Per-agent overrides land in a
+        // follow-up commit.
+        let chain = if workflow_id.is_some() {
+            self.config.resolve_workflow_chain(agent_role)?
+        } else {
+            self.config.resolve_chain(agent_role)?
+        };
+        let primary_model_id = chain.primary.name.clone();
         let model_defaults = self
             .config
             .models
-            .get(&role_config.model)
-            .ok_or_else(|| AgentError::ModelNotConfigured(role_config.model.clone()))?;
+            .get(&primary_model_id)
+            .ok_or_else(|| AgentError::ModelNotConfigured(primary_model_id.clone()))?;
 
         let authz_scopes = default_authz_scopes(agent_role, project_id);
 
@@ -483,7 +492,7 @@ impl Agents {
         }
 
         let session_model_defaults = ModelDefaults {
-            model: role_config.model,
+            model: primary_model_id,
             ..model_defaults.clone()
         };
 
