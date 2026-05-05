@@ -993,23 +993,21 @@ impl Agents {
                     _ => "Message queued — session is busy.",
                 };
                 let tx_clone = tx.clone();
+                let message = msg.to_string();
                 tokio::spawn(async move {
-                    let _ = tx_clone
-                        .send(ChatOutputEvent::Service {
-                            message: msg.to_string(),
-                        })
-                        .await;
+                    emit_event(&tx_clone, ChatOutputEvent::Service { message });
                 });
                 return Ok(rx);
             }
         }
 
-        let _ = tx
-            .send(ChatOutputEvent::UserMessage {
+        emit_event(
+            &tx,
+            ChatOutputEvent::UserMessage {
                 source,
                 text: prompt,
-            })
-            .await;
+            },
+        );
 
         let prompt_state = self
             .sessions
@@ -1041,7 +1039,7 @@ impl Agents {
                         let _ = sessions
                             .assistant_response_failed(id, current_model.clone(), msg.clone())
                             .await;
-                        let _ = tx.send(ChatOutputEvent::Error { message: msg }).await;
+                        emit_event(&tx, ChatOutputEvent::Error { message: msg });
                         return;
                     }
                     Err(_) => {
@@ -1049,7 +1047,7 @@ impl Agents {
                         let _ = sessions
                             .assistant_response_failed(id, current_model.clone(), msg.clone())
                             .await;
-                        let _ = tx.send(ChatOutputEvent::Error { message: msg }).await;
+                        emit_event(&tx, ChatOutputEvent::Error { message: msg });
                         return;
                     }
                 };
@@ -1076,17 +1074,18 @@ impl Agents {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = tx
-                            .send(ChatOutputEvent::Error {
+                        emit_event(
+                            &tx,
+                            ChatOutputEvent::Error {
                                 message: e.to_string(),
-                            })
-                            .await;
+                            },
+                        );
                         return;
                     }
                 };
 
                 if !streamed {
-                    forward_response(response, &tx).await;
+                    forward_response(response, &tx);
                 }
 
                 let next_prompt = match session_response {
@@ -1104,22 +1103,24 @@ impl Agents {
                             fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx).await;
 
                         if let Err(e) = sessions.add_tool_results(id, results).await {
-                            let _ = tx
-                                .send(ChatOutputEvent::Error {
+                            emit_event(
+                                &tx,
+                                ChatOutputEvent::Error {
                                     message: e.to_string(),
-                                })
-                                .await;
+                                },
+                            );
                             return;
                         }
 
                         match sessions.next_prompt(id, session::TargetThread::Main).await {
                             Ok(p) => p,
                             Err(e) => {
-                                let _ = tx
-                                    .send(ChatOutputEvent::Error {
+                                emit_event(
+                                    &tx,
+                                    ChatOutputEvent::Error {
                                         message: e.to_string(),
-                                    })
-                                    .await;
+                                    },
+                                );
                                 return;
                             }
                         }
@@ -1128,11 +1129,12 @@ impl Agents {
                         match sessions.next_prompt(id, target).await {
                             Ok(p) => p,
                             Err(e) => {
-                                let _ = tx
-                                    .send(ChatOutputEvent::Error {
+                                emit_event(
+                                    &tx,
+                                    ChatOutputEvent::Error {
                                         message: e.to_string(),
-                                    })
-                                    .await;
+                                    },
+                                );
                                 return;
                             }
                         }
@@ -1143,28 +1145,39 @@ impl Agents {
                 current_model = next_prompt.model.clone();
                 let (request, rx_next) = llm::PromptRequest::new(next_prompt);
                 if prompt_requests.send(request).await.is_err() {
-                    let _ = tx
-                        .send(ChatOutputEvent::Error {
+                    emit_event(
+                        &tx,
+                        ChatOutputEvent::Error {
                             message: "prompt request channel closed".to_string(),
-                        })
-                        .await;
+                        },
+                    );
                     return;
                 }
                 next = rx_next.await;
             }
 
-            let _ = tx
-                .send(ChatOutputEvent::AssistantDone {
+            emit_event(
+                &tx,
+                ChatOutputEvent::AssistantDone {
                     turns: turn,
                     input_tokens,
                     output_tokens,
                     duration_ms: None,
                     cost_usd: None,
-                })
-                .await;
+                },
+            );
         });
 
         Ok(rx)
+    }
+}
+
+fn emit_event(tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>, event: ChatOutputEvent) {
+    match tx.try_send(event) {
+        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::debug!("dropping chat output event because receiver is backpressured");
+        }
     }
 }
 
@@ -1181,17 +1194,18 @@ async fn consume_stream(
         match event {
             Ok(delta) => {
                 if let Some(chat_event) = delta_to_chat_event(&delta) {
-                    let _ = tx.send(chat_event).await;
+                    emit_event(tx, chat_event);
                 }
                 acc.process(&delta);
             }
             Err(e) => {
                 let msg = e.to_string();
-                let _ = tx
-                    .send(ChatOutputEvent::Error {
+                emit_event(
+                    tx,
+                    ChatOutputEvent::Error {
                         message: msg.clone(),
-                    })
-                    .await;
+                    },
+                );
                 return Err(msg);
             }
         }
@@ -1264,13 +1278,14 @@ async fn fan_out_tool_calls(
             let truncated: String = result.content.chars().take(MAX_CONTENT_LEN).collect();
             Some(truncated + "…")
         };
-        let _ = tx
-            .send(ChatOutputEvent::ToolResult {
+        emit_event(
+            tx,
+            ChatOutputEvent::ToolResult {
                 name,
                 is_error: result.is_error,
                 content,
-            })
-            .await;
+            },
+        );
         results.push(result);
     }
     results
@@ -1303,26 +1318,109 @@ fn call_result_to_text(result: &rmcp::model::CallToolResult) -> String {
         .join("\n")
 }
 
-async fn forward_response(
+fn forward_response(
     response: llm::PromptResponse,
     tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
 ) {
     for block in response.content {
         match block {
             llm::prompt::AssistantBlock::Text { text, .. } => {
-                let _ = tx.send(ChatOutputEvent::AssistantText { text }).await;
+                emit_event(tx, ChatOutputEvent::AssistantText { text });
             }
             llm::prompt::AssistantBlock::ToolUse { name, input, .. } => {
-                let _ = tx.send(ChatOutputEvent::ToolCallStart { name }).await;
-                let _ = tx
-                    .send(ChatOutputEvent::ToolCallInputDelta {
+                emit_event(tx, ChatOutputEvent::ToolCallStart { name });
+                emit_event(
+                    tx,
+                    ChatOutputEvent::ToolCallInputDelta {
                         partial_json: input.to_string(),
-                    })
-                    .await;
+                    },
+                );
             }
             llm::prompt::AssistantBlock::Thinking { text, .. } => {
-                let _ = tx.send(ChatOutputEvent::Thinking { text }).await;
+                emit_event(tx, ChatOutputEvent::Thinking { text });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, LazyLock,
+    };
+    use std::time::Duration;
+
+    use rmcp::model::{CallToolResult, Content, JsonObject};
+
+    use super::*;
+    use crate::toolset::{ToolSets, ToolSetsError, TopLevelTool};
+
+    struct StubTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for StubTool {
+        fn name(&self) -> &str {
+            "stub"
+        }
+
+        fn description(&self) -> &str {
+            "stub tool"
+        }
+
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })
+            });
+            &SCHEMA
+        }
+
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CallToolResult::success(vec![Content::text("done")]))
+        }
+    }
+
+    #[tokio::test]
+    async fn fan_out_tool_calls_does_not_wait_for_backpressured_chat_receiver() {
+        let toolsets = Arc::new(ToolSets::empty_for_test());
+        let calls = Arc::new(AtomicUsize::new(0));
+        toolsets.register_top_level(StubTool {
+            calls: Arc::clone(&calls),
+        });
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(ChatOutputEvent::Service {
+            message: "fill channel".to_string(),
+        })
+        .expect("channel should accept initial event");
+
+        let tool_calls = vec![llm::RequestToolUse {
+            id: "toolu_1".to_string(),
+            name: "stub".to_string(),
+            input: serde_json::json!({}),
+        }];
+
+        let results = tokio::time::timeout(
+            Duration::from_millis(100),
+            fan_out_tool_calls(&toolsets, &AuthSubject::Anonymous, tool_calls, &tx),
+        )
+        .await
+        .expect("tool result persistence must not wait on chat stream backpressure");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "done");
+        assert!(!results[0].is_error);
     }
 }
