@@ -274,6 +274,8 @@ struct WorkflowStepParams {
     sandbox_mode: Option<SandboxAgentMode>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
 }
 
 impl WorkflowStepParams {
@@ -284,6 +286,7 @@ impl WorkflowStepParams {
             sandbox: self.sandbox,
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
+            model_chain: self.model_chain,
         }
     }
 }
@@ -394,6 +397,13 @@ struct WorkflowParams {
     #[serde(default)]
     sandboxes: Vec<WorkflowSandboxParams>,
 
+    /// Workflow-wide chain override applied to every step that doesn't
+    /// supply its own `model_chain`. Per-step `model_chain` (on
+    /// `WorkflowStepParams`) takes precedence. Both fall through to the
+    /// role/config default at agent creation when unset.
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
+
     /// `update`: signals which fields the caller intends to change so
     /// `None`-vs-omitted is distinguishable. Defaults to `false` —
     /// when omitted, the field is left untouched.
@@ -405,6 +415,11 @@ struct WorkflowParams {
     clear_description: bool,
     #[serde(default)]
     update_trigger: bool,
+    /// `update`: when true, clears `model_chain` (replaces with `None`).
+    /// When false, the field follows the same `Option<ModelChain>`
+    /// semantics as `name` / `description` — `None` leaves untouched.
+    #[serde(default)]
+    clear_model_chain: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1077,6 +1092,7 @@ impl AdminToolSet {
                         trigger,
                         steps,
                         sandboxes,
+                        params.model_chain,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1161,6 +1177,14 @@ impl AdminToolSet {
                 } else {
                     None
                 };
+                // `Some(Some(_))` sets, `Some(None)` clears, `None`
+                // leaves untouched. The admin tool toggles via a separate
+                // `clear_model_chain` flag (mirroring `clear_description`).
+                let model_chain = if params.clear_model_chain {
+                    Some(None)
+                } else {
+                    params.model_chain.map(Some)
+                };
                 let definition = self
                     .workflows
                     .update(
@@ -1171,6 +1195,7 @@ impl AdminToolSet {
                         trigger,
                         steps,
                         sandboxes,
+                        model_chain,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;

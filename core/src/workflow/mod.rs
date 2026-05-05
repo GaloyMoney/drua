@@ -108,6 +108,7 @@ impl Workflows {
             trigger,
             steps,
             sandboxes,
+            model_chain,
             original_path,
             rendered,
             ..
@@ -130,6 +131,7 @@ impl Workflows {
                     Some(trigger),
                     Some(steps),
                     Some(sandboxes),
+                    Some(model_chain.clone()),
                     file_hash,
                 )
                 .did_execute()
@@ -160,7 +162,8 @@ impl Workflows {
             .name(name)
             .trigger(trigger)
             .steps(steps)
-            .sandboxes(sandboxes);
+            .sandboxes(sandboxes)
+            .model_chain(model_chain);
         if let Some(project) = project_name {
             builder = builder.project_name(project);
         }
@@ -323,6 +326,7 @@ impl Workflows {
         trigger: WorkflowTrigger,
         steps: Vec<WorkflowStepDef>,
         sandboxes: Vec<WorkflowSandboxDecl>,
+        model_chain: Option<llm::ModelChain>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         sub.can(AuthVerb::Create, AuthResource::Workflow(project_id, None))?;
 
@@ -352,7 +356,8 @@ impl Workflows {
             .name(name)
             .trigger(trigger)
             .steps(steps)
-            .sandboxes(sandboxes);
+            .sandboxes(sandboxes)
+            .model_chain(model_chain);
         if !project_name.is_empty() {
             builder = builder.project_name(project_name);
         }
@@ -371,10 +376,10 @@ impl Workflows {
         Ok(workflow)
     }
 
-    /// Updates name / description / trigger / steps / sandboxes on
-    /// an existing definition. Any `Some` field is applied; `None`
-    /// leaves the field unchanged. Steps/sandboxes are re-validated
-    /// when supplied; trigger is re-validated when supplied.
+    /// Updates name / description / trigger / steps / sandboxes /
+    /// model_chain on an existing definition. Any `Some` field is
+    /// applied; `None` leaves the field unchanged. For `model_chain`,
+    /// `Some(Some(_))` sets, `Some(None)` clears.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "core.workflow.update", skip_all)]
     pub async fn update(
@@ -386,6 +391,7 @@ impl Workflows {
         trigger: Option<WorkflowTrigger>,
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
+        model_chain: Option<Option<llm::ModelChain>>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         let mut definition = self.repo.find_by_id(id).await?;
         sub.can(
@@ -418,7 +424,7 @@ impl Workflows {
         // duplicates the chain.
         let was_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
         if definition
-            .update_content(name, description, trigger, steps, sandboxes)
+            .update_content(name, description, trigger, steps, sandboxes, model_chain)
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;

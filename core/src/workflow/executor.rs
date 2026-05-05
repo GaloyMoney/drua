@@ -149,6 +149,7 @@ impl Executor {
                     &sandbox_ids,
                     &preexisting_ids,
                     &mut borrowed_preexisting,
+                    &definition,
                 )
                 .await;
 
@@ -403,6 +404,7 @@ impl Executor {
         sandbox_ids: &HashMap<String, SandboxId>,
         preexisting_ids: &HashSet<SandboxId>,
         borrowed_preexisting: &mut HashSet<SandboxId>,
+        definition: &super::entity::WorkflowDefinition,
     ) -> Result<serde_json::Value, WorkflowError> {
         match step {
             WorkflowStepDef::AgentStep {
@@ -411,6 +413,7 @@ impl Executor {
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                ..
             } => {
                 let attach_sandbox = match sandbox.as_deref() {
                     Some(sandbox_name) => {
@@ -471,6 +474,7 @@ impl Executor {
                             .map_err(|e| WorkflowError::Agent(e.to_string()))?,
                         None => Vec::new(),
                     };
+                    let chain_override = definition.resolve_step_chain(step);
                     let agent = self
                         .agents
                         .create_for_workflow_run_in_op(
@@ -480,7 +484,7 @@ impl Executor {
                             run_id,
                             &agent_name,
                             attach_sandbox,
-                            None,
+                            chain_override,
                         )
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?;

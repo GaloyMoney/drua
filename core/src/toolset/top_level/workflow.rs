@@ -170,6 +170,8 @@ struct WorkflowStepParam {
     sandbox_mode: Option<SandboxAgentMode>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
 }
 
 impl WorkflowStepParam {
@@ -180,6 +182,7 @@ impl WorkflowStepParam {
             sandbox: self.sandbox,
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
+            model_chain: self.model_chain,
         }
     }
 }
@@ -545,6 +548,7 @@ impl TopLevelTool for WorkflowTool {
                         sandbox,
                         sandbox_mode,
                         timeout_seconds,
+                        model_chain: None,
                     }]
                 };
 
@@ -568,6 +572,9 @@ impl TopLevelTool for WorkflowTool {
                         trigger,
                         resolved_steps,
                         sandbox_decls,
+                        // workflow-level model_chain not exposed via this
+                        // tool surface yet; use update or YAML for now.
+                        None,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -732,6 +739,10 @@ impl TopLevelTool for WorkflowTool {
                         trigger,
                         steps_arg,
                         sandboxes_arg,
+                        // model_chain update via this surface lands when
+                        // the GraphQL/MCP shapes carry it; today the tool
+                        // doesn't expose a parameter for it.
+                        None,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1024,9 +1035,14 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                model_chain,
             } => {
                 out.push_str(&format!(
-                    "  - agent_step name={name} skill={skill} sandbox={sandbox:?} sandbox_mode={sandbox_mode:?} timeout_s={timeout_seconds:?}\n"
+                    "  - agent_step name={name} skill={skill} sandbox={sandbox:?} sandbox_mode={sandbox_mode:?} timeout_s={timeout_seconds:?} model_chain={}\n",
+                    model_chain
+                        .as_ref()
+                        .map(|c| format!("{}+{}", c.primary.name, c.fallbacks.len()))
+                        .unwrap_or_else(|| "<inherit>".into())
                 ));
             }
         }

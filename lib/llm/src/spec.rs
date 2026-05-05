@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelSpec {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,7 +35,7 @@ impl<S: Into<String>> From<S> for ModelSpec {
 
 /// Always non-empty: `primary` is required. `fallbacks` are tried in order
 /// when the primary (or a prior fallback) returns a transient error.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelChain {
     pub primary: ModelSpec,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
