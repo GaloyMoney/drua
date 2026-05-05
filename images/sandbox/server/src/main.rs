@@ -97,6 +97,7 @@ async fn execute(
 // shell session so background processes survive between calls.
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const MAX_TIMEOUT_MS: u64 = 10_800_000;
 
 async fn execute_bash(
     session: &SharedSession,
@@ -116,7 +117,8 @@ async fn execute_bash(
         .and_then(|v| v.as_str())
         .ok_or("Missing 'command' field")?;
 
-    let result = session.execute(command, DEFAULT_TIMEOUT_MS).await?;
+    let timeout_ms = bash_timeout_ms(input)?;
+    let result = session.execute(command, timeout_ms).await?;
 
     if result.shell_died {
         return Err(format!(
@@ -132,6 +134,28 @@ async fn execute_bash(
     } else {
         Err(format!("Exit code {}\n{}", result.exit_code, result.output))
     }
+}
+
+fn bash_timeout_ms(input: &serde_json::Value) -> Result<u64, String> {
+    let Some(raw) = input.get("timeout_ms") else {
+        return Ok(DEFAULT_TIMEOUT_MS);
+    };
+
+    let timeout_ms = raw
+        .as_u64()
+        .ok_or("'timeout_ms' must be a positive integer number of milliseconds")?;
+
+    if timeout_ms == 0 {
+        return Err("'timeout_ms' must be greater than 0".to_string());
+    }
+
+    if timeout_ms > MAX_TIMEOUT_MS {
+        return Err(format!(
+            "'timeout_ms' must be at most {MAX_TIMEOUT_MS} milliseconds"
+        ));
+    }
+
+    Ok(timeout_ms)
 }
 
 /// Async wrapper that resolves `path` against the session's current
@@ -1145,6 +1169,47 @@ mod tests {
         let result = execute_bash(&session, &input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("command"));
+    }
+
+    #[test]
+    fn bash_timeout_ms_defaults_and_validates() {
+        assert_eq!(
+            bash_timeout_ms(&serde_json::json!({})).unwrap(),
+            DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(
+            bash_timeout_ms(&serde_json::json!({"timeout_ms": 2500})).unwrap(),
+            2500
+        );
+
+        let zero = bash_timeout_ms(&serde_json::json!({"timeout_ms": 0}))
+            .expect_err("zero timeout should be rejected");
+        assert!(zero.contains("greater than 0"));
+
+        let too_large = bash_timeout_ms(&serde_json::json!({"timeout_ms": MAX_TIMEOUT_MS + 1}))
+            .expect_err("timeout above max should be rejected");
+        assert!(too_large.contains("at most"));
+
+        let not_integer = bash_timeout_ms(&serde_json::json!({"timeout_ms": "1000"}))
+            .expect_err("non-integer timeout should be rejected");
+        assert!(not_integer.contains("positive integer"));
+    }
+
+    #[tokio::test]
+    async fn bash_honors_custom_timeout_ms() {
+        init_test_workspace();
+        let session = test_session();
+        let input = serde_json::json!({
+            "command": "trap 'true' INT; sleep 30",
+            "timeout_ms": 50,
+        });
+
+        let result = execute_bash(&session, &input).await;
+        let err = result.expect_err("command should hit custom timeout");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
     }
 
     /// `exec false` replaces the shell with `false` (exit 1) before the
