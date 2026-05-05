@@ -44,9 +44,45 @@ data:
     {{- end }}
     {{- end }}
     agents:
+      {{- with .Values.galoyAgents.config.agents.defaultChain }}
+      default_chain:
+        primary:
+          name: {{ .primary.name | quote }}
+          {{- with .primary.maxTokens }}
+          max_tokens: {{ . }}
+          {{- end }}
+        {{- with .fallbacks }}
+        fallbacks:
+          {{- range . }}
+          - name: {{ .name | quote }}
+            {{- with .maxTokens }}
+            max_tokens: {{ . }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.galoyAgents.config.agents.workflowDefaultChain }}
+      workflow_default_chain:
+        primary:
+          name: {{ .primary.name | quote }}
+          {{- with .primary.maxTokens }}
+          max_tokens: {{ . }}
+          {{- end }}
+        {{- with .fallbacks }}
+        fallbacks:
+          {{- range . }}
+          - name: {{ .name | quote }}
+            {{- with .maxTokens }}
+            max_tokens: {{ . }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
       builtin_roles:
         project_lead:
-          model: {{ .Values.galoyAgents.config.agents.projectLead.model | quote }}
+          {{- with .Values.galoyAgents.config.agents.projectLead.model }}
+          model: {{ . | quote }}
+          {{- end }}
           {{- with .Values.galoyAgents.config.agents.projectLead.compaction }}
           compaction:
             {{- with .resetTimeDeltaSeconds }}
@@ -58,7 +94,9 @@ data:
           {{- end }}
         {{- with .Values.galoyAgents.config.agents.agent }}
         agent:
-          model: {{ .model | quote }}
+          {{- with .model }}
+          model: {{ . | quote }}
+          {{- end }}
           {{- with .compaction }}
           compaction:
             {{- with .resetTimeDeltaSeconds }}

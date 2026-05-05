@@ -20,14 +20,24 @@ providers:
         max_tokens_per_response: 16384
         context_window_tokens: 131072
 agents:
+  # Resolution precedence:
+  #   builtin_roles.<role>.chain  >  builtin_roles.<role>.model (legacy)  >
+  #   workflow_default_chain (workflow agents only)             >
+  #   default_chain
+  default_chain:
+    primary: { name: moonshotai/kimi-k2 }
+    # When the registry grows, declare fallbacks here, e.g.:
+    # fallbacks:
+    #   - { name: anthropic/claude-sonnet-4-6 }
+    #   - { name: openai/gpt-4o }
+  workflow_default_chain:
+    primary: { name: moonshotai/kimi-k2 }
   builtin_roles:
     project_lead:
-      model: moonshotai/kimi-k2
       compaction:
         reset_time_delta_seconds: 18000
         prune_after_seconds: 600
     agent:
-      model: moonshotai/kimi-k2
       compaction:
         prune_after_seconds: 600
 library:

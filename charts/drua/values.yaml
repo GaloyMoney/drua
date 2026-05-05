@@ -47,9 +47,26 @@ galoyAgents:
     ## Both `projectLead` and `agent` are REQUIRED — the binary refuses
     ## to start if either `agents.builtin_roles.project_lead` or
     ## `agents.builtin_roles.agent` is missing.
+    ##
+    ## Resolution precedence (highest first):
+    ##   builtin_roles.<role>.chain  >  builtin_roles.<role>.model (legacy)  >
+    ##   workflow_default_chain (workflow agents only)              >
+    ##   default_chain
+    ##
+    ## `default_chain` and `workflow_default_chain` are the new way to
+    ## express drua's primary + fallback model list. They accept a bare
+    ## string ("claude-haiku-4-5-20251001") as a length-1 chain, or the
+    ## full object form below.
     agents:
+      defaultChain:
+        primary: { name: "claude-haiku-4-5-20251001" }
+        ## Add fallbacks once the registry has multiple models, e.g.:
+        # fallbacks:
+        #   - { name: "anthropic/claude-sonnet-4-6" }
+        #   - { name: "openai/gpt-4o" }
+      workflowDefaultChain:
+        primary: { name: "claude-haiku-4-5-20251001" }
       projectLead:
-        model: "claude-haiku-4-5-20251001"
         compaction:
           ## When a user message arrives more than this many seconds after
           ## the previous assistant response, start a fresh thread.
@@ -62,7 +79,6 @@ galoyAgents:
           ## pruning still applies).
           pruneAfterSeconds: 300
       agent:
-        model: "claude-haiku-4-5-20251001"
         compaction:
           resetTimeDeltaSeconds: 600
           pruneAfterSeconds: 300
