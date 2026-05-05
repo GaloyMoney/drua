@@ -254,6 +254,9 @@ impl Skills {
     ) -> Result<Skill, SkillError> {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, Some(id)))?;
         let skill = self.repo.find_by_id(id).await?;
+        if let Some(err) = space_scoped_edit_error(&skill) {
+            return Err(err);
+        }
         Ok(skill)
     }
 
@@ -539,9 +542,19 @@ impl Skills {
             .library
             .as_ref()
             .ok_or_else(|| SkillError::SandboxLookup("library not configured".to_string()))?;
+        // Match what an agent in this project can actually invoke:
+        // project + mounted-space scope, never any other project's
+        // skills. Without this filter `library.search` was returning
+        // skill hits from every project in the library — a leak the
+        // auth check above doesn't prevent. Mount lookup failures
+        // degrade to project-only (best-effort, mirrors `Notes::search`).
+        let mounted = self.mounted_space_ids_for(Some(project_id)).await;
+        let mut scope_ids: Vec<uuid::Uuid> = Vec::with_capacity(1 + mounted.len());
+        scope_ids.push(uuid::Uuid::from(project_id));
+        scope_ids.extend(mounted.into_iter().map(uuid::Uuid::from));
         Ok(library
             .search()
-            .search(query, None, &[], &[SKILL_DOC_TYPE], &[], limit)
+            .search(query, None, &scope_ids, &[SKILL_DOC_TYPE], &[], limit)
             .await?)
     }
 
@@ -728,6 +741,9 @@ impl Skills {
         Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let mut skill = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if let Some(err) = space_scoped_edit_error(&skill) {
+            return Err(err);
+        }
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
                 verb: AuthVerb::Update,
@@ -760,8 +776,8 @@ impl Skills {
         Audit::record_skill_id(id);
         let mut op = self.begin_op(ScopeId::Project(project_id)).await?;
         let skill = self.repo.find_by_id_in_op(&mut op, id).await?;
-        if skill.space_id.is_some() {
-            return Err(SkillError::SpaceScopedDeleteViaSpaces);
+        if let Some(err) = space_scoped_edit_error(&skill) {
+            return Err(err);
         }
         if skill.project_id != Some(project_id) {
             return Err(SkillError::Authorization(AuthorizationError::Forbidden {
@@ -776,6 +792,20 @@ impl Skills {
         op.commit().await?;
         Ok(())
     }
+}
+
+/// Returns `Some(SpaceScopedEditViaSpaces)` when `skill` belongs to a
+/// space — the project surface (`Skills::find_by_id`, `update`,
+/// `delete`) calls this before attempting any mutation so the caller
+/// gets an actionable error pointing at the spaces tool instead of a
+/// generic `Forbidden`.
+fn space_scoped_edit_error(skill: &Skill) -> Option<SkillError> {
+    let space_slug = skill.space_slug.clone()?;
+    Some(SkillError::SpaceScopedEditViaSpaces {
+        name: skill.name.clone(),
+        space_slug,
+        path: skill.path.clone(),
+    })
 }
 
 /// Extracts the markdown body from a canonical skill file (everything after

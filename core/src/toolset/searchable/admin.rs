@@ -23,7 +23,7 @@ use crate::primitives::{
 };
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
-use crate::skill::{Skill, Skills};
+use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
     WorkflowDefinition, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
@@ -543,10 +543,15 @@ static TOOLS: &[ToolDef] = &[
         description: "Manage skills across any project. Commands: \
                        `create` (requires `project_id`, `name`, \
                        `description`, `body`), \
-                       `list` (requires `project_id`), \
-                       `get` (requires `skill_id`, `project_id`), \
+                       `list` (requires `project_id`; returns every skill the \
+                       project's agents can invoke — project + global + \
+                       mounted-space + sandbox-exported, each tagged with its \
+                       source), \
+                       `get` (requires `skill_id`, `project_id`; project- or \
+                       global-scoped only), \
                        `update` (requires `skill_id`, `project_id`; any of \
-                       `name`/`description`/`body`), \
+                       `name`/`description`/`body`; project-scoped only — for \
+                       space-scoped skills use the `spaces` tool), \
                        `delete` (requires `skill_id`, `project_id`; project- or \
                        global-scoped skills only — for space-scoped skills use \
                        the `spaces` tool), \
@@ -1214,14 +1219,19 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
                 Audit::record_action("skill.list");
-                let skills = self
+                // `list_for_scope` returns every skill the project's
+                // agents can invoke (project + global + mounted-space
+                // + sandbox-exported), each tagged with its source.
+                // The admin surface gets the same view as the project
+                // skills UI.
+                let scoped = self
                     .skills
-                    .list_for_project(subject, project_id)
+                    .list_for_scope(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_skills(
-                    &skills,
-                ))]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_scoped_skills(&scoped),
+                )]))
             }
 
             SkillCommand::Get => {
@@ -1802,26 +1812,56 @@ fn format_skill(s: &Skill, created: bool) -> String {
     )
 }
 
-fn format_skills(skills: &[Skill]) -> String {
+fn scoped_skill_label(source: &SkillSource) -> String {
+    match source {
+        SkillSource::Project { .. } => "project".to_string(),
+        SkillSource::Global { .. } => "global".to_string(),
+        SkillSource::Space { space_slug, .. } => format!("space:{space_slug}"),
+        SkillSource::Sandbox { sandbox_name, .. } => format!("sandbox:{sandbox_name}"),
+    }
+}
+
+fn scoped_skill_id(source: &SkillSource, fallback_name: &str) -> String {
+    match source {
+        SkillSource::Project { skill_id, .. }
+        | SkillSource::Global { skill_id }
+        | SkillSource::Space { skill_id, .. } => skill_id.to_string(),
+        // Sandbox-exported skills are runtime-only — no DB id. Show
+        // the synthetic handle so the row is still addressable in the
+        // table.
+        SkillSource::Sandbox {
+            sandbox_id,
+            sandbox_name: _,
+        } => format!("sandbox:{sandbox_id}:{fallback_name}"),
+    }
+}
+
+fn format_scoped_skills(skills: &[ScopedSkill]) -> String {
     if skills.is_empty() {
         return "No skills found.".to_string();
     }
-
-    let mut lines = Vec::with_capacity(skills.len() + 2);
+    let mut lines = Vec::with_capacity(skills.len() + 3);
     lines.push(format!(
-        "{:<38} {:<24} {:<10} {}",
+        "{:<38} {:<24} {:<22} {}",
         "ID", "NAME", "SCOPE", "DESCRIPTION"
     ));
-    lines.push("-".repeat(110));
+    lines.push("-".repeat(120));
     for s in skills {
         lines.push(format!(
-            "{:<38} {:<24} {:<10} {}",
-            s.id,
+            "{:<38} {:<24} {:<22} {}",
+            scoped_skill_id(&s.source, &s.name),
             truncate(&s.name, 24),
-            skill_scope_label(s),
-            truncate(&s.description, 50),
+            truncate(&scoped_skill_label(&s.source), 22),
+            truncate(&s.description, 40),
         ));
     }
+    lines.push(String::new());
+    lines.push(
+        "Only `scope = project` rows are editable here — \
+         space-scoped skills are managed via the spaces tool, \
+         sandbox-exported skills come from the sandbox itself."
+            .to_string(),
+    );
     lines.join("\n")
 }
 
