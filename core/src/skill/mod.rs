@@ -803,15 +803,21 @@ async fn reconcile_existing_skill<OP: AtomicOperation>(
     op: &mut OP,
     mut existing: Skill,
     parsed: ParsedSkill,
-    file_hash: drua_library::GitFileHash,
+    _file_hash: drua_library::GitFileHash,
     scope: ImportScope,
 ) -> Result<Option<Skill>, SkillError> {
+    // Granular comparison rather than hash-based: the rendered file
+    // doesn't include `name:` (Model A — filename is the canonical
+    // name), so a stale DB row whose `name` differs from the filename
+    // slug renders to the same bytes as the parsed file. The hash
+    // would say "no change" while the entity-level fields are wrong.
+    // `update_content` walks the fields and pushes an Updated event
+    // only when something actually differs.
     let content_changed = existing
-        .update(
+        .update_content(
             Some(parsed.name.clone()),
             Some(parsed.description.clone()),
             Some(parsed.body.clone()),
-            file_hash,
         )
         .did_execute();
     let path_changed = existing.change_path(parsed.path).did_execute();

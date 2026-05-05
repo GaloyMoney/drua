@@ -364,11 +364,23 @@ async fn library_search(
         .into_iter()
         .map(|h| {
             let project_id = h.fields.scope_id;
+            // Detail URLs only make sense for project-scoped entities;
+            // space-scoped hits get `None` (linking to
+            // `/projects/{space_uuid}/...` would 404).
+            let path_starts_under_space = h
+                .fields
+                .path
+                .as_deref()
+                .is_some_and(|p| p.starts_with("spaces/"));
             let (type_label, type_class, detail_url) = match h.fields.doc_type.as_str() {
                 "skill" => (
                     "Skill".to_string(),
                     "skill".to_string(),
-                    project_id.map(|p| format!("/projects/{}/skills/{}", p, h.fields.doc_id)),
+                    if path_starts_under_space {
+                        None
+                    } else {
+                        project_id.map(|p| format!("/projects/{}/skills/{}", p, h.fields.doc_id))
+                    },
                 ),
                 "workflow" => (
                     "Workflow".to_string(),
@@ -379,11 +391,24 @@ async fn library_search(
                 "space_file" => ("Space File".to_string(), "space_file".to_string(), None),
                 other => (other.to_string(), other.to_string(), None),
             };
-            let is_space = h.fields.doc_type.as_str() == "space_file";
-            let scope_label = if is_space {
-                match (&h.fields.scope_slug, &h.fields.path) {
-                    (Some(slug), Some(path)) => format!("space: {slug}/{path}"),
-                    (Some(slug), None) => format!("space: {slug}"),
+            // Two flavours of space-scoped hits surface here:
+            //   1. raw space files     (doc_type = "space_file")
+            //   2. skills + notes whose path is under `spaces/<slug>/...`
+            //      — `scope_id` here is a `SpaceId`, not a `ProjectId`,
+            //      so falling into the project branch gives a bare UUID.
+            let path_under_space = h
+                .fields
+                .path
+                .as_deref()
+                .is_some_and(|p| p.starts_with("spaces/"));
+            let is_space_file = h.fields.doc_type.as_str() == "space_file";
+            let is_space_scoped = is_space_file || path_under_space;
+            let scope_label = if is_space_scoped {
+                match (&h.fields.scope_slug, is_space_file, &h.fields.path) {
+                    // Raw space file — append the relative path so the
+                    // user sees `space: slug/path/inside/space.md`.
+                    (Some(slug), true, Some(path)) => format!("space: {slug}/{path}"),
+                    (Some(slug), _, _) => format!("space: {slug}"),
                     _ => "space".to_string(),
                 }
             } else {

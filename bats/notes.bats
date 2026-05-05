@@ -255,6 +255,21 @@ note_id_by_title() {
   [[ "$block_n1" == *"Alpha note body"* ]]
   [[ "$block_n1" != *"$beta_note_title"* ]]
 
+  # 6b. `library_search` with `projectId` set must surface
+  #     space-scoped notes from the project's mounted spaces. Without
+  #     the mount fold-in, the project filter silently hides them
+  #     (the bug `notes.search` had — same fix at the GraphQL layer).
+  alpha_search="$(graphql_query "query { librarySearch(input: { query: \"Alpha note body\", projectId: \"$project_id\", types: [NOTE] }) { id title spaceSlug projectId } }" "$AGENT_TOKEN")"
+  echo "alpha library_search: $alpha_search"
+  [[ "$alpha_search" == *"$alpha_note_title"* ]]
+  [[ "$alpha_search" == *"$slug_a"* ]]
+
+  # And the unmounted space's note (beta) must NOT surface — it lives
+  # in space-B which P doesn't mount yet.
+  beta_search="$(graphql_query "query { librarySearch(input: { query: \"Beta note body\", projectId: \"$project_id\", types: [NOTE] }) { id title } }" "$AGENT_TOKEN")"
+  echo "beta library_search (unmounted): $beta_search"
+  [[ "$beta_search" != *"$beta_note_title"* ]]
+
   # 7. Mount space-B; both notes now visible. Beta surfaces as a title
   #    in Recent index (unpinned), alpha keeps its body in Pinned.
   run admin_call "spaces" "$(jq -nc --arg slug "$slug_b" --arg pid "$project_id" '{

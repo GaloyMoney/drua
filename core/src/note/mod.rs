@@ -348,17 +348,25 @@ impl Notes {
         limit: usize,
     ) -> Result<Vec<SearchHit>, NoteError> {
         sub.can(AuthVerb::Read, AuthResource::Note(project_id, None))?;
+        // Include the project's mounted spaces in the scope filter —
+        // notes from mounted spaces are visible to the project's
+        // agents and the search results must reflect that. Mount
+        // lookup failures are swallowed (degraded to project-only)
+        // rather than fatal — search is best-effort.
+        let mounted = match self.space_mounts.space_ids_for_project(project_id).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "space_ids_for_project failed; searching without space tier");
+                Vec::new()
+            }
+        };
+        let mut scope_ids: Vec<uuid::Uuid> = Vec::with_capacity(1 + mounted.len());
+        scope_ids.push(uuid::Uuid::from(project_id));
+        scope_ids.extend(mounted.into_iter().map(uuid::Uuid::from));
         Ok(self
             .library
             .search()
-            .search(
-                query,
-                None,
-                &[uuid::Uuid::from(project_id)],
-                &[NOTE_DOC_TYPE],
-                &[],
-                limit,
-            )
+            .search(query, None, &scope_ids, &[NOTE_DOC_TYPE], &[], limit)
             .await?)
     }
 
