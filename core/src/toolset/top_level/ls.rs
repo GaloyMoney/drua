@@ -53,8 +53,10 @@ impl TopLevelTool for Ls {
     }
 
     fn description(&self) -> &str {
-        "List directory contents. Accepts either an in-sandbox path or a \
-         `space:<slug>/...` path that reads from the project's mounted spaces."
+        "List directory contents. Accepts either an in-sandbox path, a \
+         `space:<slug>/...` path that reads from the project's mounted spaces, \
+         or the bare prefix `space:` (no slug) to enumerate the spaces this \
+         agent can address."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
