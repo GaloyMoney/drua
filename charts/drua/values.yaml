@@ -183,7 +183,7 @@ galoyAgents:
     openaiApiKey: ""
     annotations:
   codeAssistant:
-    indexHash: "1e9f3528fcf2ab79b6b2628017c3c181793134d711d8beba2cad6efa25bbcd3b"
+    indexHash: "e293a0c3a448271e273e9432eda6be33ee91d8160cc2f7fb030af569fe5d02c7"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
@@ -302,8 +302,8 @@ sandbox:
   ## NIX_CONFIG. Point this at a private Cachix or in-cluster nix-serve
   ## so sandbox flakes pull from the local/project cache first.
   nixSubstituters:
-  - url: https://galoy-agents.cachix.org
-    publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
+    - url: https://galoy-agents.cachix.org
+      publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
   attic:
     enabled: true
     ## Cache name created and configured by the bootstrap job.
