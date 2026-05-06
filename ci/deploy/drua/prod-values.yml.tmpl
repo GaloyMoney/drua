@@ -20,20 +20,20 @@ galoyAgents:
         - "GaloyMoney/galoy-devs"
     providers:
       - name: openai
-        base_url: https://openrouter.ai/api
+        baseUrl: https://openrouter.ai/api
         models:
           - name: deepseek/deepseek-v4-pro
             maxTokensPerResponse: 16384
             contextWindowTokens: 1040000
     agents:
+      defaultChain:
+        primary: { name: "deepseek/deepseek-v4-pro", maxTokens: 16384 }
       projectLead:
-        model: deepseek/deepseek-v4-pro
         compaction:
           resetTimeDeltaSeconds: 3600
           pruneAfterSeconds: 300
       agent:
-        model: deepseek/deepseek-v4-pro
-        compactionConfig:
+        compaction:
           pruneAfterSeconds: 300
     report:
       enabled: true
