@@ -65,13 +65,6 @@ pub struct ServiceEvent {
     pub message: String,
 }
 
-/// Workflow agent submitted its structured output via the synthesised
-/// `submit_output` tool. Carries the validated tool-call args.
-#[derive(SimpleObject)]
-pub struct OutputSubmittedEvent {
-    pub value: serde_json::Value,
-}
-
 #[derive(Union)]
 pub enum ChatStreamEvent {
     UserMessage(UserMessageEvent),
@@ -85,7 +78,6 @@ pub enum ChatStreamEvent {
     AssistantDone(AssistantDoneEvent),
     Error(ErrorEvent),
     Service(ServiceEvent),
-    OutputSubmitted(OutputSubmittedEvent),
 }
 
 impl From<drua_core::primitives::ChatOutputEvent> for ChatStreamEvent {
@@ -135,9 +127,6 @@ impl From<drua_core::primitives::ChatOutputEvent> for ChatStreamEvent {
             }),
             ChatOutputEvent::Error { message } => Self::Error(ErrorEvent { message }),
             ChatOutputEvent::Service { message } => Self::Service(ServiceEvent { message }),
-            ChatOutputEvent::OutputSubmitted { value } => {
-                Self::OutputSubmitted(OutputSubmittedEvent { value })
-            }
         }
     }
 }

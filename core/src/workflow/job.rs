@@ -83,11 +83,6 @@ impl JobRunner for ExecuteRunRunner {
         &self,
         mut current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        // Cooperative shutdown: a watcher task flips `cancel` when the
-        // poller broadcasts shutdown. The executor polls `cancel` between
-        // steps and returns `WorkflowError::Cancelled` so the dispatcher
-        // reschedules the job. The next poller resumes via the existing
-        // step-skip + `resume_message` paths.
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_watcher = Arc::clone(&cancel);
         let watcher = tokio::spawn(async move {

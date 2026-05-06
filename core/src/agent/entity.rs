@@ -9,14 +9,21 @@ use crate::primitives::{
     WorkflowRunId,
 };
 use crate::sandbox::SandboxAgentMode;
+use crate::workflow::OutputSchema;
 use es_entity::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum AgentRole {
+    /// Orchestrates the project; never attaches to sandboxes.
     ProjectLead,
+    /// User-owned task agent.
     Agent,
+    /// Workflow-step-spawned agent. Always carries a workflow_id /
+    /// workflow_run_id and an `output_schema`; terminates by calling
+    /// the synthesised `submit_output` tool.
+    WorkflowStepAgent,
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +41,13 @@ pub enum AgentEvent {
         workflow_id: Option<WorkflowDefinitionId>,
         #[serde(default)]
         workflow_run_id: Option<WorkflowRunId>,
+        /// Required structured output schema for workflow step agents;
+        /// `None` for user-owned agents and project leads. The
+        /// `submit_output` tool reads this from the agent at call time
+        /// to validate the model's args. Boxed to keep the enum
+        /// variant size bounded — `RootSchema` is ~300 bytes.
+        #[serde(default)]
+        output_schema: Option<Box<OutputSchema>>,
     },
     /// Effective delta only (no-ops filtered out before firing).
     AuthScopesUpdated {
@@ -79,6 +93,11 @@ pub struct Agent {
     /// `chain_override`; only valid for non-workflow agents.
     #[builder(default)]
     pub model_chain_override: Option<ModelChain>,
+    /// Set on workflow step agents — the schema the `submit_output`
+    /// tool validates the model's args against. `None` for non-workflow
+    /// agents.
+    #[builder(default)]
+    pub output_schema: Option<OutputSchema>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -238,6 +257,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                     project_name,
                     workflow_id,
                     workflow_run_id,
+                    output_schema,
                 } => {
                     builder = builder
                         .id(*id)
@@ -246,7 +266,8 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .name(name.clone())
                         .project_name(project_name.clone())
                         .workflow_id(*workflow_id)
-                        .workflow_run_id(*workflow_run_id);
+                        .workflow_run_id(*workflow_run_id)
+                        .output_schema(output_schema.as_deref().cloned());
                     scopes = authz_scopes.iter().cloned().collect();
                 }
                 AgentEvent::AuthScopesUpdated { added, removed } => {
@@ -294,6 +315,8 @@ pub struct NewAgent {
     pub(super) workflow_id: Option<WorkflowDefinitionId>,
     #[builder(default, setter(into, strip_option))]
     pub(super) workflow_run_id: Option<WorkflowRunId>,
+    #[builder(default)]
+    pub(super) output_schema: Option<OutputSchema>,
 }
 
 impl NewAgent {
@@ -315,6 +338,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 project_name: self.project_name,
                 workflow_id: self.workflow_id,
                 workflow_run_id: self.workflow_run_id,
+                output_schema: self.output_schema.map(Box::new),
             }],
         )
     }

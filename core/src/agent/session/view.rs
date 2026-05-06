@@ -441,7 +441,6 @@ mod tests {
             description: None,
             input_schema: serde_json::json!({}),
             strict: false,
-            kind: ToolKind::External,
         }
     }
 

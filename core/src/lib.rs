@@ -43,8 +43,8 @@ use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
-    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool, TextEditor,
-    ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
+    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
+    SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
 };
 use user::Users;
 use workflow::Workflows;
@@ -226,6 +226,7 @@ impl App {
         ));
 
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
+        toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
         let workflows = Arc::new(Workflows::init(
             pool,

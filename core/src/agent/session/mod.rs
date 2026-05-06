@@ -264,39 +264,10 @@ impl Sessions {
         Ok(self.repo.find_by_agent_id(agent_id).await?)
     }
 
-    #[instrument(name = "domain.agent_session.current_tool_defs", skip(self))]
-    pub async fn current_tool_defs(
-        &self,
-        agent_id: AgentId,
-    ) -> Result<Vec<ToolDefinition>, AgentSessionError> {
-        let session = self.repo.find_by_agent_id(agent_id).await?;
-        Ok(session.current_tool_defs())
-    }
-
-    /// Records a successful `submit_output` tool-call from a workflow
-    /// agent. First-call-wins: subsequent calls are dropped (the agent
-    /// loop sends the model an "already submitted" tool_result).
-    #[instrument(
-        name = "domain.agent_session.record_output_submitted",
-        skip(self, value)
-    )]
-    pub async fn record_output_submitted(
-        &self,
-        agent_id: AgentId,
-        value: serde_json::Value,
-    ) -> Result<es_entity::Idempotent<()>, AgentSessionError> {
-        let mut op = self.repo.begin_op().await?;
-        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
-        let outcome = session.record_output_submitted(value);
-        if outcome.did_execute() {
-            self.repo.update_in_op(&mut op, &mut session).await?;
-        }
-        op.commit().await?;
-        Ok(outcome)
-    }
-
-    /// Reads the latest persisted `OutputSubmitted` value for an agent's
-    /// session. `None` when no submit_output call has been recorded.
+    /// Reads the latest persisted `OutputSubmitted` value for an
+    /// agent's session. `None` when no submit_output call has been
+    /// recorded. Workflow executor consumes this to populate
+    /// `StepResult.output`.
     #[instrument(name = "domain.agent_session.submitted_output", skip(self))]
     pub async fn submitted_output(
         &self,

@@ -216,6 +216,7 @@ fn format_agent(a: &Agent) -> String {
     let role = match a.agent_role {
         AgentRole::ProjectLead => "project_lead",
         AgentRole::Agent => "agent",
+        AgentRole::WorkflowStepAgent => "workflow_step_agent",
     };
     let sandbox = match &a.attached_sandbox {
         Some((sid, mode)) => format!("{sid} ({mode:?})"),
@@ -247,6 +248,7 @@ fn format_agents(agents: &[Agent]) -> String {
         let role = match a.agent_role {
             AgentRole::ProjectLead => "project_lead",
             AgentRole::Agent => "agent",
+            AgentRole::WorkflowStepAgent => "workflow_step_agent",
         };
         lines.push(format!(
             "{:<38} {:<20} {:<16} {:<38}",

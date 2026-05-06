@@ -105,8 +105,10 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Persists in `Provisioning`; caller must invoke `spawn_sandbox_creation`
-    /// after the outer op commits.
+    /// Persists in `Provisioning`. Use [`Self::create`] (or
+    /// [`Self::create_for_workflow`]) when you also need the
+    /// background provisioning lifecycle spawned; this `_in_op`
+    /// variant only writes the row.
     #[instrument(name = "domain.sandbox.create_in_op", skip(self, op))]
     pub async fn create_in_op(
         &self,
@@ -135,7 +137,7 @@ impl Sandboxes {
 
     /// Lifecycle: create → wait_ready (→ Initializing) → initialize (→ Ready).
     /// Failures route through `record_error` → `Errored` + `ProvisioningFailed`.
-    pub fn spawn_sandbox_creation(&self, id: SandboxId) {
+    fn spawn_sandbox_creation(&self, id: SandboxId) {
         let me = self.clone();
         tokio::spawn(async move {
             me.run_creation_lifecycle(id).await;
@@ -418,6 +420,29 @@ impl Sandboxes {
             .find(|s| s.name == storage_name && s.workflow_id == Some(workflow_id)))
     }
 
+    /// Workflow-scoped create + commit + lifecycle spawn. Wraps an
+    /// internal `_in_op` step with op begin/commit and the background
+    /// provisioning spawn so callers (the workflow executor) get a
+    /// `Provisioning` sandbox in one call, mirroring [`Self::create`]
+    /// for user-driven sandboxes.
+    #[instrument(name = "domain.sandbox.create_for_workflow", skip(self))]
+    pub async fn create_for_workflow(
+        &self,
+        project_id: ProjectId,
+        workflow_id: WorkflowDefinitionId,
+        name: impl Into<String> + std::fmt::Debug,
+        specs: SandboxSpecs,
+        mode: SandboxMode,
+    ) -> Result<Sandbox, SandboxError> {
+        let mut op = self.repo.begin_op().await?;
+        let sandbox = self
+            .create_for_workflow_in_op(&mut op, project_id, workflow_id, name, specs, mode)
+            .await?;
+        op.commit().await?;
+        self.spawn_sandbox_creation(sandbox.id);
+        Ok(sandbox)
+    }
+
     /// Workflow-scoped create; mirrors `create_in_op` but tags the
     /// entity with `workflow_id` and skips the auth check (the workflow
     /// run was authorised when triggered). The stored name is the
@@ -425,7 +450,7 @@ impl Sandboxes {
     /// declare the same sandbox name without violating the unique
     /// `(project_id, name)` index.
     #[instrument(name = "domain.sandbox.create_for_workflow_in_op", skip(self, op))]
-    pub async fn create_for_workflow_in_op(
+    async fn create_for_workflow_in_op(
         &self,
         op: &mut DbOp<'_>,
         project_id: ProjectId,

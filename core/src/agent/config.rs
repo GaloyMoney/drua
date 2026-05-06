@@ -9,7 +9,11 @@ use super::AgentRole;
 
 /// Roles that must be present in `builtin_roles`. New variants must be
 /// added here too — `validate` fails fast at startup if missing.
-const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::ProjectLead, AgentRole::Agent];
+const REQUIRED_ROLES: &[AgentRole] = &[
+    AgentRole::ProjectLead,
+    AgentRole::Agent,
+    AgentRole::WorkflowStepAgent,
+];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoleConfig {
@@ -142,6 +146,8 @@ mod tests {
             .insert(AgentRole::ProjectLead, RoleConfig::default());
         cfg.builtin_roles
             .insert(AgentRole::Agent, RoleConfig::default());
+        cfg.builtin_roles
+            .insert(AgentRole::WorkflowStepAgent, RoleConfig::default());
         cfg.validate().expect("should validate");
     }
 
@@ -155,6 +161,8 @@ mod tests {
             .insert(AgentRole::ProjectLead, RoleConfig::default());
         cfg.builtin_roles
             .insert(AgentRole::Agent, RoleConfig::default());
+        cfg.builtin_roles
+            .insert(AgentRole::WorkflowStepAgent, RoleConfig::default());
         let err = cfg.validate().expect_err("missing model id");
         assert!(format!("{err}").contains("missing"));
     }

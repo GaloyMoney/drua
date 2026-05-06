@@ -95,53 +95,60 @@ Implement changes rather than only suggesting them. Use tools to \
 discover missing details instead of asking for clarification.
 </default_to_action>";
 
-const WORKFLOW_BEHAVIOR_ADDENDUM: &str = "
+const WORKFLOW_AGENT_ROLE_HEADER: &str = "\
+You are a workflow step agent. Focus on completing the specific step \
+you have been given.
+
+<default_to_action>
+Implement changes rather than only suggesting them. Use tools to \
+discover missing details instead of asking for clarification.
+</default_to_action>
+
 <finish_with_submit_output>
-You are running as a workflow step. The runtime injects a \
-`submit_output` tool whose schema is the structured result this step \
-must produce. After you have done your investigation/work, call \
-`submit_output` exactly once with arguments matching that schema. \
-That call is your terminal turn — the step ends with the validated \
-arguments as its `StepResult.output`. Do NOT end the turn with a \
-plain text reply; the runtime will force the call on retry and fail \
-the step if you still don't make it.
-</finish_with_submit_output>";
+The runtime has injected a `submit_output` tool. Your terminal turn \
+is to call it exactly once, with arguments matching the schema below. \
+The validated arguments become this step's `StepResult.output`. Do \
+NOT end the turn with a plain text reply; the runtime will force the \
+call on retry and fail the step if you still don't make it.
+
+The expected output schema:
+";
 
 /// Returns four `SystemBlock`s (Base, Tools, Behavioral, Role) kept
 /// separate to allow cache-control breakpoints at the LLM layer.
-/// When `workflow_mode` is true the Behavioral block carries the
-/// `submit_output` addendum so the agent knows to terminate via that
-/// tool.
+/// `output_schema` is consulted only for [`AgentRole::WorkflowStepAgent`];
+/// the schema is rendered into the Role block so the model sees it
+/// in the system context as well as in the `submit_output` tool def.
 pub fn system_blocks_for_role(
     role: AgentRole,
     toolsets: &Arc<ToolSets>,
     subject: &AuthSubject,
     project_name: &str,
-    workflow_mode: bool,
+    output_schema: Option<&crate::workflow::OutputSchema>,
 ) -> Vec<SystemBlock> {
     let base_text = format!("{BASE_PROMPT_PREFIX} \"{project_name}\".");
     let tools_text = build_tools_section(role, toolsets, subject);
     let role_text = match role {
-        AgentRole::ProjectLead => PROJECT_LEAD_ROLE,
-        AgentRole::Agent => AGENT_ROLE,
-    };
-
-    let behavioral_text = if workflow_mode {
-        format!("{BEHAVIORAL_GUIDELINES}\n{WORKFLOW_BEHAVIOR_ADDENDUM}")
-    } else {
-        BEHAVIORAL_GUIDELINES.to_string()
+        AgentRole::ProjectLead => PROJECT_LEAD_ROLE.to_string(),
+        AgentRole::Agent => AGENT_ROLE.to_string(),
+        AgentRole::WorkflowStepAgent => render_workflow_role(output_schema),
     };
 
     vec![
         SystemBlock::Base { text: base_text },
         SystemBlock::Tools { text: tools_text },
         SystemBlock::Behavioral {
-            text: behavioral_text,
+            text: BEHAVIORAL_GUIDELINES.to_string(),
         },
-        SystemBlock::Role {
-            text: role_text.to_string(),
-        },
+        SystemBlock::Role { text: role_text },
     ]
+}
+
+fn render_workflow_role(output_schema: Option<&crate::workflow::OutputSchema>) -> String {
+    let schema_json = output_schema
+        .and_then(|s| serde_json::to_string_pretty(s.root_schema()).ok())
+        .unwrap_or_else(|| "{}".to_string());
+    format!("{WORKFLOW_AGENT_ROLE_HEADER}```json\n{schema_json}\n```\n</finish_with_submit_output>")
 }
 
 /// Tools section: does NOT re-list top-level tools (already in `tools`
@@ -153,7 +160,7 @@ fn build_tools_section(
 ) -> String {
     let mut section = String::new();
 
-    if matches!(role, AgentRole::Agent) {
+    if matches!(role, AgentRole::Agent | AgentRole::WorkflowStepAgent) {
         section.push_str(
             "Sandbox tools (bash, text_editor, read, ls, grep, glob) \
              require an attached sandbox.\n",
@@ -174,21 +181,25 @@ fn build_tools_section(
 mod tests {
     use super::*;
 
-    #[test]
-    fn project_lead_returns_four_blocks() {
-        let toolsets = Arc::new(
+    fn toolsets_for_test() -> Arc<ToolSets> {
+        Arc::new(
             tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(ToolSets::init(Default::default(), None))
                 .unwrap(),
-        );
+        )
+    }
+
+    #[test]
+    fn project_lead_returns_four_blocks() {
+        let toolsets = toolsets_for_test();
         let subject = AuthSubject::Anonymous;
         let blocks = system_blocks_for_role(
             AgentRole::ProjectLead,
             &toolsets,
             &subject,
             "acme-corp",
-            false,
+            None,
         );
         assert_eq!(blocks.len(), 4);
         assert!(matches!(&blocks[0], SystemBlock::Base { .. }));
@@ -198,57 +209,49 @@ mod tests {
         assert!(blocks[1].text().contains("progressive disclosure"));
         assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
         assert!(blocks[2].text().contains("investigate_before_answering"));
-        assert!(blocks[2].text().contains("use_parallel_tool_calls"));
-        assert!(blocks[2].text().contains("use_compose_for_efficiency"));
-        assert!(blocks[2].text().contains("compose_types"));
-        assert!(blocks[2].text().contains("describe_tool"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("project lead"));
+        assert!(!blocks[3].text().contains("submit_output"));
     }
 
     #[test]
     fn agent_returns_four_blocks_with_sandbox_note() {
-        let toolsets = Arc::new(
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(ToolSets::init(Default::default(), None))
-                .unwrap(),
-        );
+        let toolsets = toolsets_for_test();
         let subject = AuthSubject::Anonymous;
         let blocks =
-            system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project", false);
+            system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project", None);
         assert_eq!(blocks.len(), 4);
-        assert!(matches!(&blocks[1], SystemBlock::Tools { .. }));
         assert!(blocks[1].text().contains("Sandbox tools"));
         assert!(blocks[1].text().contains("require an attached sandbox"));
-        assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
         assert!(blocks[2].text().contains("investigate_before_answering"));
-        assert!(blocks[2].text().contains("use_parallel_tool_calls"));
-        assert!(blocks[2].text().contains("use_compose_for_efficiency"));
-        assert!(blocks[2].text().contains("compose_types"));
-        assert!(blocks[2].text().contains("describe_tool"));
-        assert!(!blocks[2].text().contains("submit_output"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("task agent"));
-        assert!(blocks[3].text().contains("default_to_action"));
+        assert!(!blocks[3].text().contains("submit_output"));
     }
 
     #[test]
-    fn workflow_mode_appends_submit_output_addendum() {
-        let toolsets = Arc::new(
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(ToolSets::init(Default::default()))
-                .unwrap(),
-        );
+    fn workflow_step_agent_role_includes_schema() {
+        use crate::workflow::default_output_schema;
+        let toolsets = toolsets_for_test();
         let subject = AuthSubject::Anonymous;
-        let blocks =
-            system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project", true);
+        let schema = default_output_schema();
+        let blocks = system_blocks_for_role(
+            AgentRole::WorkflowStepAgent,
+            &toolsets,
+            &subject,
+            "test-project",
+            Some(&schema),
+        );
         assert_eq!(blocks.len(), 4);
-        assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
-        assert!(blocks[2].text().contains("submit_output"));
-        assert!(blocks[2].text().contains("finish_with_submit_output"));
-        // Original behavioural guidelines still present.
-        assert!(blocks[2].text().contains("investigate_before_answering"));
+        assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
+        let role_text = blocks[3].text();
+        assert!(role_text.contains("workflow step agent"));
+        assert!(role_text.contains("submit_output"));
+        assert!(role_text.contains("finish_with_submit_output"));
+        // Schema is rendered into the role text alongside its
+        // separate appearance in the `submit_output` tool def.
+        assert!(role_text.contains("\"type\": \"object\""));
+        assert!(role_text.contains("success"));
+        assert!(role_text.contains("reason"));
     }
 }

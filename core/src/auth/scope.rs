@@ -22,6 +22,10 @@ pub enum AuthScope {
     SandboxUse(SandboxId),
     /// Read-only sandbox access. Granted on `Read` attach.
     SandboxRead(SandboxId),
+    /// Marker for agents spawned by a workflow run. Gates the
+    /// synthesised `submit_output` tool's visibility — only workflow
+    /// agents are expected to terminate via `submit_output`.
+    WorkflowStepAgent,
     /// Grants access only to [`AuthResource::External`] resources whose name matches.
     External(String),
 }
@@ -85,6 +89,8 @@ impl AuthScope {
                     )
             }
 
+            AuthScope::WorkflowStepAgent => false,
+
             AuthScope::External(name) => {
                 matches!(resource, AuthResource::External(res_name) if res_name == name)
             }
@@ -100,6 +106,7 @@ impl fmt::Display for AuthScope {
             AuthScope::ProjectMember(id) => write!(f, "project:{id}:member"),
             AuthScope::SandboxUse(id) => write!(f, "sandbox:{id}:use"),
             AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
+            AuthScope::WorkflowStepAgent => f.write_str("workflow:step_agent"),
             AuthScope::External(s) => f.write_str(s),
         }
     }
@@ -111,6 +118,9 @@ impl FromStr for AuthScope {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "admin" {
             return Ok(AuthScope::Admin);
+        }
+        if s == "workflow:step_agent" {
+            return Ok(AuthScope::WorkflowStepAgent);
         }
 
         if let Some(rest) = s.strip_prefix("project:") {
@@ -193,6 +203,7 @@ mod tests {
             AuthScope::ProjectMember(project_id),
             AuthScope::SandboxUse(sb_id),
             AuthScope::SandboxRead(sb_id),
+            AuthScope::WorkflowStepAgent,
             AuthScope::External("custom:thing".to_owned()),
         ];
 

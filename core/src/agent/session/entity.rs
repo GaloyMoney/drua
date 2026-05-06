@@ -388,43 +388,14 @@ impl AgentSession {
         self.build_prompt(target, prompt_definition).map(Some)
     }
 
-    /// Latest tool-defs snapshot — replays `Initialized` and the most
-    /// recent `ToolDefsUpdated`. Used by the agent loop to identify
-    /// `SubmitOutput` synthetic tools before fan-out.
-    pub fn current_tool_defs(&self) -> Vec<ToolDefinition> {
-        let mut latest: Vec<ToolDefinition> = Vec::new();
-        for event in self.events.iter_all() {
-            match event {
-                AgentSessionEvent::Initialized { tool_defs, .. } => latest = tool_defs.clone(),
-                AgentSessionEvent::ToolDefsUpdated { tool_defs } => latest = tool_defs.clone(),
-                _ => {}
-            }
-        }
-        latest
-    }
-
     /// Returns the structured output the agent submitted via the
-    /// synthesised `submit_output` tool, if any. Workflow steps with an
-    /// `output_schema` consume this; schemaless steps return `None`.
+    /// `submit_output` tool, if any. Workflow steps consume this to
+    /// populate `StepResult.output`.
     pub fn submitted_output(&self) -> Option<&serde_json::Value> {
         self.events.iter_all().rev().find_map(|e| match e {
             AgentSessionEvent::OutputSubmitted { value, .. } => Some(value),
             _ => None,
         })
-    }
-
-    /// First-call-wins: subsequent `submit_output` calls in the same
-    /// session are ignored. The agent loop is expected to relay an
-    /// `already submitted` tool_result to the model in those cases.
-    pub fn record_output_submitted(&mut self, value: serde_json::Value) -> Idempotent<()> {
-        if self.submitted_output().is_some() {
-            return Idempotent::AlreadyApplied;
-        }
-        self.events.push(AgentSessionEvent::OutputSubmitted {
-            value,
-            submitted_at: chrono::Utc::now(),
-        });
-        Idempotent::Executed(())
     }
 
     pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) -> Idempotent<()> {
@@ -559,8 +530,30 @@ impl AgentSession {
             return Err(AgentSessionError::NotToolUseTurn);
         }
 
+        // First non-error `submit_output` result terminates the turn.
+        // The validated payload is the assistant's `tool_use.input` —
+        // already validated provider-side (`strict: true`) and by the
+        // tool itself in `SubmitOutputTool::call`.
+        let submit_output = results
+            .iter()
+            .find(|r| !r.is_error)
+            .and_then(|result| self.find_tool_use_input(thread_id, &result.tool_use_id))
+            .filter(|(name, _)| name == SUBMIT_OUTPUT_TOOL_NAME)
+            .map(|(_, input)| input);
+
         self.events
             .push(AgentSessionEvent::ToolResultsAdded { thread_id, results });
+
+        if let Some(value) = submit_output {
+            // First-wins: skip if already recorded (e.g. resume after
+            // OutputSubmitted was persisted but loop didn't observe Done).
+            if self.submitted_output().is_none() {
+                self.events.push(AgentSessionEvent::OutputSubmitted {
+                    value,
+                    submitted_at: chrono::Utc::now(),
+                });
+            }
+        }
 
         let view = self.materialize().tool_results_since_last_breakpoint();
         let thread = self
@@ -569,12 +562,40 @@ impl AgentSession {
             .ok_or(AgentSessionError::ThreadNotFound)?;
         thread.add_tool_results(view);
 
+        if self.submitted_output().is_some() {
+            return Ok(AgentSessionResponse::Done);
+        }
+
         let target = if self.current_main_thread == Some(thread_id) {
             TargetThread::Main
         } else {
             TargetThread::Id(thread_id)
         };
         Ok(AgentSessionResponse::PromptPending { target })
+    }
+
+    /// Walks back to the prior `AssistantResponseReceived` on
+    /// `thread_id` to find the tool_use block matching `tool_use_id`.
+    /// Returns `(name, input)` so callers can dispatch on the tool's
+    /// name without re-scanning.
+    fn find_tool_use_input(
+        &self,
+        thread_id: SessionThreadId,
+        tool_use_id: &str,
+    ) -> Option<(String, serde_json::Value)> {
+        self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::AssistantResponseReceived {
+                thread_id: tid,
+                content,
+                ..
+            } if *tid == thread_id => content.iter().find_map(|block| match block {
+                AssistantBlock::ToolUse { id, name, input } if id == tool_use_id => {
+                    Some((name.clone(), input.clone()))
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
     }
 
     pub fn assistant_response_received(
@@ -1330,7 +1351,6 @@ mod tests {
             description: Some("Get weather".into()),
             input_schema: serde_json::json!({"type": "object"}),
             strict: false,
-            kind: ToolKind::External,
         }]);
 
         session
@@ -1410,7 +1430,6 @@ mod tests {
                 description: Some("Get weather".into()),
                 input_schema: serde_json::json!({"type": "object"}),
                 strict: false,
-                kind: ToolKind::External,
             }])
             .build()
             .expect("NewAgentSession build");

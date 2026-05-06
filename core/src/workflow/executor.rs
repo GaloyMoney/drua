@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::agent::session::message::{ToolDefinition, ToolKind};
+use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
 use crate::agent::{Agent, Agents};
 use crate::primitives::{
     AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
@@ -11,31 +11,10 @@ use crate::primitives::{
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
 
-use super::definition::{OutputSchema, WorkflowSandboxDecl, WorkflowStepDef};
+use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{WorkflowRunRepo, WorkflowRunState};
-
-/// The synthesised tool's name. Workflow agents see exactly this name
-/// in their `tool_defs`; the agent loop matches by name to intercept
-/// the call and persist its args as the step's structured output.
-const SUBMIT_OUTPUT_TOOL_NAME: &str = "submit_output";
-
-const SUBMIT_OUTPUT_TOOL_DESCRIPTION: &str =
-    "Call this exactly once to record this step's structured result and finish the step. \
-     The arguments must match the declared output schema.";
-
-fn build_submit_output_tool(output_schema: OutputSchema) -> ToolDefinition {
-    let input_schema = serde_json::to_value(output_schema.into_root_schema())
-        .expect("RootSchema is always serialisable to JSON");
-    ToolDefinition {
-        name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
-        description: Some(SUBMIT_OUTPUT_TOOL_DESCRIPTION.to_string()),
-        input_schema,
-        strict: true,
-        kind: ToolKind::SubmitOutput,
-    }
-}
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
@@ -148,11 +127,6 @@ impl Executor {
                 continue;
             }
 
-            // Between-steps cancellation: abort cleanly without
-            // `step_failed` so the rescheduled run picks up here. The
-            // pre-flight already brought sandboxes back to Ready and any
-            // in-flight `PromptSent` will be re-driven via
-            // [`Agents::resume_message`] on the next attempt.
             if cancel.load(Ordering::Relaxed) {
                 return Err(WorkflowError::Cancelled);
             }
@@ -247,8 +221,7 @@ impl Executor {
                     let existing = self
                         .sandboxes
                         .find_for_workflow(project_id, workflow_id, name)
-                        .await
-                        .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
+                        .await?;
 
                     let sandbox = match existing {
                         None => {
@@ -257,28 +230,15 @@ impl Executor {
                                 memory: "512Mi".to_string(),
                                 disk_size: "10Gi".to_string(),
                             });
-                            let mut op = self
-                                .sandboxes
-                                .begin_op()
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                            let sb = self
-                                .sandboxes
-                                .create_for_workflow_in_op(
-                                    &mut op,
+                            self.sandboxes
+                                .create_for_workflow(
                                     project_id,
                                     workflow_id,
                                     name.clone(),
                                     specs,
                                     mode.clone(),
                                 )
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                            op.commit()
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                            self.sandboxes.spawn_sandbox_creation(sb.id);
-                            sb
+                                .await?
                         }
                         Some(sb) => self.restart_if_dormant(sb, name).await?,
                     };
@@ -323,10 +283,7 @@ impl Executor {
                 "pre-flight: restarting sandbox in Errored state",
             );
         }
-        self.sandboxes
-            .restart_for_workflow(sandbox.id)
-            .await
-            .map_err(|e| WorkflowError::Sandbox(e.to_string()))
+        Ok(self.sandboxes.restart_for_workflow(sandbox.id).await?)
     }
 
     async fn suspend_workflow_sandboxes(
@@ -450,10 +407,6 @@ impl Executor {
                 let arguments = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
-                // `interpolate_skill` resolves the project's mounted-space
-                // skills internally via the held `SpaceMounts` — a workflow
-                // step naming a space-scoped skill resolves correctly as
-                // long as the workflow's project mounts the space.
                 let prompt = self
                     .skills
                     .interpolate_skill(skill, Some(project_id), sandbox_id, Some(&arguments))
@@ -461,21 +414,13 @@ impl Executor {
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?
                     .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
 
-                let run_id_short = {
-                    let s = run_id.to_string();
-                    s.split_once('-').map(|(p, _)| p.to_string()).unwrap_or(s)
-                };
-                let agent_name = format!("workflow-{run_id_short}-{name}");
+                let agent_name = format!("workflow-{}-{name}", run_id.short());
                 let mut op = self
                     .agents
                     .begin_op()
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-                // Re-entrancy: on retry the prior attempt's agent already
-                // owns the sandbox write slot and carries its session
-                // history (incl. an unanswered `PromptSent` if killed
-                // mid-LLM-call). Reuse it; only create when absent.
                 let existing = self
                     .agents
                     .find_for_workflow_step_in_op(&mut op, run_id, &agent_name)
@@ -485,12 +430,6 @@ impl Executor {
                 let (agent, detached_agents) = if let Some(agent) = existing {
                     (agent, Vec::new())
                 } else {
-                    // Conflict-only steal: detach a non-workflow Writer
-                    // unconditionally, or a same-workflow Writer (stale
-                    // claim from a prior run / sibling step). Different
-                    // workflows are never stolen from. Same op as
-                    // create+attach so the sandbox is never observed
-                    // double-attached.
                     let detached_agents = match attach_sandbox {
                         Some((sandbox_id, mode)) => self
                             .agents
@@ -505,8 +444,6 @@ impl Executor {
                         None => Vec::new(),
                     };
                     let chain_override = definition.resolve_step_chain(step);
-                    let extra_tool_defs =
-                        vec![build_submit_output_tool(step.output_schema().clone())];
                     let agent = self
                         .agents
                         .create_for_workflow_run_in_op(
@@ -517,7 +454,7 @@ impl Executor {
                             &agent_name,
                             attach_sandbox,
                             chain_override,
-                            extra_tool_defs,
+                            step.output_schema().clone(),
                         )
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?;
@@ -607,10 +544,11 @@ impl Executor {
         })
     }
 
-    /// Runs one user→assistant exchange and returns the structured
-    /// output if the agent terminated by calling `submit_output`.
-    /// `None` means the turn closed cleanly (or via plain text) without
-    /// a `submit_output` call — the executor decides whether to retry.
+    /// Drives one send/resume turn to completion. Returns the
+    /// structured output if the session reached `Done` via a
+    /// `submit_output` call (read from the persisted session event).
+    /// `None` means the turn closed without `submit_output` — the
+    /// caller decides whether to retry.
     async fn stream_agent_response(
         &self,
         agent: &Agent,
@@ -650,7 +588,6 @@ impl Executor {
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(300));
 
-        let mut submitted: Option<serde_json::Value> = None;
         loop {
             let event = match tokio::time::timeout(idle_timeout, rx.recv()).await {
                 Ok(Some(event)) => event,
@@ -663,7 +600,6 @@ impl Executor {
                 }
             };
             match event {
-                ChatOutputEvent::OutputSubmitted { value } => submitted = Some(value),
                 ChatOutputEvent::AssistantDone { .. } => break,
                 ChatOutputEvent::Error { message } => {
                     return Err(WorkflowError::StepFailed {
@@ -674,7 +610,15 @@ impl Executor {
                 _ => {}
             }
         }
-        Ok(submitted)
+
+        // The session is the source of truth: `add_tool_results`
+        // pushed `OutputSubmitted` and returned `Done` when the agent
+        // called `submit_output`, which broke the agent loop and
+        // emitted `AssistantDone`. Read it back here.
+        self.agents
+            .submitted_output(agent.id)
+            .await
+            .map_err(|e| WorkflowError::Agent(e.to_string()))
     }
 
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {

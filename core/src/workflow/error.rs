@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::auth::error::AuthorizationError;
+use crate::sandbox::SandboxError;
 
 use super::repo::{
     WorkflowDefinitionCreateError, WorkflowDefinitionFindError, WorkflowDefinitionModifyError,
@@ -55,7 +56,7 @@ pub enum WorkflowError {
     #[error("WorkflowError - Skill: {0}")]
     Skill(String),
     #[error("WorkflowError - Sandbox: {0}")]
-    Sandbox(String),
+    Sandbox(#[from] SandboxError),
     #[error("WorkflowError - Job: {0}")]
     Job(String),
     #[error("WorkflowError - Authorization: {0}")]
