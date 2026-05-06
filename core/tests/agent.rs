@@ -633,7 +633,7 @@ async fn detach_conflicting_writer_steals_user_writer_when_wants_write() {
 
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write, None)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
@@ -668,7 +668,7 @@ async fn detach_conflicting_writer_does_not_steal_user_reader_when_wants_write()
 
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write, None)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
@@ -706,7 +706,7 @@ async fn detach_conflicting_writer_is_noop_when_wants_read() {
 
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Read)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Read, None)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
@@ -723,7 +723,7 @@ async fn detach_conflicting_writer_is_noop_when_wants_read() {
 }
 
 #[tokio::test]
-async fn detach_conflicting_writer_skips_workflow_owned_writer() {
+async fn detach_conflicting_writer_skips_workflow_owned_writer_from_other_workflow() {
     use drua_core::sandbox::SandboxAgentMode;
 
     let pool = pool().await;
@@ -747,22 +747,89 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer() {
         .expect("create workflow agent");
     op.commit().await.expect("commit");
 
+    // `None` (non-workflow caller) and a different workflow_id both
+    // preserve the existing protection.
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write, None)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
-
     assert!(
         detached.is_empty(),
-        "helper must not detach a workflow-owned Writer: got {detached:?}",
+        "non-workflow caller must not detach a workflow-owned Writer: got {detached:?}",
     );
+
+    let other_workflow_id = drua_core::primitives::WorkflowDefinitionId::new();
+    let mut op = agents.begin_op().await.expect("begin op");
+    let detached = agents
+        .detach_conflicting_writer_in_op(
+            &mut op,
+            sandbox_id,
+            SandboxAgentMode::Write,
+            Some(other_workflow_id),
+        )
+        .await
+        .expect("detach helper");
+    op.commit().await.expect("commit");
+    assert!(
+        detached.is_empty(),
+        "different-workflow caller must not detach: got {detached:?}",
+    );
+
     let after = sandboxes.find_by_id(&sub, sandbox_id).await.expect("find");
     assert!(after
         .attached_agents
         .iter()
         .any(|(id, _)| *id == workflow_agent.id));
+}
+
+#[tokio::test]
+async fn detach_conflicting_writer_steals_from_same_workflow_writer() {
+    use drua_core::sandbox::SandboxAgentMode;
+
+    let pool = pool().await;
+    let (agents, sandboxes, sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-wf-same").await;
+    let sub = AuthSubject::User(UserId::new());
+
+    // Prior run of the same workflow left a stale Writer claim — e.g.,
+    // the run errored without releasing, or the process was killed
+    // before the post-flight detach committed.
+    let (workflow_id, prior_run_id) = seed_workflow_run(&pool, project_id).await;
+    let mut op = agents.begin_op().await.expect("begin op");
+    let stale_writer = agents
+        .create_for_workflow_run_in_op(
+            &mut op,
+            project_id,
+            workflow_id,
+            prior_run_id,
+            "wf-stale",
+            Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
+        )
+        .await
+        .expect("create workflow agent");
+    op.commit().await.expect("commit");
+
+    let mut op = agents.begin_op().await.expect("begin op");
+    let detached = agents
+        .detach_conflicting_writer_in_op(
+            &mut op,
+            sandbox_id,
+            SandboxAgentMode::Write,
+            Some(workflow_id),
+        )
+        .await
+        .expect("detach helper");
+    op.commit().await.expect("commit");
+
+    assert_eq!(detached, vec![stale_writer.id]);
+    let after = sandboxes.find_by_id(&sub, sandbox_id).await.expect("find");
+    assert!(
+        after.attached_agents.is_empty(),
+        "same-workflow steal should free the slot",
+    );
 }
 
 #[tokio::test]
@@ -775,7 +842,7 @@ async fn detach_conflicting_writer_is_noop_when_unattached() {
 
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write, None)
         .await
         .expect("detach helper");
     op.commit().await.expect("commit");
@@ -784,7 +851,7 @@ async fn detach_conflicting_writer_is_noop_when_unattached() {
     // Idempotent re-run.
     let mut op = agents.begin_op().await.expect("begin op");
     let detached = agents
-        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write)
+        .detach_conflicting_writer_in_op(&mut op, sandbox_id, SandboxAgentMode::Write, None)
         .await
         .expect("idempotent re-run");
     op.commit().await.expect("commit");

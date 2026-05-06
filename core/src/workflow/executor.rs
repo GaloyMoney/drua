@@ -463,13 +463,21 @@ impl Executor {
                 let (agent, detached_agents) = if let Some(agent) = existing {
                     (agent, Vec::new())
                 } else {
-                    // Conflict-only steal: detach a non-workflow Writer iff
-                    // we want Write. Same op as create+attach so the
-                    // sandbox is never observed double-attached.
+                    // Conflict-only steal: detach a non-workflow Writer
+                    // unconditionally, or a same-workflow Writer (stale
+                    // claim from a prior run / sibling step). Different
+                    // workflows are never stolen from. Same op as
+                    // create+attach so the sandbox is never observed
+                    // double-attached.
                     let detached_agents = match attach_sandbox {
                         Some((sandbox_id, mode)) => self
                             .agents
-                            .detach_conflicting_writer_in_op(&mut op, sandbox_id, mode)
+                            .detach_conflicting_writer_in_op(
+                                &mut op,
+                                sandbox_id,
+                                mode,
+                                Some(workflow_id),
+                            )
                             .await
                             .map_err(|e| WorkflowError::Agent(e.to_string()))?,
                         None => Vec::new(),
