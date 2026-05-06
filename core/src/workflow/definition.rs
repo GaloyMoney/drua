@@ -6,6 +6,7 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
@@ -73,6 +74,9 @@ pub enum WorkflowStepDef {
         #[serde(default)]
         sandbox_mode: Option<SandboxAgentMode>,
         timeout_seconds: Option<u64>,
+        /// Highest-precedence chain override; beats workflow + defaults.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_chain: Option<ModelChain>,
     },
 }
 
@@ -80,6 +84,12 @@ impl WorkflowStepDef {
     pub fn name(&self) -> &str {
         match self {
             WorkflowStepDef::AgentStep { name, .. } => name,
+        }
+    }
+
+    pub fn model_chain(&self) -> Option<&ModelChain> {
+        match self {
+            WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
         }
     }
 }

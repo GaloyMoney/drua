@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use llm::prompt::{Message, SystemBlock, UserBlock};
 use llm::provider::LlmProvider;
 use llm::stream::StreamAccumulator;
-use llm::{Prompt, PromptResponse};
+use llm::{ModelChain, Prompt, PromptResponse};
 use openai_client::{OpenAiResponsesAuth, OpenAiResponsesClient};
 
 const LIVE_TESTS_ENV: &str = "DRUA_LIVE_CACHE_TESTS";
@@ -41,17 +41,13 @@ fn build_prompt(
     user_text: impl Into<String>,
 ) -> Prompt {
     Prompt {
-        model: model.to_string(),
+        chain: ModelChain::new(model),
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),
-                cache_control: None,
             }],
         }],
-        system: vec![SystemBlock::Text {
-            text: system_text,
-            cache_control: None,
-        }],
+        system: vec![SystemBlock::Text { text: system_text }],
         tools: Vec::new(),
         tool_choice: None,
         max_tokens: Some(64),

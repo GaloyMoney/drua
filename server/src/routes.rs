@@ -654,7 +654,14 @@ fn project_to_view(project: &domain::project::Project) -> ProjectView {
             .created_at()
             .format("%Y-%m-%d %H:%M UTC")
             .to_string(),
+        model_chain_override_yaml: project.model_chain_override.as_ref().map(render_chain_yaml),
     }
+}
+
+/// Read-only YAML rendering for the override block on the project /
+/// agent detail templates. The form posts directly to GraphQL.
+fn render_chain_yaml(chain: &drua_core::ModelChain) -> String {
+    serde_yaml::to_string(chain).unwrap_or_default()
 }
 
 #[instrument(name = "web.projects_page", skip_all)]
@@ -1372,7 +1379,9 @@ async fn project_agent_detail(
             name: agent.name.clone(),
             role: role_label(agent.agent_role).to_string(),
             is_lead: matches!(agent.agent_role, domain::agent::AgentRole::ProjectLead),
+            is_workflow_agent: agent.is_workflow_agent(),
             attached_sandbox: attached_view,
+            model_chain_override_yaml: agent.model_chain_override.as_ref().map(render_chain_yaml),
         },
         sandbox_options,
         error: query.error,
@@ -1500,7 +1509,9 @@ async fn project_agent_history(
             name: agent.name.clone(),
             role: role_label(agent.agent_role).to_string(),
             is_lead: matches!(agent.agent_role, domain::agent::AgentRole::ProjectLead),
+            is_workflow_agent: agent.is_workflow_agent(),
             attached_sandbox: attached_view,
+            model_chain_override_yaml: agent.model_chain_override.as_ref().map(render_chain_yaml),
         },
         messages,
         workflow_run,

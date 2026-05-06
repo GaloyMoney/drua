@@ -43,14 +43,14 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model_name.clone(),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
     builtin_roles.insert(
         AgentRole::Agent,
         RoleConfig {
-            model: model_name.clone(),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
@@ -66,6 +66,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
     let config = AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     };
 
     let toolsets = Arc::new(
@@ -107,7 +108,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model_name.clone(),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
@@ -123,6 +124,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     let config = AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     };
 
     let toolsets = Arc::new(
@@ -172,7 +174,6 @@ async fn send_message_round_trip_via_prompt_channel() {
         .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::Text {
                 text: "Hi user".to_string(),
-                cache_control: None,
             }],
             usage: Usage {
                 input_tokens: 5,
@@ -181,6 +182,7 @@ async fn send_message_round_trip_via_prompt_channel() {
                 cache_creation_input_tokens: 0,
             },
             stop_reason: None,
+            model_used: None,
         })))
         .expect("send response");
 
@@ -266,7 +268,7 @@ async fn send_message_dispatches_registered_tool_call() {
     builtin_roles.insert(
         AgentRole::ProjectLead,
         RoleConfig {
-            model: model_name.clone(),
+            chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
         },
     );
@@ -282,6 +284,7 @@ async fn send_message_dispatches_registered_tool_call() {
     let config = AgentsConfig {
         builtin_roles,
         models,
+        ..Default::default()
     };
 
     // Build ToolSets, register the test tool, then share via Arc.
@@ -342,7 +345,6 @@ async fn send_message_dispatches_registered_tool_call() {
                 id: "tu_1".to_string(),
                 name: "ping".to_string(),
                 input: serde_json::json!({}),
-                cache_control: None,
             }],
             usage: Usage {
                 input_tokens: 7,
@@ -351,6 +353,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 cache_creation_input_tokens: 0,
             },
             stop_reason: Some(StopReason::ToolUse),
+            model_used: None,
         })))
         .expect("send first response");
 
@@ -365,7 +368,6 @@ async fn send_message_dispatches_registered_tool_call() {
         .send(Ok(PromptResult::Complete(PromptResponse {
             content: vec![AssistantBlock::Text {
                 text: "all done".to_string(),
-                cache_control: None,
             }],
             usage: Usage {
                 input_tokens: 9,
@@ -374,6 +376,7 @@ async fn send_message_dispatches_registered_tool_call() {
                 cache_creation_input_tokens: 0,
             },
             stop_reason: None,
+            model_used: None,
         })))
         .expect("send second response");
 
@@ -520,6 +523,7 @@ async fn delete_detaches_attached_sandbox() {
             project_id,
             "worker",
             Some((sandbox.id, SandboxAgentMode::Read)),
+            None,
         )
         .await
         .expect("create attached agent");
@@ -622,6 +626,7 @@ async fn detach_conflicting_writer_steals_user_writer_when_wants_write() {
             project_id,
             "user-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
         )
         .await
         .expect("create user agent");
@@ -656,6 +661,7 @@ async fn detach_conflicting_writer_does_not_steal_user_reader_when_wants_write()
             project_id,
             "user-reader",
             Some((sandbox_id, SandboxAgentMode::Read)),
+            None,
         )
         .await
         .expect("create user agent");
@@ -693,6 +699,7 @@ async fn detach_conflicting_writer_is_noop_when_wants_read() {
             project_id,
             "user-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
         )
         .await
         .expect("create user agent");
@@ -734,6 +741,7 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer() {
             run_id,
             "wf-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
         )
         .await
         .expect("create workflow agent");

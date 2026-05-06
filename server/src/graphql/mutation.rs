@@ -53,6 +53,19 @@ impl Mutation {
         Ok(ProjectDeletePayload::from(Project::from(project)))
     }
 
+    async fn project_update_model_chain(
+        &self,
+        ctx: &Context<'_>,
+        input: ProjectUpdateModelChainInput,
+    ) -> async_graphql::Result<ProjectUpdateModelChainPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let project = app
+            .projects()
+            .update_model_chain(sub, input.id, input.chain.map(Into::into))
+            .await?;
+        Ok(ProjectUpdateModelChainPayload::from(Project::from(project)))
+    }
+
     async fn agent_create(
         &self,
         ctx: &Context<'_>,
@@ -65,9 +78,28 @@ impl Mutation {
         };
         let agent = app
             .agents()
-            .create_agent(sub, input.project_id, input.name, attach)
+            .create_agent(
+                sub,
+                input.project_id,
+                input.name,
+                attach,
+                input.model_chain.map(Into::into),
+            )
             .await?;
         Ok(AgentCreatePayload::from(Agent::from(agent)))
+    }
+
+    async fn agent_update_model_chain(
+        &self,
+        ctx: &Context<'_>,
+        input: AgentUpdateModelChainInput,
+    ) -> async_graphql::Result<AgentUpdateModelChainPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let agent = app
+            .agents()
+            .update_model_chain(sub, input.agent_id, input.chain.map(Into::into))
+            .await?;
+        Ok(AgentUpdateModelChainPayload::from(Agent::from(agent)))
     }
 
     async fn agent_attach_sandbox(

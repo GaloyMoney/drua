@@ -38,18 +38,43 @@ galoyAgents:
     ## LLM providers and their models. Each model declares token limits
     ## used for compaction and prompt sizing.
     providers:
-      - name: anthropic
+      - name: openai
+        baseUrl: https://openrouter.ai/api
         models:
-          - name: claude-haiku-4-5-20251001
-            maxTokensPerResponse: 4096
-            contextWindowTokens: 200000
+          - name: google/gemini-2.5-flash
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1000000
+          - name: deepseek/deepseek-v3.2
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 131072
+          - name: openai/gpt-5-mini
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 400000
     ## Per-role defaults applied when an agent with that role is created.
     ## Both `projectLead` and `agent` are REQUIRED — the binary refuses
     ## to start if either `agents.builtin_roles.project_lead` or
     ## `agents.builtin_roles.agent` is missing.
+    ##
+    ## Resolution precedence (highest first):
+    ##   1. chain_override passed at the call site (workflow definition /
+    ##      per-step override; GraphQL/web UI creation form)
+    ##   2. agents.<role>.chain — optional per-role override
+    ##   3. agents.defaultChain
+    ##
+    ## `defaultChain` accepts the full object form below. Workflow agents
+    ## share `defaultChain`; per-workflow overrides live on the
+    ## WorkflowDefinition entity itself rather than a separate config key.
     agents:
+      defaultChain:
+        primary: { name: "google/gemini-2.5-flash", maxTokens: 8192 }
+        fallbacks:
+          - { name: "deepseek/deepseek-v3.2", maxTokens: 8192 }
+          - { name: "openai/gpt-5-mini", maxTokens: 8192 }
       projectLead:
-        model: "claude-haiku-4-5-20251001"
+        ## Optional per-role chain override:
+        # chain:
+        #   primary: { name: "..." }
+        #   fallbacks: [ ... ]
         compaction:
           ## When a user message arrives more than this many seconds after
           ## the previous assistant response, start a fresh thread.
@@ -62,7 +87,6 @@ galoyAgents:
           ## pruning still applies).
           pruneAfterSeconds: 300
       agent:
-        model: "claude-haiku-4-5-20251001"
         compaction:
           resetTimeDeltaSeconds: 600
           pruneAfterSeconds: 300

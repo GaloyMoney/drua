@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+use crate::spec::ModelChain;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
-    pub model: String,
+    pub chain: ModelChain,
     pub messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system: Vec<SystemBlock>,
@@ -17,14 +19,24 @@ pub struct Prompt {
     pub cache_key: Option<String>,
 }
 
+impl Default for Prompt {
+    fn default() -> Self {
+        Self {
+            chain: ModelChain::new(""),
+            messages: Vec::new(),
+            system: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: None,
+            cache_key: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SystemBlock {
-    Text {
-        text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
+    Text { text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,16 +51,12 @@ pub enum Message {
 pub enum UserBlock {
     Text {
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: String,
         content: Vec<ToolResultBlock>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
     },
 }
 
@@ -57,15 +65,11 @@ pub enum UserBlock {
 pub enum AssistantBlock {
     Text {
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
     },
     Thinking {
         text: String,
@@ -86,8 +90,6 @@ pub struct Tool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,26 +99,6 @@ pub enum ToolChoice {
     Any,
     None,
     Tool { name: String },
-}
-
-/// Anthropic prompt-caching marker. Placed on the last block you want
-/// included in the cache; everything from the start of the prompt up
-/// to that block becomes a cache breakpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CacheControl {
-    Ephemeral {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ttl: Option<CacheTtl>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CacheTtl {
-    #[serde(rename = "5m")]
-    FiveMinutes,
-    #[serde(rename = "1h")]
-    OneHour,
 }
 
 /// Recursively sort object keys so semantically equal values serialize identically.
@@ -139,13 +121,27 @@ fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
 }
 
 impl Prompt {
-    /// Hex SHA-256 of the canonical JSON form. Stable across processes and
-    /// across embedded `serde_json::Value` key orderings. `cache_key` is
-    /// excluded so the same logical prompt always hashes the same.
+    /// Content-only SHA-256: excludes `cache_key` and the fallback list
+    /// (routing intent shouldn't bust the cache).
     pub fn hash(&self) -> String {
-        let mut prompt = self.clone();
-        prompt.cache_key = None;
-        let value = serde_json::to_value(prompt).expect("Prompt is always serializable");
+        #[derive(Serialize)]
+        struct Hashable<'a> {
+            primary_model: &'a str,
+            messages: &'a [Message],
+            system: &'a [SystemBlock],
+            tools: &'a [Tool],
+            tool_choice: Option<&'a ToolChoice>,
+            max_tokens: Option<u32>,
+        }
+        let hashable = Hashable {
+            primary_model: &self.chain.primary.name,
+            messages: &self.messages,
+            system: &self.system,
+            tools: &self.tools,
+            tool_choice: self.tool_choice.as_ref(),
+            max_tokens: self.max_tokens,
+        };
+        let value = serde_json::to_value(&hashable).expect("hashable is always serializable");
         let canonical = canonicalize(&value);
         let bytes = serde_json::to_vec(&canonical).expect("canonical Value is always serializable");
         let digest = Sha256::digest(&bytes);
@@ -164,7 +160,7 @@ impl Prompt {
 
         for block in &self.system {
             match block {
-                SystemBlock::Text { text, .. } => total += enc.encode(text).len(),
+                SystemBlock::Text { text } => total += enc.encode(text).len(),
             }
         }
 
@@ -173,7 +169,7 @@ impl Prompt {
                 Message::User { content } => {
                     for block in content {
                         match block {
-                            UserBlock::Text { text, .. } => {
+                            UserBlock::Text { text } => {
                                 total += enc.encode(text).len();
                             }
                             UserBlock::ToolResult { content, .. } => {
@@ -191,7 +187,7 @@ impl Prompt {
                 Message::Assistant { content } => {
                     for block in content {
                         match block {
-                            AssistantBlock::Text { text, .. } => {
+                            AssistantBlock::Text { text } => {
                                 total += enc.encode(text).len();
                             }
                             AssistantBlock::ToolUse { input, name, .. } => {
@@ -219,108 +215,22 @@ impl Prompt {
 
         total
     }
-
-    /// Anthropic auto-checks earlier block boundaries before an explicit
-    /// marker, so append-only chat histories only need the final cacheable
-    /// block marked.
-    pub fn enable_anthropic_prompt_caching(&mut self, ttl: Option<CacheTtl>) -> bool {
-        self.clear_cache_controls();
-        let marker = Some(CacheControl::Ephemeral { ttl });
-
-        for message in self.messages.iter_mut().rev() {
-            match message {
-                Message::User { content } => {
-                    if let Some(
-                        UserBlock::Text { cache_control, .. }
-                        | UserBlock::ToolResult { cache_control, .. },
-                    ) = content.last_mut()
-                    {
-                        *cache_control = marker.clone();
-                        return true;
-                    }
-                }
-                Message::Assistant { content } => {
-                    if let Some(cache_control) =
-                        content.iter_mut().rev().find_map(|block| match block {
-                            AssistantBlock::Text { cache_control, .. }
-                            | AssistantBlock::ToolUse { cache_control, .. } => Some(cache_control),
-                            AssistantBlock::Thinking { .. } => None,
-                        })
-                    {
-                        *cache_control = marker.clone();
-                        return true;
-                    }
-                }
-            }
-        }
-
-        if let Some(SystemBlock::Text { cache_control, .. }) = self.system.last_mut() {
-            *cache_control = marker.clone();
-            return true;
-        }
-
-        if let Some(tool) = self.tools.last_mut() {
-            tool.cache_control = marker;
-            return true;
-        }
-
-        false
-    }
-
-    fn clear_cache_controls(&mut self) {
-        for block in &mut self.system {
-            match block {
-                SystemBlock::Text { cache_control, .. } => *cache_control = None,
-            }
-        }
-
-        for tool in &mut self.tools {
-            tool.cache_control = None;
-        }
-
-        for message in &mut self.messages {
-            match message {
-                Message::User { content } => {
-                    for block in content {
-                        match block {
-                            UserBlock::Text { cache_control, .. }
-                            | UserBlock::ToolResult { cache_control, .. } => {
-                                *cache_control = None;
-                            }
-                        }
-                    }
-                }
-                Message::Assistant { content } => {
-                    for block in content {
-                        match block {
-                            AssistantBlock::Text { cache_control, .. }
-                            | AssistantBlock::ToolUse { cache_control, .. } => {
-                                *cache_control = None;
-                            }
-                            AssistantBlock::Thinking { .. } => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::ModelSpec;
 
     fn sample_prompt(msg_text: &str) -> Prompt {
         Prompt {
-            model: "claude-sonnet-4-20250514".to_string(),
+            chain: ModelChain::new(ModelSpec::new("claude-sonnet-4-20250514")),
             system: vec![SystemBlock::Text {
                 text: "You are a helpful assistant.".to_string(),
-                cache_control: None,
             }],
             messages: vec![Message::User {
                 content: vec![UserBlock::Text {
                     text: msg_text.to_string(),
-                    cache_control: None,
                 }],
             }],
             tools: vec![Tool {
@@ -333,7 +243,6 @@ mod tests {
                     },
                     "required": ["location"]
                 }),
-                cache_control: None,
             }],
             tool_choice: None,
             max_tokens: Some(1024),
@@ -364,20 +273,17 @@ mod tests {
 
     #[test]
     fn hash_stable_despite_json_key_order() {
-        // Build two prompts with tool_use inputs whose keys are inserted
-        // in different order — the canonical hash must still match.
         let input_a = serde_json::json!({"alpha": 1, "beta": 2});
         let input_b = serde_json::json!({"beta": 2, "alpha": 1});
 
         let make = |input: serde_json::Value| Prompt {
-            model: "test".to_string(),
+            chain: ModelChain::new("test"),
             system: vec![],
             messages: vec![Message::Assistant {
                 content: vec![AssistantBlock::ToolUse {
                     id: "tu_1".to_string(),
                     name: "fn".to_string(),
                     input,
-                    cache_control: None,
                 }],
             }],
             tools: vec![],
@@ -421,45 +327,11 @@ mod tests {
     }
 
     #[test]
-    fn enable_anthropic_prompt_caching_marks_last_cacheable_block() {
-        let mut prompt = Prompt {
-            model: "claude-sonnet-4-20250514".to_string(),
-            system: vec![SystemBlock::Text {
-                text: "sys".to_string(),
-                cache_control: None,
-            }],
-            messages: vec![Message::Assistant {
-                content: vec![
-                    AssistantBlock::Thinking {
-                        text: "thinking".to_string(),
-                        signature: None,
-                    },
-                    AssistantBlock::Text {
-                        text: "visible".to_string(),
-                        cache_control: None,
-                    },
-                ],
-            }],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: None,
-            cache_key: None,
-        };
-
-        assert!(prompt.enable_anthropic_prompt_caching(Some(CacheTtl::FiveMinutes)));
-        match &prompt.messages[0] {
-            Message::Assistant { content } => {
-                assert!(matches!(
-                    &content[1],
-                    AssistantBlock::Text {
-                        cache_control: Some(CacheControl::Ephemeral {
-                            ttl: Some(CacheTtl::FiveMinutes)
-                        }),
-                        ..
-                    }
-                ));
-            }
-            _ => panic!("expected assistant message"),
-        }
+    fn hash_ignores_fallbacks() {
+        let mut a = sample_prompt("hello");
+        let mut b = sample_prompt("hello");
+        a.chain = ModelChain::new("a").with_fallback("b");
+        b.chain = ModelChain::new("a").with_fallback("c").with_fallback("d");
+        assert_eq!(a.hash(), b.hash());
     }
 }

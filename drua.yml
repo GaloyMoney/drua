@@ -16,18 +16,34 @@ providers:
   - name: openai
     base_url: https://openrouter.ai/api
     models:
-      - name: moonshotai/kimi-k2
-        max_tokens_per_response: 16384
+      - name: google/gemini-2.5-flash
+        max_tokens_per_response: 8192
+        context_window_tokens: 1000000
+      - name: deepseek/deepseek-v3.2
+        max_tokens_per_response: 8192
         context_window_tokens: 131072
+      - name: openai/gpt-5-mini
+        max_tokens_per_response: 8192
+        context_window_tokens: 400000
 agents:
+  # Resolution precedence (highest first):
+  #   1. chain_override passed at the call site (workflow definition /
+  #      per-step override; GraphQL/web UI creation form)
+  #   2. builtin_roles.<role>.chain — optional per-role override
+  #   3. default_chain
+  default_chain:
+    primary: { name: google/gemini-2.5-flash, max_tokens: 8192 }
+    fallbacks:
+      - { name: deepseek/deepseek-v3.2, max_tokens: 8192 }
+      - { name: openai/gpt-5-mini, max_tokens: 8192 }
   builtin_roles:
     project_lead:
-      model: moonshotai/kimi-k2
+      # Optional: chain: { primary: { name: ... }, fallbacks: [ ... ] }
       compaction:
         reset_time_delta_seconds: 18000
         prune_after_seconds: 600
     agent:
-      model: moonshotai/kimi-k2
+      # Optional: chain: { primary: { name: ... }, fallbacks: [ ... ] }
       compaction:
         prune_after_seconds: 600
 library:

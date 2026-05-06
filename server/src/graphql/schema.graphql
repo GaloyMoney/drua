@@ -1,6 +1,11 @@
 type Agent {
 	attachedSandbox: SandboxAttachment
 	id: AgentId!
+	"""
+	`None` ⇒ use the project / role / config-default chain.
+	Always `None` for workflow-spawned agents.
+	"""
+	modelChainOverride: ModelChain
 	name: String!
 	projectId: ProjectId!
 	role: AgentRole!
@@ -18,6 +23,11 @@ type AgentAttachSandboxPayload {
 }
 
 input AgentCreateInput {
+	"""
+	Initial chain override; `None` falls through to the project's
+	override, then role, then `agents.default_chain`.
+	"""
+	modelChain: ModelChainInput
 	name: String!
 	projectId: ProjectId!
 	sandboxId: SandboxId
@@ -74,6 +84,19 @@ type AgentSession {
 	All threads in this session.
 	"""
 	threads: [SessionThread!]!
+}
+
+input AgentUpdateModelChainInput {
+	agentId: AgentId!
+	"""
+	`None` clears the override (revert to project / role / default).
+	Rejects workflow-spawned agents.
+	"""
+	chain: ModelChainInput
+}
+
+type AgentUpdateModelChainPayload {
+	agent: Agent!
 }
 
 type AssistantDoneEvent {
@@ -227,11 +250,32 @@ type Me {
 	name: String
 }
 
+type ModelChain {
+	fallbacks: [ModelSpec!]!
+	primary: ModelSpec!
+}
+
+input ModelChainInput {
+	fallbacks: [ModelSpecInput!]!
+	primary: ModelSpecInput!
+}
+
+type ModelSpec {
+	maxTokens: Int
+	name: String!
+}
+
+input ModelSpecInput {
+	maxTokens: Int
+	name: String!
+}
+
 type Mutation {
 	agentAttachSandbox(input: AgentAttachSandboxInput!): AgentAttachSandboxPayload!
 	agentCreate(input: AgentCreateInput!): AgentCreatePayload!
 	agentDelete(input: AgentDeleteInput!): AgentDeletePayload!
 	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
+	agentUpdateModelChain(input: AgentUpdateModelChainInput!): AgentUpdateModelChainPayload!
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
 	noteDelete(input: NoteDeleteInput!): NoteDeletePayload!
@@ -241,6 +285,7 @@ type Mutation {
 	projectSecretCreate(input: ProjectSecretCreateInput!): ProjectSecretCreatePayload!
 	projectSecretDelete(input: ProjectSecretDeleteInput!): ProjectSecretDeletePayload!
 	projectUpdate(input: ProjectUpdateInput!): ProjectUpdatePayload!
+	projectUpdateModelChain(input: ProjectUpdateModelChainInput!): ProjectUpdateModelChainPayload!
 	sandboxCreate(input: SandboxCreateInput!): SandboxCreatePayload!
 	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
@@ -290,6 +335,11 @@ type Project {
 	id: ProjectId!
 	lead: Agent!
 	mcpCredentials: [McpCreds!]!
+	"""
+	Per-project chain. Inherited by every non-workflow agent in
+	the project unless the agent has its own override.
+	"""
+	modelChainOverride: ModelChain
 	name: String!
 	sandboxes: [Sandbox!]!
 	"""
@@ -379,6 +429,18 @@ scalar ProjectSecretId
 input ProjectUpdateInput {
 	description: String
 	id: ProjectId!
+}
+
+input ProjectUpdateModelChainInput {
+	"""
+	`None` clears the override.
+	"""
+	chain: ModelChainInput
+	id: ProjectId!
+}
+
+type ProjectUpdateModelChainPayload {
+	project: Project!
 }
 
 type ProjectUpdatePayload {

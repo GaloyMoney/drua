@@ -2,6 +2,8 @@
 //! `library/`) because the schema is workflow-specific; the library
 //! only owns transport (`WriteOp`).
 
+use llm::ModelChain;
+
 use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::skill::file::slugify;
@@ -17,6 +19,8 @@ struct WorkflowYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     trigger: WorkflowTriggerYaml,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_chain: Option<ModelChain>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sandboxes: Vec<WorkflowSandboxYaml>,
     steps: Vec<WorkflowStepYaml>,
@@ -204,6 +208,8 @@ enum WorkflowStepYaml {
         sandbox_mode: Option<SandboxAgentMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_chain: Option<ModelChain>,
     },
 }
 
@@ -216,12 +222,14 @@ impl WorkflowStepYaml {
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                model_chain,
             } => WorkflowStepYaml::AgentStep {
                 name: name.clone(),
                 skill: skill.clone(),
                 sandbox: sandbox.clone(),
                 sandbox_mode: *sandbox_mode,
                 timeout_seconds: *timeout_seconds,
+                model_chain: model_chain.clone(),
             },
         }
     }
@@ -234,12 +242,14 @@ impl WorkflowStepYaml {
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                model_chain,
             } => WorkflowStepDef::AgentStep {
                 name,
                 skill,
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                model_chain,
             },
         }
     }
@@ -253,6 +263,7 @@ pub fn render_workflow_yaml(
     trigger: &WorkflowTrigger,
     steps: &[WorkflowStepDef],
     sandboxes: &[WorkflowSandboxDecl],
+    model_chain: Option<&ModelChain>,
     created_at: &str,
     updated_at: &str,
 ) -> String {
@@ -261,6 +272,7 @@ pub fn render_workflow_yaml(
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
         trigger: WorkflowTriggerYaml::from_runtime(trigger),
+        model_chain: model_chain.cloned(),
         sandboxes: sandboxes
             .iter()
             .map(WorkflowSandboxYaml::from_runtime)
@@ -283,6 +295,7 @@ pub struct ParsedWorkflow {
     pub trigger: WorkflowTrigger,
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
+    pub model_chain: Option<ModelChain>,
     pub created_at: String,
     pub updated_at: String,
     pub original_path: String,
@@ -336,6 +349,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         .collect();
 
     let description = yaml.description;
+    let model_chain = yaml.model_chain;
 
     let rendered = render_workflow_yaml(
         workflow_id,
@@ -344,6 +358,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &trigger,
         &steps,
         &sandboxes,
+        model_chain.as_ref(),
         &yaml.created,
         &yaml.updated,
     );
@@ -359,6 +374,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         trigger,
         steps,
         sandboxes,
+        model_chain,
         created_at: yaml.created,
         updated_at: yaml.updated,
         original_path: path.to_string(),
@@ -407,6 +423,7 @@ mod tests {
             sandbox: Some("investigation".to_string()),
             sandbox_mode: None,
             timeout_seconds: Some(120),
+            model_chain: None,
         }]
     }
 
@@ -432,6 +449,7 @@ mod tests {
             trigger,
             &sample_steps(),
             sandboxes,
+            None,
             "2026-04-29T00:00:00Z",
             "2026-04-29T00:00:00Z",
         )

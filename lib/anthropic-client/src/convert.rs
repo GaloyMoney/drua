@@ -1,8 +1,9 @@
-//! Adapters between the provider-agnostic `llm` types and Anthropic wire types.
+//! Adapters between `lib/llm` types and Anthropic wire types. Owns the
+//! prompt-cache-marker placement strategy — `lib/llm` deliberately
+//! knows nothing about Anthropic's prompt caching.
 
 use llm::prompt::{
-    AssistantBlock, CacheControl, CacheTtl, Message, SystemBlock, Tool, ToolChoice,
-    ToolResultBlock, UserBlock,
+    AssistantBlock, Message, SystemBlock, Tool, ToolChoice, ToolResultBlock, UserBlock,
 };
 use llm::{PromptResponse, StopReason, Usage};
 
@@ -14,6 +15,25 @@ use crate::types::{
     AnthropicMessage, AnthropicRequest, AnthropicStopReason, AnthropicStreamEvent,
     AnthropicSystemBlock, AnthropicTool, AnthropicToolChoice, AnthropicToolResultContent,
 };
+
+/// 5m matches Anthropic's default cache window.
+const DEFAULT_CACHE_TTL: AnthropicCacheTtl = AnthropicCacheTtl::FiveMinutes;
+
+#[derive(Debug, Clone, Copy)]
+enum AnthropicCacheTtl {
+    FiveMinutes,
+    #[allow(dead_code)]
+    OneHour,
+}
+
+impl AnthropicCacheTtl {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::FiveMinutes => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
 
 pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
     let messages: Vec<AnthropicMessage> = prompt.messages.iter().map(convert_message).collect();
@@ -32,8 +52,8 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
 
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
-    AnthropicRequest {
-        model: prompt.model.clone(),
+    let mut request = AnthropicRequest {
+        model: prompt.chain.primary.name.clone(),
         messages,
         system,
         max_tokens: prompt.max_tokens.unwrap_or(8192),
@@ -42,18 +62,58 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
         tool_choice,
         stream: true,
         thinking: None,
+    };
+
+    apply_prompt_caching(&mut request, DEFAULT_CACHE_TTL);
+    request
+}
+
+/// Anthropic auto-checks earlier breakpoints, so one marker on the
+/// final cacheable block (last message → last system block → last tool
+/// definition, in that order) is sufficient.
+fn apply_prompt_caching(req: &mut AnthropicRequest, ttl: AnthropicCacheTtl) {
+    let marker = AnthropicCacheControl {
+        r#type: "ephemeral".to_string(),
+        ttl: Some(ttl.wire().to_string()),
+    };
+
+    if let Some(last_msg) = req.messages.last_mut() {
+        if mark_message(last_msg, &marker) {
+            return;
+        }
     }
+    if let Some(sys) = req.system.as_mut().and_then(|v| v.last_mut()) {
+        sys.cache_control = Some(marker);
+        return;
+    }
+    if let Some(tool) = req.tools.as_mut().and_then(|v| v.last_mut()) {
+        tool.cache_control = Some(marker);
+    }
+}
+
+/// Thinking blocks aren't cacheable on their own — breakpoint must
+/// land on text/tool content.
+fn mark_message(msg: &mut AnthropicMessage, marker: &AnthropicCacheControl) -> bool {
+    for block in msg.content.iter_mut().rev() {
+        match block {
+            AnthropicContent::Text { cache_control, .. }
+            | AnthropicContent::ToolUse { cache_control, .. }
+            | AnthropicContent::ToolResult { cache_control, .. } => {
+                *cache_control = Some(marker.clone());
+                return true;
+            }
+            AnthropicContent::Thinking { .. } | AnthropicContent::Image { .. } => {}
+        }
+    }
+    false
 }
 
 fn convert_system_block(block: &SystemBlock) -> AnthropicSystemBlock {
     match block {
-        SystemBlock::Text {
-            text,
-            cache_control,
-        } => AnthropicSystemBlock {
+        SystemBlock::Text { text } => AnthropicSystemBlock {
             r#type: "text".to_string(),
             text: text.clone(),
-            cache_control: cache_control.as_ref().map(convert_cache_control),
+            cache_control: None,
         },
     }
 }
@@ -73,23 +133,19 @@ fn convert_message(message: &Message) -> AnthropicMessage {
 
 fn convert_user_block(block: &UserBlock) -> AnthropicContent {
     match block {
-        UserBlock::Text {
-            text,
-            cache_control,
-        } => AnthropicContent::Text {
+        UserBlock::Text { text } => AnthropicContent::Text {
             text: text.clone(),
-            cache_control: cache_control.as_ref().map(convert_cache_control),
+            cache_control: None,
         },
         UserBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
-            cache_control,
         } => AnthropicContent::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: content.iter().map(convert_tool_result_block).collect(),
             is_error: if *is_error { Some(true) } else { None },
-            cache_control: cache_control.as_ref().map(convert_cache_control),
+            cache_control: None,
         },
     }
 }
@@ -102,23 +158,15 @@ fn convert_tool_result_block(block: &ToolResultBlock) -> AnthropicToolResultCont
 
 fn convert_assistant_block(block: &AssistantBlock) -> AnthropicContent {
     match block {
-        AssistantBlock::Text {
-            text,
-            cache_control,
-        } => AnthropicContent::Text {
+        AssistantBlock::Text { text } => AnthropicContent::Text {
             text: text.clone(),
-            cache_control: cache_control.as_ref().map(convert_cache_control),
+            cache_control: None,
         },
-        AssistantBlock::ToolUse {
-            id,
-            name,
-            input,
-            cache_control,
-        } => AnthropicContent::ToolUse {
+        AssistantBlock::ToolUse { id, name, input } => AnthropicContent::ToolUse {
             id: id.clone(),
             name: name.clone(),
             input: input.clone(),
-            cache_control: cache_control.as_ref().map(convert_cache_control),
+            cache_control: None,
         },
         AssistantBlock::Thinking { text, signature } => AnthropicContent::Thinking {
             thinking: text.clone(),
@@ -132,7 +180,7 @@ fn convert_tool(tool: &Tool) -> AnthropicTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
         input_schema: tool.input_schema.clone(),
-        cache_control: tool.cache_control.as_ref().map(convert_cache_control),
+        cache_control: None,
     }
 }
 
@@ -142,18 +190,6 @@ fn convert_tool_choice(choice: &ToolChoice) -> AnthropicToolChoice {
         ToolChoice::Any => AnthropicToolChoice::Any,
         ToolChoice::None => AnthropicToolChoice::None,
         ToolChoice::Tool { name } => AnthropicToolChoice::Tool { name: name.clone() },
-    }
-}
-
-fn convert_cache_control(cc: &CacheControl) -> AnthropicCacheControl {
-    match cc {
-        CacheControl::Ephemeral { ttl } => AnthropicCacheControl {
-            r#type: "ephemeral".to_string(),
-            ttl: ttl.as_ref().map(|t| match t {
-                CacheTtl::FiveMinutes => "5m".to_string(),
-                CacheTtl::OneHour => "1h".to_string(),
-            }),
-        },
     }
 }
 
@@ -185,15 +221,13 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         content,
         usage,
         stop_reason,
+        model_used: None,
     }
 }
 
 fn convert_accumulated_block(block: AccumulatedBlock) -> AssistantBlock {
     match block {
-        AccumulatedBlock::Text { text } => AssistantBlock::Text {
-            text,
-            cache_control: None,
-        },
+        AccumulatedBlock::Text { text } => AssistantBlock::Text { text },
         AccumulatedBlock::Thinking {
             thinking,
             signature,
@@ -209,7 +243,6 @@ fn convert_accumulated_block(block: AccumulatedBlock) -> AssistantBlock {
             id,
             name,
             input: arguments,
-            cache_control: None,
         },
     }
 }
@@ -342,5 +375,56 @@ impl AnthropicDeltaConverter {
             }
             AnthropicStreamEvent::Ping => vec![],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llm::prompt::{Message, Prompt, SystemBlock, UserBlock};
+    use llm::ModelChain;
+
+    fn base_prompt() -> Prompt {
+        Prompt {
+            chain: ModelChain::new("claude-sonnet-4"),
+            system: vec![SystemBlock::Text { text: "sys".into() }],
+            messages: vec![Message::User {
+                content: vec![UserBlock::Text { text: "hi".into() }],
+            }],
+            tools: vec![],
+            tool_choice: None,
+            max_tokens: Some(1024),
+            cache_key: None,
+        }
+    }
+
+    #[test]
+    fn cache_marker_lands_on_last_user_block() {
+        let req = prompt_to_request(&base_prompt());
+        let last = req.messages.last().unwrap();
+        match &last.content[0] {
+            AnthropicContent::Text { cache_control, .. } => {
+                assert!(
+                    cache_control.is_some(),
+                    "expected cache_control on last user text block"
+                );
+            }
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[test]
+    fn cache_marker_falls_through_to_system_when_no_messages() {
+        let mut p = base_prompt();
+        p.messages.clear();
+        let req = prompt_to_request(&p);
+        let sys = req.system.as_ref().unwrap().last().unwrap();
+        assert!(sys.cache_control.is_some());
+    }
+
+    #[test]
+    fn primary_model_id_is_used() {
+        let req = prompt_to_request(&base_prompt());
+        assert_eq!(req.model, "claude-sonnet-4");
     }
 }

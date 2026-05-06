@@ -199,6 +199,29 @@ impl Default for OpenAiResponsesClient {
     }
 }
 
+fn classify(err: OpenAiResponsesError) -> PromptError {
+    match err {
+        OpenAiResponsesError::Http(e) => {
+            if e.is_timeout() {
+                PromptError::transient(llm::TransientKind::Timeout, e.to_string())
+            } else if e.is_connect() {
+                PromptError::transient(llm::TransientKind::Connection, e.to_string())
+            } else {
+                PromptError::transient(llm::TransientKind::ServerError, e.to_string())
+            }
+        }
+        OpenAiResponsesError::Api { status, message } => {
+            PromptError::from_http_status(status, message)
+        }
+        OpenAiResponsesError::Sse(msg) => {
+            PromptError::transient(llm::TransientKind::SseDecode, msg)
+        }
+        OpenAiResponsesError::Stream(msg) => {
+            PromptError::transient(llm::TransientKind::ServerError, msg)
+        }
+    }
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiResponsesClient {
     fn name(&self) -> &str {
@@ -212,13 +235,13 @@ impl LlmProvider for OpenAiResponsesClient {
         let rx = self
             .send_prompt_streaming_internal(prompt)
             .await
-            .map_err(|e| PromptError::Provider(e.to_string()))?;
+            .map_err(classify)?;
 
         let (tx, out_rx) = tokio::sync::mpsc::channel(128);
         tokio::spawn(async move {
             let mut rx = rx;
             while let Some(result) = rx.recv().await {
-                let mapped = result.map_err(|e| PromptError::Provider(e.to_string()));
+                let mapped = result.map_err(classify);
                 if tx.send(mapped).await.is_err() {
                     break;
                 }
@@ -318,7 +341,7 @@ fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> R
         .join("\n");
 
     ResponsesRequest {
-        model: prompt.model.clone(),
+        model: prompt.chain.primary.name.clone(),
         input,
         instructions: (!instructions.is_empty()).then_some(instructions),
         prompt_cache_key: prompt.cache_key.clone(),
@@ -976,11 +999,10 @@ mod tests {
 
     fn sample_prompt() -> Prompt {
         Prompt {
-            model: "gpt-5.4-mini".to_string(),
+            chain: llm::ModelChain::new("gpt-5.4-mini"),
             messages: vec![Message::User {
                 content: vec![UserBlock::Text {
                     text: "hello".to_string(),
-                    cache_control: None,
                 }],
             }],
             system: Vec::new(),

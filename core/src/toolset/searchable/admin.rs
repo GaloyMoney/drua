@@ -274,6 +274,8 @@ struct WorkflowStepParams {
     sandbox_mode: Option<SandboxAgentMode>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
 }
 
 impl WorkflowStepParams {
@@ -284,6 +286,7 @@ impl WorkflowStepParams {
             sandbox: self.sandbox,
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
+            model_chain: self.model_chain,
         }
     }
 }
@@ -394,9 +397,12 @@ struct WorkflowParams {
     #[serde(default)]
     sandboxes: Vec<WorkflowSandboxParams>,
 
-    /// `update`: signals which fields the caller intends to change so
-    /// `None`-vs-omitted is distinguishable. Defaults to `false` —
-    /// when omitted, the field is left untouched.
+    /// Per-step `model_chain` (in `steps`) wins.
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
+
+    /// `update`-only flags: when `false`, the corresponding field is
+    /// left untouched. `clear_*` variants set the field to `None`.
     #[serde(default)]
     update_steps: bool,
     #[serde(default)]
@@ -405,6 +411,8 @@ struct WorkflowParams {
     clear_description: bool,
     #[serde(default)]
     update_trigger: bool,
+    #[serde(default)]
+    clear_model_chain: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -715,7 +723,7 @@ impl AdminToolSet {
                 })?;
                 let agent = self
                     .agents
-                    .create_agent(subject, project_id, &name, None)
+                    .create_agent(subject, project_id, &name, None, None)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(format_agent(
@@ -1077,6 +1085,7 @@ impl AdminToolSet {
                         trigger,
                         steps,
                         sandboxes,
+                        params.model_chain,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1161,6 +1170,11 @@ impl AdminToolSet {
                 } else {
                     None
                 };
+                let model_chain = if params.clear_model_chain {
+                    Some(None)
+                } else {
+                    params.model_chain.map(Some)
+                };
                 let definition = self
                     .workflows
                     .update(
@@ -1171,6 +1185,7 @@ impl AdminToolSet {
                         trigger,
                         steps,
                         sandboxes,
+                        model_chain,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;

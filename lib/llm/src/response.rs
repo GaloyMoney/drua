@@ -2,13 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::prompt::AssistantBlock;
 
-/// Provider-agnostic LLM response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Provider-agnostic LLM response. `model_used` is `None` from a bare
+/// client call; the chain walker populates it with the winning model id
+/// (distinct from chain primary when a fallback fired).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptResponse {
     pub content: Vec<AssistantBlock>,
     pub usage: Usage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_used: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

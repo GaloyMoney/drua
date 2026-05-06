@@ -7,6 +7,57 @@ use super::primitives::*;
 use drua_core::agent::Agent as DomainAgent;
 use drua_core::agent::AgentRole as DomainAgentRole;
 use drua_core::sandbox::SandboxAgentMode;
+use drua_core::{ModelChain as DomainModelChain, ModelSpec as DomainModelSpec};
+
+#[derive(SimpleObject, InputObject, Clone)]
+#[graphql(input_name = "ModelSpecInput")]
+pub struct ModelSpec {
+    pub name: String,
+    pub max_tokens: Option<i32>,
+}
+
+impl From<DomainModelSpec> for ModelSpec {
+    fn from(s: DomainModelSpec) -> Self {
+        Self {
+            name: s.name,
+            max_tokens: s.max_tokens.map(|n| n as i32),
+        }
+    }
+}
+
+impl From<ModelSpec> for DomainModelSpec {
+    fn from(s: ModelSpec) -> Self {
+        DomainModelSpec {
+            name: s.name,
+            max_tokens: s.max_tokens.map(|n| n.max(0) as u32),
+        }
+    }
+}
+
+#[derive(SimpleObject, InputObject, Clone)]
+#[graphql(input_name = "ModelChainInput")]
+pub struct ModelChain {
+    pub primary: ModelSpec,
+    pub fallbacks: Vec<ModelSpec>,
+}
+
+impl From<DomainModelChain> for ModelChain {
+    fn from(c: DomainModelChain) -> Self {
+        Self {
+            primary: c.primary.into(),
+            fallbacks: c.fallbacks.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ModelChain> for DomainModelChain {
+    fn from(c: ModelChain) -> Self {
+        DomainModelChain {
+            primary: c.primary.into(),
+            fallbacks: c.fallbacks.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
 #[derive(SimpleObject, Clone)]
 #[graphql(complex)]
@@ -22,6 +73,12 @@ pub struct Agent {
 
 #[ComplexObject]
 impl Agent {
+    /// `None` ⇒ use the project / role / config-default chain.
+    /// Always `None` for workflow-spawned agents.
+    async fn model_chain_override(&self) -> Option<ModelChain> {
+        self.entity.model_chain_override.clone().map(Into::into)
+    }
+
     async fn attached_sandbox(
         &self,
         ctx: &Context<'_>,
@@ -113,9 +170,22 @@ pub struct AgentCreateInput {
     pub name: String,
     pub sandbox_id: Option<SandboxId>,
     pub sandbox_mode: Option<SandboxAttachmentMode>,
+    /// Initial chain override; `None` falls through to the project's
+    /// override, then role, then `agents.default_chain`.
+    pub model_chain: Option<ModelChain>,
 }
 
 mutation_payload! { AgentCreatePayload, agent: Agent }
+
+#[derive(InputObject)]
+pub struct AgentUpdateModelChainInput {
+    pub agent_id: AgentId,
+    /// `None` clears the override (revert to project / role / default).
+    /// Rejects workflow-spawned agents.
+    pub chain: Option<ModelChain>,
+}
+
+mutation_payload! { AgentUpdateModelChainPayload, agent: Agent }
 
 #[derive(InputObject)]
 pub struct AgentAttachSandboxInput {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_graphql::{ComplexObject, Context, InputObject, SimpleObject};
 
-use super::agent::Agent;
+use super::agent::{Agent, ModelChain};
 use super::mcp_creds::McpCreds;
 use super::primitives::*;
 use super::project_secret::ProjectSecret;
@@ -26,6 +26,12 @@ pub struct Project {
 impl Project {
     async fn created_at(&self) -> Timestamp {
         self.entity.created_at().into()
+    }
+
+    /// Per-project chain. Inherited by every non-workflow agent in
+    /// the project unless the agent has its own override.
+    async fn model_chain_override(&self) -> Option<ModelChain> {
+        self.entity.model_chain_override.clone().map(Into::into)
     }
 
     async fn lead(&self, ctx: &Context<'_>) -> async_graphql::Result<Agent> {
@@ -114,3 +120,12 @@ pub struct ProjectDeleteInput {
 }
 
 mutation_payload! { ProjectDeletePayload, project: Project }
+
+#[derive(InputObject)]
+pub struct ProjectUpdateModelChainInput {
+    pub id: ProjectId,
+    /// `None` clears the override.
+    pub chain: Option<ModelChain>,
+}
+
+mutation_payload! { ProjectUpdateModelChainPayload, project: Project }

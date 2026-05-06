@@ -40,7 +40,7 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
     OpenAiRequest {
-        model: prompt.model.clone(),
+        model: prompt.chain.primary.name.clone(),
         messages,
         prompt_cache_key: prompt.cache_key.clone(),
         max_completion_tokens: prompt.max_tokens,
@@ -330,22 +330,19 @@ mod tests {
 
     fn sample_prompt() -> llm::Prompt {
         llm::Prompt {
-            model: "gpt-4o".to_string(),
+            chain: llm::ModelChain::new("gpt-4o"),
             system: vec![SystemBlock::Text {
                 text: "You are a helpful assistant.".to_string(),
-                cache_control: None,
             }],
             messages: vec![Message::User {
                 content: vec![UserBlock::Text {
                     text: "Hello".to_string(),
-                    cache_control: None,
                 }],
             }],
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
                 input_schema: serde_json::json!({"type": "object", "properties": {"location": {"type": "string"}}}),
-                cache_control: None,
             }],
             tool_choice: None,
             max_tokens: Some(1024),
@@ -382,7 +379,7 @@ mod tests {
     #[test]
     fn prompt_with_tool_results() {
         let prompt = llm::Prompt {
-            model: "gpt-4o".to_string(),
+            chain: llm::ModelChain::new("gpt-4o"),
             system: vec![],
             messages: vec![
                 Message::Assistant {
@@ -390,7 +387,6 @@ mod tests {
                         id: "call_123".to_string(),
                         name: "get_weather".to_string(),
                         input: serde_json::json!({"location": "NYC"}),
-                        cache_control: None,
                     }],
                 },
                 Message::User {
@@ -400,7 +396,6 @@ mod tests {
                             text: "72F".to_string(),
                         }],
                         is_error: false,
-                        cache_control: None,
                     }],
                 },
             ],
@@ -422,7 +417,7 @@ mod tests {
     #[test]
     fn thinking_blocks_dropped() {
         let prompt = llm::Prompt {
-            model: "gpt-4o".to_string(),
+            chain: llm::ModelChain::new("gpt-4o"),
             system: vec![],
             messages: vec![Message::Assistant {
                 content: vec![
@@ -432,7 +427,6 @@ mod tests {
                     },
                     AssistantBlock::Text {
                         text: "visible response".to_string(),
-                        cache_control: None,
                     },
                 ],
             }],

@@ -1,5 +1,6 @@
 use derive_builder::Builder;
 use drua_library::{GitFileHash, SearchableFields, WriteOp};
+use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
@@ -26,6 +27,10 @@ pub enum WorkflowDefinitionEvent {
         steps: Vec<WorkflowStepDef>,
         #[serde(default)]
         sandboxes: Vec<WorkflowSandboxDecl>,
+        /// Per-step `model_chain` overrides this; both fall through to
+        /// the role/config default when unset.
+        #[serde(default)]
+        model_chain: Option<ModelChain>,
         /// On-disk path before sync canonicalisation; the
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
@@ -38,6 +43,10 @@ pub enum WorkflowDefinitionEvent {
         steps: Option<Vec<WorkflowStepDef>>,
         #[serde(default)]
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
+        /// `Some(Some(_))` sets / replaces; `Some(None)` clears.
+        /// `None` leaves the field untouched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_chain: Option<Option<ModelChain>>,
     },
 }
 
@@ -55,6 +64,9 @@ pub struct WorkflowDefinition {
     pub steps: Vec<WorkflowStepDef>,
     #[builder(default)]
     pub sandboxes: Vec<WorkflowSandboxDecl>,
+    /// Per-step `model_chain` wins; both fall through to role/config.
+    #[builder(default)]
+    pub model_chain: Option<ModelChain>,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     events: EntityEvents<WorkflowDefinitionEvent>,
@@ -83,6 +95,7 @@ impl WorkflowDefinition {
             &self.trigger,
             &self.steps,
             &self.sandboxes,
+            self.model_chain.as_ref(),
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
         )
@@ -97,6 +110,7 @@ impl WorkflowDefinition {
 
     /// Webhook secrets stay DB-only — the splice below replays the
     /// existing one rather than letting the file overwrite it.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_from_library(
         &mut self,
         name: Option<String>,
@@ -104,6 +118,7 @@ impl WorkflowDefinition {
         trigger: Option<WorkflowTrigger>,
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
+        model_chain: Option<Option<ModelChain>>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
         if self.file_hash() == incoming_file_hash {
@@ -137,6 +152,9 @@ impl WorkflowDefinition {
         if let Some(ref s) = sandboxes {
             self.sandboxes = s.clone();
         }
+        if let Some(mc) = &model_chain {
+            self.model_chain = mc.clone();
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -144,6 +162,7 @@ impl WorkflowDefinition {
             trigger: merged_trigger,
             steps,
             sandboxes,
+            model_chain,
         });
         Idempotent::Executed(())
     }
@@ -158,12 +177,14 @@ impl WorkflowDefinition {
         trigger: Option<WorkflowTrigger>,
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
+        model_chain: Option<Option<ModelChain>>,
     ) -> Idempotent<()> {
         if name.is_none()
             && description.is_none()
             && trigger.is_none()
             && steps.is_none()
             && sandboxes.is_none()
+            && model_chain.is_none()
         {
             return Idempotent::AlreadyApplied;
         }
@@ -195,6 +216,9 @@ impl WorkflowDefinition {
         if let Some(ref s) = sandboxes {
             self.sandboxes = s.clone();
         }
+        if let Some(mc) = &model_chain {
+            self.model_chain = mc.clone();
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -202,8 +226,16 @@ impl WorkflowDefinition {
             trigger: merged_trigger,
             steps,
             sandboxes,
+            model_chain,
         });
         Idempotent::Executed(())
+    }
+
+    /// Precedence: step `model_chain` > workflow `model_chain` > None.
+    pub fn resolve_step_chain(&self, step: &WorkflowStepDef) -> Option<ModelChain> {
+        step.model_chain()
+            .cloned()
+            .or_else(|| self.model_chain.clone())
     }
 }
 
@@ -278,6 +310,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     trigger,
                     steps,
                     sandboxes,
+                    model_chain,
                     original_path,
                     ..
                 } => {
@@ -290,6 +323,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .trigger(trigger.clone())
                         .steps(steps.clone())
                         .sandboxes(sandboxes.clone())
+                        .model_chain(model_chain.clone())
                         .original_path(original_path.clone());
                 }
                 WorkflowDefinitionEvent::Updated {
@@ -298,6 +332,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     trigger,
                     steps,
                     sandboxes,
+                    model_chain,
                     ..
                 } => {
                     if let Some(n) = name {
@@ -314,6 +349,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(s) = sandboxes {
                         builder = builder.sandboxes(s.clone());
+                    }
+                    if let Some(mc) = model_chain {
+                        builder = builder.model_chain(mc.clone());
                     }
                 }
             }
@@ -340,6 +378,8 @@ pub struct NewWorkflowDefinition {
     pub(super) steps: Vec<WorkflowStepDef>,
     #[builder(default)]
     pub(super) sandboxes: Vec<WorkflowSandboxDecl>,
+    #[builder(default)]
+    pub(super) model_chain: Option<ModelChain>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
 }
@@ -363,6 +403,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 trigger: self.trigger,
                 steps: self.steps,
                 sandboxes: self.sandboxes,
+                model_chain: self.model_chain,
                 original_path: self.original_path,
             }],
         )
@@ -382,6 +423,7 @@ mod tests {
             sandbox: None,
             sandbox_mode: None,
             timeout_seconds: Some(60),
+            model_chain: None,
         }
     }
 
@@ -405,6 +447,43 @@ mod tests {
         assert_eq!(def.name, "test-flow");
         assert_eq!(def.steps.len(), 1);
         assert!(matches!(def.trigger, WorkflowTrigger::Webhook { .. }));
+    }
+
+    #[test]
+    fn resolve_step_chain_step_overrides_workflow_overrides_default() {
+        let step_chain = ModelChain::new("per-step");
+        let workflow_chain = ModelChain::new("workflow-wide");
+
+        let mut def = build();
+        def.model_chain = Some(workflow_chain.clone());
+        def.steps = vec![WorkflowStepDef::AgentStep {
+            name: "s".into(),
+            skill: "k".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: Some(step_chain.clone()),
+        }];
+        assert_eq!(
+            def.resolve_step_chain(&def.steps[0]).unwrap().primary.name,
+            "per-step"
+        );
+
+        def.steps = vec![WorkflowStepDef::AgentStep {
+            name: "s".into(),
+            skill: "k".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+        }];
+        assert_eq!(
+            def.resolve_step_chain(&def.steps[0]).unwrap().primary.name,
+            "workflow-wide"
+        );
+
+        def.model_chain = None;
+        assert!(def.resolve_step_chain(&def.steps[0]).is_none());
     }
 
     #[test]

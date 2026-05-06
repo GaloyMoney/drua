@@ -136,6 +136,66 @@
 </dl>
 
 <hr>
+<h3>Model chain</h3>
+{% if agent.is_workflow_agent %}
+<p><small>Workflow-spawned agents inherit their chain from the workflow definition / step.</small></p>
+{% else %}
+<p><small>
+  Override this agent's chain for every prompt it sends. Empty primary ⇒
+  inherit from the project / role / config default. Fallbacks are
+  comma-separated model ids tried in order on transient errors.
+</small></p>
+{% match agent.model_chain_override_yaml %}
+  {% when Some(y) %}
+<details>
+  <summary><small>Current override (YAML)</small></summary>
+  <pre style="font-size: 0.8rem; padding: 0.5rem;">{{ y }}</pre>
+</details>
+  {% when None %}
+<p><small><em>No override set — inheriting upstream.</em></small></p>
+{% endmatch %}
+<form data-gql-mutation="mutation($input: AgentUpdateModelChainInput!) { agentUpdateModelChain(input: $input) { agent { id } } }"
+      data-gql-build="buildAgentChain"
+      data-gql-reload="true">
+  <label>
+    Primary model
+    <input name="primary_name" type="text" placeholder="anthropic/claude-sonnet-4-6">
+  </label>
+  <label>
+    Fallbacks <small>(comma-separated, in priority order)</small>
+    <input name="fallbacks" type="text" placeholder="openai/gpt-4o, anthropic/claude-haiku-4-5">
+  </label>
+  <div style="display: flex; gap: 0.5rem;">
+    <button type="submit">Save chain</button>
+    <button type="button" id="agent-chain-clear" class="secondary outline">Clear override</button>
+  </div>
+</form>
+<script>
+  function buildAgentChain(fd) {
+    const primary = fd.get('primary_name').trim();
+    if (!primary) {
+      return { agentId: "{{ agent.id }}", chain: null };
+    }
+    const fbRaw = fd.get('fallbacks') || '';
+    const fallbacks = fbRaw.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ name }));
+    return {
+      agentId: "{{ agent.id }}",
+      chain: { primary: { name: primary }, fallbacks }
+    };
+  }
+  document.getElementById('agent-chain-clear')?.addEventListener('click', async () => {
+    if (!confirm('Clear the agent-level model chain override?')) return;
+    const result = await gqlMutate(
+      `mutation($input: AgentUpdateModelChainInput!) { agentUpdateModelChain(input: $input) { agent { id } } }`,
+      { input: { agentId: "{{ agent.id }}", chain: null } }
+    );
+    if (result.errors) { alert(result.errors.map(e => e.message).join('\n')); return; }
+    window.location.reload();
+  });
+</script>
+{% endif %}
+
+<hr>
 <h3>Sandbox attachment</h3>
 
 {% if agent.is_lead %}
