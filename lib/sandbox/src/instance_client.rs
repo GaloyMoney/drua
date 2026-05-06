@@ -97,6 +97,52 @@ impl InstanceClient {
         Ok(())
     }
 
+    /// Re-writes the GitHub App installation token at
+    /// `/run/secrets/github-token` and `/workspace/.git-credentials`
+    /// (and `/workspace/.gh-token`). GitHub installation tokens expire
+    /// after 1h, so the orchestrator calls this on every workflow-run
+    /// attach to keep `git push` and `gh` working on long-lived
+    /// sandboxes.
+    #[instrument(name = "sandbox.instance.refresh_credentials", skip_all)]
+    pub async fn refresh_credentials(
+        &self,
+        req: &RefreshCredentialsRequest,
+    ) -> Result<(), InstanceError> {
+        let resp = self
+            .http
+            .post(format!("{}/refresh-credentials", self.base_url))
+            .headers(current_trace_headers())
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<RefreshCredentialsResponse>()
+            .await?;
+        if let Some(err) = resp.error {
+            return Err(InstanceError::Server(err));
+        }
+        Ok(())
+    }
+
+    /// Resets the cloned repo to a clean baseline (`git reset --hard
+    /// origin/main` + drop `bot/*` branches). Best-effort: returns
+    /// `Ok(ResetRepoResponse { ok: false, .. })` when individual steps
+    /// fail (e.g. `git fetch` on a stale token); the caller decides
+    /// whether to escalate.
+    #[instrument(name = "sandbox.instance.reset_repo", skip(self))]
+    pub async fn reset_repo(&self) -> Result<ResetRepoResponse, InstanceError> {
+        let resp = self
+            .http
+            .post(format!("{}/reset-repo", self.base_url))
+            .headers(current_trace_headers())
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ResetRepoResponse>()
+            .await?;
+        Ok(resp)
+    }
+
     #[instrument(name = "sandbox.instance.execute", skip_all, fields(tool = %req.tool))]
     pub async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, InstanceError> {
         let resp = self
@@ -261,4 +307,22 @@ pub struct ExecuteRequest {
 pub struct ExecuteResponse {
     pub output: String,
     pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshCredentialsRequest {
+    pub github_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefreshCredentialsResponse {
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetRepoResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub output: String,
 }
