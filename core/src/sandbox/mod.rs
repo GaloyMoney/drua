@@ -11,7 +11,7 @@ use tracing::instrument;
 
 use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, LocalSandboxConfig};
 use sandbox::instance_client::{
-    InitializeRequest, InitializeResponse, InstanceClient, RefreshCredentialsRequest,
+    AttachRequest, InitializeRequest, InitializeResponse, InstanceClient,
 };
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
@@ -692,44 +692,31 @@ impl Sandboxes {
     }
 
     /// POST `/attach` to the sandbox-server. Resolves `base_url` via
-    /// the admin client (k8s pod IP / local port). Also refreshes the
-    /// in-pod GitHub App installation token first so a long-lived
-    /// sandbox doesn't carry a stale (>1h) token into the new agent's
-    /// session — installation tokens expire after 1h and `git push` /
-    /// `gh` would otherwise fail with `Authentication failed`.
+    /// the admin client (k8s pod IP / local port). Carries a fresh
+    /// GitHub App installation token in the attach body so a long-lived
+    /// sandbox doesn't run the smoke test with a stale (>1h) token —
+    /// installation tokens expire after 1h and `git push` / `gh` would
+    /// otherwise fail with `Authentication failed`.
     async fn notify_sandbox_attach(&self, sandbox: &Sandbox) -> Result<(), SandboxError> {
         let view = self.admin.get_sandbox(&sandbox.resource_name()).await?;
         let Some(client) = InstanceClient::from_sandbox(&view) else {
             return Ok(());
         };
-        // Refresh the token first; failure is logged but not fatal —
-        // attach should still proceed so the user can at least open
-        // a shell. If the App can't mint a token (config issue), the
-        // existing stale token (if any) keeps read paths working.
-        if let Some(provider) = self.github_app.as_ref() {
-            match provider.generate_token().await {
-                Ok(t) => {
-                    let req = RefreshCredentialsRequest {
-                        github_token: t.token,
-                    };
-                    if let Err(e) = client.refresh_credentials(&req).await {
-                        tracing::warn!(
-                            sandbox_id = %sandbox.id,
-                            error = %e,
-                            "/refresh-credentials failed (best-effort)"
-                        );
-                    }
-                }
+        let github_token = match self.github_app.as_ref() {
+            Some(provider) => match provider.generate_token().await {
+                Ok(t) => Some(t.token),
                 Err(e) => {
                     tracing::warn!(
                         sandbox_id = %sandbox.id,
                         error = %e,
                         "github_app.generate_token failed; attach proceeds with stale token"
                     );
+                    None
                 }
-            }
-        }
-        client.attach().await?;
+            },
+            None => None,
+        };
+        client.attach(&AttachRequest { github_token }).await?;
         Ok(())
     }
 

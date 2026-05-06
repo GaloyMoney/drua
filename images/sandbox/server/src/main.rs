@@ -43,15 +43,16 @@ struct InitializeRequest {
     github_token: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct RefreshCredentialsRequest {
-    github_token: String,
-}
-
-#[derive(Serialize)]
-struct RefreshCredentialsResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Deserialize, Default)]
+struct AttachRequest {
+    /// Fresh GitHub App installation token. When present, written to
+    /// `/run/secrets/github-token` and `/workspace/.git-credentials`
+    /// (and `/workspace/.gh-token`) before the smoke test runs —
+    /// installation tokens expire after 1h and persistent sandboxes
+    /// outlive that, so the orchestrator passes a fresh token on
+    /// every workflow-run attach.
+    #[serde(default)]
+    github_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -616,10 +617,24 @@ async fn initialize(
 /// shell so a broken bash environment fails the attach immediately
 /// instead of letting the agent flail through dozens of `Exit code
 /// 1` results.
+///
+/// When `req.github_token` is set, refreshes
+/// `/run/secrets/github-token` and `/workspace/.git-credentials` (and
+/// `/workspace/.gh-token`) before the smoke test. GitHub App installation
+/// tokens expire after 1h and persistent sandboxes outlive that, so the
+/// orchestrator passes a fresh token on every workflow-run attach.
 #[instrument(name = "sandbox.server.attach", skip_all)]
 async fn attach(
     State(session): State<SharedSession>,
+    body: Option<Json<AttachRequest>>,
 ) -> Result<&'static str, (StatusCode, String)> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
+        if let Err(e) = write_github_token(&github_token_path(), token).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
+    }
+
     let cwd = session.current_cwd().await;
     session.set_cwd(cwd).await;
 
@@ -639,26 +654,6 @@ async fn attach(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("attach smoke test failed: {e}"),
         )),
-    }
-}
-
-/// Re-writes `/run/secrets/github-token` and `/workspace/.git-credentials`
-/// (and `/workspace/.gh-token`) with a fresh GitHub App installation token.
-/// GitHub App installation tokens expire after 1h; persistent sandboxes
-/// outlive that, so the orchestrator calls this on every workflow-run
-/// attach.
-#[instrument(name = "sandbox.server.refresh_credentials", skip_all)]
-async fn refresh_credentials(
-    Json(req): Json<RefreshCredentialsRequest>,
-) -> Json<RefreshCredentialsResponse> {
-    if req.github_token.is_empty() {
-        return Json(RefreshCredentialsResponse {
-            error: Some("github_token is empty".to_string()),
-        });
-    }
-    match write_github_token(&github_token_path(), &req.github_token).await {
-        Ok(()) => Json(RefreshCredentialsResponse { error: None }),
-        Err(e) => Json(RefreshCredentialsResponse { error: Some(e) }),
     }
 }
 
@@ -1039,7 +1034,6 @@ pub fn build_app(session: SharedSession) -> Router {
         .route("/execute", post(execute))
         .route("/initialize", post(initialize))
         .route("/attach", post(attach))
-        .route("/refresh-credentials", post(refresh_credentials))
         .route("/reset-repo", post(reset_repo))
         .layer(axum::middleware::from_fn(
             tracing_middleware::trace_context_middleware,
@@ -1291,7 +1285,7 @@ mod tests {
     async fn attach_smoke_test_succeeds_on_healthy_session() {
         init_test_workspace();
         let session = test_session();
-        let result = attach(State(session)).await;
+        let result = attach(State(session), None).await;
         assert!(result.is_ok(), "attach failed: {:?}", result.err());
         assert_eq!(result.unwrap(), "ok");
     }
@@ -2340,40 +2334,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_credentials_rejects_empty_token() {
-        let _guard = cred_test_lock().lock().await;
-        let _ = isolated_workspace();
-        let resp = refresh_credentials(Json(RefreshCredentialsRequest {
-            github_token: String::new(),
-        }))
-        .await;
-        assert!(
-            resp.0.error.as_deref().unwrap_or("").contains("empty"),
-            "empty token should be rejected, got: {:?}",
-            resp.0.error
-        );
-    }
-
-    #[tokio::test]
-    async fn refresh_credentials_writes_workspace_files() {
+    async fn attach_with_token_refreshes_workspace_files() {
         let _guard = cred_test_lock().lock().await;
         let workspace = isolated_workspace();
         // Override GITHUB_TOKEN_PATH to keep the test off /run/secrets.
         let token_path = format!("{workspace}/github-token");
         std::env::set_var("GITHUB_TOKEN_PATH", &token_path);
 
-        let resp = refresh_credentials(Json(RefreshCredentialsRequest {
-            github_token: "ghs_refresh_test".to_string(),
-        }))
+        let session = test_session();
+        let result = attach(
+            State(session),
+            Some(Json(AttachRequest {
+                github_token: Some("ghs_attach_refresh".to_string()),
+            })),
+        )
         .await;
-        assert!(resp.0.error.is_none(), "refresh failed: {:?}", resp.0.error);
+        assert!(result.is_ok(), "attach failed: {:?}", result.err());
 
         let creds = std::fs::read_to_string(format!("{workspace}/.git-credentials")).unwrap();
-        assert!(creds.contains("ghs_refresh_test"));
+        assert!(creds.contains("ghs_attach_refresh"));
         let gh = std::fs::read_to_string(format!("{workspace}/.gh-token")).unwrap();
-        assert_eq!(gh, "ghs_refresh_test");
+        assert_eq!(gh, "ghs_attach_refresh");
 
         std::env::remove_var("GITHUB_TOKEN_PATH");
+    }
+
+    #[tokio::test]
+    async fn attach_without_body_skips_token_write() {
+        let _guard = cred_test_lock().lock().await;
+        let workspace = isolated_workspace();
+        let creds_path = format!("{workspace}/.git-credentials");
+        // Pre-populate to verify the no-body path leaves it untouched.
+        std::fs::write(
+            &creds_path,
+            "https://x-access-token:preexisting@github.com\n",
+        )
+        .unwrap();
+
+        let session = test_session();
+        let result = attach(State(session), None).await;
+        assert!(result.is_ok(), "attach failed: {:?}", result.err());
+
+        let after = std::fs::read_to_string(&creds_path).unwrap();
+        assert!(
+            after.contains("preexisting"),
+            "no-body attach must not overwrite existing creds: {after:?}"
+        );
     }
 
     #[tokio::test]
