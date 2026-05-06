@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "drua", about = "Drua — AI agent projects")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+        command: Command,
 }
 
 #[derive(Subcommand)]
