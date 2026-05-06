@@ -83,6 +83,9 @@ enum AgentCommand {
     AttachSandbox,
     DetachSandbox,
     Delete,
+    /// Set / replace / clear the per-agent chain. Rejects workflow
+    /// agents — their chain comes from the workflow definition.
+    UpdateModelChain,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -94,7 +97,8 @@ struct AgentParams {
     project_id: Option<ProjectId>,
     /// Display name for the new agent (required for `create`).
     name: Option<String>,
-    /// ID of the agent (required for `attach_sandbox`, `detach_sandbox`, and `delete`).
+    /// ID of the agent (required for `attach_sandbox`, `detach_sandbox`,
+    /// `delete`, and `update_model_chain`).
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
     /// ID of the sandbox (required for `attach_sandbox` and `detach_sandbox`).
@@ -102,6 +106,10 @@ struct AgentParams {
     sandbox_id: Option<SandboxId>,
     /// Attach mode — 'read' or 'use'. Defaults to 'read'. Only for `attach_sandbox`.
     mode: Option<SandboxAgentMode>,
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
+    #[serde(default)]
+    clear_model_chain: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -201,6 +209,10 @@ enum ProjectCommand {
     /// Create a new project (also seeds a ProjectLead agent named 'lead').
     Create,
     List,
+    /// Set / replace / clear the project-level chain.
+    /// `clear_model_chain: true` clears; otherwise `model_chain` sets.
+    /// Inherited by every non-workflow agent in the project.
+    UpdateModelChain,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -208,6 +220,13 @@ struct ProjectParams {
     command: ProjectCommand,
     name: Option<String>,
     description: Option<String>,
+    /// Project ID (required for `update_model_chain`).
+    #[schemars(with = "Option<uuid::Uuid>")]
+    project_id: Option<ProjectId>,
+    #[serde(default)]
+    model_chain: Option<llm::ModelChain>,
+    #[serde(default)]
+    clear_model_chain: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -509,7 +528,9 @@ static TOOLS: &[ToolDef] = &[
                        `attach_sandbox` (requires `agent_id`, `sandbox_id`, optional `mode`), \
                        `detach_sandbox` (requires `agent_id`, `sandbox_id`), \
                        `delete` (requires `agent_id`; soft-deletes the agent, cascades \
-                       to its session and detaches any attached sandbox).",
+                       to its session and detaches any attached sandbox), \
+                       `update_model_chain` (requires `agent_id`; set `model_chain` to \
+                       override or `clear_model_chain: true` to clear; rejects workflow agents).",
         schema: &AGENT_SCHEMA,
     },
     ToolDef {
@@ -529,7 +550,10 @@ static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "project",
         description: "Manage projects. Commands: `create` (requires `name`, optional \
-                       `description`; also seeds a ProjectLead agent), `list`.",
+                       `description`; also seeds a ProjectLead agent), `list`, \
+                       `update_model_chain` (requires `project_id`; set `model_chain` \
+                       to pin a chain inherited by every non-workflow agent in the \
+                       project, or `clear_model_chain: true` to clear).",
         schema: &PROJECT_SCHEMA,
     },
     ToolDef {
@@ -800,6 +824,33 @@ impl AdminToolSet {
                     "Agent deleted (id {agent_id})."
                 ))]))
             }
+
+            AgentCommand::UpdateModelChain => {
+                let agent_id = params.agent_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "agent_id is required for update_model_chain".to_string(),
+                    )
+                })?;
+                let chain = if params.clear_model_chain {
+                    None
+                } else {
+                    params.model_chain
+                };
+                let agent = self
+                    .agents
+                    .update_model_chain(subject, agent_id, chain)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Agent {} model_chain_override = {}",
+                    agent.id,
+                    agent
+                        .model_chain_override
+                        .as_ref()
+                        .map(|c| serde_yaml::to_string(c).unwrap_or_default())
+                        .unwrap_or_else(|| "<none>".to_string())
+                ))]))
+            }
         }
     }
 
@@ -924,6 +975,32 @@ impl AdminToolSet {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_projects(&all),
                 )]))
+            }
+
+            ProjectCommand::UpdateModelChain => {
+                let project_id = params.project_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "project_id is required for update_model_chain".to_string(),
+                    )
+                })?;
+                let chain = if params.clear_model_chain {
+                    None
+                } else {
+                    params.model_chain
+                };
+                let project = self
+                    .projects
+                    .update_model_chain(subject, project_id, chain)
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Project {} model_chain_override = {}",
+                    project.id,
+                    project
+                        .model_chain_override
+                        .as_ref()
+                        .map(|c| serde_yaml::to_string(c).unwrap_or_default())
+                        .unwrap_or_else(|| "<none>".to_string())
+                ))]))
             }
         }
     }
