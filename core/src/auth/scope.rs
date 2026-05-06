@@ -126,20 +126,13 @@ impl FromStr for AuthScope {
             }
         }
 
-        // Accept both current and legacy suffixes: `:use`/`:use_all`, `:read`/`:use_read_only`.
         if let Some(rest) = s.strip_prefix("sandbox:") {
-            if let Some(uuid_str) = rest
-                .strip_suffix(":use")
-                .or_else(|| rest.strip_suffix(":use_all"))
-            {
+            if let Some(uuid_str) = rest.strip_suffix(":use") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::SandboxUse(SandboxId::from(uuid)));
                 }
             }
-            if let Some(uuid_str) = rest
-                .strip_suffix(":read")
-                .or_else(|| rest.strip_suffix(":use_read_only"))
-            {
+            if let Some(uuid_str) = rest.strip_suffix(":read") {
                 if let Ok(uuid) = uuid_str.parse::<uuid::Uuid>() {
                     return Ok(AuthScope::SandboxRead(SandboxId::from(uuid)));
                 }
@@ -232,21 +225,6 @@ mod tests {
         assert_eq!(use_scope, AuthScope::SandboxUse(sb_id));
 
         let read_scope: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:read"
-            .parse()
-            .unwrap();
-        assert_eq!(read_scope, AuthScope::SandboxRead(sb_id));
-    }
-
-    /// Legacy serialized forms must still deserialize correctly.
-    #[test]
-    fn from_str_sandbox_legacy() {
-        let sb_id = test_sandbox_id();
-        let use_scope: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:use_all"
-            .parse()
-            .unwrap();
-        assert_eq!(use_scope, AuthScope::SandboxUse(sb_id));
-
-        let read_scope: AuthScope = "sandbox:e1e2e3e4-f1f2-1112-2122-313233343536:use_read_only"
             .parse()
             .unwrap();
         assert_eq!(read_scope, AuthScope::SandboxRead(sb_id));

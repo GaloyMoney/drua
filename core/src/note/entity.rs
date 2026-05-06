@@ -31,14 +31,10 @@ pub enum NoteEvent {
         content: String,
         tags: Vec<String>,
         /// Repo-relative on-disk path. Sacred — never mutated by the
-        /// importer. Pre-path-identity events deserialise with `""`;
-        /// hydration falls back to a derived value.
-        #[serde(default)]
+        /// importer.
         path: String,
         /// Initial pinned state. Set from frontmatter (`pinned: true`)
-        /// when a space note is imported; defaults to `false` for
-        /// project notes and pre-pinned-tier events.
-        #[serde(default)]
+        /// when a space note is imported; `false` for project notes.
         pinned: bool,
     },
     Updated {
@@ -532,39 +528,5 @@ mod tests {
             !note.rendered().contains("pinned: true"),
             "rendered output must omit `pinned: true` when unpinned"
         );
-    }
-
-    #[test]
-    fn legacy_initialized_event_deserializes_with_unknown_fields() {
-        // Pre-path-identity events have no `path` / `pinned` keys but
-        // do carry the now-removed `file_hash` field. `#[serde(default)]`
-        // hydrates the missing keys; unknown keys (`file_hash`) are
-        // ignored by serde.
-        let json = serde_json::json!({
-            "type": "initialized",
-            "id": uuid::Uuid::new_v4(),
-            "project_id": uuid::Uuid::new_v4(),
-            "project_name": "proj",
-            "title": "t",
-            "content": "c",
-            "tags": [],
-            "file_hash": "abc",
-        });
-        let ev: NoteEvent = serde_json::from_value(json).expect("legacy event");
-        match ev {
-            NoteEvent::Initialized {
-                space_id,
-                space_slug,
-                path,
-                pinned,
-                ..
-            } => {
-                assert!(space_id.is_none());
-                assert!(space_slug.is_none());
-                assert!(path.is_empty(), "legacy events default path to empty");
-                assert!(!pinned, "legacy events default pinned to false");
-            }
-            _ => panic!("expected Initialized"),
-        }
     }
 }
