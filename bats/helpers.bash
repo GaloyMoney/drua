@@ -47,6 +47,16 @@ start_server() {
 }
 
 stop_server() {
+  # Dump server.log on test-suite failure so CI logs surface panics
+  # / errors instead of swallowing them. `BATS_SUITE_TEST_NUMBER` is
+  # only meaningful inside a test; on teardown_file we treat any
+  # exit code != 0 as failure.
+  if [ "${BATS_SUITE_FAILURE_COUNT:-0}" != "0" ] && [ -f "${BATS_FILE_TMPDIR:-}/server.log" ]; then
+    echo "===== server.log (last 200 lines) ====="
+    tail -n 200 "$BATS_FILE_TMPDIR/server.log"
+    echo "===== end server.log ====="
+  fi
+
   if [ -f "$SERVER_PID_FILE" ]; then
     kill "$(cat "$SERVER_PID_FILE")" 2>/dev/null || true
     rm -f "$SERVER_PID_FILE"
