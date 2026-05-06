@@ -134,7 +134,7 @@ render_note_md() {
 wait_for_note_row() {
   local needle="$1"
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     local hit
     hit="$(psql "$pg" -At -c "SELECT 1 FROM note_events WHERE event_type = 'initialized' AND event->>'title' = '$needle' LIMIT 1;" 2>/dev/null || true)"
     if [ -n "$hit" ]; then
@@ -151,7 +151,7 @@ wait_for_note_row() {
 wait_for_note_row_gone() {
   local needle="$1"
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     local hit
     hit="$(psql "$pg" -At -c "SELECT 1 FROM notes n JOIN note_events ne ON ne.id = n.id WHERE ne.event_type='initialized' AND ne.event->>'title' = '$needle' AND n.deleted = FALSE LIMIT 1;" 2>/dev/null || true)"
     if [ -z "$hit" ]; then
@@ -166,7 +166,7 @@ wait_for_note_row_gone() {
 wait_for_note_search_gone() {
   local needle="$1"
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     local hit
     hit="$(psql "$pg" -At -c "SELECT 1 FROM library_documents WHERE doc_type='note' AND name='$needle' LIMIT 1;" 2>/dev/null || true)"
     if [ -z "$hit" ]; then

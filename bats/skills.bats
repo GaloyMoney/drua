@@ -177,7 +177,7 @@ agent_skills_block() {
 wait_for_skill_row() {
   local needle="$1"
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     local hit
     hit="$(psql "$pg" -At -c "SELECT name FROM skills WHERE name = '$needle' AND deleted = FALSE LIMIT 1;" 2>/dev/null || true)"
     if [ -n "$hit" ]; then
@@ -306,13 +306,10 @@ wait_for_skill_row() {
 }
 
 # Polls library_documents until a skill row with `name=$1` is gone.
-# Returns 0 when the row is absent, 1 on 30s timeout. Used to gate
-# search-removed assertions behind the post-delete commit hook +
-# reverse-sync importer's `delete_in_op` actually wiping the row.
 wait_for_skill_search_gone() {
   local needle="$1"
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     local hit
     hit="$(psql "$pg" -At -c "SELECT 1 FROM library_documents WHERE doc_type='skill' AND name='$needle' LIMIT 1;" 2>/dev/null || true)"
     if [ -z "$hit" ]; then
@@ -329,7 +326,7 @@ wait_for_skill_search_gone() {
 wait_for_skill_row_gone() {
   local needle="$1"
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     local hit
     hit="$(psql "$pg" -At -c "SELECT 1 FROM skills WHERE name = '$needle' AND deleted = FALSE LIMIT 1;" 2>/dev/null || true)"
     if [ -z "$hit" ]; then

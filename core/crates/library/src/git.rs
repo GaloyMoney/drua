@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::attribution::CommitAttribution;
@@ -120,6 +120,7 @@ pub struct GitEngine {
     /// in-flight commits before `push_main` lands.
     repo_mutex: Arc<Mutex<()>>,
     write_tx: mpsc::Sender<QueuedOp>,
+    local_commit_notify: Arc<Notify>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     _writer: OwnedTaskHandle,
 }
@@ -129,6 +130,10 @@ impl GitEngine {
     /// SpaceFs reads land.
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    pub fn local_commit_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.local_commit_notify)
     }
 
     #[tracing::instrument(name = "library.git.init", skip_all)]
@@ -152,10 +157,12 @@ impl GitEngine {
 
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
+        let local_commit_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(Self::run_writer(
             repo_path.clone(),
             github_app.clone(),
             Arc::clone(&repo_mutex),
+            Arc::clone(&local_commit_notify),
             write_rx,
         ));
 
@@ -163,6 +170,7 @@ impl GitEngine {
             repo_path,
             repo_mutex,
             write_tx,
+            local_commit_notify,
             github_app,
             _writer: OwnedTaskHandle::new(writer),
         })
@@ -545,6 +553,7 @@ impl GitEngine {
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         repo_mutex: Arc<Mutex<()>>,
+        local_commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
     ) {
         while let Some(first) = rx.recv().await {
@@ -562,7 +571,11 @@ impl GitEngine {
                     Err(_) => break,    // window elapsed
                 }
             }
-            Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch).await;
+            let any_ok = Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch)
+                .await;
+            if any_ok {
+                local_commit_notify.notify_waiters();
+            }
         }
     }
 
@@ -572,7 +585,7 @@ impl GitEngine {
         github_app: Option<&Arc<GitHubAppTokenProvider>>,
         repo_mutex: &Mutex<()>,
         batch: Vec<QueuedOp>,
-    ) {
+    ) -> bool {
         let _guard = repo_mutex.lock().await;
         let token = Self::fresh_token(github_app).await;
         let path = repo_path.to_path_buf();
@@ -591,9 +604,11 @@ impl GitEngine {
                 .collect()
         });
 
+        let any_ok = results.iter().any(|r| r.is_ok());
         for (resp, res) in responders.into_iter().zip(results) {
             let _ = resp.send(res);
         }
+        any_ok
     }
 
     /// Apply N ops as N commits, then push once. On non-FF push, fetch
