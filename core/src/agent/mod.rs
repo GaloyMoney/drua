@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::audit::Audit;
 use crate::library::SpaceMounts;
 use crate::note::Notes;
+use crate::project::repo::ProjectRepo;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
@@ -80,6 +81,9 @@ pub struct Agents {
     /// `AuthedSpaces` internally — no upward dep on the `Projects`
     /// service, so the previous `OnceLock<Projects>` cycle is gone.
     space_mounts: Arc<SpaceMounts>,
+    /// Direct repo handle so chain resolution can read
+    /// `Project.model_chain_override` without an upward Projects-service dep.
+    project_repo: Arc<ProjectRepo>,
     config: AgentsConfig,
     toolsets: Arc<ToolSets>,
     prompt_requests: llm::PromptRequestChannel,
@@ -107,6 +111,7 @@ impl Agents {
             skills,
             notes,
             space_mounts,
+            project_repo: Arc::new(ProjectRepo::new(pool)),
             config,
             toolsets,
             prompt_requests,
@@ -384,7 +389,17 @@ impl Agents {
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
-        let chain = self.config.resolve_chain(agent_role, chain_override)?;
+        // Per-call override beats project-level; project-level beats role/default.
+        let effective_override = match chain_override {
+            Some(c) => Some(c),
+            None => self
+                .project_repo
+                .find_by_id(project_id)
+                .await
+                .ok()
+                .and_then(|p| p.model_chain_override.clone()),
+        };
+        let chain = self.config.resolve_chain(agent_role, effective_override)?;
         let primary_model_id = chain.primary.name.clone();
         let model_defaults = self
             .config
@@ -662,6 +677,32 @@ impl Agents {
             )
             .await?;
         Ok(result.entities.into_iter().find(|a| a.name == name))
+    }
+
+    /// `Some(chain)` sets / replaces; `None` clears. Rejects workflow
+    /// agents — their chain comes from the workflow definition.
+    #[instrument(name = "domain.agent.update_model_chain", skip(self, sub))]
+    pub async fn update_model_chain(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<AgentId> + std::fmt::Debug,
+        chain: Option<llm::ModelChain>,
+    ) -> Result<Agent, AgentError> {
+        let id = id.into();
+        let mut agent = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Agent(agent.project_id, Some(agent.id)),
+        )?;
+        Audit::record_action_if_unset("agent.update_model_chain");
+        Audit::record_project_id(agent.project_id);
+        Audit::record_agent_id(id);
+        if agent.update_model_chain(chain)?.did_execute() {
+            let mut op = self.repo.begin_op().await?;
+            self.repo.update_in_op(&mut op, &mut agent).await?;
+            op.commit().await?;
+        }
+        Ok(agent)
     }
 
     #[instrument(name = "domain.agent.delete", skip(self, sub))]
@@ -1076,6 +1117,24 @@ impl Agents {
         Ok(pi_export::export_to_jsonl(&exportable))
     }
 
+    /// Resolves the per-turn chain override for a long-lived agent:
+    /// `Agent.model_chain_override` > `Project.model_chain_override` >
+    /// `None` (use the session's stored chain). Workflow agents always
+    /// return `None`.
+    async fn resolve_runtime_chain(&self, agent: &Agent) -> Option<llm::ModelChain> {
+        if agent.is_workflow_agent() {
+            return None;
+        }
+        if let Some(c) = &agent.model_chain_override {
+            return Some(c.clone());
+        }
+        self.project_repo
+            .find_by_id(agent.project_id)
+            .await
+            .ok()
+            .and_then(|p| p.model_chain_override)
+    }
+
     #[instrument(name = "domain.agent.send_message", skip(self, prompt))]
     pub async fn send_message(
         &self,
@@ -1166,10 +1225,18 @@ impl Agents {
             },
         );
 
-        let prompt_state = self
+        // Snapshot the per-agent + per-project chain once for the whole
+        // turn-loop. Workflow agents skip both — their chain is baked
+        // into the session at create and is immutable for the run.
+        let runtime_chain_override = self.resolve_runtime_chain(&agent).await;
+
+        let mut prompt_state = self
             .sessions
             .next_prompt(id, session::TargetThread::Main)
             .await?;
+        if let Some(c) = runtime_chain_override.clone() {
+            prompt_state.chain = c;
+        }
 
         self.drive_session_loop(id, agent_subject, tx, prompt_state)
             .await?;
@@ -1244,6 +1311,7 @@ impl Agents {
         let sessions = self.sessions.clone();
         let toolsets = self.toolsets.clone();
         let prompt_requests = self.prompt_requests.clone();
+        let runtime_override_for_loop = runtime_chain_override.clone();
         tokio::spawn(async move {
             let mut next = response_rx.await;
             let mut turn: u32 = 0;
@@ -1308,7 +1376,7 @@ impl Agents {
                     forward_response(response, &tx);
                 }
 
-                let next_prompt = match session_response {
+                let mut next_prompt = match session_response {
                     session::AgentSessionResponse::Done => break,
                     session::AgentSessionResponse::ToolUseRequest(tool_uses) => {
                         let tool_calls: Vec<llm::RequestToolUse> = tool_uses
@@ -1362,6 +1430,9 @@ impl Agents {
                     _ => break,
                 };
 
+                if let Some(c) = runtime_override_for_loop.clone() {
+                    next_prompt.chain = c;
+                }
                 current_model = next_prompt.chain.primary.name.clone();
                 let (request, rx_next) = llm::PromptRequest::new(next_prompt);
                 if prompt_requests.send(request).await.is_err() {

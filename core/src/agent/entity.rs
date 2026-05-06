@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use derive_builder::Builder;
+use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::{
@@ -47,6 +48,10 @@ pub enum AgentEvent {
     SandboxDetached {
         sandbox_id: SandboxId,
     },
+    /// `Some` sets / replaces the override; `None` clears it.
+    ModelChainUpdated {
+        chain: Option<ModelChain>,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -70,6 +75,10 @@ pub struct Agent {
     pub workflow_id: Option<WorkflowDefinitionId>,
     #[builder(default)]
     pub workflow_run_id: Option<WorkflowRunId>,
+    /// Per-agent chain override. Highest precedence after a per-call
+    /// `chain_override`; only valid for non-workflow agents.
+    #[builder(default)]
+    pub model_chain_override: Option<ModelChain>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -147,6 +156,27 @@ impl Agent {
         let _ = self.apply_sandbox_scopes(sandbox_id, mode);
         self.events
             .push(AgentEvent::SandboxAttached { sandbox_id, mode });
+        Ok(Idempotent::Executed(()))
+    }
+
+    pub fn is_workflow_agent(&self) -> bool {
+        self.workflow_id.is_some()
+    }
+
+    /// Workflow agents reject — their chain comes from the
+    /// `WorkflowDefinition` / step. `None` clears any prior override.
+    pub(super) fn update_model_chain(
+        &mut self,
+        chain: Option<ModelChain>,
+    ) -> Result<Idempotent<()>, super::error::AgentError> {
+        if self.is_workflow_agent() {
+            return Err(super::error::AgentError::WorkflowAgentChainImmutable);
+        }
+        if self.model_chain_override == chain {
+            return Ok(Idempotent::AlreadyApplied);
+        }
+        self.model_chain_override = chain.clone();
+        self.events.push(AgentEvent::ModelChainUpdated { chain });
         Ok(Idempotent::Executed(()))
     }
 
@@ -234,6 +264,9 @@ impl TryFromEvents<AgentEvent> for Agent {
                     if matches!(attached_sandbox, Some((id, _)) if id == *sandbox_id) {
                         attached_sandbox = None;
                     }
+                }
+                AgentEvent::ModelChainUpdated { chain } => {
+                    builder = builder.model_chain_override(chain.clone());
                 }
             }
         }

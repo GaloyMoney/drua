@@ -626,6 +626,7 @@ async fn detach_conflicting_writer_steals_user_writer_when_wants_write() {
             project_id,
             "user-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
         )
         .await
         .expect("create user agent");
@@ -660,6 +661,7 @@ async fn detach_conflicting_writer_does_not_steal_user_reader_when_wants_write()
             project_id,
             "user-reader",
             Some((sandbox_id, SandboxAgentMode::Read)),
+            None,
         )
         .await
         .expect("create user agent");
@@ -697,6 +699,7 @@ async fn detach_conflicting_writer_is_noop_when_wants_read() {
             project_id,
             "user-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
         )
         .await
         .expect("create user agent");
@@ -738,6 +741,7 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer() {
             run_id,
             "wf-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
         )
         .await
         .expect("create workflow agent");

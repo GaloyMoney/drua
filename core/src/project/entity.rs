@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
+use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
 use es_entity::*;
@@ -29,6 +30,10 @@ pub enum ProjectEvent {
     SpaceUnmounted {
         space_id: SpaceId,
     },
+    /// `Some` sets / replaces the override; `None` clears it.
+    ModelChainUpdated {
+        chain: Option<ModelChain>,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -43,6 +48,9 @@ pub struct Project {
     pub archived_at: Option<DateTime<Utc>>,
     #[builder(default)]
     pub mounted_spaces: Vec<SpaceId>,
+    /// Per-project chain. Beats role/default, loses to per-agent override.
+    #[builder(default)]
+    pub model_chain_override: Option<ModelChain>,
     events: EntityEvents<ProjectEvent>,
 }
 
@@ -96,6 +104,15 @@ impl Project {
         self.events.push(ProjectEvent::SpaceUnmounted { space_id });
         Idempotent::Executed(())
     }
+
+    pub(super) fn update_model_chain(&mut self, chain: Option<ModelChain>) -> Idempotent<()> {
+        if self.model_chain_override == chain {
+            return Idempotent::AlreadyApplied;
+        }
+        self.model_chain_override = chain.clone();
+        self.events.push(ProjectEvent::ModelChainUpdated { chain });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for Project {
@@ -140,6 +157,9 @@ impl TryFromEvents<ProjectEvent> for Project {
                 }
                 ProjectEvent::SpaceUnmounted { space_id } => {
                     mounted_spaces.retain(|id| id != space_id);
+                }
+                ProjectEvent::ModelChainUpdated { chain } => {
+                    builder = builder.model_chain_override(chain.clone());
                 }
             }
         }
