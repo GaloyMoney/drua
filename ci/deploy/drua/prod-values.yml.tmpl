@@ -18,16 +18,10 @@ galoyAgents:
       githubRedirectUri: "https://dashboard.agents.galoy.io/auth/github/callback"
       githubAllowedTeams:
         - "GaloyMoney/galoy-devs"
-    providers:
-      - name: openai
-        baseUrl: https://openrouter.ai/api
-        models:
-          - name: deepseek/deepseek-v4-pro
-            maxTokensPerResponse: 16384
-            contextWindowTokens: 1040000
+    # `providers` and `agents.defaultChain` inherit from charts/drua/values.yaml
+    # (gemini primary + deepseek/gpt-5-mini fallbacks per #278). Override them
+    # here only to pin prod to a specific provider mix.
     agents:
-      defaultChain:
-        primary: { name: "deepseek/deepseek-v4-pro", maxTokens: 16384 }
       projectLead:
         compaction:
           resetTimeDeltaSeconds: 3600
