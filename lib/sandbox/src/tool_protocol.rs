@@ -171,64 +171,149 @@ pub struct GrepInput {
 
 // ───────────────────────── text editor ─────────────────────────
 
-/// Typed input for the `str_replace_based_edit_tool` tool — Anthropic-
-/// compatible editor with four sub-commands. `#[serde(tag = "command")]`
-/// preserves the existing wire shape (`command` discriminator with the
-/// per-variant fields flat at the top level).
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TextEditorInput {
-    /// Read a file or list a directory.
-    View {
-        /// In-sandbox absolute path, or `space:<slug>/...` for a
-        /// mounted space.
-        path: String,
+/// Sub-commands for the `str_replace_based_edit_tool` tool.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextEditorCommand {
+    View,
+    Create,
+    StrReplace,
+    Insert,
+}
 
-        /// `[start, end]` line range. `-1` for end means EOF. Optional.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view_range: Option<[i64; 2]>,
-    },
-    /// Write a new file.
-    Create {
-        path: String,
-        /// Full file contents.
-        file_text: String,
-    },
-    /// Replace a unique substring.
-    StrReplace {
-        path: String,
-        /// Substring to replace. Must match the file byte-for-byte and
-        /// appear exactly once.
-        old_str: String,
-        /// Replacement text.
-        new_str: String,
-    },
-    /// Insert text at a line.
-    Insert {
-        path: String,
-        /// Line number after which to insert text. `0` = beginning of
-        /// file.
-        insert_line: u64,
-        /// Text to insert. `insert_text` is accepted as a legacy alias.
-        #[serde(alias = "insert_text")]
-        new_str: String,
-    },
+/// Typed input for the `str_replace_based_edit_tool` tool — Anthropic-
+/// compatible editor with four sub-commands. Modelled as a flat struct
+/// with all per-command fields optional so the JSON Schema is a single
+/// `type: "object"` (Anthropic / MCP can't currently consume a `oneOf`
+/// at the root of a tool's input schema). [`Self::resolve`] enforces
+/// the per-command required fields after deserialization.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TextEditorInput {
+    /// Which editor operation to perform.
+    pub command: TextEditorCommand,
+
+    /// In-sandbox absolute path, or `space:<slug>/...` for a mounted
+    /// space (view-only).
+    pub path: String,
+
+    /// `[start, end]` line range for `view`. `-1` for end means EOF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_range: Option<[i64; 2]>,
+
+    /// Full file contents for `create`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_text: Option<String>,
+
+    /// Substring to replace for `str_replace`. Must match the file
+    /// byte-for-byte and appear exactly once. `view` the file first if
+    /// you don't have its current content in context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_str: Option<String>,
+
+    /// Replacement text for `str_replace`, or text to insert for
+    /// `insert`. `insert_text` is accepted as a legacy alias.
+    #[serde(
+        default,
+        alias = "insert_text",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub new_str: Option<String>,
+
+    /// Line number after which to insert text for `insert`.
+    /// `0` = beginning of file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_line: Option<u64>,
 }
 
 impl TextEditorInput {
     /// `view` is read-only; everything else mutates state.
     pub fn is_mutating(&self) -> bool {
-        !matches!(self, Self::View { .. })
+        !matches!(self.command, TextEditorCommand::View)
     }
 
-    pub fn path(&self) -> &str {
-        match self {
-            Self::View { path, .. }
-            | Self::Create { path, .. }
-            | Self::StrReplace { path, .. }
-            | Self::Insert { path, .. } => path,
+    /// Validate per-command required fields and project the flat
+    /// struct into a typed variant.
+    pub fn resolve(self) -> Result<TextEditorAction, TextEditorInputError> {
+        match self.command {
+            TextEditorCommand::View => Ok(TextEditorAction::View {
+                path: self.path,
+                view_range: self.view_range,
+            }),
+            TextEditorCommand::Create => {
+                let file_text = self.file_text.ok_or(TextEditorInputError::MissingField {
+                    command: "create",
+                    field: "file_text",
+                })?;
+                Ok(TextEditorAction::Create {
+                    path: self.path,
+                    file_text,
+                })
+            }
+            TextEditorCommand::StrReplace => {
+                let old_str = self.old_str.ok_or(TextEditorInputError::MissingField {
+                    command: "str_replace",
+                    field: "old_str",
+                })?;
+                let new_str = self.new_str.ok_or(TextEditorInputError::MissingField {
+                    command: "str_replace",
+                    field: "new_str",
+                })?;
+                Ok(TextEditorAction::StrReplace {
+                    path: self.path,
+                    old_str,
+                    new_str,
+                })
+            }
+            TextEditorCommand::Insert => {
+                let insert_line = self.insert_line.ok_or(TextEditorInputError::MissingField {
+                    command: "insert",
+                    field: "insert_line",
+                })?;
+                let new_str = self.new_str.ok_or(TextEditorInputError::MissingField {
+                    command: "insert",
+                    field: "new_str",
+                })?;
+                Ok(TextEditorAction::Insert {
+                    path: self.path,
+                    insert_line,
+                    new_str,
+                })
+            }
         }
     }
+}
+
+/// Resolved per-command shape, produced by [`TextEditorInput::resolve`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextEditorAction {
+    View {
+        path: String,
+        view_range: Option<[i64; 2]>,
+    },
+    Create {
+        path: String,
+        file_text: String,
+    },
+    StrReplace {
+        path: String,
+        old_str: String,
+        new_str: String,
+    },
+    Insert {
+        path: String,
+        insert_line: u64,
+        new_str: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum TextEditorInputError {
+    #[error("'{field}' is required for command '{command}'")]
+    MissingField {
+        command: &'static str,
+        field: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -463,82 +548,102 @@ mod tests {
 
     #[test]
     fn text_editor_view_roundtrip() {
-        let input = TextEditorInput::View {
-            path: "/tmp/x".to_string(),
-            view_range: Some([1, -1]),
-        };
-        let json = serde_json::to_value(&input).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "command": "view",
-                "path": "/tmp/x",
-                "view_range": [1, -1]
-            })
-        );
-        let back: TextEditorInput = serde_json::from_value(json).unwrap();
-        assert_eq!(back, input);
+        let input: TextEditorInput = serde_json::from_value(serde_json::json!({
+            "command": "view",
+            "path": "/tmp/x",
+            "view_range": [1, -1]
+        }))
+        .unwrap();
+        assert_eq!(input.command, TextEditorCommand::View);
+        assert_eq!(input.path, "/tmp/x");
+        assert_eq!(input.view_range, Some([1, -1]));
+        match input.clone().resolve().unwrap() {
+            TextEditorAction::View { path, view_range } => {
+                assert_eq!(path, "/tmp/x");
+                assert_eq!(view_range, Some([1, -1]));
+            }
+            other => panic!("expected View, got {other:?}"),
+        }
     }
 
     #[test]
-    fn text_editor_create_roundtrip() {
-        let input = TextEditorInput::Create {
-            path: "/tmp/x".to_string(),
-            file_text: "hello".to_string(),
-        };
-        let json = serde_json::to_value(&input).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "command": "create",
-                "path": "/tmp/x",
-                "file_text": "hello"
-            })
-        );
-        let back: TextEditorInput = serde_json::from_value(json).unwrap();
-        assert_eq!(back, input);
+    fn text_editor_create_resolve() {
+        let input: TextEditorInput = serde_json::from_value(serde_json::json!({
+            "command": "create",
+            "path": "/tmp/x",
+            "file_text": "hello"
+        }))
+        .unwrap();
+        match input.resolve().unwrap() {
+            TextEditorAction::Create { path, file_text } => {
+                assert_eq!(path, "/tmp/x");
+                assert_eq!(file_text, "hello");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
     }
 
     #[test]
-    fn text_editor_str_replace_roundtrip() {
-        let input = TextEditorInput::StrReplace {
-            path: "/tmp/x".to_string(),
-            old_str: "a".to_string(),
-            new_str: "b".to_string(),
-        };
-        let json = serde_json::to_value(&input).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "command": "str_replace",
-                "path": "/tmp/x",
-                "old_str": "a",
-                "new_str": "b"
-            })
-        );
-        let back: TextEditorInput = serde_json::from_value(json).unwrap();
-        assert_eq!(back, input);
+    fn text_editor_create_missing_file_text() {
+        let input: TextEditorInput = serde_json::from_value(serde_json::json!({
+            "command": "create",
+            "path": "/tmp/x"
+        }))
+        .unwrap();
+        let err = input.resolve().expect_err("missing file_text");
+        assert!(matches!(
+            err,
+            TextEditorInputError::MissingField {
+                command: "create",
+                field: "file_text"
+            }
+        ));
     }
 
     #[test]
-    fn text_editor_insert_roundtrip() {
-        let input = TextEditorInput::Insert {
-            path: "/tmp/x".to_string(),
-            insert_line: 5,
-            new_str: "// added".to_string(),
-        };
-        let json = serde_json::to_value(&input).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "command": "insert",
-                "path": "/tmp/x",
-                "insert_line": 5,
-                "new_str": "// added"
-            })
-        );
-        let back: TextEditorInput = serde_json::from_value(json).unwrap();
-        assert_eq!(back, input);
+    fn text_editor_str_replace_resolve() {
+        let input: TextEditorInput = serde_json::from_value(serde_json::json!({
+            "command": "str_replace",
+            "path": "/tmp/x",
+            "old_str": "a",
+            "new_str": "b"
+        }))
+        .unwrap();
+        match input.resolve().unwrap() {
+            TextEditorAction::StrReplace {
+                path,
+                old_str,
+                new_str,
+            } => {
+                assert_eq!(path, "/tmp/x");
+                assert_eq!(old_str, "a");
+                assert_eq!(new_str, "b");
+            }
+            other => panic!("expected StrReplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_editor_insert_resolve_with_alias() {
+        let input: TextEditorInput = serde_json::from_value(serde_json::json!({
+            "command": "insert",
+            "path": "/tmp/x",
+            "insert_line": 5,
+            "insert_text": "// added"
+        }))
+        .unwrap();
+        match input.resolve().unwrap() {
+            TextEditorAction::Insert {
+                path,
+                insert_line,
+                new_str,
+            } => {
+                assert_eq!(path, "/tmp/x");
+                assert_eq!(insert_line, 5);
+                assert_eq!(new_str, "// added");
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
     }
 
     #[test]
@@ -555,17 +660,52 @@ mod tests {
     }
 
     #[test]
+    fn text_editor_unknown_field_rejected() {
+        let err = serde_json::from_value::<TextEditorInput>(serde_json::json!({
+            "command": "view",
+            "path": "/tmp/x",
+            "viewRange": [1, 2]
+        }))
+        .expect_err("camelCase typo should be rejected");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
     fn text_editor_is_mutating() {
-        let view = TextEditorInput::View {
+        let view = TextEditorInput {
+            command: TextEditorCommand::View,
             path: "x".to_string(),
             view_range: None,
+            file_text: None,
+            old_str: None,
+            new_str: None,
+            insert_line: None,
         };
         assert!(!view.is_mutating());
 
-        let create = TextEditorInput::Create {
-            path: "x".to_string(),
-            file_text: "y".to_string(),
+        let create = TextEditorInput {
+            command: TextEditorCommand::Create,
+            ..view
         };
         assert!(create.is_mutating());
+    }
+
+    #[test]
+    fn text_editor_schema_is_object_root() {
+        // MCP / Anthropic tool input schemas must be plain `type: "object"`
+        // at the root — not `oneOf`. Pin that here so a future refactor to a
+        // tagged enum can't silently break the model-facing schema.
+        let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+            s.inline_subschemas = true;
+            s.meta_schema = None;
+        });
+        let generator = settings.into_generator();
+        let schema = generator.into_root_schema_for::<TextEditorInput>();
+        let value = serde_json::to_value(schema).unwrap();
+        assert_eq!(value.get("type").and_then(|t| t.as_str()), Some("object"));
+        assert!(
+            value.get("oneOf").is_none(),
+            "TextEditorInput root schema must not use oneOf"
+        );
     }
 }

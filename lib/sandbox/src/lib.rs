@@ -13,6 +13,7 @@ pub use error::{AdminError, InstanceError};
 pub use instance_client::InstanceClient;
 pub use tool_protocol::{
     BashCommandInput, BashCommandOutput, BashInputError, DeleteInput, GlobInput, GrepInput,
-    GrepOutputMode, MoveInput, TextEditorInput,
+    GrepOutputMode, MoveInput, TextEditorAction, TextEditorCommand, TextEditorInput,
+    TextEditorInputError,
 };
 pub use types::{Sandbox, SandboxMode, SandboxSpecs};

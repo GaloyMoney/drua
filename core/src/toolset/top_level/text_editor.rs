@@ -19,7 +19,7 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
-use sandbox::TextEditorInput;
+use sandbox::{TextEditorAction, TextEditorInput};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -96,45 +96,49 @@ impl TopLevelTool for TextEditor {
         let input: TextEditorInput = parse_params(arguments)?;
         Audit::record_action("text_editor");
 
-        let path = input.path();
+        let is_mutating = input.is_mutating();
 
         // `space:<slug>/...` paths are handled entirely by SpaceFs —
         // both reads (`view`) and writes (`create` / `str_replace` /
         // `insert`). Each helper returns Ok(None) on non-space paths
         // so we fall through to the sandbox dispatch below.
-        if SpaceFs::is_space_path(path) {
-            let space_result: Option<String> = match &input {
-                TextEditorInput::View { path, view_range } => {
+        if SpaceFs::is_space_path(&input.path) {
+            let action = input
+                .clone()
+                .resolve()
+                .map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))?;
+            let space_result: Option<String> = match action {
+                TextEditorAction::View { path, view_range } => {
                     let range = view_range.map(|[s, e]| (s, e));
                     self.space_fs
-                        .view_file(subject, path, range)
+                        .view_file(subject, &path, range)
                         .await?
                         .map(|view| match view {
                             FileView::File(text) => text,
                             FileView::Dir(entries) => entries.join("\n"),
                         })
                 }
-                TextEditorInput::Create { path, file_text } => self
+                TextEditorAction::Create { path, file_text } => self
                     .space_fs
-                    .write_file(subject, path, file_text.clone())
+                    .write_file(subject, &path, file_text)
                     .await?
                     .map(|()| format!("Wrote {path}")),
-                TextEditorInput::StrReplace {
+                TextEditorAction::StrReplace {
                     path,
                     old_str,
                     new_str,
                 } => self
                     .space_fs
-                    .str_replace(subject, path, old_str.clone(), new_str.clone())
+                    .str_replace(subject, &path, old_str, new_str)
                     .await?
                     .map(|()| format!("Replaced text in {path}")),
-                TextEditorInput::Insert {
+                TextEditorAction::Insert {
                     path,
                     insert_line,
                     new_str,
                 } => self
                     .space_fs
-                    .insert_line(subject, path, *insert_line as usize, new_str.clone())
+                    .insert_line(subject, &path, insert_line as usize, new_str)
                     .await?
                     .map(|()| format!("Inserted text at line {insert_line} of {path}")),
             };
@@ -147,7 +151,7 @@ impl TopLevelTool for TextEditor {
         }
 
         // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
-        let sandbox_id = if input.is_mutating() {
+        let sandbox_id = if is_mutating {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
             subject
@@ -156,7 +160,7 @@ impl TopLevelTool for TextEditor {
         };
         Audit::record_sandbox_id(sandbox_id);
 
-        let client = if input.is_mutating() {
+        let client = if is_mutating {
             self.sandboxes
                 .instance_client_for(subject, sandbox_id)
                 .await

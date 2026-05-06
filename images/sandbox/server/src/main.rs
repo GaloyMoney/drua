@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use sandbox::tool_protocol::{
     BashCommandInput, BashInputError, DeleteInput, GlobInput, GrepInput, GrepOutputMode, MoveInput,
-    TextEditorInput,
+    TextEditorAction, TextEditorInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -197,18 +197,23 @@ async fn execute_text_editor(
 ) -> Result<String, String> {
     let input: TextEditorInput =
         serde_json::from_value(input).map_err(|e| format!("Invalid text-editor input: {e}"))?;
+    let action = input
+        .resolve()
+        .map_err(|e| format!("Invalid text-editor input: {e}"))?;
 
-    match input {
-        TextEditorInput::View { path, view_range } => editor_view(session, &path, view_range).await,
-        TextEditorInput::Create { path, file_text } => {
+    match action {
+        TextEditorAction::View { path, view_range } => {
+            editor_view(session, &path, view_range).await
+        }
+        TextEditorAction::Create { path, file_text } => {
             editor_create(session, &path, &file_text).await
         }
-        TextEditorInput::StrReplace {
+        TextEditorAction::StrReplace {
             path,
             old_str,
             new_str,
         } => editor_str_replace(session, &path, &old_str, &new_str).await,
-        TextEditorInput::Insert {
+        TextEditorAction::Insert {
             path,
             insert_line,
             new_str,
