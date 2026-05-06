@@ -74,10 +74,6 @@ impl TopLevelTool for WhoAmI {
         matches!(subject, AuthSubject::ExportedAgent(_, _, _))
     }
 
-    fn composable(&self) -> bool {
-        false
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,

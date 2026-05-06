@@ -56,12 +56,16 @@ pub(crate) fn array_of_any_schema(
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+    /// `None` only in tests without a DB pool.
     audit: Option<Arc<Audit>>,
     init_errors: Vec<(String, String)>,
 }
 
 impl ToolSets {
-    pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
+    pub async fn init(
+        config: ToolSetsConfig,
+        audit: Option<Arc<Audit>>,
+    ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
         let mut init_errors: Vec<(String, String)> = Vec::new();
 
@@ -121,6 +125,7 @@ impl ToolSets {
         let compose = Arc::new(ComposeTool::new(
             Arc::clone(&sets),
             Arc::clone(&top_level),
+            audit.clone(),
             config.compose.clone(),
         ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
@@ -145,7 +150,7 @@ impl ToolSets {
         Ok(Self {
             sets,
             top_level,
-            audit: None,
+            audit,
             init_errors,
         })
     }
@@ -175,11 +180,6 @@ impl ToolSets {
                 "Failed to initialize MCP upstream"
             );
         }
-    }
-
-    /// Optional — when `None` (e.g. in tests) audit is silently skipped.
-    pub fn set_audit(&mut self, audit: Arc<Audit>) {
-        self.audit = Some(audit);
     }
 
     /// Uses interior mutability so tools can be registered after the
