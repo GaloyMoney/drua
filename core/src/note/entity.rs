@@ -409,7 +409,7 @@ mod tests {
 
     use crate::primitives::{NoteId, ProjectId};
 
-    use super::{NewNote, Note, NoteEvent};
+    use super::{NewNote, Note};
 
     fn new_note() -> Note {
         let id = NoteId::new();

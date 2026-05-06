@@ -396,9 +396,23 @@ impl Skills {
         project_id: ProjectId,
     ) -> Result<Vec<ScopedSkill>, SkillError> {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
-        let mut out: Vec<ScopedSkill> = Vec::new();
+
+        // Collect every tier first, then resolve name collisions with the
+        // same precedence `skills_context_for_scope` applies to the agent's
+        // `<available_skills>` block: Space > Sandbox > Project > Global.
+        // Without this dedupe, the UI would show shadowed rows the agent
+        // can't actually invoke.
+        let mut space_tier: Vec<ScopedSkill> = Vec::new();
+        let mut sandbox_tier: Vec<ScopedSkill> = Vec::new();
+        let mut project_tier: Vec<ScopedSkill> = Vec::new();
+        let mut global_tier: Vec<ScopedSkill> = Vec::new();
 
         for s in self.list_for_project_inner(project_id).await? {
+            let bucket = if s.project_id.is_some() {
+                &mut project_tier
+            } else {
+                &mut global_tier
+            };
             let source = match s.project_id {
                 Some(pid) => SkillSource::Project {
                     skill_id: s.id,
@@ -406,7 +420,7 @@ impl Skills {
                 },
                 None => SkillSource::Global { skill_id: s.id },
             };
-            out.push(ScopedSkill {
+            bucket.push(ScopedSkill {
                 name: s.name,
                 description: s.description,
                 body: s.body,
@@ -414,11 +428,12 @@ impl Skills {
             });
         }
 
-        // Mount-set is bounded (capped at SPACES_BLOCK_LIMIT in space_mounts),
-        // so one query per mount is fine.
+        // Mount-set is bounded (capped at SPACES_BLOCK_LIMIT in space_mounts).
+        // Each mount queried independently — a single space failure logs and
+        // is dropped from the result rather than nuking the whole list.
         let mounted_space_ids = self.mounted_space_ids_for(Some(project_id)).await;
         for space_id in mounted_space_ids {
-            let res = self
+            let res = match self
                 .repo
                 .list_for_space_id_by_created_at(
                     Some(space_id),
@@ -428,10 +443,17 @@ impl Skills {
                     },
                     es_entity::ListDirection::Ascending,
                 )
-                .await?;
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!(error = %e, %space_id, "list_for_space_id_by_created_at failed; this space's skills hidden from list_for_scope");
+                    continue;
+                }
+            };
             for s in res.entities {
                 let space_slug = s.space_slug.clone().unwrap_or_default();
-                out.push(ScopedSkill {
+                space_tier.push(ScopedSkill {
                     name: s.name,
                     description: s.description,
                     body: s.body,
@@ -453,7 +475,7 @@ impl Skills {
                         continue;
                     }
                     for exp in &sandbox.exported_skills {
-                        out.push(ScopedSkill {
+                        sandbox_tier.push(ScopedSkill {
                             name: exp.name.clone(),
                             description: exp.description.clone().unwrap_or_default(),
                             body: exp.content.clone(),
@@ -470,6 +492,15 @@ impl Skills {
             }
         }
 
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<ScopedSkill> = Vec::new();
+        for tier in [space_tier, sandbox_tier, project_tier, global_tier] {
+            for s in tier {
+                if seen.insert(s.name.clone()) {
+                    out.push(s);
+                }
+            }
+        }
         Ok(out)
     }
 
