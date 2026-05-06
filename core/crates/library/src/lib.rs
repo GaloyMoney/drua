@@ -79,6 +79,7 @@ impl Library {
             Arc::clone(&git),
             tick_tx,
             Duration::from_millis(config.fetch_interval_ms),
+            git.local_commit_notify(),
         );
 
         let importers: ImporterRegistry =
@@ -132,13 +133,17 @@ impl Library {
         git: Arc<GitEngine>,
         tick_tx: mpsc::Sender<CommitTick>,
         interval: Duration,
+        local_commit_notify: Arc<tokio::sync::Notify>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_head: Option<String> = None;
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = local_commit_notify.notified() => {}
+                }
                 match git.fetch_and_head().await {
                     Ok(Some(head)) => {
                         if last_head.as_deref() == Some(head.as_str()) {
