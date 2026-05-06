@@ -54,13 +54,13 @@ oauth:
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
   github_allowed_teams: []
 agents:
+  default_chain:
+    primary: { name: test-model }
   builtin_roles:
     project_lead:
-      model: test-model
       compaction:
         prune_after_seconds: 600
     agent:
-      model: test-model
       compaction:
         prune_after_seconds: 600
 providers:
