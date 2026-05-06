@@ -382,13 +382,10 @@ impl Skills {
 
     /// Every skill an agent in `project_id` can invoke, with
     /// provenance: project-owned, truly-global, mounted-space, and
-    /// sandbox-exported (runtime). Mirrors the resolution that
-    /// [`Self::skills_context_for_scope`] does for the agent's
-    /// `<available_skills>` block — the UI calls this so the human
-    /// sees the same set the agent does. Lookups against
-    /// `space_mounts` / `sandboxes` failures are logged + swallowed
-    /// so a missing lower tier degrades the result rather than fails
-    /// the whole request.
+    /// sandbox-exported (runtime). UI surface — uses every Ready
+    /// sandbox in the project (the human sees the full possibility
+    /// set). [`Self::skills_context_for_scope`] uses the same fan-out
+    /// + precedence but with only the agent's attached sandbox.
     #[instrument(name = "skill.list_for_scope", skip(self, sub))]
     pub async fn list_for_scope(
         &self,
@@ -396,29 +393,37 @@ impl Skills {
         project_id: ProjectId,
     ) -> Result<Vec<ScopedSkill>, SkillError> {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
+        let mounted_space_ids = self.mounted_space_ids_for(Some(project_id)).await;
+        let sandbox_tier = self.sandbox_exports_for_project(sub, project_id).await;
+        self.scoped_skills_with_precedence(project_id, &mounted_space_ids, sandbox_tier)
+            .await
+    }
 
-        // Collect every tier first, then resolve name collisions with the
-        // same precedence `skills_context_for_scope` applies to the agent's
-        // `<available_skills>` block: Space > Sandbox > Project > Global.
-        // Without this dedupe, the UI would show shadowed rows the agent
-        // can't actually invoke.
+    /// Project + global from the DB, mounted-space skills (per-space
+    /// failures dropped), then folded with the precedence
+    /// **Space > Sandbox > Project > Global** — first-wins by name.
+    /// Caller supplies the sandbox tier because the two surfaces
+    /// source it differently (every Ready sandbox vs single attached).
+    async fn scoped_skills_with_precedence(
+        &self,
+        project_id: ProjectId,
+        mounted_space_ids: &[SpaceId],
+        sandbox_tier: Vec<ScopedSkill>,
+    ) -> Result<Vec<ScopedSkill>, SkillError> {
         let mut space_tier: Vec<ScopedSkill> = Vec::new();
-        let mut sandbox_tier: Vec<ScopedSkill> = Vec::new();
         let mut project_tier: Vec<ScopedSkill> = Vec::new();
         let mut global_tier: Vec<ScopedSkill> = Vec::new();
 
         for s in self.list_for_project_inner(project_id).await? {
-            let bucket = if s.project_id.is_some() {
-                &mut project_tier
-            } else {
-                &mut global_tier
-            };
-            let source = match s.project_id {
-                Some(pid) => SkillSource::Project {
-                    skill_id: s.id,
-                    project_id: pid,
-                },
-                None => SkillSource::Global { skill_id: s.id },
+            let (source, bucket) = match s.project_id {
+                Some(pid) => (
+                    SkillSource::Project {
+                        skill_id: s.id,
+                        project_id: pid,
+                    },
+                    &mut project_tier,
+                ),
+                None => (SkillSource::Global { skill_id: s.id }, &mut global_tier),
             };
             bucket.push(ScopedSkill {
                 name: s.name,
@@ -431,12 +436,11 @@ impl Skills {
         // Mount-set is bounded (capped at SPACES_BLOCK_LIMIT in space_mounts).
         // Each mount queried independently — a single space failure logs and
         // is dropped from the result rather than nuking the whole list.
-        let mounted_space_ids = self.mounted_space_ids_for(Some(project_id)).await;
         for space_id in mounted_space_ids {
             let res = match self
                 .repo
                 .list_for_space_id_by_created_at(
-                    Some(space_id),
+                    Some(*space_id),
                     es_entity::PaginatedQueryArgs {
                         first: 100,
                         after: None,
@@ -447,7 +451,7 @@ impl Skills {
             {
                 Ok(res) => res,
                 Err(e) => {
-                    tracing::warn!(error = %e, %space_id, "list_for_space_id_by_created_at failed; this space's skills hidden from list_for_scope");
+                    tracing::warn!(error = %e, %space_id, "list_for_space_id_by_created_at failed; this space's skills hidden");
                     continue;
                 }
             };
@@ -459,36 +463,10 @@ impl Skills {
                     body: s.body,
                     source: SkillSource::Space {
                         skill_id: s.id,
-                        space_id,
+                        space_id: *space_id,
                         space_slug,
                     },
                 });
-            }
-        }
-
-        // Best-effort: a Sandbox-Read denial just hides the sandbox tier
-        // instead of failing the whole list (mirrors the space_mounts path).
-        match self.sandboxes.list_for_project(sub, project_id).await {
-            Ok(sandboxes) => {
-                for sandbox in sandboxes {
-                    if sandbox.state != crate::sandbox::SandboxState::Ready {
-                        continue;
-                    }
-                    for exp in &sandbox.exported_skills {
-                        sandbox_tier.push(ScopedSkill {
-                            name: exp.name.clone(),
-                            description: exp.description.clone().unwrap_or_default(),
-                            body: exp.content.clone(),
-                            source: SkillSource::Sandbox {
-                                sandbox_id: sandbox.id,
-                                sandbox_name: sandbox.name.clone(),
-                            },
-                        });
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "sandboxes.list_for_project failed; sandbox tier hidden from list_for_scope");
             }
         }
 
@@ -502,6 +480,75 @@ impl Skills {
             }
         }
         Ok(out)
+    }
+
+    /// Sandbox tier for the project surface — every Ready sandbox in
+    /// the project contributes its exported skills. Best-effort: a
+    /// Sandbox-Read denial just returns an empty tier.
+    async fn sandbox_exports_for_project(
+        &self,
+        sub: &AuthSubject,
+        project_id: ProjectId,
+    ) -> Vec<ScopedSkill> {
+        let mut out = Vec::new();
+        match self.sandboxes.list_for_project(sub, project_id).await {
+            Ok(sandboxes) => {
+                for sandbox in sandboxes {
+                    if sandbox.state != crate::sandbox::SandboxState::Ready {
+                        continue;
+                    }
+                    for exp in &sandbox.exported_skills {
+                        out.push(ScopedSkill {
+                            name: exp.name.clone(),
+                            description: exp.description.clone().unwrap_or_default(),
+                            body: exp.content.clone(),
+                            source: SkillSource::Sandbox {
+                                sandbox_id: sandbox.id,
+                                sandbox_name: sandbox.name.clone(),
+                            },
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sandboxes.list_for_project failed; sandbox tier hidden");
+            }
+        }
+        out
+    }
+
+    /// Sandbox tier for the agent surface — only the attached sandbox
+    /// (an agent can only invoke skills from its own sandbox).
+    async fn sandbox_exports_for_attached(
+        &self,
+        attached_sandbox_id: Option<SandboxId>,
+    ) -> Vec<ScopedSkill> {
+        let exports = match self
+            .sandboxes
+            .exported_skills_for_sandbox(attached_sandbox_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "exported_skills_for_sandbox failed; attached-sandbox tier hidden");
+                return Vec::new();
+            }
+        };
+        let Some(sandbox_id) = attached_sandbox_id else {
+            return Vec::new();
+        };
+        exports
+            .into_iter()
+            .map(|exp| ScopedSkill {
+                name: exp.name,
+                description: exp.description.unwrap_or_default(),
+                body: exp.content,
+                source: SkillSource::Sandbox {
+                    sandbox_id,
+                    sandbox_name: String::new(),
+                },
+            })
+            .collect()
     }
 
     async fn list_for_project_inner(
@@ -619,64 +666,13 @@ impl Skills {
         &self,
         scope: &AgentScope,
     ) -> Result<Option<String>, SkillError> {
-        let project_and_global = self.list_for_project_inner(scope.project_id).await?;
-
-        let mut space_skills: Vec<Skill> = Vec::new();
-        for space_id in &scope.mounted_space_ids {
-            let res = self
-                .repo
-                .list_for_space_id_by_created_at(
-                    Some(*space_id),
-                    es_entity::PaginatedQueryArgs {
-                        first: 100,
-                        after: None,
-                    },
-                    es_entity::ListDirection::Ascending,
-                )
-                .await?;
-            space_skills.extend(res.entities);
-        }
-
-        let sandbox_skills = match self
-            .sandboxes
-            .exported_skills_for_sandbox(scope.attached_sandbox_id)
-            .await
-        {
-            Ok(skills) => skills,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to fetch sandbox exported skills");
-                Vec::new()
-            }
-        };
-
-        // Precedence (highest first): Space > Sandbox > Project > Global.
-        // First insert wins; later same-name entries are dropped.
-        let mut seen_names = std::collections::HashSet::new();
-        let mut entries: Vec<(String, &'static str, String)> = Vec::new();
-
-        for skill in &space_skills {
-            if seen_names.insert(skill.name.clone()) {
-                entries.push((skill.name.clone(), " [space]", skill.description.clone()));
-            }
-        }
-        for skill in &sandbox_skills {
-            if seen_names.insert(skill.name.clone()) {
-                let desc = skill.description.clone().unwrap_or_default();
-                entries.push((skill.name.clone(), "", desc));
-            }
-        }
-        for skill in &project_and_global {
-            if seen_names.insert(skill.name.clone()) {
-                let scope_tag = if skill.project_id.is_some() {
-                    ""
-                } else {
-                    " [global]"
-                };
-                entries.push((skill.name.clone(), scope_tag, skill.description.clone()));
-            }
-        }
-
-        if entries.is_empty() {
+        let sandbox_tier = self
+            .sandbox_exports_for_attached(scope.attached_sandbox_id)
+            .await;
+        let scoped = self
+            .scoped_skills_with_precedence(scope.project_id, &scope.mounted_space_ids, sandbox_tier)
+            .await?;
+        if scoped.is_empty() {
             return Ok(None);
         }
 
@@ -692,14 +688,19 @@ impl Skills {
             .saturating_sub(header.len())
             .saturating_sub(footer.len());
 
-        for (name, scope, description) in entries.iter().take(SKILLS_CONTEXT_MAX) {
-            let desc: String = description.chars().take(MAX_DESCRIPTION_LEN).collect();
-            let truncated = if desc.len() < description.len() {
+        for s in scoped.iter().take(SKILLS_CONTEXT_MAX) {
+            let scope_tag = match s.source {
+                SkillSource::Space { .. } => " [space]",
+                SkillSource::Global { .. } => " [global]",
+                SkillSource::Project { .. } | SkillSource::Sandbox { .. } => "",
+            };
+            let desc: String = s.description.chars().take(MAX_DESCRIPTION_LEN).collect();
+            let truncated = if desc.len() < s.description.len() {
                 format!("{desc}...")
             } else {
                 desc
             };
-            let line = format!("- {name}{scope} — {truncated}\n");
+            let line = format!("- {}{scope_tag} — {truncated}\n", s.name);
             if line.len() > remaining {
                 buf.push_str("- ... (more skills available — use search to find them)\n");
                 break;
