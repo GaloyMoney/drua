@@ -10,7 +10,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use sandbox::bash_protocol::{BashCommandInput, BashInputError};
+use sandbox::tool_protocol::{
+    BashCommandInput, BashInputError, DeleteInput, GlobInput, GrepInput, GrepOutputMode, MoveInput,
+    TextEditorInput,
+};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
@@ -73,15 +76,16 @@ async fn execute(
     Json(req): Json<ExecuteRequest>,
 ) -> Json<ExecuteResponse> {
     let ExecuteRequest { tool, input } = req;
-    // Bash moves `input` into a typed deser; other arms only borrow it,
-    // so each tool pays only for what it actually needs.
+    // Each handler typed-deserializes its slice of `input`, so a typo
+    // (`timeoutMs`, `Pattern`, …) becomes a clean parse error instead
+    // of a silently-ignored field.
     let result = match tool.as_str() {
         "bash" => execute_bash(&session, input).await,
-        "str_replace_based_edit_tool" => execute_text_editor(&session, &input).await,
-        "Grep" => execute_grep(&session, &input).await,
-        "Glob" => execute_glob(&session, &input).await,
-        "Move" => execute_move(&session, &input).await,
-        "Delete" => execute_delete(&session, &input).await,
+        "str_replace_based_edit_tool" => execute_text_editor(&session, input).await,
+        "Grep" => execute_grep(&session, input).await,
+        "Glob" => execute_glob(&session, input).await,
+        "Move" => execute_move(&session, input).await,
+        "Delete" => execute_delete(&session, input).await,
         other => Err(format!("Unknown tool: {other}")),
     };
 
@@ -189,27 +193,34 @@ fn validate_path_against(scope: &std::path::Path, path: &str) -> Result<PathBuf,
 
 async fn execute_text_editor(
     session: &SharedSession,
-    input: &serde_json::Value,
+    input: serde_json::Value,
 ) -> Result<String, String> {
-    let command = input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'command' field")?;
+    let input: TextEditorInput =
+        serde_json::from_value(input).map_err(|e| format!("Invalid text-editor input: {e}"))?;
 
-    match command {
-        "view" => editor_view(session, input).await,
-        "create" => editor_create(session, input).await,
-        "str_replace" => editor_str_replace(session, input).await,
-        "insert" => editor_insert(session, input).await,
-        other => Err(format!("Unknown text editor command: {other}")),
+    match input {
+        TextEditorInput::View { path, view_range } => editor_view(session, &path, view_range).await,
+        TextEditorInput::Create { path, file_text } => {
+            editor_create(session, &path, &file_text).await
+        }
+        TextEditorInput::StrReplace {
+            path,
+            old_str,
+            new_str,
+        } => editor_str_replace(session, &path, &old_str, &new_str).await,
+        TextEditorInput::Insert {
+            path,
+            insert_line,
+            new_str,
+        } => editor_insert(session, &path, insert_line, &new_str).await,
     }
 }
 
-async fn editor_view(session: &SharedSession, input: &serde_json::Value) -> Result<String, String> {
-    let raw_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' field")?;
+async fn editor_view(
+    session: &SharedSession,
+    raw_path: &str,
+    view_range: Option<[i64; 2]>,
+) -> Result<String, String> {
     let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
 
@@ -244,9 +255,8 @@ async fn editor_view(session: &SharedSession, input: &serde_json::Value) -> Resu
             .map_err(|e| format!("Error: {e}"))?;
         let lines: Vec<&str> = content.lines().collect();
 
-        let (start, end) = if let Some(range) = input.get("view_range").and_then(|v| v.as_array()) {
-            let s = range.first().and_then(|v| v.as_i64()).unwrap_or(1).max(1) as usize;
-            let e = range.get(1).and_then(|v| v.as_i64()).unwrap_or(-1);
+        let (start, end) = if let Some([s, e]) = view_range {
+            let s = s.max(1) as usize;
             let end = if e == -1 {
                 lines.len()
             } else {
@@ -269,17 +279,9 @@ async fn editor_view(session: &SharedSession, input: &serde_json::Value) -> Resu
 
 async fn editor_create(
     session: &SharedSession,
-    input: &serde_json::Value,
+    raw_path: &str,
+    file_text: &str,
 ) -> Result<String, String> {
-    let raw_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' field")?;
-    let file_text = input
-        .get("file_text")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'file_text' field")?;
-
     // Create parent dirs first so validate_path can canonicalize the parent.
     if let Some(parent) = std::path::Path::new(raw_path).parent() {
         tokio::fs::create_dir_all(parent)
@@ -298,22 +300,12 @@ async fn editor_create(
 
 async fn editor_str_replace(
     session: &SharedSession,
-    input: &serde_json::Value,
+    raw_path: &str,
+    old_str: &str,
+    new_str: &str,
 ) -> Result<String, String> {
-    let raw_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' field")?;
     let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
-    let old_str = input
-        .get("old_str")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'old_str' field")?;
-    let new_str = input
-        .get("new_str")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'new_str' field")?;
 
     let content = tokio::fs::read_to_string(path)
         .await
@@ -342,23 +334,13 @@ async fn editor_str_replace(
 /// `insert_line == 0` means insert at the beginning of the file.
 async fn editor_insert(
     session: &SharedSession,
-    input: &serde_json::Value,
+    raw_path: &str,
+    insert_line: u64,
+    insert_text: &str,
 ) -> Result<String, String> {
-    let raw_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' field")?;
     let validated = validate_path(session, raw_path).await?;
     let path = validated.to_str().ok_or("Path is not valid UTF-8")?;
-    let insert_line = input
-        .get("insert_line")
-        .and_then(|v| v.as_u64())
-        .ok_or("Missing 'insert_line' field")? as usize;
-    let insert_text = input
-        .get("new_str")
-        .or_else(|| input.get("insert_text"))
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'new_str' field")?;
+    let insert_line = insert_line as usize;
 
     let content = tokio::fs::read_to_string(path)
         .await
@@ -389,26 +371,19 @@ async fn editor_insert(
     ))
 }
 
-async fn execute_move(
-    session: &SharedSession,
-    input: &serde_json::Value,
-) -> Result<String, String> {
-    let from_raw = input
-        .get("from")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'from' field")?;
-    let to_raw = input
-        .get("to")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'to' field")?;
+async fn execute_move(session: &SharedSession, input: serde_json::Value) -> Result<String, String> {
+    let MoveInput {
+        from: from_raw,
+        to: to_raw,
+    } = serde_json::from_value(input).map_err(|e| format!("Invalid move input: {e}"))?;
 
-    if let Some(parent) = std::path::Path::new(to_raw).parent() {
+    if let Some(parent) = std::path::Path::new(&to_raw).parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("Error creating directories: {e}"))?;
     }
-    let from = validate_path(session, from_raw).await?;
-    let to = validate_path(session, to_raw).await?;
+    let from = validate_path(session, &from_raw).await?;
+    let to = validate_path(session, &to_raw).await?;
 
     if !tokio::fs::try_exists(&from)
         .await
@@ -432,13 +407,11 @@ async fn execute_move(
 
 async fn execute_delete(
     session: &SharedSession,
-    input: &serde_json::Value,
+    input: serde_json::Value,
 ) -> Result<String, String> {
-    let raw_path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' field")?;
-    let validated = validate_path(session, raw_path).await?;
+    let DeleteInput { path: raw_path } =
+        serde_json::from_value(input).map_err(|e| format!("Invalid delete input: {e}"))?;
+    let validated = validate_path(session, &raw_path).await?;
 
     let exists = tokio::fs::try_exists(&validated)
         .await
@@ -452,72 +425,58 @@ async fn execute_delete(
     Ok(format!("Deleted {raw_path}"))
 }
 
-async fn execute_grep(
-    session: &SharedSession,
-    input: &serde_json::Value,
-) -> Result<String, String> {
-    let pattern = input
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'pattern' field")?;
+async fn execute_grep(session: &SharedSession, input: serde_json::Value) -> Result<String, String> {
+    let input: GrepInput =
+        serde_json::from_value(input).map_err(|e| format!("Invalid grep input: {e}"))?;
 
     let mut args: Vec<String> = vec!["--no-heading".to_string(), "--color=never".to_string()];
 
-    let output_mode = input
-        .get("output_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("files_with_matches");
-
+    let output_mode = input.output_mode.unwrap_or_default();
     match output_mode {
-        "files_with_matches" => args.push("--files-with-matches".to_string()),
-        "count" => args.push("--count".to_string()),
-        "content" => {}
-        other => return Err(format!("Unknown output_mode: {other}")),
+        GrepOutputMode::FilesWithMatches => args.push("--files-with-matches".to_string()),
+        GrepOutputMode::Count => args.push("--count".to_string()),
+        GrepOutputMode::Content => {}
     }
 
-    if input.get("-i").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if input.case_insensitive {
         args.push("--ignore-case".to_string());
     }
 
-    if output_mode == "content" {
-        let show_line_numbers = input.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
-        if show_line_numbers {
+    if matches!(output_mode, GrepOutputMode::Content) {
+        // `-n` defaults to true when content is being printed.
+        if input.line_numbers.unwrap_or(true) {
             args.push("--line-number".to_string());
         }
     }
 
-    if let Some(n) = input.get("-A").and_then(|v| v.as_u64()) {
+    if let Some(n) = input.after_context {
         args.push(format!("--after-context={n}"));
     }
-    if let Some(n) = input.get("-B").and_then(|v| v.as_u64()) {
+    if let Some(n) = input.before_context {
         args.push(format!("--before-context={n}"));
     }
-    if let Some(n) = input.get("-C").and_then(|v| v.as_u64()) {
+    if let Some(n) = input.context {
         args.push(format!("--context={n}"));
     }
 
-    if input
-        .get("multiline")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if input.multiline {
         args.push("--multiline".to_string());
         args.push("--multiline-dotall".to_string());
     }
 
-    if let Some(ty) = input.get("type").and_then(|v| v.as_str()) {
+    if let Some(ty) = &input.type_ {
         args.push(format!("--type={ty}"));
     }
 
-    if let Some(glob) = input.get("glob").and_then(|v| v.as_str()) {
+    if let Some(glob) = &input.glob {
         args.push(format!("--glob={glob}"));
     }
 
     args.push("--".to_string());
-    args.push(pattern.to_string());
+    args.push(input.pattern);
 
-    let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    args.push(search_path.to_string());
+    let search_path = input.path.unwrap_or_else(|| ".".to_string());
+    args.push(search_path);
 
     let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
@@ -536,7 +495,7 @@ async fn execute_grep(
         Some(0) | Some(1) => {
             let mut result = stdout.into_owned();
 
-            if let Some(limit) = input.get("head_limit").and_then(|v| v.as_u64()) {
+            if let Some(limit) = input.head_limit {
                 let limit = limit as usize;
                 let lines: Vec<&str> = result.lines().take(limit).collect();
                 result = lines.join("\n");
@@ -548,16 +507,11 @@ async fn execute_grep(
     }
 }
 
-async fn execute_glob(
-    session: &SharedSession,
-    input: &serde_json::Value,
-) -> Result<String, String> {
-    let pattern = input
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'pattern' field")?;
+async fn execute_glob(session: &SharedSession, input: serde_json::Value) -> Result<String, String> {
+    let input: GlobInput =
+        serde_json::from_value(input).map_err(|e| format!("Invalid glob input: {e}"))?;
 
-    let search_path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let search_path = input.path.unwrap_or_else(|| ".".to_string());
 
     let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
@@ -566,8 +520,8 @@ async fn execute_glob(
             .args([
                 "--files",
                 "--color=never",
-                &format!("--glob={pattern}"),
-                search_path,
+                &format!("--glob={pattern}", pattern = input.pattern),
+                &search_path,
             ])
             .current_dir(&scope)
             .output(),
@@ -1261,14 +1215,16 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "line one\nline two\nline three"
         });
-        let result = editor_create(&test_session(), &create_input).await;
+        let result = execute_text_editor(&test_session(), create_input).await;
         assert!(result.is_ok(), "create failed: {:?}", result);
 
         let view_input = serde_json::json!({
             "command": "view",
             "path": file.to_str().unwrap()
         });
-        let result = editor_view(&test_session(), &view_input).await.unwrap();
+        let result = execute_text_editor(&test_session(), view_input)
+            .await
+            .unwrap();
         assert!(result.contains("1: line one"));
         assert!(result.contains("2: line two"));
         assert!(result.contains("3: line three"));
@@ -1288,14 +1244,18 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "a\nb\nc\nd\ne"
         });
-        editor_create(&test_session(), &create_input).await.unwrap();
+        execute_text_editor(&test_session(), create_input)
+            .await
+            .unwrap();
 
         let view_input = serde_json::json!({
             "command": "view",
             "path": file.to_str().unwrap(),
             "view_range": [2, 4]
         });
-        let result = editor_view(&test_session(), &view_input).await.unwrap();
+        let result = execute_text_editor(&test_session(), view_input)
+            .await
+            .unwrap();
         assert!(result.contains("2: b"));
         assert!(result.contains("3: c"));
         assert!(result.contains("4: d"));
@@ -1318,7 +1278,9 @@ mod tests {
             "command": "view",
             "path": dir.to_str().unwrap()
         });
-        let result = editor_view(&test_session(), &view_input).await.unwrap();
+        let result = execute_text_editor(&test_session(), view_input)
+            .await
+            .unwrap();
         assert!(result.contains("file_a.txt"));
         assert!(result.contains("file_b.txt"));
 
@@ -1337,7 +1299,9 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "hello world\ngoodbye world"
         });
-        editor_create(&test_session(), &create_input).await.unwrap();
+        execute_text_editor(&test_session(), create_input)
+            .await
+            .unwrap();
 
         let replace_input = serde_json::json!({
             "command": "str_replace",
@@ -1345,7 +1309,7 @@ mod tests {
             "old_str": "hello world",
             "new_str": "hello rust"
         });
-        let result = editor_str_replace(&test_session(), &replace_input).await;
+        let result = execute_text_editor(&test_session(), replace_input).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Successfully replaced"));
 
@@ -1368,7 +1332,9 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "hello world"
         });
-        editor_create(&test_session(), &create_input).await.unwrap();
+        execute_text_editor(&test_session(), create_input)
+            .await
+            .unwrap();
 
         let replace_input = serde_json::json!({
             "command": "str_replace",
@@ -1376,7 +1342,7 @@ mod tests {
             "old_str": "nonexistent",
             "new_str": "replacement"
         });
-        let result = editor_str_replace(&test_session(), &replace_input).await;
+        let result = execute_text_editor(&test_session(), replace_input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No match found"));
 
@@ -1395,7 +1361,9 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "foo bar foo"
         });
-        editor_create(&test_session(), &create_input).await.unwrap();
+        execute_text_editor(&test_session(), create_input)
+            .await
+            .unwrap();
 
         let replace_input = serde_json::json!({
             "command": "str_replace",
@@ -1403,7 +1371,7 @@ mod tests {
             "old_str": "foo",
             "new_str": "baz"
         });
-        let result = editor_str_replace(&test_session(), &replace_input).await;
+        let result = execute_text_editor(&test_session(), replace_input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("2 matches"));
 
@@ -1422,7 +1390,9 @@ mod tests {
             "path": file.to_str().unwrap(),
             "file_text": "line one\nline two\n"
         });
-        editor_create(&test_session(), &create_input).await.unwrap();
+        execute_text_editor(&test_session(), create_input)
+            .await
+            .unwrap();
 
         let insert_input = serde_json::json!({
             "command": "insert",
@@ -1430,7 +1400,7 @@ mod tests {
             "insert_line": 0,
             "new_str": "header line"
         });
-        let result = editor_insert(&test_session(), &insert_input).await;
+        let result = execute_text_editor(&test_session(), insert_input).await;
         assert!(result.is_ok(), "insert failed: {:?}", result);
 
         let content = tokio::fs::read_to_string(&file).await.unwrap();
@@ -1442,48 +1412,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn editor_insert_accepts_legacy_insert_text_alias() {
+        init_test_workspace();
+        let dir = std::env::temp_dir().join("sandbox-test-insert-alias");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let file = dir.join("alias.txt");
+
+        let create_input = serde_json::json!({
+            "command": "create",
+            "path": file.to_str().unwrap(),
+            "file_text": "line one\n"
+        });
+        execute_text_editor(&test_session(), create_input)
+            .await
+            .unwrap();
+
+        // Older callers send `insert_text` instead of `new_str`. The
+        // typed shape accepts both via #[serde(alias)].
+        let insert_input = serde_json::json!({
+            "command": "insert",
+            "path": file.to_str().unwrap(),
+            "insert_line": 1,
+            "insert_text": "added"
+        });
+        let result = execute_text_editor(&test_session(), insert_input).await;
+        assert!(result.is_ok(), "alias insert failed: {:?}", result);
+    }
+
+    #[tokio::test]
     async fn editor_view_nonexistent_file_returns_error() {
         init_test_workspace();
         let input = serde_json::json!({
             "command": "view",
             "path": "/nonexistent/path/file.txt"
         });
-        let result = editor_view(&test_session(), &input).await;
+        let result = execute_text_editor(&test_session(), input).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn text_editor_dispatch_routes_commands() {
+    async fn text_editor_rejects_unknown_command() {
         init_test_workspace();
-        let dir = std::env::temp_dir().join("sandbox-test-dispatch");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        let file = dir.join("dispatch.txt");
+        let input = serde_json::json!({"command": "delete"});
+        let err = execute_text_editor(&test_session(), input)
+            .await
+            .expect_err("unknown command should fail at parse");
+        assert!(err.contains("Invalid text-editor input"), "got: {err}");
+    }
 
-        // Test create via dispatch
-        let input = serde_json::json!({
-            "command": "create",
-            "path": file.to_str().unwrap(),
-            "file_text": "dispatch test"
-        });
-        let result = execute_text_editor(&test_session(), &input).await;
-        assert!(result.is_ok());
-
-        // Test view via dispatch
+    #[tokio::test]
+    async fn text_editor_rejects_unknown_field() {
+        init_test_workspace();
         let input = serde_json::json!({
             "command": "view",
-            "path": file.to_str().unwrap()
+            "path": "/tmp/x",
+            "viewRange": [1, 5]  // camelCase typo for view_range
         });
-        let result = execute_text_editor(&test_session(), &input).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().contains("dispatch test"));
-
-        // Test unknown command
-        let input = serde_json::json!({"command": "delete"});
-        let result = execute_text_editor(&test_session(), &input).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let err = execute_text_editor(&test_session(), input)
+            .await
+            .expect_err("unknown field should fail at parse");
+        assert!(err.contains("Invalid text-editor input"), "got: {err}");
     }
 
     // ── extract_repo_name ──────────────────────────────────────────
@@ -1958,7 +1946,7 @@ mod tests {
             "path": dir.to_str().unwrap(),
             "output_mode": "content"
         });
-        let result = execute_grep(&test_session(), &input).await;
+        let result = execute_grep(&test_session(), input).await;
         assert!(result.is_ok(), "grep failed: {:?}", result);
         let output = result.unwrap();
         assert!(output.contains("hello world"));
@@ -1986,7 +1974,7 @@ mod tests {
             "path": dir.to_str().unwrap(),
             "output_mode": "files_with_matches"
         });
-        let result = execute_grep(&test_session(), &input).await.unwrap();
+        let result = execute_grep(&test_session(), input).await.unwrap();
         assert!(result.contains("a.txt"));
         assert!(!result.contains("b.txt"));
 
@@ -2010,7 +1998,7 @@ mod tests {
             "pattern": "zzz_nonexistent",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_grep(&test_session(), &input).await;
+        let result = execute_grep(&test_session(), input).await;
         assert!(result.is_ok());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -2035,7 +2023,7 @@ mod tests {
             "output_mode": "content",
             "head_limit": 3
         });
-        let result = execute_grep(&test_session(), &input).await.unwrap();
+        let result = execute_grep(&test_session(), input).await.unwrap();
         assert_eq!(result.lines().count(), 3);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -2044,7 +2032,7 @@ mod tests {
     #[tokio::test]
     async fn grep_missing_pattern_returns_error() {
         let input = serde_json::json!({});
-        let result = execute_grep(&test_session(), &input).await;
+        let result = execute_grep(&test_session(), input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("pattern"));
     }
@@ -2069,7 +2057,7 @@ mod tests {
             "pattern": "*.rs",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_glob(&test_session(), &input).await;
+        let result = execute_glob(&test_session(), input).await;
         assert!(result.is_ok(), "glob failed: {:?}", result);
         let output = result.unwrap();
         assert!(output.contains("foo.rs"));
@@ -2095,7 +2083,7 @@ mod tests {
             "pattern": "*.xyz",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_glob(&test_session(), &input).await;
+        let result = execute_glob(&test_session(), input).await;
         assert!(result.is_ok());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -2104,7 +2092,7 @@ mod tests {
     #[tokio::test]
     async fn glob_missing_pattern_returns_error() {
         let input = serde_json::json!({});
-        let result = execute_glob(&test_session(), &input).await;
+        let result = execute_glob(&test_session(), input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("pattern"));
     }

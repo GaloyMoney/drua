@@ -3,13 +3,16 @@
 //! HTTP wrapper over a single sandbox's `/initialize` and `/execute`.
 
 pub mod admin_client;
-pub mod bash_protocol;
 pub mod error;
 pub mod instance_client;
+pub mod tool_protocol;
 mod types;
 
 pub use admin_client::AdminClient;
-pub use bash_protocol::{BashCommandInput, BashCommandOutput, BashInputError};
 pub use error::{AdminError, InstanceError};
 pub use instance_client::InstanceClient;
+pub use tool_protocol::{
+    BashCommandInput, BashCommandOutput, BashInputError, DeleteInput, GlobInput, GrepInput,
+    GrepOutputMode, MoveInput, TextEditorInput,
+};
 pub use types::{Sandbox, SandboxMode, SandboxSpecs};

@@ -15,8 +15,7 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
-use sandbox::instance_client::ExecuteRequest;
-use serde::Deserialize;
+use sandbox::MoveInput;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -27,12 +26,6 @@ use crate::space_fs::SpaceFs;
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
 use super::{parse_params, schema_for, OutputSchema, TextOutput};
-
-#[derive(Deserialize, schemars::JsonSchema)]
-struct MoveParams {
-    from: String,
-    to: String,
-}
 
 pub struct MoveFile {
     sandboxes: Arc<Sandboxes>,
@@ -48,7 +41,7 @@ impl MoveFile {
     }
 }
 
-static MOVE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<MoveParams>);
+static MOVE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<MoveInput>);
 static MOVE_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
 
 fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
@@ -89,15 +82,15 @@ impl TopLevelTool for MoveFile {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let params: MoveParams = parse_params(arguments)?;
+        let input: MoveInput = parse_params(arguments)?;
         Audit::record_action("move");
 
         let space_result = self
             .space_fs
-            .move_file(subject, &params.from, &params.to)
+            .move_file(subject, &input.from, &input.to)
             .await?;
         if space_result.is_some() {
-            let text = format!("Moved {} -> {}", params.from, params.to);
+            let text = format!("Moved {} -> {}", input.from, input.to);
             let out = TextOutput {
                 output: text.clone(),
             };
@@ -112,15 +105,7 @@ impl TopLevelTool for MoveFile {
             .instance_client_for(subject, sandbox_id)
             .await?;
 
-        let req = ExecuteRequest {
-            tool: "Move".to_string(),
-            input: serde_json::json!({
-                "from": params.from,
-                "to": params.to,
-            }),
-        };
-
-        match client.execute(&req).await {
+        match client.execute_move(&input).await {
             Ok(resp) => {
                 let out = TextOutput {
                     output: resp.output.clone(),

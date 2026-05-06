@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::bash_protocol::{BashCommandInput, BashCommandOutput};
 use crate::error::InstanceError;
+use crate::tool_protocol::{
+    BashCommandInput, BashCommandOutput, DeleteInput, GlobInput, GrepInput, MoveInput,
+    TextEditorInput,
+};
 use crate::types::{Sandbox, SandboxMode};
 
 #[derive(Clone)]
@@ -109,20 +112,15 @@ impl InstanceClient {
         Ok(resp)
     }
 
-    /// Typed wrapper over `/execute` for the `bash` tool. Same wire as
-    /// [`Self::execute`] with `tool = "bash"`; the typed surface lets
-    /// callers construct/parse the bash IO by name instead of hand-
-    /// rolling `serde_json::Value` objects. Skips the intermediate
-    /// `serde_json::Value` allocation that `execute()` would force.
-    #[instrument(name = "sandbox.instance.execute_bash", skip_all)]
-    pub async fn execute_bash(
+    /// Typed POST to `/execute`. Skips the intermediate
+    /// `serde_json::Value` that the loose-typed [`Self::execute`]
+    /// path would force.
+    async fn execute_typed<T: Serialize>(
         &self,
-        input: &BashCommandInput,
-    ) -> Result<BashCommandOutput, InstanceError> {
-        let req = ExecuteRequestRef {
-            tool: "bash",
-            input,
-        };
+        tool: &str,
+        input: &T,
+    ) -> Result<ExecuteResponse, InstanceError> {
+        let req = ExecuteRequestRef { tool, input };
         let resp = self
             .http
             .post(format!("{}/execute", self.base_url))
@@ -133,10 +131,57 @@ impl InstanceClient {
             .error_for_status()?
             .json::<ExecuteResponse>()
             .await?;
+        Ok(resp)
+    }
+
+    /// Typed wrapper over `/execute` for the `bash` tool.
+    #[instrument(name = "sandbox.instance.execute_bash", skip_all)]
+    pub async fn execute_bash(
+        &self,
+        input: &BashCommandInput,
+    ) -> Result<BashCommandOutput, InstanceError> {
+        let resp = self.execute_typed("bash", input).await?;
         Ok(BashCommandOutput {
             output: resp.output,
             is_error: resp.is_error,
         })
+    }
+
+    /// Typed wrapper over `/execute` for the `Glob` tool.
+    #[instrument(name = "sandbox.instance.execute_glob", skip_all)]
+    pub async fn execute_glob(&self, input: &GlobInput) -> Result<ExecuteResponse, InstanceError> {
+        self.execute_typed("Glob", input).await
+    }
+
+    /// Typed wrapper over `/execute` for the `Grep` tool.
+    #[instrument(name = "sandbox.instance.execute_grep", skip_all)]
+    pub async fn execute_grep(&self, input: &GrepInput) -> Result<ExecuteResponse, InstanceError> {
+        self.execute_typed("Grep", input).await
+    }
+
+    /// Typed wrapper over `/execute` for the `Move` tool.
+    #[instrument(name = "sandbox.instance.execute_move", skip_all)]
+    pub async fn execute_move(&self, input: &MoveInput) -> Result<ExecuteResponse, InstanceError> {
+        self.execute_typed("Move", input).await
+    }
+
+    /// Typed wrapper over `/execute` for the `Delete` tool.
+    #[instrument(name = "sandbox.instance.execute_delete", skip_all)]
+    pub async fn execute_delete(
+        &self,
+        input: &DeleteInput,
+    ) -> Result<ExecuteResponse, InstanceError> {
+        self.execute_typed("Delete", input).await
+    }
+
+    /// Typed wrapper over `/execute` for the `str_replace_based_edit_tool`.
+    #[instrument(name = "sandbox.instance.execute_text_editor", skip_all)]
+    pub async fn execute_text_editor(
+        &self,
+        input: &TextEditorInput,
+    ) -> Result<ExecuteResponse, InstanceError> {
+        self.execute_typed("str_replace_based_edit_tool", input)
+            .await
     }
 }
 
