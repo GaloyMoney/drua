@@ -42,6 +42,10 @@ agents:
       # Optional: chain: { primary: { name: ... }, fallbacks: [ ... ] }
       compaction:
         prune_after_seconds: 600
+    workflow_step_agent:
+      # Optional: chain: { primary: { name: ... }, fallbacks: [ ... ] }
+      compaction:
+        prune_after_seconds: 600
 library:
   repo_url: "https://github.com/galoymoney/drua-test-library"
   skill_sync_interval_secs: 5
