@@ -130,10 +130,35 @@ pub(crate) struct OpenAiUsage {
     pub completion_tokens: u32,
     #[serde(default)]
     pub prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
+    /// OpenRouter populates this with USD credits charged. Direct OpenAI
+    /// never sets it; presence is the OpenRouter signal.
+    #[serde(default)]
+    pub cost: Option<f64>,
+    #[serde(default)]
+    pub cost_details: Option<OpenAiCostDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OpenAiPromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: u32,
+    /// OpenRouter populates this for upstream models with explicit cache-write
+    /// pricing (Anthropic family). OpenAI direct never sets it.
+    #[serde(default)]
+    pub cache_write_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpenAiCompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpenAiCostDetails {
+    /// Actual upstream provider cost; OpenRouter BYOK only.
+    #[serde(default)]
+    pub upstream_inference_cost: Option<f64>,
 }

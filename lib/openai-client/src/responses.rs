@@ -499,7 +499,11 @@ struct ToolCallState {
 struct PendingUsage {
     input_tokens: u32,
     output_tokens: u32,
-    cached_input_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    reasoning_output_tokens: u32,
+    cost_usd: Option<f64>,
+    upstream_inference_cost_usd: Option<f64>,
 }
 
 impl ResponsesDeltaSynthesizer {
@@ -536,14 +540,30 @@ impl ResponsesDeltaSynthesizer {
             ResponsesResponseEvent::ResponseCompleted { response }
             | ResponsesResponseEvent::ResponseDone { response }
             | ResponsesResponseEvent::ResponseIncomplete { response } => {
-                self.pending_usage = response.usage.as_ref().map(|usage| PendingUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cached_input_tokens: usage
+                self.pending_usage = response.usage.as_ref().map(|usage| {
+                    let (cache_read, cache_write) = usage
                         .input_tokens_details
                         .as_ref()
-                        .map(|details| details.cached_tokens)
-                        .unwrap_or(0),
+                        .map(|d| (d.cached_tokens, d.cache_write_tokens))
+                        .unwrap_or((0, 0));
+                    let reasoning = usage
+                        .output_tokens_details
+                        .as_ref()
+                        .map(|d| d.reasoning_tokens)
+                        .unwrap_or(0);
+                    let upstream = usage
+                        .cost_details
+                        .as_ref()
+                        .and_then(|d| d.upstream_inference_cost);
+                    PendingUsage {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_read_input_tokens: cache_read,
+                        cache_creation_input_tokens: cache_write,
+                        reasoning_output_tokens: reasoning,
+                        cost_usd: usage.cost,
+                        upstream_inference_cost_usd: upstream,
+                    }
                 });
                 self.pending_incomplete_reason = response.incomplete_reason();
                 Ok(Vec::new())
@@ -723,7 +743,11 @@ impl ResponsesDeltaSynthesizer {
         let Some(PendingUsage {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            reasoning_output_tokens,
+            cost_usd,
+            upstream_inference_cost_usd,
         }) = self.pending_usage
         else {
             return Err("OpenAI Responses stream ended without terminal response".to_string());
@@ -734,8 +758,11 @@ impl ResponsesDeltaSynthesizer {
             StreamDelta::Usage {
                 input_tokens,
                 output_tokens,
-                cache_read_input_tokens: cached_input_tokens,
-                cache_creation_input_tokens: 0,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                reasoning_output_tokens,
+                cost_usd,
+                upstream_inference_cost_usd,
             },
             StreamDelta::Done {
                 stop_reason: Some(self.stop_reason()),
@@ -889,12 +916,32 @@ struct ResponsesUsage {
     input_tokens_details: Option<ResponsesInputTokensDetails>,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    output_tokens_details: Option<ResponsesOutputTokensDetails>,
+    #[serde(default)]
+    cost: Option<f64>,
+    #[serde(default)]
+    cost_details: Option<ResponsesCostDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ResponsesInputTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
+    #[serde(default)]
+    cache_write_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesOutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesCostDetails {
+    #[serde(default)]
+    upstream_inference_cost: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1090,6 +1137,7 @@ mod tests {
                 output_tokens: 1,
                 cache_read_input_tokens: 1,
                 cache_creation_input_tokens: 0,
+                ..
             }
         )));
         assert!(terminal.iter().any(|delta| matches!(

@@ -198,6 +198,10 @@ impl OpenAiClient {
             usage.input_tokens = tracing::field::Empty,
             usage.output_tokens = tracing::field::Empty,
             usage.cache_read_input_tokens = tracing::field::Empty,
+            usage.cache_creation_input_tokens = tracing::field::Empty,
+            usage.reasoning_output_tokens = tracing::field::Empty,
+            usage.cost_usd = tracing::field::Empty,
+            usage.upstream_inference_cost_usd = tracing::field::Empty,
             stream.delta_count = tracing::field::Empty,
         );
 
@@ -231,7 +235,7 @@ async fn drive_stream_with_retry(
     let mut current_resp = initial_resp;
     let mut empty_retries: u32 = 0;
     let mut delta_count: u64 = 0;
-    let mut usage_seen: Option<(u32, u32, u32)> = None;
+    let mut usage_seen: Option<UsageSnapshot> = None;
 
     loop {
         let byte_stream = current_resp.bytes_stream();
@@ -248,11 +252,21 @@ async fn drive_stream_with_retry(
                             input_tokens,
                             output_tokens,
                             cache_read_input_tokens,
-                            ..
+                            cache_creation_input_tokens,
+                            reasoning_output_tokens,
+                            cost_usd,
+                            upstream_inference_cost_usd,
                         } = &delta
                         {
-                            usage_seen =
-                                Some((*input_tokens, *output_tokens, *cache_read_input_tokens));
+                            usage_seen = Some(UsageSnapshot {
+                                input_tokens: *input_tokens,
+                                output_tokens: *output_tokens,
+                                cache_read_input_tokens: *cache_read_input_tokens,
+                                cache_creation_input_tokens: *cache_creation_input_tokens,
+                                reasoning_output_tokens: *reasoning_output_tokens,
+                                cost_usd: *cost_usd,
+                                upstream_inference_cost_usd: *upstream_inference_cost_usd,
+                            });
                         }
                         tx.try_send(Ok(delta))
                             .map_err(|e| SseError::Processing(e.to_string()))?;
@@ -305,11 +319,33 @@ async fn drive_stream_with_retry(
 
     span.record("empty_completion_retries", empty_retries);
     span.record("stream.delta_count", delta_count);
-    if let Some((input, output, cache_read)) = usage_seen {
-        span.record("usage.input_tokens", input);
-        span.record("usage.output_tokens", output);
-        span.record("usage.cache_read_input_tokens", cache_read);
+    if let Some(u) = usage_seen {
+        span.record("usage.input_tokens", u.input_tokens);
+        span.record("usage.output_tokens", u.output_tokens);
+        span.record("usage.cache_read_input_tokens", u.cache_read_input_tokens);
+        span.record(
+            "usage.cache_creation_input_tokens",
+            u.cache_creation_input_tokens,
+        );
+        span.record("usage.reasoning_output_tokens", u.reasoning_output_tokens);
+        if let Some(c) = u.cost_usd {
+            span.record("usage.cost_usd", c);
+        }
+        if let Some(c) = u.upstream_inference_cost_usd {
+            span.record("usage.upstream_inference_cost_usd", c);
+        }
     }
+}
+
+#[derive(Copy, Clone)]
+struct UsageSnapshot {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    reasoning_output_tokens: u32,
+    cost_usd: Option<f64>,
+    upstream_inference_cost_usd: Option<f64>,
 }
 
 /// Best-effort scrape of `error.metadata.retry_after_seconds` from an

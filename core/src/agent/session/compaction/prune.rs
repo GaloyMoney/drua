@@ -342,6 +342,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 0,
+                reasoning: 0,
             },
             cost: Cost::default(),
         }
