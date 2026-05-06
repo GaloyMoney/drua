@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent::session::message::{ToolDefinition, ToolKind};
 use crate::agent::{Agent, Agents};
 use crate::primitives::{
     AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
@@ -14,6 +15,25 @@ use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{WorkflowRunRepo, WorkflowRunState};
+
+/// The synthesised tool's name. Workflow agents see exactly this name
+/// in their `tool_defs`; the agent loop matches by name to intercept
+/// the call and persist its args as the step's structured output.
+const SUBMIT_OUTPUT_TOOL_NAME: &str = "submit_output";
+
+const SUBMIT_OUTPUT_TOOL_DESCRIPTION: &str =
+    "Call this exactly once to record this step's structured result and finish the step. \
+     The arguments must match the declared output schema.";
+
+fn build_submit_output_tool(output_schema: serde_json::Value) -> ToolDefinition {
+    ToolDefinition {
+        name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
+        description: Some(SUBMIT_OUTPUT_TOOL_DESCRIPTION.to_string()),
+        input_schema: output_schema,
+        strict: true,
+        kind: ToolKind::SubmitOutput,
+    }
+}
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
@@ -483,6 +503,8 @@ impl Executor {
                         None => Vec::new(),
                     };
                     let chain_override = definition.resolve_step_chain(step);
+                    let extra_tool_defs =
+                        vec![build_submit_output_tool(step.effective_output_schema())];
                     let agent = self
                         .agents
                         .create_for_workflow_run_in_op(
@@ -493,6 +515,7 @@ impl Executor {
                             &agent_name,
                             attach_sandbox,
                             chain_override,
+                            extra_tool_defs,
                         )
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?;
@@ -523,7 +546,7 @@ impl Executor {
                 }
 
                 let result = self
-                    .stream_agent_response(&agent, prompt, name, *timeout_seconds)
+                    .run_agent_until_submit_output(&agent, prompt, name, *timeout_seconds)
                     .await;
 
                 // Detach the sandbox unconditionally so the next step can
@@ -533,18 +556,67 @@ impl Executor {
                     self.detach_step_sandbox(sandbox_id, agent.id).await;
                 }
 
-                result.map(serde_json::Value::String)
+                result
             }
         }
     }
 
-    async fn stream_agent_response(
+    /// First the regular send/resume loop; if the agent finished without
+    /// calling `submit_output`, retry once with `tool_choice` forced to
+    /// the synthetic tool. After a second miss the step fails.
+    async fn run_agent_until_submit_output(
         &self,
         agent: &Agent,
         prompt: String,
         step_name: &str,
         timeout_seconds: Option<u64>,
-    ) -> Result<String, WorkflowError> {
+    ) -> Result<serde_json::Value, WorkflowError> {
+        if let Some(value) = self
+            .stream_agent_response(agent, Some(prompt), None, step_name, timeout_seconds)
+            .await?
+        {
+            return Ok(value);
+        }
+
+        // Forced retry: the agent ended its turn without calling
+        // `submit_output`. Nudge it with a fresh user message and
+        // `tool_choice: Tool { submit_output }` so the next assistant
+        // turn is constrained to the synthetic tool.
+        let nudge = "Investigation complete — call `submit_output` now to record the structured \
+             result for this step.";
+        if let Some(value) = self
+            .stream_agent_response(
+                agent,
+                Some(nudge.to_string()),
+                Some(llm::prompt::ToolChoice::Tool {
+                    name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
+                }),
+                step_name,
+                timeout_seconds,
+            )
+            .await?
+        {
+            return Ok(value);
+        }
+
+        Err(WorkflowError::StepFailed {
+            step: step_name.to_string(),
+            reason: "agent did not call submit_output after one forced retry".to_string(),
+        })
+    }
+
+    /// Runs one user→assistant exchange and returns the structured
+    /// output if the agent terminated by calling `submit_output`.
+    /// `None` means the turn closed cleanly (or via plain text) without
+    /// a `submit_output` call — the executor decides whether to retry.
+    async fn stream_agent_response(
+        &self,
+        agent: &Agent,
+        user_prompt: Option<String>,
+        tool_choice: Option<llm::prompt::ToolChoice>,
+        step_name: &str,
+        timeout_seconds: Option<u64>,
+    ) -> Result<Option<serde_json::Value>, WorkflowError> {
         let agent_subject = agent.auth_subject();
         // Resume an in-flight prompt if a prior attempt was killed between
         // `PromptSent` and `AssistantResponseReceived`. Otherwise emit the
@@ -559,11 +631,14 @@ impl Executor {
             .map_err(|e| WorkflowError::Agent(e.to_string()))?
         {
             Some(rx) => rx,
-            None => self
-                .agents
-                .send_message(agent_subject, agent.id, prompt)
-                .await
-                .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+            None => match user_prompt {
+                Some(prompt) => self
+                    .agents
+                    .send_message_with_choice(agent_subject, agent.id, prompt, tool_choice)
+                    .await
+                    .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+                None => return Ok(None),
+            },
         };
 
         // Idle timeout: resets on every streamed event so a busy agent
@@ -573,7 +648,7 @@ impl Executor {
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(300));
 
-        let mut output = String::new();
+        let mut submitted: Option<serde_json::Value> = None;
         loop {
             let event = match tokio::time::timeout(idle_timeout, rx.recv()).await {
                 Ok(Some(event)) => event,
@@ -586,8 +661,7 @@ impl Executor {
                 }
             };
             match event {
-                ChatOutputEvent::AssistantText { text } => output.push_str(&text),
-                ChatOutputEvent::AssistantTextDelta { text } => output.push_str(&text),
+                ChatOutputEvent::OutputSubmitted { value } => submitted = Some(value),
                 ChatOutputEvent::AssistantDone { .. } => break,
                 ChatOutputEvent::Error { message } => {
                     return Err(WorkflowError::StepFailed {
@@ -598,7 +672,7 @@ impl Executor {
                 _ => {}
             }
         }
-        Ok(output)
+        Ok(submitted)
     }
 
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {

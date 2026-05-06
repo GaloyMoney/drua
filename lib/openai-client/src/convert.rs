@@ -161,6 +161,7 @@ fn convert_tool(tool: &Tool) -> OpenAiTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             parameters: tool.input_schema.clone(),
+            strict: if tool.strict { Some(true) } else { None },
         },
     }
 }
@@ -363,6 +364,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
                 input_schema: serde_json::json!({"type": "object", "properties": {"location": {"type": "string"}}}),
+                strict: false,
             }],
             tool_choice: None,
             max_tokens: Some(1024),

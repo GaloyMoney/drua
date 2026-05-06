@@ -183,6 +183,11 @@ struct WorkflowStepParam {
     timeout_seconds: Option<u64>,
     #[serde(default)]
     model_chain: Option<llm::ModelChain>,
+    /// JSON Schema (root must be `type: object`) for the step's
+    /// structured output. Omit to fall back to the default `{success,
+    /// reason}` schema.
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
 }
 
 impl WorkflowStepParam {
@@ -194,6 +199,7 @@ impl WorkflowStepParam {
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
             model_chain: self.model_chain,
+            output_schema: self.output_schema,
         }
     }
 }
@@ -578,6 +584,7 @@ impl TopLevelTool for WorkflowTool {
                         sandbox_mode,
                         timeout_seconds,
                         model_chain: None,
+                        output_schema: None,
                     }]
                 };
 
@@ -1067,6 +1074,7 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                ..
             } => {
                 out.push_str(&format!(
                     "  - agent_step name={name} skill={skill} sandbox={sandbox:?} sandbox_mode={sandbox_mode:?} timeout_s={timeout_seconds:?} model_chain={}\n",

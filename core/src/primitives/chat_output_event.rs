@@ -54,4 +54,10 @@ pub enum ChatOutputEvent {
     Service {
         message: String,
     },
+    /// Workflow agent step submitted its structured output via the
+    /// synthesised `submit_output` tool. Workflow executor consumes
+    /// this to populate `StepResult.output`.
+    OutputSubmitted {
+        value: serde_json::Value,
+    },
 }

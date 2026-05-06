@@ -77,6 +77,12 @@ pub enum WorkflowStepDef {
         /// Highest-precedence chain override; beats workflow + defaults.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
+        /// JSON Schema (root must be `type: object` per MCP) describing
+        /// the structured payload the agent must submit via the
+        /// synthesised `submit_output` tool. `None` falls back to
+        /// [`default_output_schema`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_schema: Option<serde_json::Value>,
     },
 }
 
@@ -92,6 +98,43 @@ impl WorkflowStepDef {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
         }
     }
+
+    /// Returns the declared `output_schema` if any, else
+    /// [`default_output_schema`]. Every AgentStep produces a structured
+    /// output via the synthesised `submit_output` tool — there is no
+    /// schemaless free-text passthrough.
+    pub fn effective_output_schema(&self) -> serde_json::Value {
+        match self {
+            WorkflowStepDef::AgentStep {
+                output_schema: Some(s),
+                ..
+            } => s.clone(),
+            WorkflowStepDef::AgentStep {
+                output_schema: None,
+                ..
+            } => default_output_schema(),
+        }
+    }
+}
+
+/// Default `output_schema` injected when an `AgentStep` doesn't declare
+/// one. Forces every workflow agent to terminate with a `{success,
+/// reason}` payload so step results are always structured.
+pub fn default_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["success", "reason"],
+        "properties": {
+            "success": {
+                "type": "boolean",
+                "description": "Did the step achieve its goal?"
+            },
+            "reason": {
+                "type": "string",
+                "description": "One paragraph explaining the outcome (citing evidence on failure)."
+            }
+        }
+    })
 }
 
 /// Top-level sandbox declaration on a workflow.
@@ -134,6 +177,56 @@ impl WorkflowSandboxDecl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_output_schema_is_object_root() {
+        let schema = default_output_schema();
+        assert_eq!(
+            schema.get("type").and_then(|t| t.as_str()),
+            Some("object"),
+            "MCP requires `type: object` at the schema root (memo 019dfc8c)"
+        );
+        let required = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("default schema declares required");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"success"));
+        assert!(names.contains(&"reason"));
+    }
+
+    #[test]
+    fn effective_output_schema_uses_declared_when_present() {
+        let custom = serde_json::json!({
+            "type": "object",
+            "required": ["verdict"],
+            "properties": { "verdict": {"type": "string"} }
+        });
+        let step = WorkflowStepDef::AgentStep {
+            name: "judge".into(),
+            skill: "judge".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: Some(custom.clone()),
+        };
+        assert_eq!(step.effective_output_schema(), custom);
+    }
+
+    #[test]
+    fn effective_output_schema_falls_back_to_default() {
+        let step = WorkflowStepDef::AgentStep {
+            name: "noop".into(),
+            skill: "noop".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: None,
+        };
+        assert_eq!(step.effective_output_schema(), default_output_schema());
+    }
 
     #[test]
     fn parse_cron_schedule_accepts_six_fields() {

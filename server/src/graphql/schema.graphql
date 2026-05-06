@@ -154,11 +154,16 @@ enum ChatMessageRole {
 	USER
 }
 
-union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | AssistantTextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent
+union ChatStreamEvent = UserMessageEvent | AssistantTextEvent | ThinkingEvent | AssistantTextDeltaEvent | ThinkingDeltaEvent | ToolCallStartEvent | ToolCallInputDeltaEvent | ToolResultEvent | AssistantDoneEvent | ErrorEvent | ServiceEvent | OutputSubmittedEvent
 
 type ErrorEvent {
 	message: String!
 }
+
+"""
+A scalar that can represent any JSON value.
+"""
+scalar JSON
 
 """
 Workflow files are git-synced to the library repo but not exposed
@@ -302,6 +307,14 @@ type NoteDeletePayload {
 }
 
 scalar NoteId
+
+"""
+Workflow agent submitted its structured output via the synthesised
+`submit_output` tool. Carries the validated tool-call args.
+"""
+type OutputSubmittedEvent {
+	value: JSON!
+}
 
 """
 Information about pagination in a connection

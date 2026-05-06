@@ -95,13 +95,29 @@ Implement changes rather than only suggesting them. Use tools to \
 discover missing details instead of asking for clarification.
 </default_to_action>";
 
+const WORKFLOW_BEHAVIOR_ADDENDUM: &str = "
+<finish_with_submit_output>
+You are running as a workflow step. The runtime injects a \
+`submit_output` tool whose schema is the structured result this step \
+must produce. After you have done your investigation/work, call \
+`submit_output` exactly once with arguments matching that schema. \
+That call is your terminal turn — the step ends with the validated \
+arguments as its `StepResult.output`. Do NOT end the turn with a \
+plain text reply; the runtime will force the call on retry and fail \
+the step if you still don't make it.
+</finish_with_submit_output>";
+
 /// Returns four `SystemBlock`s (Base, Tools, Behavioral, Role) kept
 /// separate to allow cache-control breakpoints at the LLM layer.
+/// When `workflow_mode` is true the Behavioral block carries the
+/// `submit_output` addendum so the agent knows to terminate via that
+/// tool.
 pub fn system_blocks_for_role(
     role: AgentRole,
     toolsets: &Arc<ToolSets>,
     subject: &AuthSubject,
     project_name: &str,
+    workflow_mode: bool,
 ) -> Vec<SystemBlock> {
     let base_text = format!("{BASE_PROMPT_PREFIX} \"{project_name}\".");
     let tools_text = build_tools_section(role, toolsets, subject);
@@ -110,11 +126,17 @@ pub fn system_blocks_for_role(
         AgentRole::Agent => AGENT_ROLE,
     };
 
+    let behavioral_text = if workflow_mode {
+        format!("{BEHAVIORAL_GUIDELINES}\n{WORKFLOW_BEHAVIOR_ADDENDUM}")
+    } else {
+        BEHAVIORAL_GUIDELINES.to_string()
+    };
+
     vec![
         SystemBlock::Base { text: base_text },
         SystemBlock::Tools { text: tools_text },
         SystemBlock::Behavioral {
-            text: BEHAVIORAL_GUIDELINES.to_string(),
+            text: behavioral_text,
         },
         SystemBlock::Role {
             text: role_text.to_string(),
@@ -161,8 +183,13 @@ mod tests {
                 .unwrap(),
         );
         let subject = AuthSubject::Anonymous;
-        let blocks =
-            system_blocks_for_role(AgentRole::ProjectLead, &toolsets, &subject, "acme-corp");
+        let blocks = system_blocks_for_role(
+            AgentRole::ProjectLead,
+            &toolsets,
+            &subject,
+            "acme-corp",
+            false,
+        );
         assert_eq!(blocks.len(), 4);
         assert!(matches!(&blocks[0], SystemBlock::Base { .. }));
         assert!(blocks[0].text().contains("Galoy Agents platform"));
@@ -188,7 +215,8 @@ mod tests {
                 .unwrap(),
         );
         let subject = AuthSubject::Anonymous;
-        let blocks = system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project");
+        let blocks =
+            system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project", false);
         assert_eq!(blocks.len(), 4);
         assert!(matches!(&blocks[1], SystemBlock::Tools { .. }));
         assert!(blocks[1].text().contains("Sandbox tools"));
@@ -199,8 +227,28 @@ mod tests {
         assert!(blocks[2].text().contains("use_compose_for_efficiency"));
         assert!(blocks[2].text().contains("compose_types"));
         assert!(blocks[2].text().contains("describe_tool"));
+        assert!(!blocks[2].text().contains("submit_output"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("task agent"));
         assert!(blocks[3].text().contains("default_to_action"));
+    }
+
+    #[test]
+    fn workflow_mode_appends_submit_output_addendum() {
+        let toolsets = Arc::new(
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(ToolSets::init(Default::default()))
+                .unwrap(),
+        );
+        let subject = AuthSubject::Anonymous;
+        let blocks =
+            system_blocks_for_role(AgentRole::Agent, &toolsets, &subject, "test-project", true);
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
+        assert!(blocks[2].text().contains("submit_output"));
+        assert!(blocks[2].text().contains("finish_with_submit_output"));
+        // Original behavioural guidelines still present.
+        assert!(blocks[2].text().contains("investigate_before_answering"));
     }
 }

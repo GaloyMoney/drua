@@ -243,6 +243,7 @@ impl Agents {
                 None,
                 None,
                 None,
+                Vec::new(),
             )
             .await?;
         op.commit().await?;
@@ -278,6 +279,7 @@ impl Agents {
                 None,
                 None,
                 chain_override,
+                Vec::new(),
             )
             .await?;
         op.commit().await?;
@@ -286,6 +288,9 @@ impl Agents {
 
     /// Caller commits the op. Stamping `(workflow_id, workflow_run_id)`
     /// is what excludes the agent from [`Self::list_for_project`].
+    /// `extra_tool_defs` are appended to the standard top-level tools;
+    /// the workflow executor uses this to inject the synthesised
+    /// `submit_output` tool when a step declares an `output_schema`.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
@@ -297,6 +302,7 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
         chain_override: Option<llm::ModelChain>,
+        extra_tool_defs: Vec<session::message::ToolDefinition>,
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
         Audit::record_project_id(project_id);
@@ -316,6 +322,7 @@ impl Agents {
             Some(workflow_id),
             Some(workflow_run_id),
             chain_override,
+            extra_tool_defs,
         )
         .await
     }
@@ -363,12 +370,13 @@ impl Agents {
             None,
             None,
             None,
+            Vec::new(),
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
+    #[instrument(name = "domain.agent.create_in_op", skip(self, op, extra_tool_defs))]
     async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -381,6 +389,7 @@ impl Agents {
         workflow_id: Option<WorkflowDefinitionId>,
         workflow_run_id: Option<WorkflowRunId>,
         chain_override: Option<llm::ModelChain>,
+        extra_tool_defs: Vec<session::message::ToolDefinition>,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -428,16 +437,18 @@ impl Agents {
         let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
         let agent_subject = agent.auth_subject();
-        let tool_defs: Vec<session::message::ToolDefinition> = self
+        let mut tool_defs: Vec<session::message::ToolDefinition> = self
             .toolsets
             .top_level_tools(&agent_subject)
             .map(|t| session::message::ToolDefinition::from(llm::prompt::Tool::from(t.as_ref())))
             .collect();
+        tool_defs.extend(extra_tool_defs);
         let mut system_blocks = system_prompt::system_blocks_for_role(
             agent_role,
             &self.toolsets,
             &agent_subject,
             &agent.project_name,
+            workflow_id.is_some(),
         );
 
         // Apply attach to the entity first so the initial skills block reflects
@@ -1157,6 +1168,21 @@ impl Agents {
         id: AgentId,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
+        self.send_message_with_choice(subject, id, prompt, None)
+            .await
+    }
+
+    /// `tool_choice` is applied to the initial prompt only. The agent
+    /// loop's per-turn re-prompts inherit `Auto` from the session, so a
+    /// forced choice is a one-shot nudge rather than a sticky setting.
+    #[instrument(name = "domain.agent.send_message_with_choice", skip(self, prompt))]
+    pub async fn send_message_with_choice(
+        &self,
+        subject: AuthSubject,
+        id: AgentId,
+        prompt: String,
+        tool_choice: Option<llm::prompt::ToolChoice>,
+    ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
         // Agents may only message peers in their own project; anonymous rejected.
@@ -1195,6 +1221,7 @@ impl Agents {
             &self.toolsets,
             &agent_subject,
             &agent.project_name,
+            agent.workflow_id.is_some(),
         );
         proposed_system_blocks.extend(dynamic_blocks);
 
@@ -1251,6 +1278,9 @@ impl Agents {
             .await?;
         if let Some(c) = runtime_chain_override.clone() {
             prompt_state.chain = c;
+        }
+        if let Some(choice) = tool_choice {
+            prompt_state.tool_choice = Some(choice);
         }
 
         self.drive_session_loop(id, agent_subject, tx, prompt_state, runtime_chain_override)
@@ -1397,16 +1427,110 @@ impl Agents {
                 let mut next_prompt = match session_response {
                     session::AgentSessionResponse::Done => break,
                     session::AgentSessionResponse::ToolUseRequest(tool_uses) => {
-                        let tool_calls: Vec<llm::RequestToolUse> = tool_uses
-                            .into_iter()
-                            .map(|tu| llm::RequestToolUse {
-                                id: tu.id,
-                                name: tu.name,
-                                input: tu.input,
-                            })
-                            .collect();
-                        let results =
-                            fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx).await;
+                        let synthetic_tools: std::collections::HashMap<
+                            String,
+                            session::message::ToolDefinition,
+                        > = match sessions.current_tool_defs(id).await {
+                            Ok(defs) => defs
+                                .into_iter()
+                                .filter(|d| {
+                                    matches!(d.kind, session::message::ToolKind::SubmitOutput)
+                                })
+                                .map(|d| (d.name.clone(), d))
+                                .collect(),
+                            Err(e) => {
+                                emit_event(
+                                    &tx,
+                                    ChatOutputEvent::Error {
+                                        message: e.to_string(),
+                                    },
+                                );
+                                return;
+                            }
+                        };
+
+                        let mut external: Vec<llm::RequestToolUse> = Vec::new();
+                        let mut synthetic_results: Vec<llm::ToolUseResult> = Vec::new();
+                        let mut submit_succeeded = false;
+                        let mut already_submitted_in_turn = false;
+
+                        for tu in tool_uses {
+                            match synthetic_tools.get(&tu.name) {
+                                None => external.push(llm::RequestToolUse {
+                                    id: tu.id,
+                                    name: tu.name,
+                                    input: tu.input,
+                                }),
+                                Some(defn) => {
+                                    if already_submitted_in_turn {
+                                        synthetic_results.push(llm::ToolUseResult {
+                                            tool_use_id: tu.id,
+                                            content:
+                                                "submit_output already called in this turn; ignored"
+                                                    .to_string(),
+                                            is_error: true,
+                                        });
+                                        continue;
+                                    }
+                                    if let Err(msg) = validate_against_object_schema(
+                                        &defn.input_schema,
+                                        &tu.input,
+                                    ) {
+                                        synthetic_results.push(llm::ToolUseResult {
+                                            tool_use_id: tu.id,
+                                            content: format!(
+                                                "submit_output args failed schema validation: {msg}"
+                                            ),
+                                            is_error: true,
+                                        });
+                                        continue;
+                                    }
+                                    match sessions
+                                        .record_output_submitted(id, tu.input.clone())
+                                        .await
+                                    {
+                                        Ok(outcome) if outcome.did_execute() => {
+                                            submit_succeeded = true;
+                                            already_submitted_in_turn = true;
+                                            emit_event(
+                                                &tx,
+                                                ChatOutputEvent::OutputSubmitted {
+                                                    value: tu.input.clone(),
+                                                },
+                                            );
+                                            synthetic_results.push(llm::ToolUseResult {
+                                                tool_use_id: tu.id,
+                                                content: "output recorded".to_string(),
+                                                is_error: false,
+                                            });
+                                        }
+                                        Ok(_) => {
+                                            synthetic_results.push(llm::ToolUseResult {
+                                                tool_use_id: tu.id,
+                                                content: "submit_output already recorded for this session; ignored".to_string(),
+                                                is_error: true,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            emit_event(
+                                                &tx,
+                                                ChatOutputEvent::Error {
+                                                    message: e.to_string(),
+                                                },
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut results = if external.is_empty() {
+                            Vec::new()
+                        } else {
+                            fan_out_tool_calls(&toolsets, &agent_subject, external, &tx).await
+                        };
+                        results.extend(synthetic_results);
 
                         if let Err(e) = sessions.add_tool_results(id, results).await {
                             emit_event(
@@ -1416,6 +1540,13 @@ impl Agents {
                                 },
                             );
                             return;
+                        }
+
+                        if submit_succeeded {
+                            // Terminal turn: the executor now has the structured
+                            // output and the model needn't (and shouldn't) drive
+                            // another LLM call.
+                            break;
                         }
 
                         match sessions.next_prompt(id, session::TargetThread::Main).await {
@@ -1651,6 +1782,33 @@ fn forward_response(
     }
 }
 
+/// Defence-in-depth check for the synthesised `submit_output` tool.
+/// `strict: true` already enforces the schema provider-side; this is the
+/// runtime safety net for non-strict providers.
+///
+/// Only validates the shape that matters for MCP: the value is an
+/// object, and every key listed in `schema.required` is present. Type
+/// checks are intentionally minimal — the model still benefits from
+/// strict-mode validation upstream.
+fn validate_against_object_schema(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "expected JSON object".to_string())?;
+    let Some(required) = schema.get("required").and_then(|r| r.as_array()) else {
+        return Ok(());
+    };
+    for r in required {
+        let Some(key) = r.as_str() else { continue };
+        if !obj.contains_key(key) {
+            return Err(format!("missing required field `{key}`"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -1697,6 +1855,45 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CallToolResult::success(vec![Content::text("done")]))
         }
+    }
+
+    #[test]
+    fn validate_against_object_schema_accepts_object_with_required_fields() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "boolean" }
+            }
+        });
+        let value = serde_json::json!({ "a": "hi", "b": true });
+        validate_against_object_schema(&schema, &value).unwrap();
+    }
+
+    #[test]
+    fn validate_against_object_schema_rejects_non_object_value() {
+        let schema = serde_json::json!({ "type": "object" });
+        let err = validate_against_object_schema(&schema, &serde_json::json!("oops")).unwrap_err();
+        assert!(err.contains("expected JSON object"));
+    }
+
+    #[test]
+    fn validate_against_object_schema_reports_missing_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["a", "b"],
+        });
+        let err = validate_against_object_schema(&schema, &serde_json::json!({ "a": "only" }))
+            .unwrap_err();
+        assert!(err.contains("missing required field"));
+        assert!(err.contains('b'));
+    }
+
+    #[test]
+    fn validate_against_object_schema_skips_when_no_required_array() {
+        let schema = serde_json::json!({ "type": "object" });
+        validate_against_object_schema(&schema, &serde_json::json!({})).unwrap();
     }
 
     #[tokio::test]

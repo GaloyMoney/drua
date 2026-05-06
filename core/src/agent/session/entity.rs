@@ -95,6 +95,14 @@ pub enum AgentSessionEvent {
         stripped_user_messages: Vec<MessageBlockIndex>,
         estimated_tokens_saved: u64,
     },
+    /// Terminal event for a workflow agent step: the agent called the
+    /// synthesised `submit_output` tool and the runtime captured the
+    /// validated args. The session's `StepResult.output` projection
+    /// reads this event.
+    OutputSubmitted {
+        value: serde_json::Value,
+        submitted_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +386,45 @@ impl AgentSession {
             TargetThread::Id(thread_id)
         };
         self.build_prompt(target, prompt_definition).map(Some)
+    }
+
+    /// Latest tool-defs snapshot — replays `Initialized` and the most
+    /// recent `ToolDefsUpdated`. Used by the agent loop to identify
+    /// `SubmitOutput` synthetic tools before fan-out.
+    pub fn current_tool_defs(&self) -> Vec<ToolDefinition> {
+        let mut latest: Vec<ToolDefinition> = Vec::new();
+        for event in self.events.iter_all() {
+            match event {
+                AgentSessionEvent::Initialized { tool_defs, .. } => latest = tool_defs.clone(),
+                AgentSessionEvent::ToolDefsUpdated { tool_defs } => latest = tool_defs.clone(),
+                _ => {}
+            }
+        }
+        latest
+    }
+
+    /// Returns the structured output the agent submitted via the
+    /// synthesised `submit_output` tool, if any. Workflow steps with an
+    /// `output_schema` consume this; schemaless steps return `None`.
+    pub fn submitted_output(&self) -> Option<&serde_json::Value> {
+        self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::OutputSubmitted { value, .. } => Some(value),
+            _ => None,
+        })
+    }
+
+    /// First-call-wins: subsequent `submit_output` calls in the same
+    /// session are ignored. The agent loop is expected to relay an
+    /// `already submitted` tool_result to the model in those cases.
+    pub fn record_output_submitted(&mut self, value: serde_json::Value) -> Idempotent<()> {
+        if self.submitted_output().is_some() {
+            return Idempotent::AlreadyApplied;
+        }
+        self.events.push(AgentSessionEvent::OutputSubmitted {
+            value,
+            submitted_at: chrono::Utc::now(),
+        });
+        Idempotent::Executed(())
     }
 
     pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) -> Idempotent<()> {
@@ -806,6 +853,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::ToolResultsAdded { .. } => {}
                 AgentSessionEvent::ToolResultsMasked { .. } => {}
                 AgentSessionEvent::CompactionApplied { .. } => {}
+                AgentSessionEvent::OutputSubmitted { .. } => {}
             }
         }
 
@@ -1281,6 +1329,8 @@ mod tests {
             name: "get_weather".into(),
             description: Some("Get weather".into()),
             input_schema: serde_json::json!({"type": "object"}),
+            strict: false,
+            kind: ToolKind::External,
         }]);
 
         session
@@ -1359,6 +1409,8 @@ mod tests {
                 name: "get_weather".into(),
                 description: Some("Get weather".into()),
                 input_schema: serde_json::json!({"type": "object"}),
+                strict: false,
+                kind: ToolKind::External,
             }])
             .build()
             .expect("NewAgentSession build");

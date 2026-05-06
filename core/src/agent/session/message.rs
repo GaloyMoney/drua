@@ -104,6 +104,31 @@ pub struct ToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    /// Default-omitted; stale events hydrate as non-strict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
+    /// Default-omitted (`External`); stale events hydrate as
+    /// `External` so MCP-routed tools keep working.
+    #[serde(default, skip_serializing_if = "ToolKind::is_default")]
+    pub kind: ToolKind,
+}
+
+/// Discriminator on `ToolDefinition`. `External` calls are routed to
+/// MCP toolsets; `SubmitOutput` calls are intercepted by the agent
+/// loop, validated against the tool's `input_schema`, and persisted as
+/// the session's terminal `OutputSubmitted` event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    #[default]
+    External,
+    SubmitOutput,
+}
+
+impl ToolKind {
+    fn is_default(&self) -> bool {
+        matches!(self, ToolKind::External)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +241,7 @@ impl From<ToolDefinition> for llm::prompt::Tool {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema,
+            strict: t.strict,
         }
     }
 }
@@ -324,6 +350,8 @@ impl From<llm::prompt::Tool> for ToolDefinition {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema,
+            strict: t.strict,
+            kind: ToolKind::External,
         }
     }
 }
@@ -382,5 +410,65 @@ pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> S
         SandboxOperation::Detach => {
             format!("<sandbox>\nDetached sandbox \"{sandbox_name}\".\n</sandbox>")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_definition_default_kind_is_external() {
+        let json = serde_json::json!({
+            "name": "my_tool",
+            "input_schema": {"type": "object"}
+        });
+        let def: ToolDefinition = serde_json::from_value(json).unwrap();
+        assert!(matches!(def.kind, ToolKind::External));
+        assert!(!def.strict);
+    }
+
+    #[test]
+    fn tool_definition_external_kind_omitted_on_serialize() {
+        let def = ToolDefinition {
+            name: "foo".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: false,
+            kind: ToolKind::External,
+        };
+        let json = serde_json::to_value(&def).unwrap();
+        assert!(json.get("kind").is_none());
+        assert!(json.get("strict").is_none());
+    }
+
+    #[test]
+    fn tool_definition_submit_output_roundtrips_through_serde() {
+        let def = ToolDefinition {
+            name: "submit_output".into(),
+            description: Some("call once".into()),
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: true,
+            kind: ToolKind::SubmitOutput,
+        };
+        let json = serde_json::to_value(&def).unwrap();
+        assert_eq!(json.get("kind"), Some(&serde_json::json!("submit_output")));
+        assert_eq!(json.get("strict"), Some(&serde_json::json!(true)));
+        let back: ToolDefinition = serde_json::from_value(json).unwrap();
+        assert!(matches!(back.kind, ToolKind::SubmitOutput));
+        assert!(back.strict);
+    }
+
+    #[test]
+    fn tool_definition_to_llm_tool_preserves_strict() {
+        let def = ToolDefinition {
+            name: "submit_output".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: true,
+            kind: ToolKind::SubmitOutput,
+        };
+        let llm_tool: llm::prompt::Tool = def.into();
+        assert!(llm_tool.strict);
     }
 }

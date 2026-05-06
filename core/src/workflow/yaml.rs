@@ -210,6 +210,8 @@ enum WorkflowStepYaml {
         timeout_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_schema: Option<serde_json::Value>,
     },
 }
 
@@ -223,6 +225,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                output_schema,
             } => WorkflowStepYaml::AgentStep {
                 name: name.clone(),
                 skill: skill.clone(),
@@ -230,6 +233,7 @@ impl WorkflowStepYaml {
                 sandbox_mode: *sandbox_mode,
                 timeout_seconds: *timeout_seconds,
                 model_chain: model_chain.clone(),
+                output_schema: output_schema.clone(),
             },
         }
     }
@@ -243,6 +247,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                output_schema,
             } => WorkflowStepDef::AgentStep {
                 name,
                 skill,
@@ -250,6 +255,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                output_schema,
             },
         }
     }
@@ -424,6 +430,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(120),
             model_chain: None,
+            output_schema: None,
         }]
     }
 
@@ -596,6 +603,47 @@ steps:
     #[test]
     fn workflow_yaml_returns_none_for_empty() {
         assert!(parse_workflow_yaml("", "runtime/workflows/x.yml").is_none());
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_output_schema() {
+        let id = WorkflowDefinitionId::new();
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {
+                "verdict": { "type": "string", "enum": ["pass", "fail"] }
+            }
+        });
+        let steps = vec![WorkflowStepDef::AgentStep {
+            name: "judge".to_string(),
+            skill: "judge".to_string(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: Some(schema.clone()),
+        }];
+        let content = render_workflow_yaml(
+            id,
+            "judge-flow",
+            None,
+            &WorkflowTrigger::Manual,
+            &steps,
+            &[],
+            None,
+            "2026-05-06T00:00:00Z",
+            "2026-05-06T00:00:00Z",
+        );
+        assert!(content.contains("output_schema"));
+        let path = canonical_workflow_path(id, "judge-flow", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert_eq!(parsed.steps.len(), 1);
+        match &parsed.steps[0] {
+            WorkflowStepDef::AgentStep { output_schema, .. } => {
+                assert_eq!(output_schema.as_ref(), Some(&schema));
+            }
+        }
     }
 
     #[test]

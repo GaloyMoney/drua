@@ -276,6 +276,12 @@ struct WorkflowStepParams {
     timeout_seconds: Option<u64>,
     #[serde(default)]
     model_chain: Option<llm::ModelChain>,
+    /// JSON Schema (root must be `type: object`) for this step's
+    /// structured output. Omit to fall back to the default `{success,
+    /// reason}` schema. Surfaced to the agent as the `submit_output`
+    /// tool's `input_schema`.
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
 }
 
 impl WorkflowStepParams {
@@ -287,6 +293,7 @@ impl WorkflowStepParams {
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
             model_chain: self.model_chain,
+            output_schema: self.output_schema,
         }
     }
 }

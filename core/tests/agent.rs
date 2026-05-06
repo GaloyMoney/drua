@@ -739,6 +739,7 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer_from_other_workfl
             "wf-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
+            Vec::new(),
         )
         .await
         .expect("create workflow agent");
@@ -804,6 +805,7 @@ async fn detach_conflicting_writer_steals_from_same_workflow_writer() {
             "wf-stale",
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
+            Vec::new(),
         )
         .await
         .expect("create workflow agent");

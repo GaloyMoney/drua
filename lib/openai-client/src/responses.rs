@@ -305,6 +305,8 @@ struct ResponsesTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -461,6 +463,7 @@ fn convert_tool(tool: &Tool) -> ResponsesTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
         parameters: tool.input_schema.clone(),
+        strict: if tool.strict { Some(true) } else { None },
     }
 }
 

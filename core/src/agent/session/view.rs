@@ -440,6 +440,8 @@ mod tests {
             name: name.to_string(),
             description: None,
             input_schema: serde_json::json!({}),
+            strict: false,
+            kind: ToolKind::External,
         }
     }
 
