@@ -387,13 +387,9 @@ mod tests {
     fn base_prompt() -> Prompt {
         Prompt {
             chain: ModelChain::new("claude-sonnet-4"),
-            system: vec![SystemBlock::Text {
-                text: "sys".into(),
-            }],
+            system: vec![SystemBlock::Text { text: "sys".into() }],
             messages: vec![Message::User {
-                content: vec![UserBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![UserBlock::Text { text: "hi".into() }],
             }],
             tools: vec![],
             tool_choice: None,

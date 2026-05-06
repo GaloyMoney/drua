@@ -654,10 +654,7 @@ fn project_to_view(project: &domain::project::Project) -> ProjectView {
             .created_at()
             .format("%Y-%m-%d %H:%M UTC")
             .to_string(),
-        model_chain_override_yaml: project
-            .model_chain_override
-            .as_ref()
-            .map(render_chain_yaml),
+        model_chain_override_yaml: project.model_chain_override.as_ref().map(render_chain_yaml),
     }
 }
 
@@ -1384,10 +1381,7 @@ async fn project_agent_detail(
             is_lead: matches!(agent.agent_role, domain::agent::AgentRole::ProjectLead),
             is_workflow_agent: agent.is_workflow_agent(),
             attached_sandbox: attached_view,
-            model_chain_override_yaml: agent
-                .model_chain_override
-                .as_ref()
-                .map(render_chain_yaml),
+            model_chain_override_yaml: agent.model_chain_override.as_ref().map(render_chain_yaml),
         },
         sandbox_options,
         error: query.error,
@@ -1517,10 +1511,7 @@ async fn project_agent_history(
             is_lead: matches!(agent.agent_role, domain::agent::AgentRole::ProjectLead),
             is_workflow_agent: agent.is_workflow_agent(),
             attached_sandbox: attached_view,
-            model_chain_override_yaml: agent
-                .model_chain_override
-                .as_ref()
-                .map(render_chain_yaml),
+            model_chain_override_yaml: agent.model_chain_override.as_ref().map(render_chain_yaml),
         },
         messages,
         workflow_run,

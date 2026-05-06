@@ -182,10 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn primary_succeeds_returns_immediately() {
-        let chain = vec![entry(
-            "primary",
-            Arc::new(OkProvider { name: "anthropic" }),
-        )];
+        let chain = vec![entry("primary", Arc::new(OkProvider { name: "anthropic" }))];
         let outcome = walk(&chain, &Prompt::default()).await.unwrap();
         assert_eq!(outcome.model_used, "primary");
         assert_eq!(outcome.attempts.len(), 1);
@@ -203,10 +200,7 @@ mod tests {
         ));
         let bad_calls = bad.clone();
         let good = Arc::new(OkProvider { name: "openai" });
-        let chain = vec![
-            entry("primary", bad),
-            entry("fallback", good),
-        ];
+        let chain = vec![entry("primary", bad), entry("fallback", good)];
         let outcome = walk(&chain, &Prompt::default()).await.unwrap();
         assert_eq!(outcome.model_used, "fallback");
         assert_eq!(outcome.attempts.len(), 2);
@@ -232,10 +226,7 @@ mod tests {
             PromptError::transient(TransientKind::ServerError, "503"),
         ));
         let never_calls = good.clone();
-        let chain = vec![
-            entry("primary", bad),
-            entry("fallback", good),
-        ];
+        let chain = vec![entry("primary", bad), entry("fallback", good)];
         let err = walk(&chain, &Prompt::default()).await.unwrap_err();
         assert!(err.is_terminal());
         assert_eq!(never_calls.calls.load(Ordering::SeqCst), 0);

@@ -55,10 +55,7 @@ pub enum PromptError {
     },
 
     #[error("terminal {kind:?}: {message}")]
-    Terminal {
-        kind: TerminalKind,
-        message: String,
-    },
+    Terminal { kind: TerminalKind, message: String },
 
     #[error("model `{0}` not configured")]
     ModelNotConfigured(String),

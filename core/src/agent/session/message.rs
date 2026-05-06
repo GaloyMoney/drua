@@ -273,11 +273,9 @@ impl From<AssistantBlock> for llm::prompt::AssistantBlock {
     fn from(b: AssistantBlock) -> Self {
         match b {
             AssistantBlock::Text { text } => llm::prompt::AssistantBlock::Text { text },
-            AssistantBlock::ToolUse { id, name, input } => llm::prompt::AssistantBlock::ToolUse {
-                id,
-                name,
-                input,
-            },
+            AssistantBlock::ToolUse { id, name, input } => {
+                llm::prompt::AssistantBlock::ToolUse { id, name, input }
+            }
             AssistantBlock::Thinking { text, signature } => {
                 llm::prompt::AssistantBlock::Thinking { text, signature }
             }

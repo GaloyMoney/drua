@@ -305,11 +305,7 @@ impl ExecutorState {
 }
 
 #[instrument(name = "domain.prompt_executor.evaluate_chain", skip_all)]
-async fn evaluate_chain(
-    entries: Vec<ChainEntry>,
-    prompt: Prompt,
-    response: PromptResponseChannel,
-) {
+async fn evaluate_chain(entries: Vec<ChainEntry>, prompt: Prompt, response: PromptResponseChannel) {
     match walk(&entries, &prompt).await {
         Ok(outcome) => {
             tracing::info!(
