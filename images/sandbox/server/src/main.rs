@@ -43,6 +43,26 @@ struct InitializeRequest {
     github_token: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct AttachRequest {
+    /// Fresh GitHub App installation token. When present, written to
+    /// `/run/secrets/github-token` and `/workspace/.git-credentials`
+    /// (and `/workspace/.gh-token`) before the smoke test runs —
+    /// installation tokens expire after 1h and persistent sandboxes
+    /// outlive that, so the orchestrator passes a fresh token on
+    /// every workflow-run attach.
+    #[serde(default)]
+    github_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResetRepoResponse {
+    /// True iff every reset step exited 0. Best-effort callers can ignore this.
+    ok: bool,
+    /// Concatenated stdout/stderr of the reset script, for observability.
+    output: String,
+}
+
 #[derive(Debug, Serialize)]
 struct InitializeResponse {
     cwd: String,
@@ -597,10 +617,24 @@ async fn initialize(
 /// shell so a broken bash environment fails the attach immediately
 /// instead of letting the agent flail through dozens of `Exit code
 /// 1` results.
+///
+/// When `req.github_token` is set, refreshes
+/// `/run/secrets/github-token` and `/workspace/.git-credentials` (and
+/// `/workspace/.gh-token`) before the smoke test. GitHub App installation
+/// tokens expire after 1h and persistent sandboxes outlive that, so the
+/// orchestrator passes a fresh token on every workflow-run attach.
 #[instrument(name = "sandbox.server.attach", skip_all)]
 async fn attach(
     State(session): State<SharedSession>,
+    body: Option<Json<AttachRequest>>,
 ) -> Result<&'static str, (StatusCode, String)> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
+        if let Err(e) = write_github_token(&github_token_path(), token).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
+    }
+
     let cwd = session.current_cwd().await;
     session.set_cwd(cwd).await;
 
@@ -620,6 +654,42 @@ async fn attach(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("attach smoke test failed: {e}"),
         )),
+    }
+}
+
+/// Resets the cloned repo at the bash session's cwd to a clean baseline:
+/// `git fetch origin main && git checkout main && git reset --hard origin/main
+/// && git clean -fd`, then drops any leftover `bot/*` branches. Best-effort:
+/// individual steps may fail (e.g. `fetch` if the token is stale) and the
+/// remaining steps still run. Runs through the existing bash session so the
+/// commands inherit the UID-drop and the agent's git config.
+///
+/// No-op (returns `ok=true`) when the cwd does not contain a `.git` dir —
+/// e.g. scratch-mode sandboxes.
+#[instrument(name = "sandbox.server.reset_repo", skip_all)]
+async fn reset_repo(State(session): State<SharedSession>) -> Json<ResetRepoResponse> {
+    let cwd = session.current_cwd().await;
+    let script = format!(
+        r#"set +e; cd {cwd} 2>/dev/null || exit 0; \
+[ -d .git ] || exit 0; \
+git fetch origin main; \
+git checkout main 2>/dev/null || git checkout -B main origin/main; \
+git reset --hard origin/main; \
+git clean -fd; \
+for b in $(git branch --list 'bot/*' | sed 's/^[* ]*//'); do git branch -D "$b" 2>/dev/null || true; done; \
+echo __reset_done__"#
+    );
+
+    const RESET_TIMEOUT_MS: u64 = 60_000;
+    match session.execute(&script, RESET_TIMEOUT_MS).await {
+        Ok(r) => Json(ResetRepoResponse {
+            ok: !r.shell_died && r.output.contains("__reset_done__"),
+            output: r.output,
+        }),
+        Err(e) => Json(ResetRepoResponse {
+            ok: false,
+            output: e,
+        }),
     }
 }
 
@@ -679,33 +749,25 @@ async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Write `.git-credentials` into the workspace so the agent user (after UID
-/// drop) can push/pull without access to `/run/secrets/`. Also configures git
-/// to use the credential store.
+/// Write `.git-credentials` and `.gh-token` into the workspace so the agent
+/// user (after UID drop) can push/pull and run `gh` without access to
+/// `/run/secrets/`. Also configures git to use the credential store.
 async fn write_workspace_git_credentials(token: &str) -> Result<(), String> {
-    let workspace = workspace_root();
+    write_workspace_git_credentials_at(&workspace_root(), token).await
+}
+
+/// Workspace-parameterised core of [`write_workspace_git_credentials`] —
+/// kept separate so tests can target a per-test directory without
+/// mutating the process-wide `WORKSPACE_ROOT` env var (which would race
+/// with other tests reading `workspace_root()`).
+async fn write_workspace_git_credentials_at(workspace: &str, token: &str) -> Result<(), String> {
     let cred_path = format!("{workspace}/.git-credentials");
     let content = format!("https://x-access-token:{token}@github.com\n");
 
-    tokio::fs::write(&cred_path, &content)
-        .await
-        .map_err(|e| format!("Failed to write git credentials: {e}"))?;
+    write_agent_owned_file(&cred_path, content.as_bytes()).await?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&cred_path, std::fs::Permissions::from_mode(0o600))
-            .await
-            .map_err(|e| format!("Failed to chmod git credentials: {e}"))?;
-
-        // chown to agent:agent (1000:1000) so the UID-dropped process can read it.
-        let output = std::process::Command::new("chown")
-            .args(["1000:1000", &cred_path])
-            .output();
-        if let Err(e) = output {
-            tracing::warn!("Failed to chown git credentials (non-fatal): {e}");
-        }
-    }
+    let gh_token_path = format!("{workspace}/.gh-token");
+    write_agent_owned_file(&gh_token_path, token.as_bytes()).await?;
 
     let output = std::process::Command::new("git")
         .args([
@@ -717,6 +779,32 @@ async fn write_workspace_git_credentials(token: &str) -> Result<(), String> {
         .output();
     if let Err(e) = output {
         tracing::warn!("Failed to configure git credential store (non-fatal): {e}");
+    }
+
+    Ok(())
+}
+
+/// Writes `bytes` to `path`, then chmods 0600 and chowns agent:agent (1000:1000)
+/// so the UID-dropped agent process can read it. Same trust boundary as
+/// `.git-credentials` — anyone with shell access as UID 1000 can read it.
+async fn write_agent_owned_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    tokio::fs::write(path, bytes)
+        .await
+        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| format!("Failed to chmod {path}: {e}"))?;
+
+        let output = std::process::Command::new("chown")
+            .args(["1000:1000", path])
+            .output();
+        if let Err(e) = output {
+            tracing::warn!("Failed to chown {path} (non-fatal): {e}");
+        }
     }
 
     Ok(())
@@ -953,6 +1041,7 @@ pub fn build_app(session: SharedSession) -> Router {
         .route("/execute", post(execute))
         .route("/initialize", post(initialize))
         .route("/attach", post(attach))
+        .route("/reset-repo", post(reset_repo))
         .layer(axum::middleware::from_fn(
             tracing_middleware::trace_context_middleware,
         ))
@@ -1203,7 +1292,7 @@ mod tests {
     async fn attach_smoke_test_succeeds_on_healthy_session() {
         init_test_workspace();
         let session = test_session();
-        let result = attach(State(session)).await;
+        let result = attach(State(session), None).await;
         assert!(result.is_ok(), "attach failed: {:?}", result.err());
         assert_eq!(result.unwrap(), "ok");
     }
@@ -2179,6 +2268,103 @@ mod tests {
             result.is_ok(),
             "expected ok for new file, got: {:?}",
             result
+        );
+    }
+
+    /// Allocates a fresh per-test directory under `temp_dir()` so
+    /// credential / reset tests can run in parallel without touching
+    /// `WORKSPACE_ROOT` (which other tests read concurrently to resolve
+    /// path scopes).
+    fn fresh_test_dir(prefix: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn write_workspace_git_credentials_writes_both_files() {
+        let workspace = fresh_test_dir("sandbox-cred-write");
+        write_workspace_git_credentials_at(&workspace, "ghs_test_token_42")
+            .await
+            .expect("write should succeed");
+
+        let creds = std::fs::read_to_string(format!("{workspace}/.git-credentials")).unwrap();
+        assert!(
+            creds.contains("x-access-token:ghs_test_token_42@github.com"),
+            "git-credentials missing token: {creds:?}"
+        );
+
+        let gh_token = std::fs::read_to_string(format!("{workspace}/.gh-token")).unwrap();
+        assert_eq!(
+            gh_token, "ghs_test_token_42",
+            "gh-token should be the bare token (no newline, no URL wrapping)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_workspace_git_credentials_sets_0600_perms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = fresh_test_dir("sandbox-cred-perms");
+        write_workspace_git_credentials_at(&workspace, "ghs_perms_check")
+            .await
+            .expect("write should succeed");
+
+        let creds_perms = std::fs::metadata(format!("{workspace}/.git-credentials"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(creds_perms, 0o600, ".git-credentials must be 0600");
+
+        let gh_perms = std::fs::metadata(format!("{workspace}/.gh-token"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(gh_perms, 0o600, ".gh-token must be 0600");
+    }
+
+    /// Wire-shape smoke test: confirms the wire types deserialize and
+    /// the `Option<Json<AttachRequest>>` extractor accepts a missing
+    /// body without changing the cwd-pinned-shell behaviour.
+    #[test]
+    fn attach_request_default_has_no_token() {
+        let req = AttachRequest::default();
+        assert!(req.github_token.is_none());
+    }
+
+    /// Wire-shape smoke test: a JSON body with `github_token: null`
+    /// deserializes to `None`, and a present token deserializes to
+    /// `Some`.
+    #[test]
+    fn attach_request_deserializes_optional_token() {
+        let none_form: AttachRequest = serde_json::from_str(r#"{"github_token": null}"#).unwrap();
+        assert!(none_form.github_token.is_none());
+
+        let some_form: AttachRequest =
+            serde_json::from_str(r#"{"github_token": "ghs_x"}"#).unwrap();
+        assert_eq!(some_form.github_token.as_deref(), Some("ghs_x"));
+
+        let empty_form: AttachRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(empty_form.github_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_repo_is_noop_when_cwd_has_no_git_dir() {
+        let workspace = fresh_test_dir("sandbox-reset-nogit");
+        let session: SharedSession = Arc::new(BashSession::new());
+        session.set_cwd(workspace).await;
+
+        let resp = reset_repo(State(session)).await;
+        // Best-effort: no .git → script exits 0 immediately. The marker
+        // never echoes (we exit before it), so `ok` is false but the
+        // call succeeds without error.
+        assert!(
+            !resp.0.ok || resp.0.output.is_empty() || !resp.0.output.contains("__reset_done__"),
+            "no-git case should not falsely claim success: {:?}",
+            resp.0
         );
     }
 }

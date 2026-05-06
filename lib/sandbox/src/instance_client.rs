@@ -86,15 +86,42 @@ impl InstanceClient {
     /// The server resets per-tenant state — currently the persistent
     /// bash session's cwd — so the new agent doesn't inherit the
     /// prior tenant's `cd`. Idempotent.
-    #[instrument(name = "sandbox.instance.attach", skip(self))]
-    pub async fn attach(&self) -> Result<(), InstanceError> {
+    ///
+    /// When `req.github_token` is `Some`, the server also rewrites
+    /// `/run/secrets/github-token`, `/workspace/.git-credentials`, and
+    /// `/workspace/.gh-token` before the smoke test — installation
+    /// tokens expire after 1h and persistent sandboxes outlive that,
+    /// so the orchestrator passes a fresh token on every workflow-run
+    /// attach.
+    #[instrument(name = "sandbox.instance.attach", skip_all)]
+    pub async fn attach(&self, req: &AttachRequest) -> Result<(), InstanceError> {
         self.http
             .post(format!("{}/attach", self.base_url))
             .headers(current_trace_headers())
+            .json(req)
             .send()
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// Resets the cloned repo to a clean baseline (`git reset --hard
+    /// origin/main` + drop `bot/*` branches). Best-effort: returns
+    /// `Ok(ResetRepoResponse { ok: false, .. })` when individual steps
+    /// fail (e.g. `git fetch` on a stale token); the caller decides
+    /// whether to escalate.
+    #[instrument(name = "sandbox.instance.reset_repo", skip(self))]
+    pub async fn reset_repo(&self) -> Result<ResetRepoResponse, InstanceError> {
+        let resp = self
+            .http
+            .post(format!("{}/reset-repo", self.base_url))
+            .headers(current_trace_headers())
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ResetRepoResponse>()
+            .await?;
+        Ok(resp)
     }
 
     #[instrument(name = "sandbox.instance.execute", skip_all, fields(tool = %req.tool))]
@@ -261,4 +288,22 @@ pub struct ExecuteRequest {
 pub struct ExecuteResponse {
     pub output: String,
     pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AttachRequest {
+    /// Fresh GitHub App installation token. When `Some`, the server
+    /// rewrites `/run/secrets/github-token` and the workspace credential
+    /// files before running the smoke test. Installation tokens expire
+    /// after 1h, so the orchestrator passes a fresh token on every
+    /// workflow-run attach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetRepoResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub output: String,
 }

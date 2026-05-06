@@ -163,6 +163,17 @@ fn try_spawn(
         .env("PS1", "")
         .current_dir(cwd);
 
+    // gh CLI reads GH_TOKEN from env. The token is written by the
+    // sandbox-server's refresh-credentials path to <workspace>/.gh-token
+    // (mode 0600, chowned 1000:1000). Read at spawn time so each
+    // post-attach session pick up a freshly-refreshed token.
+    if let Ok(token) = std::fs::read_to_string(format!("{workspace}/.gh-token")) {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            cmd.env("GH_TOKEN", trimmed);
+        }
+    }
+
     cmd.spawn()
         .map_err(|e| format!("Failed to execute command: {e}"))
 }

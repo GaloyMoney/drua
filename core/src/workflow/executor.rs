@@ -512,6 +512,16 @@ impl Executor {
                     self.agents.invalidate_agent_cache(prior);
                 }
 
+                // Reset the workspace repo so leftover state from a prior
+                // workflow run (stale `bot/*` branches, dirty checkout)
+                // doesn't leak into this agent's view of HEAD. Runs after
+                // `notify_sandbox_attach` (which fired in
+                // `create_for_workflow_run_in_op` above) so the freshly
+                // refreshed token is available for `git fetch`. Best-effort.
+                if let Some((sandbox_id, _)) = attach_sandbox {
+                    self.sandboxes.reset_for_workflow_step(sandbox_id).await;
+                }
+
                 let result = self
                     .stream_agent_response(&agent, prompt, name, *timeout_seconds)
                     .await;

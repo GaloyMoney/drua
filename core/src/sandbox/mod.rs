@@ -10,7 +10,9 @@ use es_entity::*;
 use tracing::instrument;
 
 use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, LocalSandboxConfig};
-use sandbox::instance_client::{InitializeRequest, InitializeResponse, InstanceClient};
+use sandbox::instance_client::{
+    AttachRequest, InitializeRequest, InitializeResponse, InstanceClient,
+};
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
 use crate::audit::Audit;
@@ -690,14 +692,78 @@ impl Sandboxes {
     }
 
     /// POST `/attach` to the sandbox-server. Resolves `base_url` via
-    /// the admin client (k8s pod IP / local port).
+    /// the admin client (k8s pod IP / local port). Carries a fresh
+    /// GitHub App installation token in the attach body so a long-lived
+    /// sandbox doesn't run the smoke test with a stale (>1h) token —
+    /// installation tokens expire after 1h and `git push` / `gh` would
+    /// otherwise fail with `Authentication failed`.
     async fn notify_sandbox_attach(&self, sandbox: &Sandbox) -> Result<(), SandboxError> {
         let view = self.admin.get_sandbox(&sandbox.resource_name()).await?;
         let Some(client) = InstanceClient::from_sandbox(&view) else {
             return Ok(());
         };
-        client.attach().await?;
+        let github_token = match self.github_app.as_ref() {
+            Some(provider) => match provider.generate_token().await {
+                Ok(t) => Some(t.token),
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox_id = %sandbox.id,
+                        error = %e,
+                        "github_app.generate_token failed; attach proceeds with stale token"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        client.attach(&AttachRequest { github_token }).await?;
         Ok(())
+    }
+
+    /// Best-effort hook called by the workflow executor at agent-step
+    /// start: resets the sandbox repo to `origin/main` so leftover
+    /// state from a prior run doesn't leak into the new agent's
+    /// context. No-op for `Scratch`-mode sandboxes (the sandbox-server
+    /// short-circuits when `cwd` has no `.git`). Failures (e.g. fetch
+    /// blocked by a stale token) are logged at warn — the step still
+    /// runs.
+    #[instrument(name = "domain.sandbox.reset_for_workflow_step", skip(self))]
+    pub async fn reset_for_workflow_step(&self, sandbox_id: SandboxId) {
+        let sandbox = match self.repo.find_by_id(sandbox_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(%sandbox_id, error = %e, "reset: sandbox lookup failed");
+                return;
+            }
+        };
+        if !matches!(sandbox.mode, SandboxMode::Repo { .. }) {
+            return;
+        }
+        let view = match self.admin.get_sandbox(&sandbox.resource_name()).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(%sandbox_id, error = %e, "reset: admin lookup failed");
+                return;
+            }
+        };
+        let Some(client) = InstanceClient::from_sandbox(&view) else {
+            return;
+        };
+        match client.reset_repo().await {
+            Ok(resp) if resp.ok => {
+                tracing::info!(%sandbox_id, "reset: repo reset to clean baseline");
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    %sandbox_id,
+                    output = %resp.output,
+                    "reset: repo reset partially failed (continuing)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(%sandbox_id, error = %e, "reset: HTTP call failed");
+            }
+        }
     }
 
     /// Idempotent (no-op if not attached).
