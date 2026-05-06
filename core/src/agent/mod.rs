@@ -1238,7 +1238,7 @@ impl Agents {
             prompt_state.chain = c;
         }
 
-        self.drive_session_loop(id, agent_subject, tx, prompt_state)
+        self.drive_session_loop(id, agent_subject, tx, prompt_state, runtime_chain_override)
             .await?;
 
         Ok(rx)
@@ -1286,7 +1286,7 @@ impl Agents {
         };
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
-        self.drive_session_loop(id, agent_subject, tx, prompt_state)
+        self.drive_session_loop(id, agent_subject, tx, prompt_state, None)
             .await?;
         Ok(Some(rx))
     }
@@ -1294,12 +1294,15 @@ impl Agents {
     /// Send the initial `prompt_state` to the LLM and spawn the response
     /// loop. Shared by [`Self::send_message`] (fresh turn) and
     /// [`Self::resume_message`] (retried turn from a persisted `PromptSent`).
+    /// `runtime_chain_override` is re-applied to every per-turn prompt so the
+    /// agent/project override survives across the spawned loop.
     async fn drive_session_loop(
         &self,
         id: AgentId,
         agent_subject: AuthSubject,
         tx: tokio::sync::mpsc::Sender<ChatOutputEvent>,
         prompt_state: llm::Prompt,
+        runtime_chain_override: Option<llm::ModelChain>,
     ) -> Result<(), AgentError> {
         let model_name = prompt_state.chain.primary.name.clone();
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
@@ -1311,7 +1314,7 @@ impl Agents {
         let sessions = self.sessions.clone();
         let toolsets = self.toolsets.clone();
         let prompt_requests = self.prompt_requests.clone();
-        let runtime_override_for_loop = runtime_chain_override.clone();
+        let runtime_override_for_loop = runtime_chain_override;
         tokio::spawn(async move {
             let mut next = response_rx.await;
             let mut turn: u32 = 0;
