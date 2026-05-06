@@ -414,6 +414,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
 mod tests {
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
+    use super::super::definition::default_output_schema;
     use super::*;
 
     fn sample_step() -> WorkflowStepDef {
@@ -424,7 +425,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(60),
             model_chain: None,
-            output_schema: None,
+            output_schema: default_output_schema(),
         }
     }
 
@@ -464,7 +465,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: Some(step_chain.clone()),
-            output_schema: None,
+            output_schema: default_output_schema(),
         }];
         assert_eq!(
             def.resolve_step_chain(&def.steps[0]).unwrap().primary.name,
@@ -478,7 +479,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: None,
+            output_schema: default_output_schema(),
         }];
         assert_eq!(
             def.resolve_step_chain(&def.steps[0]).unwrap().primary.name,

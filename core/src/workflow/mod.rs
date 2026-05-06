@@ -25,8 +25,8 @@ use crate::user::Users;
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{
-    next_cron_fire_at, parse_cron_schedule, parse_timezone, WorkflowSandboxDecl, WorkflowStepDef,
-    WorkflowTrigger,
+    default_output_schema, next_cron_fire_at, parse_cron_schedule, parse_timezone, OutputSchema,
+    OutputSchemaError, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
 };
 pub use entity::*;
 pub use error::*;

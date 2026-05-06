@@ -193,13 +193,13 @@ struct WorkflowStepParam {
 impl WorkflowStepParam {
     fn into_step(self) -> Result<WorkflowStepDef, ToolSetsError> {
         let output_schema = match self.output_schema {
-            Some(value) => Some(serde_json::from_value(value).map_err(|e| {
+            Some(value) => serde_json::from_value(value).map_err(|e| {
                 ToolSetsError::MissingArgument(format!(
                     "step '{}': output_schema invalid (root must be `type: object` per MCP): {e}",
                     self.name
                 ))
-            })?),
-            None => None,
+            })?,
+            None => crate::workflow::default_output_schema(),
         };
         Ok(WorkflowStepDef::AgentStep {
             name: self.name,
@@ -593,7 +593,7 @@ impl TopLevelTool for WorkflowTool {
                         sandbox_mode,
                         timeout_seconds,
                         model_chain: None,
-                        output_schema: None,
+                        output_schema: crate::workflow::default_output_schema(),
                     }]
                 };
 

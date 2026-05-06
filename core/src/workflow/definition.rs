@@ -124,12 +124,13 @@ pub enum WorkflowStepDef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
         /// JSON Schema describing the structured payload the agent
-        /// must submit via the synthesised `submit_output` tool. `None`
-        /// falls back to [`default_output_schema`]. The root is
-        /// guaranteed `type: "object"` (enforced by [`OutputSchema`]
-        /// validation on construction/deserialization).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_schema: Option<OutputSchema>,
+        /// must submit via the synthesised `submit_output` tool. The
+        /// root is guaranteed `type: "object"` (enforced by
+        /// [`OutputSchema`] validation on construction/deserialization).
+        /// Old workflows / inputs that omit the field hydrate as
+        /// [`default_output_schema`] (`{success, reason}`).
+        #[serde(default = "default_output_schema")]
+        output_schema: OutputSchema,
     },
 }
 
@@ -146,20 +147,14 @@ impl WorkflowStepDef {
         }
     }
 
-    /// Returns the declared `output_schema` if any, else
-    /// [`default_output_schema`]. Every AgentStep produces a structured
-    /// output via the synthesised `submit_output` tool — there is no
-    /// schemaless free-text passthrough.
-    pub fn effective_output_schema(&self) -> OutputSchema {
+    /// Every AgentStep produces a structured output via the
+    /// synthesised `submit_output` tool. The schema defaults to
+    /// [`default_output_schema`] (`{success, reason}`) when the step
+    /// doesn't declare its own; there is no schemaless free-text
+    /// passthrough.
+    pub fn output_schema(&self) -> &OutputSchema {
         match self {
-            WorkflowStepDef::AgentStep {
-                output_schema: Some(s),
-                ..
-            } => s.clone(),
-            WorkflowStepDef::AgentStep {
-                output_schema: None,
-                ..
-            } => default_output_schema(),
+            WorkflowStepDef::AgentStep { output_schema, .. } => output_schema,
         }
     }
 }
@@ -289,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_output_schema_uses_declared_when_present() {
+    fn output_schema_accessor_returns_declared() {
         let custom_value = serde_json::json!({
             "type": "object",
             "required": ["verdict"],
@@ -303,14 +298,31 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: Some(custom),
+            output_schema: custom,
         };
-        let effective = serde_json::to_value(step.effective_output_schema()).unwrap();
-        assert_eq!(effective, custom_value);
+        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        assert_eq!(actual, custom_value);
     }
 
     #[test]
-    fn effective_output_schema_falls_back_to_default() {
+    fn output_schema_defaults_when_yaml_omits_field() {
+        // Tagged-enum struct format with discriminator + flat fields.
+        let json = serde_json::json!({
+            "type": "agent_step",
+            "name": "noop",
+            "skill": "noop",
+            "sandbox": null,
+            "sandbox_mode": null,
+            "timeout_seconds": null
+        });
+        let step: WorkflowStepDef = serde_json::from_value(json).unwrap();
+        let default = serde_json::to_value(default_output_schema()).unwrap();
+        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        assert_eq!(actual, default);
+    }
+
+    #[test]
+    fn output_schema_default_round_trips_through_serde() {
         let step = WorkflowStepDef::AgentStep {
             name: "noop".into(),
             skill: "noop".into(),
@@ -318,11 +330,17 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: None,
+            output_schema: default_output_schema(),
         };
-        let effective = serde_json::to_value(step.effective_output_schema()).unwrap();
+        let value = serde_json::to_value(&step).unwrap();
+        assert!(
+            value.get("output_schema").is_some(),
+            "output_schema is always serialized; never omitted"
+        );
+        let back: WorkflowStepDef = serde_json::from_value(value).unwrap();
+        let back_schema = serde_json::to_value(back.output_schema()).unwrap();
         let default = serde_json::to_value(default_output_schema()).unwrap();
-        assert_eq!(effective, default);
+        assert_eq!(back_schema, default);
     }
 
     #[test]

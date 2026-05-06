@@ -506,7 +506,7 @@ impl Executor {
                     };
                     let chain_override = definition.resolve_step_chain(step);
                     let extra_tool_defs =
-                        vec![build_submit_output_tool(step.effective_output_schema())];
+                        vec![build_submit_output_tool(step.output_schema().clone())];
                     let agent = self
                         .agents
                         .create_for_workflow_run_in_op(
