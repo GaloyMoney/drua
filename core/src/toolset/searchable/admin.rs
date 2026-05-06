@@ -1219,11 +1219,7 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
                 Audit::record_action("skill.list");
-                // `list_for_scope` returns every skill the project's
-                // agents can invoke (project + global + mounted-space
-                // + sandbox-exported), each tagged with its source.
-                // The admin surface gets the same view as the project
-                // skills UI.
+                // Same view as the project skills UI — see Skills::list_for_scope.
                 let scoped = self
                     .skills
                     .list_for_scope(subject, project_id)

@@ -250,10 +250,7 @@ impl TopLevelTool for SkillTool {
             }
 
             SkillParams::List => {
-                // `list_for_scope` returns every skill the project's
-                // agents can invoke (project + global + mounted-space
-                // + sandbox-exported), each tagged with its source.
-                // Matches the `<available_skills>` set the agent sees.
+                // Matches the agent's `<available_skills>` set — see Skills::list_for_scope.
                 let scoped = self
                     .skills
                     .list_for_scope(subject, project_id)

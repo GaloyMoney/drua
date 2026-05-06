@@ -398,7 +398,6 @@ impl Skills {
         sub.can(AuthVerb::Read, AuthResource::Skill(project_id, None))?;
         let mut out: Vec<ScopedSkill> = Vec::new();
 
-        // 1. Project + truly-global (existing list_for_project_inner).
         for s in self.list_for_project_inner(project_id).await? {
             let source = match s.project_id {
                 Some(pid) => SkillSource::Project {
@@ -415,8 +414,8 @@ impl Skills {
             });
         }
 
-        // 2. Mounted spaces — one query per mount; mount-set is small
-        // (capped at SPACES_BLOCK_LIMIT in space_mounts).
+        // Mount-set is bounded (capped at SPACES_BLOCK_LIMIT in space_mounts),
+        // so one query per mount is fine.
         let mounted_space_ids = self.mounted_space_ids_for(Some(project_id)).await;
         for space_id in mounted_space_ids {
             let res = self
@@ -445,9 +444,8 @@ impl Skills {
             }
         }
 
-        // 3. Sandbox-exported — every Ready sandbox in the project.
-        // Best-effort: a Sandbox-Read denial here just hides this tier
-        // (consistent with the existing `space_mounts` failure path).
+        // Best-effort: a Sandbox-Read denial just hides the sandbox tier
+        // instead of failing the whole list (mirrors the space_mounts path).
         match self.sandboxes.list_for_project(sub, project_id).await {
             Ok(sandboxes) => {
                 for sandbox in sandboxes {

@@ -813,10 +813,7 @@ async fn project_skills_page(
 
     let (lead_agent, agent_views) = project_sidebar_context(&sub, &state, project_id).await;
 
-    // Single call into the service — covers project + global +
-    // mounted-space + sandbox-exported skills with provenance. The
-    // human in the UI sees the same set the agent sees in
-    // `<available_skills>`.
+    // UI shows the same set the agent sees in `<available_skills>`.
     let scoped_skills = state
         .app
         .skills()
