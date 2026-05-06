@@ -141,6 +141,9 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 anyhow = "1"
 thiserror = "2"
 
+# Glob matching (git-proxy ref-pattern policy)
+globset = "0.4"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod git_proxy;
 pub mod graphql;
 mod routes;
 pub mod server;
@@ -82,6 +83,7 @@ pub fn router() -> Router<AppState> {
         .merge(routes::api_router())
         .merge(graphql::router())
         .merge(webhook::router())
+        .merge(git_proxy::router())
 }
 
 pub struct RunServerArgs {

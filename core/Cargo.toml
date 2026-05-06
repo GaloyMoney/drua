@@ -27,6 +27,7 @@ chrono-tz = "0.10"
 cron = "0.15"
 derive_builder = "0.20"
 es-entity = "0.10"
+globset = { workspace = true }
 job = { workspace = true }
 obix = { workspace = true }
 futures = { workspace = true }

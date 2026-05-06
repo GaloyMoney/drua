@@ -6,6 +6,7 @@ pub mod auth;
 pub mod code_assistant;
 mod config;
 pub mod encryption;
+pub mod git_proxy;
 pub mod github_app;
 pub mod library;
 pub mod mcp_creds;
@@ -31,6 +32,7 @@ use std::sync::Arc;
 use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
+use git_proxy::GitProxies;
 use github_app::GitHubAppTokenProvider;
 use library::{AuthedSearch, AuthedSpaces};
 use mcp_creds::McpCredentials;
@@ -63,6 +65,7 @@ pub struct App {
     sandboxes: Arc<Sandboxes>,
     workflows: Arc<Workflows>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
+    git_proxies: Arc<GitProxies>,
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
@@ -185,6 +188,8 @@ impl App {
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
+
+        let git_proxies = Arc::new(GitProxies::new(pool));
 
         // Read facade for the project↔space mount relationship. Built
         // before `Skills` so Skills can resolve mounted-space skills
@@ -363,6 +368,7 @@ impl App {
             sandboxes,
             workflows,
             github_app,
+            git_proxies,
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
             spaces,
@@ -419,6 +425,10 @@ impl App {
 
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
         self.github_app.as_deref()
+    }
+
+    pub fn git_proxies(&self) -> &GitProxies {
+        &self.git_proxies
     }
 
     pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
