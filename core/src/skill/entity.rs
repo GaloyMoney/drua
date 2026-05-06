@@ -28,19 +28,8 @@ pub enum SkillEvent {
         description: String,
         body: String,
         /// Repo-relative on-disk path. Sacred — never mutated by the
-        /// importer. New events always set this; legacy events that
-        /// predate path-as-identity deserialise with `""` and
-        /// hydration falls back to the legacy `original_path` or a
-        /// derived value (kept here so old events still round-trip
-        /// to the same `Skill`).
-        #[serde(default)]
+        /// importer.
         path: String,
-        /// Legacy: original file path captured by the pre-path-identity
-        /// reverse-sync importer. Deserialised for back-compat;
-        /// emitted only when re-serialising old events. New `Initialized`
-        /// events leave it `None`.
-        #[serde(default)]
-        original_path: Option<String>,
     },
     Updated {
         name: Option<String>,
@@ -330,26 +319,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_initialized_event_without_space_id_deserializes() {
-        // Pre-space-tier events have no `space_id` key. `#[serde(default)]`
-        // must hydrate them as `space_id: None`.
-        let json = serde_json::json!({
-            "type": "initialized",
-            "id": uuid::Uuid::new_v4(),
-            "project_id": uuid::Uuid::new_v4(),
-            "project_name": "proj",
-            "name": "skill-x",
-            "description": "desc",
-            "body": "body",
-        });
-        let ev: SkillEvent = serde_json::from_value(json).expect("legacy event");
-        match ev {
-            SkillEvent::Initialized { space_id, .. } => assert!(space_id.is_none()),
-            _ => panic!("expected Initialized"),
-        }
-    }
-
-    #[test]
     fn shell_split_double_quotes() {
         assert_eq!(
             shell_split(r#""hello world" foo"#),
@@ -474,17 +443,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                     description,
                     body,
                     path,
-                    original_path,
-                    ..
                 } => {
-                    // Path-as-identity events set `path`; pre-migration
-                    // events left only `original_path`. Either is fine
-                    // — pick whichever is non-empty.
-                    let resolved_path = if !path.is_empty() {
-                        path.clone()
-                    } else {
-                        original_path.clone().unwrap_or_default()
-                    };
                     builder = builder
                         .id(*id)
                         .project_id(*project_id)
@@ -494,7 +453,7 @@ impl TryFromEvents<SkillEvent> for Skill {
                         .name(name.clone())
                         .description(description.clone())
                         .body(body.clone())
-                        .path(resolved_path);
+                        .path(path.clone());
                 }
 
                 SkillEvent::Updated {
@@ -596,7 +555,6 @@ impl IntoEvents<SkillEvent> for NewSkill {
                 description: self.description,
                 body: self.body,
                 path: self.path,
-                original_path: None,
             }],
         )
     }

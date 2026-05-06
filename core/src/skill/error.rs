@@ -30,6 +30,16 @@ pub enum SkillError {
     Authorization(#[from] AuthorizationError),
     #[error("SkillError - skill is space-scoped; delete via the spaces tool")]
     SpaceScopedDeleteViaSpaces,
+    #[error(
+        "SkillError - skill `{name}` is owned by space `{space_slug}`; \
+         edit it via the spaces tool (`spaces edit op=write slug={space_slug} \
+         path={path}`) — the project surface only manages project-scoped skills"
+    )]
+    SpaceScopedEditViaSpaces {
+        name: String,
+        space_slug: String,
+        path: String,
+    },
     /// A name + scope collision tripped one of the partial unique indexes
     /// (`idx_skills_global_name`, `idx_skills_project_name`, or
     /// `idx_skills_space_name`). Surfaced as a typed variant so callers

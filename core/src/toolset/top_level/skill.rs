@@ -10,7 +10,7 @@ use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SkillId;
 use crate::project::Projects;
-use crate::skill::{Skill, Skills};
+use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -139,10 +139,15 @@ impl TopLevelTool for SkillTool {
          `$0`, `$1`, … to interpolate trigger inputs; if the body has no \
          placeholder, arguments are appended as `ARGUMENTS: <value>`. \
          Commands: `create` (requires `name`, `description`, `body`), \
-         `update` (requires `skill_id`; any of `name`/`description`/`body`), \
-         `delete` (requires `skill_id`; project- or global-scoped skills only \
-         — for space-scoped skills use the `spaces` tool), \
-         `list`, `get` (requires `skill_id`)."
+         `update` (requires `skill_id`; any of `name`/`description`/`body` — \
+         project-scoped only; space-scoped skills must be edited via the \
+         `spaces` tool), \
+         `delete` (requires `skill_id`; project-scoped only — for space-scoped \
+         skills use the `spaces` tool), \
+         `list` (every skill the project's agents can invoke — project + \
+         global + mounted-space + sandbox-exported, each tagged with its \
+         source), \
+         `get` (requires `skill_id`; project- or global-scoped only)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -245,15 +250,16 @@ impl TopLevelTool for SkillTool {
             }
 
             SkillParams::List => {
-                let skills = self
+                // Matches the agent's `<available_skills>` set — see Skills::list_for_scope.
+                let scoped = self
                     .skills
-                    .list_for_project(subject, project_id)
+                    .list_for_scope(subject, project_id)
                     .await
                     .map_err(|e| ToolSetsError::Skill(e.to_string()))?;
-                let text = format_list_text(&skills);
+                let text = format_scoped_list_text(&scoped);
                 let out = SkillOutput {
                     command: "list".to_string(),
-                    skills: Some(skills.iter().map(|s| skill_to_summary(s, false)).collect()),
+                    skills: Some(scoped.iter().map(scoped_to_summary).collect()),
                     ..Default::default()
                 };
                 (text, out)
@@ -298,30 +304,64 @@ fn skill_to_summary(s: &Skill, include_body: bool) -> SkillSummary {
     }
 }
 
-fn format_list_text(skills: &[Skill]) -> String {
+fn scope_label(source: &SkillSource) -> String {
+    match source {
+        SkillSource::Project { .. } => "project".to_string(),
+        SkillSource::Global { .. } => "global".to_string(),
+        SkillSource::Space { space_slug, .. } => format!("space:{space_slug}"),
+        SkillSource::Sandbox { sandbox_name, .. } => format!("sandbox:{sandbox_name}"),
+    }
+}
+
+fn scoped_to_summary(s: &ScopedSkill) -> SkillSummary {
+    let (id, project_id) = match &s.source {
+        SkillSource::Project {
+            skill_id,
+            project_id,
+        } => (skill_id.to_string(), Some(project_id.to_string())),
+        SkillSource::Global { skill_id } => (skill_id.to_string(), None),
+        SkillSource::Space { skill_id, .. } => (skill_id.to_string(), None),
+        // Sandbox-exported skills are runtime-only — synthesise a
+        // composite handle so the structured output is still
+        // addressable, but no DB id exists.
+        SkillSource::Sandbox {
+            sandbox_id,
+            sandbox_name: _,
+        } => (format!("sandbox:{sandbox_id}:{}", s.name), None),
+    };
+    SkillSummary {
+        id,
+        name: s.name.clone(),
+        description: s.description.clone(),
+        scope: scope_label(&s.source),
+        project_id,
+        body: None,
+    }
+}
+
+fn format_scoped_list_text(skills: &[ScopedSkill]) -> String {
     if skills.is_empty() {
         return "No skills found.".to_string();
     }
     let mut lines = Vec::with_capacity(skills.len() + 2);
-    lines.push(format!(
-        "{:<38} {:<24} {:<10} {}",
-        "ID", "NAME", "SCOPE", "DESCRIPTION"
-    ));
-    lines.push("-".repeat(110));
+    lines.push(format!("{:<28} {:<22} {}", "NAME", "SCOPE", "DESCRIPTION"));
+    lines.push("-".repeat(96));
     for s in skills {
-        let scope = if s.project_id.is_some() {
-            "project"
-        } else {
-            "global"
-        };
         lines.push(format!(
-            "{:<38} {:<24} {:<10} {}",
-            s.id,
-            truncate(&s.name, 24),
-            scope,
-            truncate(&s.description, 50)
+            "{:<28} {:<22} {}",
+            truncate(&s.name, 28),
+            truncate(&scope_label(&s.source), 22),
+            truncate(&s.description, 44),
         ));
     }
+    lines.push(String::new());
+    lines.push(
+        "Skills outside `scope = project` are read-only here — \
+         space-scoped skills are edited via the `spaces` tool; \
+         sandbox-exported skills come from the sandbox itself; \
+         global skills are admin-only."
+            .to_string(),
+    );
     lines.join("\n")
 }
 

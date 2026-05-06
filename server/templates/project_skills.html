@@ -108,6 +108,20 @@
 {% if skills.is_empty() %}
 <p><em>No skills synced yet. Add skill files to the library repo to see them here.</em></p>
 {% else %}
+<style>
+  .skill-scope {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: var(--pico-border-radius);
+    color: white;
+    text-transform: lowercase;
+    white-space: nowrap;
+  }
+  .skill-scope.project  { background: #1976d2; }
+  .skill-scope.global   { background: #455a64; }
+  .skill-scope.space    { background: #6a1b9a; }
+  .skill-scope.sandbox  { background: #00897b; }
+</style>
 <figure>
   <table>
     <thead>
@@ -115,16 +129,14 @@
         <th>Name</th>
         <th>Scope</th>
         <th>Description</th>
-        <th>Created</th>
       </tr>
     </thead>
     <tbody>
       {% for skill in skills %}
-      <tr style="cursor: pointer;" onclick="window.location='/projects/{{ project.id }}/skills/{{ skill.id }}'">
+      <tr {% match skill.detail_url %}{% when Some with (url) %}style="cursor: pointer;" onclick="window.location='{{ url }}'"{% when None %}{% endmatch %}>
         <td><strong>{{ skill.name }}</strong></td>
-        <td>{% if skill.is_global %}<mark style="font-size: 0.75rem; padding: 0.1rem 0.4rem;">global</mark>{% else %}<small style="color: var(--pico-muted-color);">project</small>{% endif %}</td>
+        <td><span class="skill-scope {{ skill.scope_class }}">{{ skill.scope_label }}</span></td>
         <td>{{ skill.description }}</td>
-        <td><small>{{ skill.created_at }}</small></td>
       </tr>
       {% endfor %}
     </tbody>
