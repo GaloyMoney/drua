@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use job::*;
@@ -8,6 +9,7 @@ use crate::primitives::WorkflowRunId;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
 
+use super::error::WorkflowError;
 use super::executor::Executor;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::WorkflowRunRepo;
@@ -79,9 +81,28 @@ impl JobRunner for ExecuteRunRunner {
     #[tracing::instrument(name = "core.workflow.execute_run.job", skip_all, fields(run_id = %self.config.run_id))]
     async fn run(
         &self,
-        _current_job: CurrentJob,
+        mut current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        self.executor.run(self.config.run_id).await?;
-        Ok(JobCompletion::Complete)
+        // Cooperative shutdown: a watcher task flips `cancel` when the
+        // poller broadcasts shutdown. The executor polls `cancel` between
+        // steps and returns `WorkflowError::Cancelled` so the dispatcher
+        // reschedules the job. The next poller resumes via the existing
+        // step-skip + `resume_message` paths.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_watcher = Arc::clone(&cancel);
+        let watcher = tokio::spawn(async move {
+            if current_job.shutdown_requested().await {
+                cancel_for_watcher.store(true, Ordering::Release);
+            }
+        });
+
+        let result = self.executor.run(self.config.run_id, cancel).await;
+        watcher.abort();
+
+        match result {
+            Ok(()) => Ok(JobCompletion::Complete),
+            Err(WorkflowError::Cancelled) => Ok(JobCompletion::RescheduleNow),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 }

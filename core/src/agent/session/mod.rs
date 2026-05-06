@@ -100,6 +100,19 @@ impl Sessions {
         Ok(prompt.into())
     }
 
+    /// Rebuilds the prompt of the most recent unanswered `PromptSent`.
+    /// Resume primitive: workflow runner re-drives this prompt after a kill
+    /// instead of re-invoking `add_user_input` + `next_prompt` (which would
+    /// duplicate the user message and re-run compaction).
+    #[instrument(name = "domain.agent_session.pending_prompt", skip(self))]
+    pub async fn pending_prompt(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<llm::Prompt>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.pending_prompt()?.map(Into::into))
+    }
+
     #[instrument(
         name = "domain.agent_session.assistant_response_received",
         skip(self, response)

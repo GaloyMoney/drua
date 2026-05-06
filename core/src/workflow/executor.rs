@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,9 +47,19 @@ impl Executor {
     /// Resumable: idempotent mutations + skipping already-terminal steps
     /// make this safe to invoke repeatedly after a crash.
     /// `Ok(())` whenever a terminal state was recorded; `Err(_)` only on
-    /// load/persist failure.
+    /// load/persist failure or cooperative cancellation
+    /// ([`WorkflowError::Cancelled`]).
+    ///
+    /// `cancel` is polled between steps; when set, the run aborts cleanly
+    /// without recording `step_failed` so the next attempt resumes the
+    /// in-progress step. Callers that don't need cancellation pass a
+    /// fresh `Arc<AtomicBool>` initialized to `false`.
     #[tracing::instrument(name = "core.workflow.execute_run", skip_all, fields(run_id = %run_id))]
-    pub async fn run(&self, run_id: WorkflowRunId) -> Result<(), WorkflowError> {
+    pub async fn run(
+        &self,
+        run_id: WorkflowRunId,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<(), WorkflowError> {
         let mut run = self.runs.find_by_id(run_id).await?;
 
         if matches!(
@@ -113,6 +124,15 @@ impl Executor {
 
             if run.step_already_terminal(&step_name) {
                 continue;
+            }
+
+            // Between-steps cancellation: abort cleanly without
+            // `step_failed` so the rescheduled run picks up here. The
+            // pre-flight already brought sandboxes back to Ready and any
+            // in-flight `PromptSent` will be re-driven via
+            // [`Agents::resume_message`] on the next attempt.
+            if cancel.load(Ordering::Relaxed) {
+                return Err(WorkflowError::Cancelled);
             }
 
             if run.step_started(step_name.clone()).did_execute() {
@@ -427,30 +447,44 @@ impl Executor {
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-                // Conflict-only steal: detach a non-workflow Writer iff
-                // we want Write. Same op as create+attach so the sandbox
-                // is never observed double-attached.
-                let detached_agents = match attach_sandbox {
-                    Some((sandbox_id, mode)) => self
-                        .agents
-                        .detach_conflicting_writer_in_op(&mut op, sandbox_id, mode)
-                        .await
-                        .map_err(|e| WorkflowError::Agent(e.to_string()))?,
-                    None => Vec::new(),
-                };
-
-                let agent = self
+                // Re-entrancy: on retry the prior attempt's agent already
+                // owns the sandbox write slot and carries its session
+                // history (incl. an unanswered `PromptSent` if killed
+                // mid-LLM-call). Reuse it; only create when absent.
+                let existing = self
                     .agents
-                    .create_for_workflow_run_in_op(
-                        &mut op,
-                        project_id,
-                        workflow_id,
-                        run_id,
-                        &agent_name,
-                        attach_sandbox,
-                    )
+                    .find_for_workflow_step_in_op(&mut op, run_id, &agent_name)
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+
+                let (agent, detached_agents) = if let Some(agent) = existing {
+                    (agent, Vec::new())
+                } else {
+                    // Conflict-only steal: detach a non-workflow Writer iff
+                    // we want Write. Same op as create+attach so the
+                    // sandbox is never observed double-attached.
+                    let detached_agents = match attach_sandbox {
+                        Some((sandbox_id, mode)) => self
+                            .agents
+                            .detach_conflicting_writer_in_op(&mut op, sandbox_id, mode)
+                            .await
+                            .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+                        None => Vec::new(),
+                    };
+                    let agent = self
+                        .agents
+                        .create_for_workflow_run_in_op(
+                            &mut op,
+                            project_id,
+                            workflow_id,
+                            run_id,
+                            &agent_name,
+                            attach_sandbox,
+                        )
+                        .await
+                        .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+                    (agent, detached_agents)
+                };
                 op.commit()
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
@@ -489,11 +523,25 @@ impl Executor {
         timeout_seconds: Option<u64>,
     ) -> Result<String, WorkflowError> {
         let agent_subject = agent.auth_subject();
-        let mut rx = self
+        // Resume an in-flight prompt if a prior attempt was killed between
+        // `PromptSent` and `AssistantResponseReceived`. Otherwise emit the
+        // step's prompt as a fresh user input. `pending_prompt` returns
+        // `None` whenever the last response-related event is
+        // `AssistantResponseReceived` (success or recorded error), so a
+        // closed turn flows through to `send_message` as expected.
+        let mut rx = match self
             .agents
-            .send_message(agent_subject, agent.id, prompt)
+            .resume_message(agent_subject.clone(), agent.id)
             .await
-            .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+            .map_err(|e| WorkflowError::Agent(e.to_string()))?
+        {
+            Some(rx) => rx,
+            None => self
+                .agents
+                .send_message(agent_subject, agent.id, prompt)
+                .await
+                .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+        };
 
         // Idle timeout: resets on every streamed event so a busy agent
         // can run indefinitely. Trips only when nothing arrives for the

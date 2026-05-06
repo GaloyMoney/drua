@@ -619,6 +619,33 @@ impl Agents {
         Ok(result.entities)
     }
 
+    /// Lookup the workflow agent for `(run_id, name)`. Re-entrancy primitive
+    /// for [`crate::workflow::Executor`]: on retry we reuse the existing
+    /// agent (preserving its `sandbox_attached` claim and session history)
+    /// instead of creating a fresh one that would collide on the write slot.
+    #[instrument(name = "domain.agent.find_for_workflow_step_in_op", skip(self, op))]
+    pub async fn find_for_workflow_step_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        run_id: WorkflowRunId,
+        name: &str,
+    ) -> Result<Option<Agent>, AgentError> {
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_workflow_run_id_by_created_at_in_op(
+                &mut *op,
+                Some(run_id),
+                query,
+                es_entity::ListDirection::Ascending,
+            )
+            .await?;
+        Ok(result.entities.into_iter().find(|a| a.name == name))
+    }
+
     #[instrument(name = "domain.agent.delete", skip(self, sub))]
     pub async fn delete(
         &self,
@@ -1125,6 +1152,69 @@ impl Agents {
             .next_prompt(id, session::TargetThread::Main)
             .await?;
 
+        self.drive_session_loop(id, agent_subject, tx, prompt_state)
+            .await?;
+
+        Ok(rx)
+    }
+
+    /// Re-drive an in-flight LLM call for a workflow agent on retry. Uses
+    /// [`Sessions::pending_prompt`] which, when the last `PromptSent` has no
+    /// matching `AssistantResponseReceived`, rebuilds the original prompt
+    /// from the persisted definition. Returns `Ok(None)` when the prior turn
+    /// closed cleanly (success or recorded error) — caller should fall back
+    /// to [`Self::send_message`] to start a fresh turn.
+    #[instrument(name = "domain.agent.resume_message", skip(self))]
+    pub async fn resume_message(
+        &self,
+        subject: AuthSubject,
+        id: AgentId,
+    ) -> Result<Option<tokio::sync::mpsc::Receiver<ChatOutputEvent>>, AgentError> {
+        let agent = self.repo.find_by_id(id).await?;
+
+        match &subject {
+            AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
+            AuthSubject::Agent(project, _, _)
+            | AuthSubject::AgentOnBehalfOfUser(_, project, _, _)
+                if *project == agent.project_id => {}
+            _ => return Err(AgentError::Unauthorized),
+        }
+
+        Audit::record_action_if_unset("agent.resume_message");
+        Audit::record_project_id(agent.project_id);
+        Audit::record_agent_id(id);
+        if let Some(wf) = agent.workflow_id {
+            Audit::record_workflow_id(wf);
+        }
+        if let Some(run) = agent.workflow_run_id {
+            Audit::record_workflow_run_id(run);
+        }
+
+        let Some(prompt_state) = self.sessions.pending_prompt(id).await? else {
+            return Ok(None);
+        };
+
+        let agent_subject = match subject.originating_user_id() {
+            Some(user_id) => agent.auth_subject_for_user(user_id),
+            None => agent.auth_subject(),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
+        self.drive_session_loop(id, agent_subject, tx, prompt_state)
+            .await?;
+        Ok(Some(rx))
+    }
+
+    /// Send the initial `prompt_state` to the LLM and spawn the response
+    /// loop. Shared by [`Self::send_message`] (fresh turn) and
+    /// [`Self::resume_message`] (retried turn from a persisted `PromptSent`).
+    async fn drive_session_loop(
+        &self,
+        id: AgentId,
+        agent_subject: AuthSubject,
+        tx: tokio::sync::mpsc::Sender<ChatOutputEvent>,
+        prompt_state: llm::Prompt,
+    ) -> Result<(), AgentError> {
         let model_name = prompt_state.model.clone();
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
         self.prompt_requests
@@ -1278,8 +1368,7 @@ impl Agents {
                 },
             );
         });
-
-        Ok(rx)
+        Ok(())
     }
 }
 

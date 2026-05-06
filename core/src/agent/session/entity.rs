@@ -354,6 +354,32 @@ impl AgentSession {
         self.build_prompt(target, prompt_definition)
     }
 
+    /// Rebuild the most recently sent prompt iff no response followed it.
+    /// `Some` ⇒ the prior turn was interrupted (process killed mid-LLM-call);
+    /// `None` ⇒ the last turn closed cleanly via `AssistantResponseReceived`
+    /// (success or recorded error) or no prompt has been sent yet.
+    /// Pure query — never pushes events.
+    pub fn pending_prompt(&self) -> Result<Option<Prompt>, AgentSessionError> {
+        let pending = self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::PromptSent {
+                thread_id,
+                prompt_definition,
+                ..
+            } => Some(Some((*thread_id, prompt_definition.clone()))),
+            AgentSessionEvent::AssistantResponseReceived { .. } => Some(None),
+            _ => None,
+        });
+        let Some(Some((thread_id, prompt_definition))) = pending else {
+            return Ok(None);
+        };
+        let target = if self.current_main_thread == Some(thread_id) {
+            TargetThread::Main
+        } else {
+            TargetThread::Id(thread_id)
+        };
+        self.build_prompt(target, prompt_definition).map(Some)
+    }
+
     pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) -> Idempotent<()> {
         let latest = self.events.iter_all().rev().find_map(|e| match e {
             AgentSessionEvent::ToolDefsUpdated { tool_defs } => Some(tool_defs),
@@ -1020,6 +1046,86 @@ mod tests {
             }
             _ => panic!("expected User message"),
         }
+    }
+
+    #[test]
+    fn pending_prompt_is_none_for_fresh_session() {
+        let session = new_session();
+        let pending = session.pending_prompt().expect("pending_prompt query");
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn pending_prompt_returns_prompt_when_response_is_missing() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let issued = session
+            .next_prompt(TargetThread::Main)
+            .expect("next_prompt should succeed");
+        hydrate_threads(&mut session);
+
+        let pending = session
+            .pending_prompt()
+            .expect("pending_prompt query")
+            .expect("PromptSent without ARR should yield Some");
+        // The rebuilt prompt mirrors the one emitted by `next_prompt`:
+        // same model, same messages, same system view.
+        assert_eq!(pending.messages.len(), issued.messages.len());
+        assert_eq!(pending.model, issued.model);
+    }
+
+    #[test]
+    fn pending_prompt_is_none_after_assistant_response() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "Hi".into() }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        let pending = session.pending_prompt().expect("pending_prompt query");
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn pending_prompt_is_none_after_recorded_assistant_error() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        // Mirrors `Sessions::assistant_response_failed`: an empty ARR with
+        // `StopReason::Error` closes the turn. `pending_prompt` must treat
+        // it as answered, so resume does not re-drive an LLM call we
+        // already gave up on.
+        session
+            .assistant_response_received(
+                thread_id,
+                Vec::new(),
+                StopReason::Error,
+                Some("rate limit".into()),
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        let pending = session.pending_prompt().expect("pending_prompt query");
+        assert!(pending.is_none());
     }
 
     #[test]

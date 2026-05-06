@@ -60,4 +60,10 @@ pub enum WorkflowError {
     Job(String),
     #[error("WorkflowError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
+    /// Cooperative cancellation. The runner observes the job's shutdown
+    /// signal and returns this between safe checkpoints; the dispatcher
+    /// reschedules the job so the next poller resumes from the persisted
+    /// state.
+    #[error("WorkflowError - Cancelled: graceful shutdown requested")]
+    Cancelled,
 }
