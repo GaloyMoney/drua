@@ -34,6 +34,9 @@ pub enum StreamDelta {
         output_tokens: u32,
         cache_read_input_tokens: u32,
         cache_creation_input_tokens: u32,
+        reasoning_output_tokens: u32,
+        cost_usd: Option<f64>,
+        upstream_inference_cost_usd: Option<f64>,
     },
     Done {
         stop_reason: Option<StopReason>,
@@ -116,11 +119,22 @@ impl StreamAccumulator {
                 output_tokens,
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
+                reasoning_output_tokens,
+                cost_usd,
+                upstream_inference_cost_usd,
             } => {
                 self.usage.input_tokens += *input_tokens;
                 self.usage.output_tokens += *output_tokens;
                 self.usage.cache_read_input_tokens += *cache_read_input_tokens;
                 self.usage.cache_creation_input_tokens += *cache_creation_input_tokens;
+                self.usage.reasoning_output_tokens += *reasoning_output_tokens;
+                if let Some(c) = cost_usd {
+                    self.usage.cost_usd = Some(self.usage.cost_usd.unwrap_or(0.0) + *c);
+                }
+                if let Some(c) = upstream_inference_cost_usd {
+                    self.usage.upstream_inference_cost_usd =
+                        Some(self.usage.upstream_inference_cost_usd.unwrap_or(0.0) + *c);
+                }
             }
             StreamDelta::Done { stop_reason } => {
                 self.stop_reason = *stop_reason;
@@ -195,6 +209,9 @@ mod tests {
             output_tokens: 0,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         acc.process(&StreamDelta::TextDelta {
             text: "Hello".to_string(),
@@ -207,6 +224,9 @@ mod tests {
             output_tokens: 5,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
@@ -244,6 +264,9 @@ mod tests {
             output_tokens: 20,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
@@ -299,6 +322,9 @@ mod tests {
             output_tokens: 0,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         // Thinking
         acc.process(&StreamDelta::ThinkingDelta {
@@ -322,6 +348,9 @@ mod tests {
             output_tokens: 30,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
@@ -419,6 +448,9 @@ mod tests {
             output_tokens: 0,
             cache_read_input_tokens: 80,
             cache_creation_input_tokens: 20,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         acc.process(&StreamDelta::TextDelta {
             text: "hi".to_string(),
@@ -428,6 +460,9 @@ mod tests {
             output_tokens: 50,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            cost_usd: None,
+            upstream_inference_cost_usd: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),

@@ -203,6 +203,10 @@ struct PendingUsage {
     input_tokens: u32,
     output_tokens: u32,
     cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    reasoning_output_tokens: u32,
+    cost_usd: Option<f64>,
+    upstream_inference_cost_usd: Option<f64>,
 }
 
 impl DeltaSynthesizer {
@@ -228,15 +232,28 @@ impl DeltaSynthesizer {
         let mut deltas = Vec::new();
 
         if let Some(usage) = &chunk.usage {
-            let cached_tokens = usage
+            let (cache_read, cache_write) = usage
                 .prompt_tokens_details
                 .as_ref()
-                .map(|details| details.cached_tokens)
+                .map(|d| (d.cached_tokens, d.cache_write_tokens))
+                .unwrap_or((0, 0));
+            let reasoning = usage
+                .completion_tokens_details
+                .as_ref()
+                .map(|d| d.reasoning_tokens)
                 .unwrap_or(0);
+            let upstream = usage
+                .cost_details
+                .as_ref()
+                .and_then(|d| d.upstream_inference_cost);
             self.pending_usage = Some(PendingUsage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
-                cache_read_input_tokens: cached_tokens,
+                cache_read_input_tokens: cache_read,
+                cache_creation_input_tokens: cache_write,
+                reasoning_output_tokens: reasoning,
+                cost_usd: usage.cost,
+                upstream_inference_cost_usd: upstream,
             });
         }
 
@@ -317,7 +334,10 @@ impl DeltaSynthesizer {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
                 cache_read_input_tokens: u.cache_read_input_tokens,
-                cache_creation_input_tokens: 0,
+                cache_creation_input_tokens: u.cache_creation_input_tokens,
+                reasoning_output_tokens: u.reasoning_output_tokens,
+                cost_usd: u.cost_usd,
+                upstream_inference_cost_usd: u.upstream_inference_cost_usd,
             }],
             None => Vec::new(),
         }
@@ -495,6 +515,7 @@ mod tests {
                 output_tokens: 5,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                ..
             }
         )));
         assert!(deltas.iter().any(|d| matches!(
@@ -598,6 +619,86 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn synthesizer_extracts_openrouter_cost_and_cache_write() {
+        let mut synth = DeltaSynthesizer::new();
+
+        // OpenRouter routing an Anthropic-backed model: cache_write_tokens
+        // populated, plus top-level cost and reasoning tokens.
+        synth
+            .process_chunk(r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#)
+            .unwrap();
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1500,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":400},"completion_tokens_details":{"reasoning_tokens":120},"cost":0.00785,"cost_details":{"upstream_inference_cost":0.00712}}}"#,
+            )
+            .unwrap();
+
+        let usage = deltas
+            .iter()
+            .find_map(|d| match d {
+                StreamDelta::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                    reasoning_output_tokens,
+                    cost_usd,
+                    upstream_inference_cost_usd,
+                } => Some((
+                    *input_tokens,
+                    *output_tokens,
+                    *cache_read_input_tokens,
+                    *cache_creation_input_tokens,
+                    *reasoning_output_tokens,
+                    *cost_usd,
+                    *upstream_inference_cost_usd,
+                )),
+                _ => None,
+            })
+            .expect("usage delta");
+        assert_eq!(usage.0, 1500);
+        assert_eq!(usage.1, 300);
+        assert_eq!(usage.2, 900);
+        assert_eq!(usage.3, 400);
+        assert_eq!(usage.4, 120);
+        assert_eq!(usage.5, Some(0.00785));
+        assert_eq!(usage.6, Some(0.00712));
+    }
+
+    #[test]
+    fn synthesizer_direct_openai_leaves_cost_none() {
+        let mut synth = DeltaSynthesizer::new();
+        synth
+            .process_chunk(r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#)
+            .unwrap();
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}"#,
+            )
+            .unwrap();
+
+        let (cache_write, cost, upstream) = deltas
+            .iter()
+            .find_map(|d| match d {
+                StreamDelta::Usage {
+                    cache_creation_input_tokens,
+                    cost_usd,
+                    upstream_inference_cost_usd,
+                    ..
+                } => Some((
+                    *cache_creation_input_tokens,
+                    *cost_usd,
+                    *upstream_inference_cost_usd,
+                )),
+                _ => None,
+            })
+            .expect("usage delta");
+        assert_eq!(cache_write, 0, "direct OpenAI never has cache_write");
+        assert_eq!(cost, None, "direct OpenAI never has cost");
+        assert_eq!(upstream, None);
     }
 
     #[test]

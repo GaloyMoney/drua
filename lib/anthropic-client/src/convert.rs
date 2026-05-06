@@ -215,6 +215,7 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         output_tokens: acc.usage.output_tokens as u32,
         cache_read_input_tokens: acc.usage.cache_read_tokens as u32,
         cache_creation_input_tokens: acc.usage.cache_write_tokens as u32,
+        ..Default::default()
     };
 
     PromptResponse {
@@ -294,6 +295,9 @@ impl AnthropicDeltaConverter {
                     output_tokens: 0,
                     cache_read_input_tokens,
                     cache_creation_input_tokens,
+                    reasoning_output_tokens: 0,
+                    cost_usd: None,
+                    upstream_inference_cost_usd: None,
                 }]
             }
             AnthropicStreamEvent::ContentBlockStart {
@@ -356,6 +360,9 @@ impl AnthropicDeltaConverter {
                         output_tokens: u.output_tokens as u32,
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
+                        reasoning_output_tokens: 0,
+                        cost_usd: None,
+                        upstream_inference_cost_usd: None,
                     });
                 }
                 let stop_reason = delta.stop_reason.map(|sr| match sr {

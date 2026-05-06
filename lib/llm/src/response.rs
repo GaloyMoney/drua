@@ -25,6 +25,17 @@ pub struct Usage {
     pub cache_read_input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
+    /// Subset of `output_tokens` spent on reasoning (OpenAI o-series,
+    /// OpenRouter `completion_tokens_details.reasoning_tokens`).
+    #[serde(default)]
+    pub reasoning_output_tokens: u32,
+    /// Provider-reported USD cost for this call. Populated when the upstream
+    /// returns it (OpenRouter always; direct Anthropic/OpenAI never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Upstream provider's actual inference cost (OpenRouter BYOK requests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_inference_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

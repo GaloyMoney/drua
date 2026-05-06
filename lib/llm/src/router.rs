@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::provider::LlmProvider;
 use crate::request::PromptError;
+use crate::response::Usage;
 use crate::{Prompt, StreamHandle};
 
 #[derive(Clone)]
@@ -31,6 +32,10 @@ pub struct AttemptRecord {
     pub model_id: String,
     pub provider_name: String,
     pub outcome: AttemptOutcome,
+    /// Populated only on `Succeeded`, and only after the consumer drains the
+    /// stream and back-fills via `WalkOutcome::record_winning_usage`.
+    /// Walker can't observe stream Usage itself — the receiver is handed off.
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +50,20 @@ pub struct WalkOutcome {
     pub stream: StreamHandle,
     pub model_used: String,
     pub attempts: Vec<AttemptRecord>,
+}
+
+impl WalkOutcome {
+    /// Back-fill the winning (last `Succeeded`) attempt's usage once the
+    /// caller has finished draining the stream.
+    pub fn record_winning_usage(attempts: &mut [AttemptRecord], usage: Usage) {
+        if let Some(a) = attempts
+            .iter_mut()
+            .rev()
+            .find(|a| matches!(a.outcome, AttemptOutcome::Succeeded))
+        {
+            a.usage = Some(usage);
+        }
+    }
 }
 
 /// First `Ok` from `send_prompt_streaming` wins. Mid-stream errors are
@@ -70,6 +89,7 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
                     model_id: entry.model_id.clone(),
                     provider_name: entry.provider.name().to_string(),
                     outcome: AttemptOutcome::Succeeded,
+                    usage: None,
                 });
                 tracing::info!(
                     model = %entry.model_id,
@@ -88,6 +108,7 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
                     model_id: entry.model_id.clone(),
                     provider_name: entry.provider.name().to_string(),
                     outcome: AttemptOutcome::Terminal(e.to_string()),
+                    usage: None,
                 });
                 tracing::error!(
                     model = %entry.model_id,
@@ -108,6 +129,7 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
                     model_id: entry.model_id.clone(),
                     provider_name: entry.provider.name().to_string(),
                     outcome: AttemptOutcome::Transient(e.to_string()),
+                    usage: None,
                 });
                 last_err = Some(e);
             }
@@ -237,5 +259,31 @@ mod tests {
         let chain: Vec<ChainEntry> = vec![];
         let err = walk(&chain, &Prompt::default()).await.unwrap_err();
         assert!(matches!(err, PromptError::Provider(_)));
+    }
+
+    #[tokio::test]
+    async fn record_winning_usage_attaches_to_succeeded_attempt() {
+        let bad = Arc::new(FailingProvider::new(
+            "bad",
+            PromptError::transient(TransientKind::ServerError, "503"),
+        ));
+        let good = Arc::new(OkProvider { name: "openai" });
+        let chain = vec![entry("primary", bad), entry("fallback", good)];
+        let mut outcome = walk(&chain, &Prompt::default()).await.unwrap();
+
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 80,
+            cost_usd: Some(0.0042),
+            ..Default::default()
+        };
+        WalkOutcome::record_winning_usage(&mut outcome.attempts, usage);
+
+        assert!(outcome.attempts[0].usage.is_none(), "transient stays None");
+        let winning = outcome.attempts[1].usage.expect("succeeded got usage");
+        assert_eq!(winning.input_tokens, 100);
+        assert_eq!(winning.cache_read_input_tokens, 80);
+        assert_eq!(winning.cost_usd, Some(0.0042));
     }
 }
