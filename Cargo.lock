@@ -4726,6 +4726,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry_sdk",
+ "sandbox",
  "serde",
  "serde_json",
  "serde_yaml",

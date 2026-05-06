@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use sandbox::bash_protocol::{BashCommandInput, BashInputError};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
@@ -71,13 +72,16 @@ async fn execute(
     State(session): State<SharedSession>,
     Json(req): Json<ExecuteRequest>,
 ) -> Json<ExecuteResponse> {
-    let result = match req.tool.as_str() {
-        "bash" => execute_bash(&session, &req.input).await,
-        "str_replace_based_edit_tool" => execute_text_editor(&session, &req.input).await,
-        "Grep" => execute_grep(&session, &req.input).await,
-        "Glob" => execute_glob(&session, &req.input).await,
-        "Move" => execute_move(&session, &req.input).await,
-        "Delete" => execute_delete(&session, &req.input).await,
+    let ExecuteRequest { tool, input } = req;
+    // Bash moves `input` into a typed deser; other arms only borrow it,
+    // so each tool pays only for what it actually needs.
+    let result = match tool.as_str() {
+        "bash" => execute_bash(&session, input).await,
+        "str_replace_based_edit_tool" => execute_text_editor(&session, &input).await,
+        "Grep" => execute_grep(&session, &input).await,
+        "Glob" => execute_glob(&session, &input).await,
+        "Move" => execute_move(&session, &input).await,
+        "Delete" => execute_delete(&session, &input).await,
         other => Err(format!("Unknown tool: {other}")),
     };
 
@@ -96,29 +100,24 @@ async fn execute(
 // Bash tool (Anthropic bash_20250124): commands run through a long-lived
 // shell session so background processes survive between calls.
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const MAX_TIMEOUT_MS: u64 = 10_800_000;
+/// Wall-clock timeout for the simple grep/glob handlers. Bash has its
+/// own default on [`BashCommandInput::DEFAULT_TIMEOUT_MS`].
+const GREP_GLOB_TIMEOUT_MS: u64 = 120_000;
 
-async fn execute_bash(
-    session: &SharedSession,
-    input: &serde_json::Value,
-) -> Result<String, String> {
-    if input
-        .get("restart")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+async fn execute_bash(session: &SharedSession, input: serde_json::Value) -> Result<String, String> {
+    let input: BashCommandInput =
+        serde_json::from_value(input).map_err(|e| format!("Invalid bash input: {e}"))?;
+
+    if input.restart {
         session.restart().await?;
         return Ok("Bash session restarted.".to_string());
     }
 
+    let timeout_ms = input.validated_timeout_ms().map_err(|e| e.to_string())?;
     let command = input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'command' field")?;
-
-    let timeout_ms = bash_timeout_ms(input)?;
-    let result = session.execute(command, timeout_ms).await?;
+        .command
+        .ok_or_else(|| BashInputError::MissingCommand.to_string())?;
+    let result = session.execute(&command, timeout_ms).await?;
 
     if result.shell_died {
         return Err(format!(
@@ -134,28 +133,6 @@ async fn execute_bash(
     } else {
         Err(format!("Exit code {}\n{}", result.exit_code, result.output))
     }
-}
-
-fn bash_timeout_ms(input: &serde_json::Value) -> Result<u64, String> {
-    let Some(raw) = input.get("timeout_ms") else {
-        return Ok(DEFAULT_TIMEOUT_MS);
-    };
-
-    let timeout_ms = raw
-        .as_u64()
-        .ok_or("'timeout_ms' must be a positive integer number of milliseconds")?;
-
-    if timeout_ms == 0 {
-        return Err("'timeout_ms' must be greater than 0".to_string());
-    }
-
-    if timeout_ms > MAX_TIMEOUT_MS {
-        return Err(format!(
-            "'timeout_ms' must be at most {MAX_TIMEOUT_MS} milliseconds"
-        ));
-    }
-
-    Ok(timeout_ms)
 }
 
 /// Async wrapper that resolves `path` against the session's current
@@ -544,11 +521,11 @@ async fn execute_grep(
 
     let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
-        Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        Duration::from_millis(GREP_GLOB_TIMEOUT_MS),
         Command::new("rg").args(&args).current_dir(&scope).output(),
     )
     .await
-    .map_err(|_| format!("Grep timed out after {DEFAULT_TIMEOUT_MS}ms"))?
+    .map_err(|_| format!("Grep timed out after {GREP_GLOB_TIMEOUT_MS}ms"))?
     .map_err(|e| format!("Failed to execute rg: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -584,7 +561,7 @@ async fn execute_glob(
 
     let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
-        Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        Duration::from_millis(GREP_GLOB_TIMEOUT_MS),
         Command::new("rg")
             .args([
                 "--files",
@@ -596,7 +573,7 @@ async fn execute_glob(
             .output(),
     )
     .await
-    .map_err(|_| format!("Glob timed out after {DEFAULT_TIMEOUT_MS}ms"))?
+    .map_err(|_| format!("Glob timed out after {GREP_GLOB_TIMEOUT_MS}ms"))?
     .map_err(|e| format!("Failed to execute rg: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1135,7 +1112,7 @@ mod tests {
         init_test_workspace();
         let session = test_session();
         let input = serde_json::json!({"command": "echo hello"});
-        let result = execute_bash(&session, &input).await;
+        let result = execute_bash(&session, input).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("hello"));
     }
@@ -1146,7 +1123,7 @@ mod tests {
         let session = test_session();
         // Use a sub-shell to get non-zero exit without killing the session
         let input = serde_json::json!({"command": "bash -c 'exit 42'"});
-        let result = execute_bash(&session, &input).await;
+        let result = execute_bash(&session, input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Exit code 42"));
     }
@@ -1156,7 +1133,7 @@ mod tests {
         init_test_workspace();
         let session = test_session();
         let input = serde_json::json!({"restart": true});
-        let result = execute_bash(&session, &input).await;
+        let result = execute_bash(&session, input).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("restarted"));
     }
@@ -1166,33 +1143,62 @@ mod tests {
         init_test_workspace();
         let session = test_session();
         let input = serde_json::json!({});
-        let result = execute_bash(&session, &input).await;
+        let result = execute_bash(&session, input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("command"));
     }
 
-    #[test]
-    fn bash_timeout_ms_defaults_and_validates() {
-        assert_eq!(
-            bash_timeout_ms(&serde_json::json!({})).unwrap(),
-            DEFAULT_TIMEOUT_MS
+    #[tokio::test]
+    async fn bash_rejects_string_timeout_ms_at_parse() {
+        init_test_workspace();
+        let session = test_session();
+        let input = serde_json::json!({"command": "echo hi", "timeout_ms": "1000"});
+        let err = execute_bash(&session, input)
+            .await
+            .expect_err("string timeout_ms should fail at parse");
+        assert!(
+            err.contains("Invalid bash input"),
+            "expected parse error, got: {err}"
         );
-        assert_eq!(
-            bash_timeout_ms(&serde_json::json!({"timeout_ms": 2500})).unwrap(),
-            2500
-        );
+    }
 
-        let zero = bash_timeout_ms(&serde_json::json!({"timeout_ms": 0}))
+    #[tokio::test]
+    async fn bash_rejects_unknown_field() {
+        init_test_workspace();
+        let session = test_session();
+        let input = serde_json::json!({"command": "echo hi", "timeoutMs": 1000});
+        let err = execute_bash(&session, input)
+            .await
+            .expect_err("unknown field should fail at parse");
+        assert!(
+            err.contains("Invalid bash input"),
+            "expected parse error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_rejects_zero_timeout_ms() {
+        init_test_workspace();
+        let session = test_session();
+        let input = serde_json::json!({"command": "echo hi", "timeout_ms": 0});
+        let err = execute_bash(&session, input)
+            .await
             .expect_err("zero timeout should be rejected");
-        assert!(zero.contains("greater than 0"));
+        assert!(err.contains("greater than 0"), "got: {err}");
+    }
 
-        let too_large = bash_timeout_ms(&serde_json::json!({"timeout_ms": MAX_TIMEOUT_MS + 1}))
-            .expect_err("timeout above max should be rejected");
-        assert!(too_large.contains("at most"));
-
-        let not_integer = bash_timeout_ms(&serde_json::json!({"timeout_ms": "1000"}))
-            .expect_err("non-integer timeout should be rejected");
-        assert!(not_integer.contains("positive integer"));
+    #[tokio::test]
+    async fn bash_rejects_too_large_timeout_ms() {
+        init_test_workspace();
+        let session = test_session();
+        let input = serde_json::json!({
+            "command": "echo hi",
+            "timeout_ms": BashCommandInput::MAX_TIMEOUT_MS + 1,
+        });
+        let err = execute_bash(&session, input)
+            .await
+            .expect_err("too-large timeout should be rejected");
+        assert!(err.contains("at most"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1204,7 +1210,7 @@ mod tests {
             "timeout_ms": 50,
         });
 
-        let result = execute_bash(&session, &input).await;
+        let result = execute_bash(&session, input).await;
         let err = result.expect_err("command should hit custom timeout");
         assert!(
             err.contains("timed out"),
@@ -1224,7 +1230,7 @@ mod tests {
         let input = serde_json::json!({
             "command": "echo on-stdout; echo on-stderr >&2; exec false",
         });
-        let result = execute_bash(&session, &input).await;
+        let result = execute_bash(&session, input).await;
         let err = result.expect_err("shell death should surface as Err");
         assert!(
             err.contains("Shell exited before completing the command"),

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::bash_protocol::{BashCommandInput, BashCommandOutput};
 use crate::error::InstanceError;
 use crate::types::{Sandbox, SandboxMode};
 
@@ -107,6 +108,45 @@ impl InstanceClient {
             .await?;
         Ok(resp)
     }
+
+    /// Typed wrapper over `/execute` for the `bash` tool. Same wire as
+    /// [`Self::execute`] with `tool = "bash"`; the typed surface lets
+    /// callers construct/parse the bash IO by name instead of hand-
+    /// rolling `serde_json::Value` objects. Skips the intermediate
+    /// `serde_json::Value` allocation that `execute()` would force.
+    #[instrument(name = "sandbox.instance.execute_bash", skip_all)]
+    pub async fn execute_bash(
+        &self,
+        input: &BashCommandInput,
+    ) -> Result<BashCommandOutput, InstanceError> {
+        let req = ExecuteRequestRef {
+            tool: "bash",
+            input,
+        };
+        let resp = self
+            .http
+            .post(format!("{}/execute", self.base_url))
+            .headers(current_trace_headers())
+            .json(&req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ExecuteResponse>()
+            .await?;
+        Ok(BashCommandOutput {
+            output: resp.output,
+            is_error: resp.is_error,
+        })
+    }
+}
+
+/// Borrowed mirror of [`ExecuteRequest`] used by typed wrappers like
+/// [`InstanceClient::execute_bash`] to serialize directly to the wire
+/// without going through an intermediate `serde_json::Value`.
+#[derive(Serialize)]
+struct ExecuteRequestRef<'a, T: Serialize> {
+    tool: &'a str,
+    input: &'a T,
 }
 
 #[derive(Debug, Clone, Serialize)]

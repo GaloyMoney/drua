@@ -8,6 +8,7 @@ axum.workspace = true
 drua-tracing-utils = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-http = "0.31"
+sandbox = { workspace = true }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
