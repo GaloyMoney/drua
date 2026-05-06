@@ -65,11 +65,7 @@ fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     })
 }
 
-/// True iff `path` is a "bare" space URI naming no slug — `space:`,
-/// `space:/`, `space://`, etc. These are routed to the
-/// `list_mounted_spaces` codepath instead of per-space resolution so
-/// the agent can discover what's mounted without needing the
-/// `<spaces>` system-prompt block.
+/// True for slugless space URIs (`space:`, `space:/`, etc.); routed to `list_mounted_spaces` for runtime discovery.
 fn is_bare_space_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("space:") else {
         return false;
@@ -111,13 +107,8 @@ impl SpaceFs {
         !slug.is_empty()
     }
 
-    /// Parses `path`, runs the auth gate, normalises and validates
-    /// the rel-path, and bundles the resolved `(Space, rel_path)`.
-    /// `Ok(None)` means `path` isn't a space path (caller falls
-    /// through to the sandbox). A `space:`-prefixed path that doesn't
-    /// parse — e.g. empty slug — is `BadRequest`, not silent
-    /// fall-through, so a malformed input doesn't masquerade as
-    /// "not authorized" downstream.
+    /// `Ok(None)` for non-`space:` paths (caller falls through to sandbox).
+    /// `space:`-prefixed paths that don't parse return `BadRequest`, so malformed input never masquerades as an auth denial.
     async fn resolve(
         &self,
         sub: &AuthSubject,
@@ -202,13 +193,8 @@ impl SpaceFs {
         Ok(Some(FileView::File(apply_view_range(&content, view_range))))
     }
 
-    /// List a directory under a `space:` path. Bare `space:` (no slug)
-    /// returns the slugs of mounted spaces — see `list_mounted_spaces`.
-    /// Paths that resolve to no entries return an empty listing rather
-    /// than an Io error: an "implicit" subdirectory naturally vanishes
-    /// when its last backing file is removed, and that's a clean
-    /// outcome, not a tool failure (it shouldn't pollute audit error
-    /// counts).
+    /// Bare `space:` returns mounted-space slugs (see `list_mounted_spaces`).
+    /// Paths resolving to no entries return an empty listing (not an Io error) so post-delete LS doesn't pollute audit error counts.
     #[instrument(name = "library.space_fs.view_dir", skip(self, sub))]
     pub async fn view_dir(
         &self,

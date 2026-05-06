@@ -469,11 +469,7 @@ impl Projects {
         Ok(self.spaces.find_by_ids(&project.mounted_spaces).await?)
     }
 
-    /// Spaces this subject can address: admins see every space in the
-    /// library; project-bound subjects see only spaces mounted in
-    /// their carrying project. Mirrors the auth shape of
-    /// `space_for_subject` but with no slug — used by the bare
-    /// `LS space:` discovery surface.
+    /// Spaces the subject can address: admins see all; project subjects see their `mounted_spaces`.
     #[instrument(name = "domain.project.list_visible_spaces", skip(self, sub))]
     pub async fn list_visible_spaces(&self, sub: &AuthSubject) -> Result<Vec<Space>, ProjectError> {
         if sub.is_admin() {
@@ -482,6 +478,9 @@ impl Projects {
         let project_id = sub
             .project_id()
             .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
+        sub.can(AuthVerb::Read, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.list_visible_spaces");
+        Audit::record_project_id(project_id);
         let project = self.repo.find_by_id(project_id).await?;
         if project.mounted_spaces.is_empty() {
             return Ok(Vec::new());
