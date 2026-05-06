@@ -38,11 +38,18 @@ galoyAgents:
     ## LLM providers and their models. Each model declares token limits
     ## used for compaction and prompt sizing.
     providers:
-      - name: anthropic
+      - name: openai
+        baseUrl: https://openrouter.ai/api
         models:
-          - name: claude-haiku-4-5-20251001
-            maxTokensPerResponse: 4096
-            contextWindowTokens: 200000
+          - name: google/gemini-2.5-flash
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1000000
+          - name: deepseek/deepseek-v3.2
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 131072
+          - name: openai/gpt-5-mini
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 400000
     ## Per-role defaults applied when an agent with that role is created.
     ## Both `projectLead` and `agent` are REQUIRED — the binary refuses
     ## to start if either `agents.builtin_roles.project_lead` or
@@ -59,11 +66,10 @@ galoyAgents:
     ## WorkflowDefinition entity itself rather than a separate config key.
     agents:
       defaultChain:
-        primary: { name: "claude-haiku-4-5-20251001" }
-        ## Add fallbacks once the registry has multiple models, e.g.:
-        # fallbacks:
-        #   - { name: "anthropic/claude-sonnet-4-6" }
-        #   - { name: "openai/gpt-4o" }
+        primary: { name: "google/gemini-2.5-flash", maxTokens: 8192 }
+        fallbacks:
+          - { name: "deepseek/deepseek-v3.2", maxTokens: 8192 }
+          - { name: "openai/gpt-5-mini", maxTokens: 8192 }
       projectLead:
         ## Optional per-role chain override:
         # chain:

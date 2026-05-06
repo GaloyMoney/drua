@@ -29,7 +29,7 @@ data:
     providers:
     {{- range . }}
       - name: {{ .name | quote }}
-        {{- with .base_url }}
+        {{- with .baseUrl }}
         base_url: {{ . | quote }}
         {{- end }}
         models:
