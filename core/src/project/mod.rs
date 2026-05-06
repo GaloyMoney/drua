@@ -209,8 +209,21 @@ impl Projects {
         Audit::record_action_if_unset("project.delete");
         Audit::record_project_id(id);
         let mut op = self.repo.begin_op().await?;
+        // Snapshot agent ids before the cascade so we can wipe the
+        // in-memory `Agents::context_cache` post-commit. The cache is
+        // keyed by AgentId; once delete_in_op runs the entries are
+        // unreachable through the DB but still occupy heap.
+        let agent_ids: Vec<AgentId> = self
+            .agents
+            .list_for_project_in_op(&mut op, id)
+            .await
+            .map(|agents| agents.into_iter().map(|a| a.id).collect())
+            .unwrap_or_default();
         let project = self.delete_in_op(&mut op, sub, id).await?;
         op.commit().await?;
+        for agent_id in agent_ids {
+            self.agents.invalidate_agent_cache(agent_id);
+        }
         Ok(project)
     }
 
@@ -228,12 +241,6 @@ impl Projects {
             return Ok(project);
         }
 
-        // Tear down pods/processes via the admin client before touching DB
-        // state so in-flight sandbox work stops first.
-        if let Err(e) = self.sandboxes.suspend_for_project_in_op(op, id).await {
-            tracing::warn!(error = %e, "failed to suspend sandboxes during project delete");
-        }
-
         let agent_list = self.agents.list_for_project_in_op(op, id).await?;
         for agent in &agent_list {
             if let Err(e) = self.agents.delete_in_op(op, agent.id).await {
@@ -243,6 +250,20 @@ impl Projects {
                     "failed to delete agent during project delete"
                 );
             }
+        }
+
+        // Sandbox tear-down runs after agent delete so each agent's
+        // detach event lands while the sandbox row is still live;
+        // `cascade_delete_for_project_in_op` then deletes the pod,
+        // tears down PVCs (workspace + nix-store), and soft-deletes
+        // the row so we don't leave zombie sandboxes pointing at a
+        // tombstoned project.
+        if let Err(e) = self
+            .sandboxes
+            .cascade_delete_for_project_in_op(op, id)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to cascade-delete sandboxes during project delete");
         }
 
         if let Err(e) = self.skills.delete_for_project_in_op(op, id).await {

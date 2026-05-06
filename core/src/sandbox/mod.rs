@@ -721,39 +721,80 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Best-effort: per-sandbox failures are logged and skipped.
-    #[instrument(name = "domain.sandbox.suspend_for_project_in_op", skip(self, op))]
-    pub async fn suspend_for_project_in_op(
+    /// Project-cascade entry point: tears down every sandbox owned by
+    /// `project_id` end-to-end — pod / local process via the admin
+    /// client, persistent storage (PVCs / `.sandboxes/<name>/`) via
+    /// `delete_pvcs`, and the DB row via the repo's
+    /// `soft_without_queries` cascade. Per-sandbox admin failures are
+    /// logged and skipped so a transient k8s blip can't strand the
+    /// whole project delete; the row flip still lands so the entity
+    /// stops being addressable.
+    #[instrument(
+        name = "domain.sandbox.cascade_delete_for_project_in_op",
+        skip(self, op)
+    )]
+    pub async fn cascade_delete_for_project_in_op(
         &self,
         op: &mut DbOp<'_>,
         project_id: ProjectId,
     ) -> Result<(), SandboxError> {
-        let query = PaginatedQueryArgs {
-            first: 100,
-            after: None,
-        };
-        let result = self
-            .repo
-            .list_for_project_id_by_created_at_in_op(
-                &mut *op,
-                project_id,
-                query,
-                ListDirection::Descending,
-            )
-            .await?;
-        for sandbox in result.entities {
-            if sandbox.state == SandboxState::Suspended {
-                continue;
+        for sandbox in self.list_all_for_project_in_op(op, project_id).await? {
+            let resource_name = sandbox.resource_name();
+            if sandbox.state != SandboxState::Suspended {
+                if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox.id,
+                        sandbox = %resource_name,
+                        error = %e,
+                        "admin delete_sandbox failed during project cascade"
+                    );
+                }
             }
-            if let Err(e) = self.suspend_in_op(op, sandbox.id).await {
+            if let Err(e) = self.admin.delete_pvcs(&resource_name).await {
                 tracing::warn!(
                     sandbox_id = %sandbox.id,
+                    sandbox = %resource_name,
                     error = %e,
-                    "failed to suspend sandbox during project delete"
+                    "admin delete_pvcs failed during project cascade"
                 );
             }
         }
+        self.repo
+            .cascade_delete_for_project_in_op(op, project_id)
+            .await?;
         Ok(())
+    }
+
+    /// Drains every page of `list_for_project_id_by_created_at_in_op`
+    /// — used by the cascade variants that *must not* miss rows.
+    async fn list_all_for_project_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        project_id: ProjectId,
+    ) -> Result<Vec<Sandbox>, SandboxError> {
+        const PAGE_SIZE: usize = 100;
+        let mut all = Vec::new();
+        let mut query = PaginatedQueryArgs {
+            first: PAGE_SIZE,
+            after: None,
+        };
+        loop {
+            let mut result = self
+                .repo
+                .list_for_project_id_by_created_at_in_op(
+                    &mut *op,
+                    project_id,
+                    query,
+                    ListDirection::Descending,
+                )
+                .await?;
+            all.append(&mut result.entities);
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     #[instrument(name = "domain.sandbox.suspend", skip(self, sub))]
