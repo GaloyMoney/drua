@@ -571,8 +571,8 @@ impl GitEngine {
                     Err(_) => break,    // window elapsed
                 }
             }
-            let any_ok = Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch)
-                .await;
+            let any_ok =
+                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch).await;
             if any_ok {
                 local_commit_notify.notify_waiters();
             }
