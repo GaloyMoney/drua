@@ -65,6 +65,14 @@ fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     })
 }
 
+/// True for slugless space URIs (`space:`, `space:/`, etc.); routed to `list_mounted_spaces` for runtime discovery.
+fn is_bare_space_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("space:") else {
+        return false;
+    };
+    rest.trim_matches('/').is_empty()
+}
+
 /// Auth-gated, resolved view of a `space:<slug>/<rel>` path.
 struct Resolved {
     space: Space,
@@ -99,21 +107,47 @@ impl SpaceFs {
         !slug.is_empty()
     }
 
-    /// Parses `path`, runs the auth gate, normalises and validates
-    /// the rel-path, and bundles the resolved `(Space, rel_path)`.
-    /// `Ok(None)` means `path` isn't a space path.
+    /// `Ok(None)` for non-`space:` paths (caller falls through to sandbox).
+    /// `space:`-prefixed paths that don't parse return `BadRequest`, so malformed input never masquerades as an auth denial.
     async fn resolve(
         &self,
         sub: &AuthSubject,
         path: &str,
     ) -> Result<Option<Resolved>, ProjectError> {
         let Some(sref) = parse_space_path(path) else {
+            if path.starts_with("space:") {
+                return Err(SpaceError::BadRequest {
+                    reason: format!(
+                        "'{path}' is not a valid space URI; expected 'space:<slug>' or 'space:<slug>/<rel>'"
+                    ),
+                }
+                .into());
+            }
             return Ok(None);
         };
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
         Ok(Some(Resolved { space, rel_path }))
+    }
+
+    /// Slugs of every space the subject can address — admins see all
+    /// spaces in the library; project subjects see their project's
+    /// `mounted_spaces`. Returned as `space:<slug>/` directory entries
+    /// so the LS surface formats them like any other listing.
+    #[instrument(name = "library.space_fs.list_mounted_spaces", skip(self, sub))]
+    pub async fn list_mounted_spaces(
+        &self,
+        sub: &AuthSubject,
+    ) -> Result<Vec<String>, ProjectError> {
+        Audit::record_action_if_unset("space.list_mounted");
+        let spaces = self.projects.list_visible_spaces(sub).await?;
+        let mut entries: Vec<String> = spaces
+            .into_iter()
+            .map(|s| format!("space:{}/", s.slug))
+            .collect();
+        entries.sort();
+        Ok(entries)
     }
 
     /// View a file (or list a directory) under a `space:` path. Reads
@@ -159,13 +193,17 @@ impl SpaceFs {
         Ok(Some(FileView::File(apply_view_range(&content, view_range))))
     }
 
-    /// List a directory under a `space:` path.
+    /// Bare `space:` returns mounted-space slugs (see `list_mounted_spaces`).
+    /// Paths resolving to no entries return an empty listing (not an Io error) so post-delete LS doesn't pollute audit error counts.
     #[instrument(name = "library.space_fs.view_dir", skip(self, sub))]
     pub async fn view_dir(
         &self,
         sub: &AuthSubject,
         path: &str,
     ) -> Result<Option<Vec<String>>, ProjectError> {
+        if is_bare_space_path(path) {
+            return Ok(Some(self.list_mounted_spaces(sub).await?));
+        }
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
@@ -174,7 +212,7 @@ impl SpaceFs {
             .list_dir(&resolved.space.slug, &resolved.rel_path)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
-            .ok_or_else(|| io_err(format!("no such directory: {}", resolved.rel_path)))?;
+            .unwrap_or_default();
         Ok(Some(format_dir(entries)))
     }
 
@@ -638,6 +676,47 @@ mod tests {
     fn parse_rejects_empty_slug() {
         assert!(parse_space_path("space:").is_none());
         assert!(parse_space_path("space:/foo").is_none());
+    }
+
+    #[test]
+    fn bare_space_path_matches_only_slugless_uri() {
+        assert!(is_bare_space_path("space:"));
+        assert!(is_bare_space_path("space:/"));
+        assert!(is_bare_space_path("space://"));
+        assert!(!is_bare_space_path("space:demo"));
+        assert!(!is_bare_space_path("space:demo/"));
+        assert!(!is_bare_space_path("space:/foo"));
+        assert!(!is_bare_space_path(""));
+        assert!(!is_bare_space_path("/etc/passwd"));
+    }
+
+    #[test]
+    fn bad_request_error_stringifies_distinctly() {
+        let err = SpaceError::BadRequest {
+            reason: "'space:/foo' is not a valid space URI; expected 'space:<slug>' or 'space:<slug>/<rel>'".into(),
+        };
+        let s = err.to_string();
+        assert!(
+            s.contains("BadRequest"),
+            "expected error to surface BadRequest token, got: {s}"
+        );
+        assert!(!s.contains("Unauthorized"), "got: {s}");
+        assert!(!s.contains("NotFound"), "got: {s}");
+    }
+
+    #[test]
+    fn not_found_and_bad_request_are_distinct_strings() {
+        let nf = SpaceError::NotFound {
+            slug: "ghost".into(),
+        }
+        .to_string();
+        let br = SpaceError::BadRequest {
+            reason: "empty slug".into(),
+        }
+        .to_string();
+        assert_ne!(nf, br);
+        assert!(nf.contains("NotFound"));
+        assert!(br.contains("BadRequest"));
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub enum SpaceError {
     Validation(String),
     #[error("SpaceError - NotFound: space {slug:?} does not exist")]
     NotFound { slug: String },
+    /// Malformed space URI — distinguishes "fix the path" from auth denial (`Unauthorized`) or unknown slug (`NotFound`).
+    #[error("SpaceError - BadRequest: {reason}")]
+    BadRequest { reason: String },
     #[error("SpaceError - NotMounted: space {slug:?} is not mounted in project {project_id:?}")]
     NotMounted {
         slug: String,

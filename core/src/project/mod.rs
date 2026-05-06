@@ -469,6 +469,25 @@ impl Projects {
         Ok(self.spaces.find_by_ids(&project.mounted_spaces).await?)
     }
 
+    /// Spaces the subject can address: admins see all; project subjects see their `mounted_spaces`.
+    #[instrument(name = "domain.project.list_visible_spaces", skip(self, sub))]
+    pub async fn list_visible_spaces(&self, sub: &AuthSubject) -> Result<Vec<Space>, ProjectError> {
+        if sub.is_admin() {
+            return Ok(self.spaces.list_all(sub).await?);
+        }
+        let project_id = sub
+            .project_id()
+            .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
+        sub.can(AuthVerb::Read, AuthResource::Project(Some(project_id)))?;
+        Audit::record_action_if_unset("project.list_visible_spaces");
+        Audit::record_project_id(project_id);
+        let project = self.repo.find_by_id(project_id).await?;
+        if project.mounted_spaces.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self.spaces.find_by_ids(&project.mounted_spaces).await?)
+    }
+
     /// Central authorization primitive for sandboxless space access.
     /// Resolves `slug` via `Library` and returns the `Space`. For
     /// project-bound subjects (`Agent` / `AgentOnBehalfOfUser`),
