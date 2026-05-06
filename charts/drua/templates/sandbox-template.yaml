@@ -57,13 +57,7 @@ spec:
         - name: MCP_GATEWAY_URL
           value: {{ .Values.sandbox.mcpGatewayUrl | quote }}
         {{- end }}
-        {{- if .Values.sandbox.attic.enabled }}
-        - name: NIX_CONFIG
-          valueFrom:
-            configMapKeyRef:
-              name: {{ include "galoyAgents.sandbox.nixConfigMapName" . }}
-              key: NIX_CONFIG
-        {{- else if .Values.sandbox.nixSubstituters }}
+        {{- if or .Values.sandbox.nixSubstituters .Values.sandbox.nixNetrc.enabled }}
         - name: NIX_CONFIG
           value: |-
 {{ include "galoyAgents.sandbox.nixConfig" . | indent 12 }}
@@ -74,6 +68,12 @@ spec:
           readOnly: true
         - name: project-secrets
           mountPath: /run/secrets
+        {{- if .Values.sandbox.nixNetrc.enabled }}
+        - name: nix-netrc
+          mountPath: {{ .Values.sandbox.nixNetrc.mountPath | quote }}
+          subPath: {{ .Values.sandbox.nixNetrc.secret.key | quote }}
+          readOnly: true
+        {{- end }}
       volumes:
       - name: project-secrets
         emptyDir:
@@ -85,6 +85,15 @@ spec:
               audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-mcp" }}
               expirationSeconds: 3600
               path: token
+      {{- if .Values.sandbox.nixNetrc.enabled }}
+      - name: nix-netrc
+        secret:
+          secretName: {{ include "galoyAgents.sandbox.nixNetrcSecretName" . }}
+          defaultMode: 256
+          items:
+          - key: {{ .Values.sandbox.nixNetrc.secret.key | quote }}
+            path: {{ .Values.sandbox.nixNetrc.secret.key | quote }}
+      {{- end }}
       dnsConfig:
         nameservers:
         - "8.8.8.8"

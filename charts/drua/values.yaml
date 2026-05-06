@@ -328,54 +328,23 @@ sandbox:
   nixSubstituters:
     - url: https://galoy-agents.cachix.org
       publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
-  attic:
-    enabled: true
-    ## Cache name created and configured by the bootstrap job.
-    cacheName: lana-bats
-    ## Optional pre-seeded public signing key. Normally left empty because the
-    ## bootstrap job discovers the generated key and updates sandbox NIX_CONFIG.
-    publicKey: ""
-    image:
-      repository: ghcr.io/zhaofengli/attic
-      digest: ""
-      tag: latest
-      pullPolicy: IfNotPresent
-    service:
-      port: 8080
-    configSecret:
-      create: true
-      ## Defaults to "<fullname>-attic-config". Set when using an externally
-      ## managed secret with a `server.toml` key.
+  ## Optional Nix netrc file for authenticated binary caches, such as a
+  ## private Cachix cache. When enabled, `netrc-file = <mountPath>` is added
+  ## to sandbox NIX_CONFIG and the Secret is mounted into the sandbox
+  ## container. Keep this read-only; do not use a write-capable cache token.
+  nixNetrc:
+    enabled: false
+    mountPath: /etc/nix/netrc
+    secret:
+      ## Set create=false and name=<existing secret> for externally managed
+      ## secrets. The Secret must live in the sandbox namespace.
+      create: false
       name: ""
-      ## Required only when `create: true` and `enabled: true`.
-      ## If empty, Helm generates and then preserves a secret in the cluster.
-      jwtSecret: ""
-    bootstrap:
-      enabled: true
-      image:
-        repository: nixos/nix
-        tag: latest
-        pullPolicy: IfNotPresent
-      ## Attic cache priority. cache.nixos.org uses priority 40, so 20 wins.
-      priority: 20
-      tokenValidity: 10y
-      resources:
-        requests:
-          cpu: 100m
-          memory: 512Mi
-        limits:
-          memory: 2Gi
-    persistence:
-      size: 80Gi
-      ## Falls back to `persistence.storageClassName` when empty.
-      storageClassName: ""
-    resources:
-      requests:
-        cpu: 1
-        memory: 2Gi
-      limits:
-        cpu: 2
-        memory: 4Gi
+      key: netrc
+      ## Used only when create=true.
+      ## Example:
+      ##   machine lana-bank-github-actions.cachix.org password <read-token>
+      contents: ""
   persistence:
     mountPath: /workspace
     size: 10Gi

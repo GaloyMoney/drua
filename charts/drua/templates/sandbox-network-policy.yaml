@@ -68,22 +68,7 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: {{ .Values.sandbox.otelCollectorNamespace }}
   {{- end }}
-  # 4. Sandbox-local Attic binary cache.
-  {{- if .Values.sandbox.attic.enabled }}
-  - ports:
-    - protocol: TCP
-      port: {{ .Values.sandbox.attic.service.port }}
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: {{ include "galoyAgents.sandboxNamespace" . }}
-      podSelector:
-        matchLabels:
-          app: {{ template "galoyAgents.fullname" . }}
-          app.kubernetes.io/component: sandbox-attic
-          release: {{ .Release.Name }}
-  {{- end }}
-  # 5. Internet — all non-RFC1918 destinations (via NAT gateway)
+  # 4. Internet — all non-RFC1918 destinations (via NAT gateway)
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
