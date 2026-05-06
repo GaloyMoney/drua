@@ -35,7 +35,11 @@ struct ComposeParams {
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
-    audit: Arc<RwLock<Option<Arc<Audit>>>>,
+    /// `None` only in tests without a DB pool. Each sub-tool dispatch needs
+    /// it to persist its own audit row with its own outcome (memory
+    /// `019dfd6e`); without it the sub-tool action inherits the parent
+    /// compose call's outcome.
+    audit: Option<Arc<Audit>>,
     config: ComposeConfig,
 }
 
@@ -43,21 +47,15 @@ impl ComposeTool {
     pub fn new(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+        audit: Option<Arc<Audit>>,
         config: ComposeConfig,
     ) -> Self {
         Self {
             sets,
             top_level,
-            audit: Arc::new(RwLock::new(None)),
+            audit,
             config,
         }
-    }
-
-    /// Wires audit so each sub-tool dispatch in a compose script persists its
-    /// own audit row with its own outcome — without this, sub-tool actions
-    /// inherit the parent compose call's outcome (memory `019dfd6e`).
-    pub fn set_audit(&self, audit: Arc<Audit>) {
-        *self.audit.write().expect("audit lock poisoned") = Some(audit);
     }
 }
 
@@ -137,18 +135,11 @@ impl TopLevelTool for ComposeTool {
             format!("/*\n{dts}*/\n{}", params.script)
         };
 
-        let audit_snapshot = self
-            .audit
-            .read()
-            .expect("audit lock poisoned")
-            .as_ref()
-            .map(Arc::clone);
-
         let dispatcher = Arc::new(CatalogDispatcher {
             sets: Arc::clone(&self.sets),
             top_level: Arc::clone(&self.top_level),
             subject: subject.clone(),
-            audit: audit_snapshot,
+            audit: self.audit.clone(),
         });
 
         let engine = js_engine::JsEngine::new()

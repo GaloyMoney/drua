@@ -56,17 +56,16 @@ pub(crate) fn array_of_any_schema(
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
-    /// Typed handle to the registered [`ComposeTool`] so [`set_audit`] can
-    /// thread audit into compose dispatchers (sub-tool calls record their
-    /// own outcome there). The same `Arc` is also stored in `top_level`
-    /// behind a `dyn TopLevelTool` for normal dispatch.
-    compose: Arc<ComposeTool>,
+    /// `None` only in tests without a DB pool.
     audit: Option<Arc<Audit>>,
     init_errors: Vec<(String, String)>,
 }
 
 impl ToolSets {
-    pub async fn init(config: ToolSetsConfig) -> Result<Self, ToolSetsError> {
+    pub async fn init(
+        config: ToolSetsConfig,
+        audit: Option<Arc<Audit>>,
+    ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
         let mut init_errors: Vec<(String, String)> = Vec::new();
 
@@ -126,6 +125,7 @@ impl ToolSets {
         let compose = Arc::new(ComposeTool::new(
             Arc::clone(&sets),
             Arc::clone(&top_level),
+            audit.clone(),
             config.compose.clone(),
         ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
@@ -139,10 +139,7 @@ impl ToolSets {
                 describe as Arc<dyn TopLevelTool>,
             );
             map.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
-            map.insert(
-                compose.name().to_string(),
-                Arc::clone(&compose) as Arc<dyn TopLevelTool>,
-            );
+            map.insert(compose.name().to_string(), compose as Arc<dyn TopLevelTool>);
             map.insert(
                 compose_types.name().to_string(),
                 compose_types as Arc<dyn TopLevelTool>,
@@ -153,8 +150,7 @@ impl ToolSets {
         Ok(Self {
             sets,
             top_level,
-            compose,
-            audit: None,
+            audit,
             init_errors,
         })
     }
@@ -184,14 +180,6 @@ impl ToolSets {
                 "Failed to initialize MCP upstream"
             );
         }
-    }
-
-    /// Optional — when `None` (e.g. in tests) audit is silently skipped.
-    /// Also propagates into [`ComposeTool`] so sub-tool dispatches record
-    /// their own audit row (memory `019dfd6e`).
-    pub fn set_audit(&mut self, audit: Arc<Audit>) {
-        self.compose.set_audit(Arc::clone(&audit));
-        self.audit = Some(audit);
     }
 
     /// Uses interior mutability so tools can be registered after the
@@ -395,17 +383,9 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
 #[cfg(test)]
 impl ToolSets {
     pub fn empty_for_test() -> Self {
-        let sets = Arc::new(RwLock::new(Vec::new()));
-        let top_level = Arc::new(RwLock::new(HashMap::new()));
-        let compose = Arc::new(ComposeTool::new(
-            Arc::clone(&sets),
-            Arc::clone(&top_level),
-            ComposeConfig::default(),
-        ));
         Self {
-            sets,
-            top_level,
-            compose,
+            sets: Arc::new(RwLock::new(Vec::new())),
+            top_level: Arc::new(RwLock::new(HashMap::new())),
             audit: None,
             init_errors: Vec::new(),
         }

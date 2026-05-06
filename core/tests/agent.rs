@@ -70,7 +70,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
     };
 
     let toolsets = Arc::new(
-        ToolSets::init(ToolSetsConfig::default())
+        ToolSets::init(ToolSetsConfig::default(), None)
             .await
             .expect("init toolsets"),
     );
@@ -128,7 +128,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     };
 
     let toolsets = Arc::new(
-        ToolSets::init(ToolSetsConfig::default())
+        ToolSets::init(ToolSetsConfig::default(), None)
             .await
             .expect("init toolsets"),
     );
@@ -288,7 +288,7 @@ async fn send_message_dispatches_registered_tool_call() {
     };
 
     // Build ToolSets, register the test tool, then share via Arc.
-    let toolsets = ToolSets::init(ToolSetsConfig::default())
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), None)
         .await
         .expect("init toolsets");
     toolsets.register_top_level(PingTool::new());

@@ -109,13 +109,12 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        let mut toolsets = ToolSets::init(config.toolsets).await?;
+        let toolsets = ToolSets::init(config.toolsets, Some(Arc::clone(&audit))).await?;
         toolsets.log_init_summary();
         if let Some(ca) = code_assistant.as_ref() {
             toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
         }
         toolsets.register_top_level(ProjectLog::new(Arc::clone(&audit)));
-        toolsets.set_audit(Arc::clone(&audit));
 
         let (prompt_executor, prompt_tx) = PromptExecutor::init(config.prompt_executor).await;
         let prompt_executor = Arc::new(prompt_executor);

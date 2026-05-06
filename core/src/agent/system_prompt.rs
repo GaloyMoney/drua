@@ -157,7 +157,7 @@ mod tests {
         let toolsets = Arc::new(
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(ToolSets::init(Default::default()))
+                .block_on(ToolSets::init(Default::default(), None))
                 .unwrap(),
         );
         let subject = AuthSubject::Anonymous;
@@ -184,7 +184,7 @@ mod tests {
         let toolsets = Arc::new(
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(ToolSets::init(Default::default()))
+                .block_on(ToolSets::init(Default::default(), None))
                 .unwrap(),
         );
         let subject = AuthSubject::Anonymous;

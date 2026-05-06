@@ -80,12 +80,11 @@ impl SearchableToolSet for StubSet {
 }
 
 async fn build_toolsets(pool: &sqlx::PgPool, set: StubSet) -> (ToolSets, Arc<Audit>) {
-    let mut toolsets = ToolSets::init(ToolSetsConfig::default())
+    let audit = Arc::new(Audit::new(pool));
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), Some(Arc::clone(&audit)))
         .await
         .expect("init toolsets");
     toolsets.register_searchable(set);
-    let audit = Arc::new(Audit::new(pool));
-    toolsets.set_audit(Arc::clone(&audit));
     (toolsets, audit)
 }
 
