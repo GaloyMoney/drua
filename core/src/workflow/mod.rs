@@ -37,29 +37,6 @@ use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
 
-/// Rejects schemas whose root isn't `type: "object"` — MCP / Anthropic
-/// tool-use silently misbehaves on `oneOf`/`anyOf` roots (see memo
-/// `019dfc8c`). The synthesised `submit_output` tool needs a clean
-/// object root.
-fn validate_output_schema_root(
-    step_name: &str,
-    schema: &serde_json::Value,
-) -> Result<(), WorkflowError> {
-    let obj = schema.as_object().ok_or_else(|| {
-        WorkflowError::InvalidOutputSchema(format!(
-            "step '{step_name}' output_schema must be a JSON object"
-        ))
-    })?;
-    match obj.get("type").and_then(|t| t.as_str()) {
-        Some("object") => Ok(()),
-        _ => Err(WorkflowError::InvalidOutputSchema(format!(
-            "step '{step_name}' output_schema root must be `type: \"object\"`; \
-             tagged-union (`oneOf`/`anyOf`) roots are rejected by MCP. \
-             Wrap the union under a struct field instead."
-        ))),
-    }
-}
-
 #[derive(Clone)]
 pub struct Workflows {
     repo: WorkflowDefinitionRepo,
@@ -256,7 +233,6 @@ impl Workflows {
                     name,
                     skill,
                     sandbox,
-                    output_schema,
                     ..
                 } => {
                     let preexisting_sandbox_id = sandbox
@@ -282,13 +258,9 @@ impl Workflows {
                         }
                     }
 
-                    // MCP requires `type: object` at the schema root
-                    // (memo 019dfc8c). Reject early so authors see the
-                    // failure at create-time rather than the agent
-                    // hitting a confused tool-call.
-                    if let Some(schema) = output_schema {
-                        validate_output_schema_root(name, schema)?;
-                    }
+                    // `OutputSchema` enforces the `type: "object"` root
+                    // invariant at construction/deserialization
+                    // (memo 019dfc8c). Bad schemas can't reach here.
                 }
             }
         }
@@ -711,42 +683,6 @@ impl Workflows {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_output_schema_root_accepts_object() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "required": ["x"],
-            "properties": { "x": { "type": "string" } }
-        });
-        validate_output_schema_root("step", &schema).unwrap();
-    }
-
-    #[test]
-    fn validate_output_schema_root_rejects_one_of_root() {
-        let schema = serde_json::json!({
-            "oneOf": [
-                { "type": "object", "properties": { "a": { "type": "string" } } },
-                { "type": "object", "properties": { "b": { "type": "string" } } }
-            ]
-        });
-        let err = validate_output_schema_root("step", &schema).unwrap_err();
-        assert!(matches!(err, WorkflowError::InvalidOutputSchema(_)));
-    }
-
-    #[test]
-    fn validate_output_schema_root_rejects_non_object_type() {
-        let schema = serde_json::json!({ "type": "array", "items": { "type": "string" } });
-        let err = validate_output_schema_root("step", &schema).unwrap_err();
-        assert!(matches!(err, WorkflowError::InvalidOutputSchema(_)));
-    }
-
-    #[test]
-    fn validate_output_schema_root_rejects_non_object_value() {
-        let schema = serde_json::json!("just a string");
-        let err = validate_output_schema_root("step", &schema).unwrap_err();
-        assert!(matches!(err, WorkflowError::InvalidOutputSchema(_)));
-    }
 
     #[test]
     fn validate_trigger_accepts_manual_and_webhook() {

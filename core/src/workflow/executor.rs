@@ -11,7 +11,7 @@ use crate::primitives::{
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
 
-use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
+use super::definition::{OutputSchema, WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{WorkflowRunRepo, WorkflowRunState};
@@ -25,11 +25,13 @@ const SUBMIT_OUTPUT_TOOL_DESCRIPTION: &str =
     "Call this exactly once to record this step's structured result and finish the step. \
      The arguments must match the declared output schema.";
 
-fn build_submit_output_tool(output_schema: serde_json::Value) -> ToolDefinition {
+fn build_submit_output_tool(output_schema: OutputSchema) -> ToolDefinition {
+    let input_schema = serde_json::to_value(output_schema.into_root_schema())
+        .expect("RootSchema is always serialisable to JSON");
     ToolDefinition {
         name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
         description: Some(SUBMIT_OUTPUT_TOOL_DESCRIPTION.to_string()),
-        input_schema: output_schema,
+        input_schema,
         strict: true,
         kind: ToolKind::SubmitOutput,
     }

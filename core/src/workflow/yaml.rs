@@ -6,6 +6,8 @@ use llm::ModelChain;
 
 use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+
+use super::definition::OutputSchema;
 use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
@@ -211,7 +213,7 @@ enum WorkflowStepYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_schema: Option<serde_json::Value>,
+        output_schema: Option<OutputSchema>,
     },
 }
 
@@ -608,13 +610,14 @@ steps:
     #[test]
     fn workflow_yaml_roundtrip_output_schema() {
         let id = WorkflowDefinitionId::new();
-        let schema = serde_json::json!({
+        let schema_value = serde_json::json!({
             "type": "object",
             "required": ["verdict"],
             "properties": {
                 "verdict": { "type": "string", "enum": ["pass", "fail"] }
             }
         });
+        let schema: OutputSchema = serde_json::from_value(schema_value.clone()).unwrap();
         let steps = vec![WorkflowStepDef::AgentStep {
             name: "judge".to_string(),
             skill: "judge".to_string(),
@@ -622,7 +625,7 @@ steps:
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: Some(schema.clone()),
+            output_schema: Some(schema),
         }];
         let content = render_workflow_yaml(
             id,
@@ -641,7 +644,9 @@ steps:
         assert_eq!(parsed.steps.len(), 1);
         match &parsed.steps[0] {
             WorkflowStepDef::AgentStep { output_schema, .. } => {
-                assert_eq!(output_schema.as_ref(), Some(&schema));
+                let actual =
+                    serde_json::to_value(output_schema.as_ref().expect("schema present")).unwrap();
+                assert_eq!(actual, schema_value);
             }
         }
     }

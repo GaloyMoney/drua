@@ -34,8 +34,6 @@ pub enum WorkflowError {
     BuildEntity(String),
     #[error("WorkflowError - InvalidDefinition: {0}")]
     InvalidDefinition(String),
-    #[error("WorkflowError - InvalidOutputSchema: {0}")]
-    InvalidOutputSchema(String),
     #[error("WorkflowError - InvalidCronExpression: {0}")]
     InvalidCronExpression(String),
     #[error("WorkflowError - InvalidTimezone: {0}")]

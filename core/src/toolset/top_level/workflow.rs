@@ -191,16 +191,25 @@ struct WorkflowStepParam {
 }
 
 impl WorkflowStepParam {
-    fn into_step(self) -> WorkflowStepDef {
-        WorkflowStepDef::AgentStep {
+    fn into_step(self) -> Result<WorkflowStepDef, ToolSetsError> {
+        let output_schema = match self.output_schema {
+            Some(value) => Some(serde_json::from_value(value).map_err(|e| {
+                ToolSetsError::MissingArgument(format!(
+                    "step '{}': output_schema invalid (root must be `type: object` per MCP): {e}",
+                    self.name
+                ))
+            })?),
+            None => None,
+        };
+        Ok(WorkflowStepDef::AgentStep {
             name: self.name,
             skill: self.skill,
             sandbox: self.sandbox,
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
             model_chain: self.model_chain,
-            output_schema: self.output_schema,
-        }
+            output_schema,
+        })
     }
 }
 
@@ -570,7 +579,7 @@ impl TopLevelTool for WorkflowTool {
                     steps
                         .into_iter()
                         .map(WorkflowStepParam::into_step)
-                        .collect()
+                        .collect::<Result<_, _>>()?
                 } else {
                     let skill = skill.ok_or_else(|| {
                         ToolSetsError::MissingArgument(
@@ -756,12 +765,16 @@ impl TopLevelTool for WorkflowTool {
                 } else {
                     None
                 };
-                let steps_arg = update_steps.then(|| {
-                    steps
-                        .into_iter()
-                        .map(WorkflowStepParam::into_step)
-                        .collect()
-                });
+                let steps_arg = if update_steps {
+                    Some(
+                        steps
+                            .into_iter()
+                            .map(WorkflowStepParam::into_step)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                } else {
+                    None
+                };
                 let sandboxes_arg = update_sandboxes
                     .then(|| sandboxes.into_iter().map(|s| s.into_decl()).collect());
                 let model_chain_arg = if clear_model_chain {

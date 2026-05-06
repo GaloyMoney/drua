@@ -285,16 +285,25 @@ struct WorkflowStepParams {
 }
 
 impl WorkflowStepParams {
-    fn into_step(self) -> WorkflowStepDef {
-        WorkflowStepDef::AgentStep {
+    fn into_step(self) -> Result<WorkflowStepDef, ToolSetsError> {
+        let output_schema = match self.output_schema {
+            Some(value) => Some(serde_json::from_value(value).map_err(|e| {
+                ToolSetsError::MissingArgument(format!(
+                    "step '{}': output_schema invalid (root must be `type: object` per MCP): {e}",
+                    self.name
+                ))
+            })?),
+            None => None,
+        };
+        Ok(WorkflowStepDef::AgentStep {
             name: self.name,
             skill: self.skill,
             sandbox: self.sandbox,
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
             model_chain: self.model_chain,
-            output_schema: self.output_schema,
-        }
+            output_schema,
+        })
     }
 }
 
@@ -1075,7 +1084,11 @@ impl AdminToolSet {
                         secret: String::new(),
                     }
                 };
-                let steps = params.steps.into_iter().map(|s| s.into_step()).collect();
+                let steps = params
+                    .steps
+                    .into_iter()
+                    .map(|s| s.into_step())
+                    .collect::<Result<Vec<_>, _>>()?;
                 let sandboxes = params
                     .sandboxes
                     .into_iter()
@@ -1161,7 +1174,7 @@ impl AdminToolSet {
                             .steps
                             .into_iter()
                             .map(|s| s.into_step())
-                            .collect::<Vec<_>>(),
+                            .collect::<Result<Vec<_>, _>>()?,
                     )
                 } else {
                     None
