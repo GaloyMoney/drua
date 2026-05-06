@@ -401,7 +401,8 @@ impl K8sAdminClient {
         Ok(current)
     }
 
-    /// PVC is retained for recreation.
+    /// PVC is retained for recreation. Use [`Self::delete_pvcs`] to tear
+    /// it down when the owning project is being deleted.
     #[instrument(name = "sandbox.admin.k8s.delete_sandbox", skip_all, fields(%name))]
     pub async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         let sandboxes: Api<Sandbox> = Api::namespaced(self.client.clone(), &self.namespace);
@@ -417,6 +418,42 @@ impl K8sAdminClient {
                 _ => AdminError::Kube(e),
             })?;
         tracing::info!(sandbox = %name, "Sandbox deleted");
+        Ok(())
+    }
+
+    /// Delete every PVC labeled `sandbox-name=<name>` (workspace PVC plus
+    /// any controller-owned `volumeClaimTemplate` PVCs — both carry the
+    /// label, see `ensure_pvc` and `nix_store_claim_template`). Pod-bound
+    /// PVCs enter `Terminating` and finalize once the pod is gone — call
+    /// `delete_sandbox` first.
+    #[instrument(name = "sandbox.admin.k8s.delete_pvcs", skip_all, fields(%name))]
+    pub async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError> {
+        let pvcs: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+        let lp = ListParams::default().labels(&format!("sandbox-name={name}"));
+        let list = pvcs.list(&lp).await?;
+        if list.items.is_empty() {
+            return Ok(());
+        }
+        for pvc in list.items {
+            let Some(pvc_name) = pvc.metadata.name.as_deref() else {
+                continue;
+            };
+            match pvcs.delete(pvc_name, &DeleteParams::default()).await {
+                Ok(_) => {
+                    tracing::info!(sandbox = %name, pvc = %pvc_name, "PVC deleted");
+                }
+                Err(kube::Error::Api(resp)) if resp.code == 404 => {}
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        pvc = %pvc_name,
+                        error = %e,
+                        "PVC delete failed (continuing)"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -667,6 +704,10 @@ impl AdminClient for K8sAdminClient {
 
     async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         K8sAdminClient::delete_sandbox(self, name).await
+    }
+
+    async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError> {
+        K8sAdminClient::delete_pvcs(self, name).await
     }
 
     async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {

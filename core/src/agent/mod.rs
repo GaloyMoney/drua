@@ -603,20 +603,29 @@ impl Agents {
         project_id: ProjectId,
     ) -> Result<Vec<Agent>, AgentError> {
         Audit::record_project_id(project_id);
-        let query = es_entity::PaginatedQueryArgs {
-            first: 100,
+        const PAGE_SIZE: usize = 100;
+        let mut all = Vec::new();
+        let mut query = es_entity::PaginatedQueryArgs {
+            first: PAGE_SIZE,
             after: None,
         };
-        let result = self
-            .repo
-            .list_for_project_id_by_created_at_in_op(
-                &mut *op,
-                project_id,
-                query,
-                es_entity::ListDirection::Descending,
-            )
-            .await?;
-        Ok(result.entities)
+        loop {
+            let mut result = self
+                .repo
+                .list_for_project_id_by_created_at_in_op(
+                    &mut *op,
+                    project_id,
+                    query,
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            all.append(&mut result.entities);
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     /// Lookup the workflow agent for `(run_id, name)`. Re-entrancy primitive
@@ -664,6 +673,7 @@ impl Agents {
         let mut op = self.repo.begin_op().await?;
         self.delete_in_op(&mut op, id).await?;
         op.commit().await?;
+        self.invalidate_agent_cache(id);
         Ok(())
     }
 

@@ -17,6 +17,12 @@ pub trait AdminClient: Send + Sync {
 
     async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError>;
 
+    /// Tear down any persistent storage (PVCs on k8s; nothing on local)
+    /// associated with `name`. Called after `delete_sandbox` during
+    /// project-cascade cleanup so we don't leak paid storage when the
+    /// owning project goes away. Idempotent: missing storage is a no-op.
+    async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError>;
+
     async fn get_sandbox(&self, name: &str) -> Result<Sandbox, AdminError>;
 
     async fn list_sandboxes(&self) -> Result<Vec<Sandbox>, AdminError>;

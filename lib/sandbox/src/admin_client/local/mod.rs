@@ -142,6 +142,30 @@ impl LocalAdminClient {
         Ok(())
     }
 
+    /// Local equivalent of the k8s PVC tear-down: removes the per-sandbox
+    /// directory under `.sandboxes/<name>/` (workspace + secrets). Missing
+    /// dir is a no-op so callers can run delete_sandbox + delete_pvcs
+    /// even if the sandbox was never spawned.
+    #[instrument(name = "sandbox.admin.local.delete_pvcs", skip(self), fields(%name))]
+    pub async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError> {
+        let sandbox_dir = self.sandboxes_root.join(name);
+        match tokio::fs::remove_dir_all(&sandbox_dir).await {
+            Ok(_) => {
+                tracing::info!(sandbox = %name, dir = %sandbox_dir.display(), "Local sandbox dir removed");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %name,
+                    dir = %sandbox_dir.display(),
+                    error = %e,
+                    "Local sandbox dir remove failed (continuing)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         let sandboxes = self.sandboxes.lock().await;
         sandboxes
@@ -168,6 +192,10 @@ impl AdminClient for LocalAdminClient {
 
     async fn delete_sandbox(&self, name: &str) -> Result<(), AdminError> {
         LocalAdminClient::delete_sandbox(self, name).await
+    }
+
+    async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError> {
+        LocalAdminClient::delete_pvcs(self, name).await
     }
 
     async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
