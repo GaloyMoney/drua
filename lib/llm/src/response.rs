@@ -2,12 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::prompt::AssistantBlock;
 
-/// Provider-agnostic LLM response.
-///
-/// `model_used` carries the actual model id that produced this response —
-/// distinct from the *primary* of the chain when fallback fired. The chain
-/// walker (`crate::router`) populates it; bare client calls leave it `None`
-/// (caller may assume the chain primary).
+/// Provider-agnostic LLM response. `model_used` is `None` from a bare
+/// client call; the chain walker populates it with the winning model id
+/// (distinct from chain primary when a fallback fired).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptResponse {
     pub content: Vec<AssistantBlock>,

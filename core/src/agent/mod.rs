@@ -245,8 +245,6 @@ impl Agents {
     }
 
     /// Project name is resolved from the existing lead agent.
-    /// `chain_override` lets a creation form (GraphQL / web UI) supply a
-    /// user-chosen chain that overrides the role/default.
     #[instrument(name = "domain.agent.create_agent", skip(self, sub))]
     pub async fn create_agent(
         &self,
@@ -283,9 +281,6 @@ impl Agents {
 
     /// Caller commits the op. Stamping `(workflow_id, workflow_run_id)`
     /// is what excludes the agent from [`Self::list_for_project`].
-    /// `chain_override` lets the executor thread through a chain resolved
-    /// from the WorkflowDefinition (or per-step `WorkflowStepDef`) — once
-    /// those fields land. Today the executor passes `None`.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
@@ -389,10 +384,6 @@ impl Agents {
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
-        // Resolution precedence: explicit override (workflow def / step,
-        // GraphQL form) > role override > default. Workflow agents and
-        // user agents share the same resolution path; the only difference
-        // is what the caller supplies for `chain_override`.
         let chain = self.config.resolve_chain(agent_role, chain_override)?;
         let primary_model_id = chain.primary.name.clone();
         let model_defaults = self

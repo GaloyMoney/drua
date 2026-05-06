@@ -121,12 +121,9 @@ fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
 }
 
 impl Prompt {
-    /// Hex SHA-256 of the canonical JSON form of (chain.primary, messages,
-    /// system, tools, tool_choice, max_tokens). Excludes `cache_key` and the
-    /// fallback list — content identity is what the cache cares about, not
-    /// routing intent.
+    /// Content-only SHA-256: excludes `cache_key` and the fallback list
+    /// (routing intent shouldn't bust the cache).
     pub fn hash(&self) -> String {
-        // Hash a stripped form that elides routing-only fields.
         #[derive(Serialize)]
         struct Hashable<'a> {
             primary_model: &'a str,
@@ -331,9 +328,6 @@ mod tests {
 
     #[test]
     fn hash_ignores_fallbacks() {
-        // Two prompts with the same primary but different fallback lists
-        // must hash identically — chain composition is routing intent,
-        // not content.
         let mut a = sample_prompt("hello");
         let mut b = sample_prompt("hello");
         a.chain = ModelChain::new("a").with_fallback("b");

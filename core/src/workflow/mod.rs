@@ -376,10 +376,8 @@ impl Workflows {
         Ok(workflow)
     }
 
-    /// Updates name / description / trigger / steps / sandboxes /
-    /// model_chain on an existing definition. Any `Some` field is
-    /// applied; `None` leaves the field unchanged. For `model_chain`,
-    /// `Some(Some(_))` sets, `Some(None)` clears.
+    /// `Some` applies the field; `None` leaves it untouched.
+    /// `model_chain: Some(None)` clears the field.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "core.workflow.update", skip_all)]
     pub async fn update(

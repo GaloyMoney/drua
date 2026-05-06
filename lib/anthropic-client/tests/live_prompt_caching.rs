@@ -32,10 +32,8 @@ fn unique_nonce() -> String {
     format!("{}-{timestamp}", std::process::id())
 }
 
-/// Cache marker placement is automatic in `prompt_to_request` — the
-/// translation layer (lib/anthropic-client/src/convert.rs::apply_prompt_caching)
-/// owns the strategy. Tests construct vanilla prompts; cache hints are
-/// no longer expressible at the `lib/llm` level.
+/// Cache markers are stamped automatically by `prompt_to_request`; the
+/// `lib/llm` `Prompt` shape carries no cache hints.
 fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) -> Prompt {
     Prompt {
         chain: ModelChain::new(model),
@@ -93,19 +91,9 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
     let system_text = build_large_system_prefix(&model, &nonce);
     let client = AnthropicClient::new(api_key);
 
-    // Cache markers are stamped automatically by the convert layer's
-    // `apply_prompt_caching`, which targets the last cacheable block in the
-    // wire-format request. For this two-request scenario the user message
-    // varies between calls, so the convert layer's "last block in the last
-    // message" target ends up cacheable but never reused — the *system*
-    // prefix is what we expect to hit.
-    //
-    // The test's contract: the warm request creates a cache entry; one of
-    // the follow-up requests sees a cache read. The current convert
-    // strategy marks the last user block, which under Anthropic's
-    // prefix-caching rules still creates a cache breakpoint at that index;
-    // earlier auto-checked breakpoints (system prefix) become eligible for
-    // reuse on follow-ups whose system text matches verbatim.
+    // The test relies on Anthropic auto-checking earlier breakpoints:
+    // the convert layer marks the last user block, but the matching
+    // *system prefix* is what becomes reusable on follow-ups.
     let warm_prompt = build_prompt(
         &model,
         system_text.clone(),

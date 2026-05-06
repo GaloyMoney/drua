@@ -24,8 +24,6 @@ pub mod workflow;
 
 pub use config::*;
 
-/// Re-exports of provider-agnostic LLM types so downstream crates
-/// (`drua-server`, tests) don't have to depend on `lib/llm` directly.
 pub use llm::{ModelChain, ModelSpec};
 
 use std::sync::Arc;

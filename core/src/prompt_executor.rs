@@ -250,9 +250,8 @@ impl ExecutorState {
         self.models.iter().find(|m| m.name == name)
     }
 
-    /// Resolves the prompt's chain into `Vec<ChainEntry>` against the
-    /// provider registry. Unknown model ids are skipped with a warn-level
-    /// log; if **every** chain element is unknown we return an error.
+    /// Unknown model ids are skipped with a warn; only an entirely
+    /// unknown chain errors.
     fn build_chain(&self, prompt: &Prompt) -> Result<Vec<ChainEntry>, PromptError> {
         let mut entries = Vec::with_capacity(prompt.chain.len());
         for spec in prompt.chain.iter() {
@@ -295,10 +294,8 @@ impl ExecutorState {
             "Dispatching prompt with chain",
         );
 
-        // Walk the chain in a spawned task so dispatch returns immediately.
-        // The StreamHandle is sent back via response_channel only after the
-        // first upstream call resolves Ok — earlier failures fall through
-        // cleanly to the next chain element.
+        // StreamHandle handoff is deferred until the first upstream Ok
+        // so transient failures can fall through to the next entry.
         let response_channel = request.response_channel;
         let prompt = request.prompt;
         tokio::spawn(async move {
@@ -320,10 +317,8 @@ async fn evaluate_chain(
                 attempts = outcome.attempts.len(),
                 "router.walk: success",
             );
-            // The walker's StreamHandle is what we surface to the caller.
-            // `model_used` could be threaded through PromptResult in a
-            // follow-up; for now the agent loop falls back to chain.primary
-            // when model_used is unknown.
+            // TODO: thread `outcome.model_used` through PromptResult so
+            // the agent loop can record the winning fallback id.
             let _ = response.send(Ok(PromptResult::Stream(StreamHandle {
                 rx: outcome.stream.rx,
             })));

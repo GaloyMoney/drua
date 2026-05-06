@@ -74,8 +74,7 @@ pub enum WorkflowStepDef {
         #[serde(default)]
         sandbox_mode: Option<SandboxAgentMode>,
         timeout_seconds: Option<u64>,
-        /// Per-step chain override. Highest precedence — wins over the
-        /// workflow definition's `model_chain` and the config defaults.
+        /// Highest-precedence chain override; beats workflow + defaults.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
     },
@@ -88,7 +87,6 @@ impl WorkflowStepDef {
         }
     }
 
-    /// The chain override declared on this specific step, if any.
     pub fn model_chain(&self) -> Option<&ModelChain> {
         match self {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),

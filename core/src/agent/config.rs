@@ -11,12 +11,9 @@ use super::AgentRole;
 /// added here too — `validate` fails fast at startup if missing.
 const REQUIRED_ROLES: &[AgentRole] = &[AgentRole::ProjectLead, AgentRole::Agent];
 
-/// Per-role config. `chain` overrides `AgentsConfig.default_chain` when
-/// set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoleConfig {
-    /// Optional per-role chain override. Falls through to
-    /// `AgentsConfig.default_chain` when absent.
+    /// Per-role override; falls through to `AgentsConfig.default_chain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<ModelChain>,
     #[serde(default)]
@@ -42,15 +39,8 @@ impl Default for ModelDefaults {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
-    /// Default chain applied to every agent (user- or workflow-spawned)
-    /// whose role has no chain override and whose creation site supplies
-    /// no explicit override. Required at startup unless every required
-    /// role has its own `chain` set.
-    ///
-    /// Workflow-specific overrides live on the WorkflowDefinition entity
-    /// itself (and per-step on `WorkflowStepDef`), passed through
-    /// `Agents::create_in_op`'s `chain_override` parameter at the call
-    /// site. They do not get a separate config-level default.
+    /// Required at startup unless every role sets its own `chain`.
+    /// Workflow / per-step overrides ride on the entity, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_chain_loose")]
     pub default_chain: Option<ModelChain>,
@@ -60,8 +50,7 @@ pub struct AgentsConfig {
     pub models: HashMap<String, ModelDefaults>,
 }
 
-/// Accepts both `default_chain: { primary: { name: "x" }, fallbacks: [] }`
-/// and the bare-string shortcut `default_chain: "x"`.
+/// Accepts the bare-string shortcut `"x"` as well as the full object.
 fn deserialize_chain_loose<'de, D>(deserializer: D) -> Result<Option<ModelChain>, D::Error>
 where
     D: Deserializer<'de>,
@@ -80,10 +69,7 @@ where
 }
 
 impl AgentsConfig {
-    /// Called from `App::init` to fail loudly at startup. Each required
-    /// role must resolve to *some* chain (its own override or the
-    /// default), and every model id referenced in any chain must be in
-    /// the registry.
+    /// Called from `App::init` to fail loudly at startup.
     pub fn validate(&self) -> Result<(), AgentError> {
         for role in REQUIRED_ROLES {
             let role_cfg = self
@@ -109,15 +95,7 @@ impl AgentsConfig {
         Ok(())
     }
 
-    /// Resolve the chain for an agent at creation time.
-    ///
-    /// Precedence (highest first):
-    /// 1. `override_chain` — supplied by the call site (workflow executor
-    ///    threading through a `WorkflowDefinition.model_chain` /
-    ///    `WorkflowStepDef::AgentStep.model_chain`, or a GraphQL/web UI
-    ///    creation form supplying a user-chosen chain)
-    /// 2. `builtin_roles[role].chain` — per-role config override
-    /// 3. `default_chain` — config-level default
+    /// Precedence: `override_chain` > role `chain` > `default_chain`.
     pub fn resolve_chain(
         &self,
         role: AgentRole,

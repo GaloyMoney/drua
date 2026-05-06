@@ -323,9 +323,7 @@ fn parse_retry_after_seconds(body: &str) -> Option<u64> {
         .as_u64()
 }
 
-/// Map an `OpenAiChatCompletionsError` to a classified `PromptError` so the
-/// chain walker can decide whether to fall back. HTTP API errors classify
-/// by status code; transport errors are Transient.
+/// Status code → classified `PromptError`; transport errors are Transient.
 fn classify(err: OpenAiChatCompletionsError) -> PromptError {
     match err {
         OpenAiChatCompletionsError::Http(e) => {

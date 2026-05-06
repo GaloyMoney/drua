@@ -199,7 +199,6 @@ impl Default for OpenAiResponsesClient {
     }
 }
 
-/// Map an `OpenAiResponsesError` to a classified `PromptError`.
 fn classify(err: OpenAiResponsesError) -> PromptError {
     match err {
         OpenAiResponsesError::Http(e) => {

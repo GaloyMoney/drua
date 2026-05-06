@@ -1,7 +1,6 @@
-//! Adapters between the provider-agnostic `llm` types and Anthropic wire
-//! types. The cache-marker placement strategy lives here too: `lib/llm`
-//! deliberately knows nothing about Anthropic's prompt caching — this
-//! module owns the optimisation end-to-end.
+//! Adapters between `lib/llm` types and Anthropic wire types. Owns the
+//! prompt-cache-marker placement strategy — `lib/llm` deliberately
+//! knows nothing about Anthropic's prompt caching.
 
 use llm::prompt::{
     AssistantBlock, Message, SystemBlock, Tool, ToolChoice, ToolResultBlock, UserBlock,
@@ -17,10 +16,7 @@ use crate::types::{
     AnthropicSystemBlock, AnthropicTool, AnthropicToolChoice, AnthropicToolResultContent,
 };
 
-/// TTL for the ephemeral cache marker drua applies on every Anthropic
-/// request. 5m matches Anthropic's default cache window; longer TTLs
-/// require either an explicit per-deployment toggle or a dynamic decision
-/// based on prompt shape.
+/// 5m matches Anthropic's default cache window.
 const DEFAULT_CACHE_TTL: AnthropicCacheTtl = AnthropicCacheTtl::FiveMinutes;
 
 #[derive(Debug, Clone, Copy)]
@@ -72,12 +68,9 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
     request
 }
 
-/// Stamp one ephemeral cache marker on the last cacheable block in the
-/// wire-format request. Anthropic auto-checks earlier breakpoints, so a
-/// single marker on the final cacheable block is sufficient.
-///
-/// Search order (matches the prior in-`lib/llm` strategy):
-/// last message → last system block → last tool definition.
+/// Anthropic auto-checks earlier breakpoints, so one marker on the
+/// final cacheable block (last message → last system block → last tool
+/// definition, in that order) is sufficient.
 fn apply_prompt_caching(req: &mut AnthropicRequest, ttl: AnthropicCacheTtl) {
     let marker = AnthropicCacheControl {
         r#type: "ephemeral".to_string(),
@@ -98,10 +91,8 @@ fn apply_prompt_caching(req: &mut AnthropicRequest, ttl: AnthropicCacheTtl) {
     }
 }
 
-/// Find the last cacheable content block in a message and stamp the marker.
-/// Returns true if a marker was placed. Thinking blocks are skipped (they
-/// are not cacheable on their own; the breakpoint must land on text/tool
-/// content).
+/// Thinking blocks aren't cacheable on their own — breakpoint must
+/// land on text/tool content.
 fn mark_message(msg: &mut AnthropicMessage, marker: &AnthropicCacheControl) -> bool {
     for block in msg.content.iter_mut().rev() {
         match block {

@@ -44,8 +44,7 @@ pub enum PromptResult {
     Stream(StreamHandle),
 }
 
-/// Classified provider errors. `Transient` triggers chain fallback;
-/// `Terminal` propagates immediately.
+/// `Transient` triggers chain fallback; `Terminal` propagates immediately.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PromptError {
     #[error("transient {kind:?}: {message}")]
@@ -64,8 +63,7 @@ pub enum PromptError {
     #[error("model `{0}` not configured")]
     ModelNotConfigured(String),
 
-    /// Unclassified provider error. Treated as transient by the chain walker
-    /// so that legacy call sites keep working as before during migration.
+    /// Unclassified — treated as transient during migration.
     #[error("provider: {0}")]
     Provider(String),
 }
@@ -90,10 +88,8 @@ pub enum TerminalKind {
 }
 
 impl PromptError {
-    /// Whether the chain walker should try the next chain element.
-    /// `Transient` → yes; `Terminal` and `ModelNotConfigured` → no.
-    /// Unclassified `Provider(_)` errors fall back too (safe default
-    /// during migration; provider clients should classify going forward).
+    /// Returns true when the chain walker should NOT advance to the
+    /// next entry. `Provider(_)` falls back (safe default).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -109,7 +105,6 @@ impl PromptError {
     }
 }
 
-/// Convenience constructors for provider clients.
 impl PromptError {
     pub fn transient(kind: TransientKind, message: impl Into<String>) -> Self {
         Self::Transient {
@@ -138,8 +133,7 @@ impl PromptError {
         }
     }
 
-    /// Map an HTTP status code emitted by an LLM provider into a classified
-    /// `PromptError`. The body is captured in `message` for diagnostics.
+    /// Classify an upstream HTTP status into the right `PromptError` arm.
     pub fn from_http_status(status: u16, body: impl Into<String>) -> Self {
         match status {
             400 => Self::terminal(TerminalKind::BadRequest, body),

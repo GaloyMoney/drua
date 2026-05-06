@@ -181,9 +181,7 @@ impl AnthropicClient {
     }
 }
 
-/// Map an `AnthropicError` to a classified `PromptError` so the chain
-/// walker can decide whether to fall back. Connection / SSE / stream
-/// errors are Transient; HTTP API errors classify by status code.
+/// Status code → classified `PromptError`; transport errors are Transient.
 fn classify(err: AnthropicError) -> PromptError {
     match err {
         AnthropicError::Http(e) => {

@@ -27,9 +27,8 @@ pub enum WorkflowDefinitionEvent {
         steps: Vec<WorkflowStepDef>,
         #[serde(default)]
         sandboxes: Vec<WorkflowSandboxDecl>,
-        /// Workflow-wide chain override applied to every step that
-        /// doesn't supply its own `model_chain`. `None` → fall through
-        /// to per-role / config-level default at agent creation.
+        /// Per-step `model_chain` overrides this; both fall through to
+        /// the role/config default when unset.
         #[serde(default)]
         model_chain: Option<ModelChain>,
         /// On-disk path before sync canonicalisation; the
@@ -65,9 +64,7 @@ pub struct WorkflowDefinition {
     pub steps: Vec<WorkflowStepDef>,
     #[builder(default)]
     pub sandboxes: Vec<WorkflowSandboxDecl>,
-    /// Workflow-wide chain override; per-step `model_chain` (on
-    /// `WorkflowStepDef::AgentStep`) takes precedence over this. Both
-    /// fall through to the role/config default when unset.
+    /// Per-step `model_chain` wins; both fall through to role/config.
     #[builder(default)]
     pub model_chain: Option<ModelChain>,
     #[builder(default)]
@@ -234,11 +231,7 @@ impl WorkflowDefinition {
         Idempotent::Executed(())
     }
 
-    /// Resolve the chain to apply to a step's agent.
-    /// Precedence (highest first):
-    ///   1. step's own `model_chain`
-    ///   2. workflow's `model_chain`
-    ///   3. None (caller falls through to role/config default)
+    /// Precedence: step `model_chain` > workflow `model_chain` > None.
     pub fn resolve_step_chain(&self, step: &WorkflowStepDef) -> Option<ModelChain> {
         step.model_chain()
             .cloned()
@@ -357,8 +350,6 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     if let Some(s) = sandboxes {
                         builder = builder.sandboxes(s.clone());
                     }
-                    // `Some(Some(_))` sets, `Some(None)` clears,
-                    // `None` leaves untouched.
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
                     }
@@ -463,7 +454,6 @@ mod tests {
         let step_chain = ModelChain::new("per-step");
         let workflow_chain = ModelChain::new("workflow-wide");
 
-        // Step with own chain → step wins
         let mut def = build();
         def.model_chain = Some(workflow_chain.clone());
         def.steps = vec![WorkflowStepDef::AgentStep {
@@ -479,7 +469,6 @@ mod tests {
             "per-step"
         );
 
-        // Step without own chain → workflow chain wins
         def.steps = vec![WorkflowStepDef::AgentStep {
             name: "s".into(),
             skill: "k".into(),
@@ -493,7 +482,6 @@ mod tests {
             "workflow-wide"
         );
 
-        // Neither set → caller falls through to role/config default
         def.model_chain = None;
         assert!(def.resolve_step_chain(&def.steps[0]).is_none());
     }

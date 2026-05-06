@@ -1,8 +1,4 @@
 //! Provider-agnostic model identification and fallback chain types.
-//!
-//! A `ModelChain` is `[primary, fallback…]`. The chain walker
-//! ([`crate::router::walk`]) drives the chain on transient failures
-//! and reports the winning model id back via [`crate::PromptResponse::model_used`].
 
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +29,7 @@ impl<S: Into<String>> From<S> for ModelSpec {
     }
 }
 
-/// Always non-empty: `primary` is required. `fallbacks` are tried in order
-/// when the primary (or a prior fallback) returns a transient error.
+/// Always non-empty: `primary` is required.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelChain {
     pub primary: ModelSpec,

@@ -397,16 +397,12 @@ struct WorkflowParams {
     #[serde(default)]
     sandboxes: Vec<WorkflowSandboxParams>,
 
-    /// Workflow-wide chain override applied to every step that doesn't
-    /// supply its own `model_chain`. Per-step `model_chain` (on
-    /// `WorkflowStepParams`) takes precedence. Both fall through to the
-    /// role/config default at agent creation when unset.
+    /// Per-step `model_chain` (in `steps`) wins.
     #[serde(default)]
     model_chain: Option<llm::ModelChain>,
 
-    /// `update`: signals which fields the caller intends to change so
-    /// `None`-vs-omitted is distinguishable. Defaults to `false` —
-    /// when omitted, the field is left untouched.
+    /// `update`-only flags: when `false`, the corresponding field is
+    /// left untouched. `clear_*` variants set the field to `None`.
     #[serde(default)]
     update_steps: bool,
     #[serde(default)]
@@ -415,9 +411,6 @@ struct WorkflowParams {
     clear_description: bool,
     #[serde(default)]
     update_trigger: bool,
-    /// `update`: when true, clears `model_chain` (replaces with `None`).
-    /// When false, the field follows the same `Option<ModelChain>`
-    /// semantics as `name` / `description` — `None` leaves untouched.
     #[serde(default)]
     clear_model_chain: bool,
 }
@@ -1177,9 +1170,6 @@ impl AdminToolSet {
                 } else {
                     None
                 };
-                // `Some(Some(_))` sets, `Some(None)` clears, `None`
-                // leaves untouched. The admin tool toggles via a separate
-                // `clear_model_chain` flag (mirroring `clear_description`).
                 let model_chain = if params.clear_model_chain {
                     Some(None)
                 } else {

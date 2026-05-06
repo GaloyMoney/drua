@@ -1,14 +1,6 @@
-//! Provider-agnostic chain walker.
-//!
-//! Iterates a `Vec<ChainEntry { spec, provider }>` and dispatches to the
-//! first provider that returns a successful upstream stream-open. Transient
-//! errors (network, 5xx, 429) advance to the next entry; terminal errors
-//! (auth, bad-request, content-policy) abort the chain.
-//!
-//! The walker is provider-blind: a single chain may freely mix providers
-//! (e.g. `[anthropic/sonnet → openai/gpt-4o]`). Each provider's
-//! `send_prompt_streaming` does its own wire-format translation; the walker
-//! never mutates the prompt.
+//! Provider-agnostic chain walker. Transient errors advance; terminal
+//! errors abort. The walker never mutates the prompt — a single chain
+//! may freely mix providers.
 
 use std::sync::Arc;
 
@@ -18,10 +10,8 @@ use crate::{Prompt, StreamHandle};
 
 #[derive(Clone)]
 pub struct ChainEntry {
-    /// Resolved model id for diagnostics + `model_used` reporting.
     pub model_id: String,
-    /// Per-attempt parameter override; `None` lets the provider's own
-    /// defaults apply (today only `max_tokens` is plumbed through).
+    /// Today only `max_tokens` is plumbed through per-attempt.
     pub max_tokens: Option<u32>,
     pub provider: Arc<dyn LlmProvider>,
 }
@@ -57,11 +47,9 @@ pub struct WalkOutcome {
     pub attempts: Vec<AttemptRecord>,
 }
 
-/// Walks the chain. The first entry whose `send_prompt_streaming` resolves
-/// `Ok(_)` wins — its `StreamHandle` is returned and the walker returns.
-/// Subsequent transient failures within the *stream itself* are not
-/// recoverable here (they belong to the consumer; falling back mid-stream
-/// would corrupt user-visible output).
+/// First `Ok` from `send_prompt_streaming` wins. Mid-stream errors are
+/// not recoverable — falling back after deltas leak would corrupt the
+/// assistant message in the session log.
 pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, PromptError> {
     if chain.is_empty() {
         return Err(PromptError::Provider("empty chain".to_string()));
@@ -71,8 +59,6 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
     let mut last_err: Option<PromptError> = None;
 
     for entry in chain {
-        // Per-attempt clone is the tax for `max_tokens` overrides — the
-        // base prompt itself is never mutated.
         let mut prompt = base.clone();
         if let Some(mt) = entry.max_tokens {
             prompt.max_tokens = Some(mt);

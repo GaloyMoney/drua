@@ -46,6 +46,11 @@ enum WorkflowParams {
         /// (if set) must reference one of these by name.
         #[serde(default)]
         sandboxes: Vec<WorkflowSandboxParam>,
+        /// Workflow-wide chain override. Per-step `model_chain` (in
+        /// `WorkflowStepParam`) wins; both fall through to the
+        /// role/config default when unset.
+        #[serde(default)]
+        model_chain: Option<llm::ModelChain>,
     },
     List,
     Get {
@@ -94,6 +99,12 @@ enum WorkflowParams {
         provider: Option<String>,
         #[serde(default)]
         manual: bool,
+        /// Replace the workflow-wide chain. `clear_model_chain: true`
+        /// clears it to `None`; otherwise omitting leaves untouched.
+        #[serde(default)]
+        model_chain: Option<llm::ModelChain>,
+        #[serde(default)]
+        clear_model_chain: bool,
     },
 }
 
@@ -445,6 +456,22 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "update_trigger": {
                 "type": "boolean",
                 "description": "Update only: rebuild the trigger from `provider`/`manual`."
+            },
+            "model_chain": {
+                "description": "Workflow-wide model chain override. Per-step `model_chain` (in `steps[]`) wins. On update, omitting leaves untouched; pair with `clear_model_chain: true` to clear.",
+                "type": "object",
+                "properties": {
+                    "primary": item_schema_for::<llm::ModelSpec>(),
+                    "fallbacks": {
+                        "type": "array",
+                        "items": item_schema_for::<llm::ModelSpec>(),
+                    }
+                },
+                "required": ["primary"]
+            },
+            "clear_model_chain": {
+                "type": "boolean",
+                "description": "Update only: clears `model_chain` to null. Ignored when false."
             }
         },
         "required": ["command"],
@@ -466,16 +493,17 @@ impl TopLevelTool for WorkflowTool {
          as raw shell scripts). The trigger payload is interpolated into \
          each step's skill via `$ARGUMENTS`. Commands: `create` (requires \
          `name`; either `steps` array or single-step shorthand `skill`; \
-         optional `provider`, `sandboxes`, `manual`), `list`, `get` \
-         (requires `definition_id`), `trigger` (requires `definition_id`, \
-         optional `payload`; returns immediately with the spawned run), \
-         `await_run` (requires `run_id`; blocks until terminal — pair with \
-         `trigger` when you need the final state inline), `runs` \
-         (requires `definition_id`; truncated step outputs), `run` \
-         (requires `run_id`; full per-step outputs), \
+         optional `provider`, `sandboxes`, `manual`, `model_chain`), \
+         `list`, `get` (requires `definition_id`), `trigger` (requires \
+         `definition_id`, optional `payload`; returns immediately with \
+         the spawned run), `await_run` (requires `run_id`; blocks until \
+         terminal — pair with `trigger` when you need the final state \
+         inline), `runs` (requires `definition_id`; truncated step \
+         outputs), `run` (requires `run_id`; full per-step outputs), \
          `update` (requires `definition_id`; optional `name`, \
          `description`+`clear_description`, `steps`+`update_steps`, \
-         `sandboxes`+`update_sandboxes`, `provider`/`manual`+`update_trigger`)."
+         `sandboxes`+`update_sandboxes`, `provider`/`manual`+`update_trigger`, \
+         `model_chain`+`clear_model_chain`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -520,6 +548,7 @@ impl TopLevelTool for WorkflowTool {
                 sandbox_mode,
                 timeout_seconds,
                 sandboxes,
+                model_chain,
             } => {
                 let trigger = if manual {
                     WorkflowTrigger::Manual
@@ -572,9 +601,7 @@ impl TopLevelTool for WorkflowTool {
                         trigger,
                         resolved_steps,
                         sandbox_decls,
-                        // workflow-level model_chain not exposed via this
-                        // tool surface yet; use update or YAML for now.
-                        None,
+                        model_chain,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -702,6 +729,8 @@ impl TopLevelTool for WorkflowTool {
                 update_trigger,
                 provider,
                 manual,
+                model_chain,
+                clear_model_chain,
             } => {
                 let description: Option<Option<String>> = if clear_description {
                     Some(None)
@@ -728,6 +757,11 @@ impl TopLevelTool for WorkflowTool {
                 });
                 let sandboxes_arg = update_sandboxes
                     .then(|| sandboxes.into_iter().map(|s| s.into_decl()).collect());
+                let model_chain_arg = if clear_model_chain {
+                    Some(None)
+                } else {
+                    model_chain.map(Some)
+                };
 
                 let definition = self
                     .workflows
@@ -739,10 +773,7 @@ impl TopLevelTool for WorkflowTool {
                         trigger,
                         steps_arg,
                         sandboxes_arg,
-                        // model_chain update via this surface lands when
-                        // the GraphQL/MCP shapes carry it; today the tool
-                        // doesn't expose a parameter for it.
-                        None,
+                        model_chain_arg,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
