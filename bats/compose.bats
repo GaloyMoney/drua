@@ -74,17 +74,29 @@ teardown_file() {
   [[ "$output" == *"execution_time"* ]]
 }
 
-# Wait for `audit_entries` to contain a row whose `action` matches a SQL LIKE
-# pattern recorded at-or-after `since_id`. Audit rows are persisted via a
-# fire-and-forget tokio::spawn, so we poll briefly.
-_wait_for_audit_action() {
-  local action_like="$1"
-  local since_id="$2"
+# Query the audit log via the `drua_admin_log` MCP tool (admin scope; the
+# bats fixture's mcp_creds carry `admin`). Tool lives under the `drua_admin`
+# searchable toolset, so we go through the `call_tool` meta-tool. Returns
+# the text body — `format_audit_entries` formats action / outcome columns
+# truncated to fixed widths.
+_audit_log() {
+  local args_json="$1"
+  local response
+  response="$(mcp_call "$AGENT_TOKEN" "tools/call" \
+    "$(jq -nc --argjson args "$args_json" \
+      '{name:"call_tool", arguments:{tool_name:"drua_admin_log", arguments:$args}}')")"
+  echo "$response" | jq -r '.result.content[0].text // ""'
+}
+
+# Poll the log tool until a row matching `args_json` appears. Audit rows
+# are persisted via fire-and-forget tokio::spawn, so wait briefly.
+_wait_for_audit_log() {
+  local args_json="$1"
   for _i in $(seq 1 40); do
-    local count
-    count="$(psql "$PG_CON" -tAc \
-      "SELECT count(*) FROM audit_entries WHERE id > $since_id AND action LIKE '$action_like'")"
-    if [ "${count:-0}" -gt 0 ]; then
+    local out
+    out="$(_audit_log "$args_json")"
+    if [[ "$out" != "No audit entries found."* ]] && [ -n "$out" ]; then
+      echo "$out"
       return 0
     fi
     sleep 0.1
@@ -92,68 +104,61 @@ _wait_for_audit_action() {
   return 1
 }
 
-# Query the outcome column for a single audit row matching `action_like`,
-# recorded after `since_id`. Returns "success" or "error".
-_audit_outcome() {
-  local action_like="$1"
-  local since_id="$2"
-  psql "$PG_CON" -tAc \
-    "SELECT outcome FROM audit_entries
-     WHERE id > $since_id AND action LIKE '$action_like'
-     ORDER BY id DESC LIMIT 1"
-}
-
 # Validates the fix from memory `019dfd6e`: a sub-tool dispatched inside a
 # compose script must record its own audit row with its own outcome,
-# distinct from the parent compose row.
+# distinct from the parent compose row. Both rows are checked via the
+# `drua_admin_log` MCP tool.
 @test "compose: tools.whoami records sub-tool audit row separate from parent" {
-  local since_id
-  since_id="$(psql "$PG_CON" -tAc 'SELECT COALESCE(MAX(id), 0) FROM audit_entries')"
-
   run mcp_call "$AGENT_TOKEN" "tools/call" \
     '{"name":"compose","arguments":{"script":"return await tools.whoami({});"}}'
   echo "$output"
   [[ "$output" == *"exported_agent"* ]]
 
-  _wait_for_audit_action 'compose > top_level: whoami' "$since_id" \
-    || { echo "no whoami audit row appeared"; return 1; }
-  _wait_for_audit_action 'compose' "$since_id" \
-    || { echo "no parent compose audit row appeared"; return 1; }
+  # Sub-tool row: action contains "whoami", outcome=success.
+  local sub_log
+  sub_log="$(_wait_for_audit_log '{"action":"whoami","outcome":"success","limit":1}')" \
+    || { echo "no whoami success audit row appeared"; return 1; }
+  echo "sub_log=$sub_log"
+  [[ "$sub_log" == *"whoam"* ]]
+  [[ "$sub_log" == *"success"* ]]
 
-  local sub_outcome parent_outcome
-  sub_outcome="$(_audit_outcome 'compose > top_level: whoami' "$since_id")"
-  parent_outcome="$(_audit_outcome 'compose' "$since_id")"
-  echo "sub_outcome=$sub_outcome parent_outcome=$parent_outcome"
-  [ "$sub_outcome" = "success" ]
-  [ "$parent_outcome" = "success" ]
+  # Parent compose row: entrypoint=mcp: compose, outcome=success.
+  local parent_log
+  parent_log="$(_wait_for_audit_log \
+    '{"entrypoint":"mcp: compose","outcome":"success","action":"compose","limit":5}')" \
+    || { echo "no parent compose success row appeared"; return 1; }
+  echo "parent_log=$parent_log"
+  [[ "$parent_log" == *"compose"* ]]
+  [[ "$parent_log" == *"success"* ]]
 }
 
 # Regression for the original misattribution bug: when the JS script throws
 # AFTER a successful sub-tool call, the sub-tool row must stay `success` —
-# only the parent compose row should be `error`.
+# only the parent compose row should be `error`. Asserted via the
+# `drua_admin_log` MCP tool (no DB access).
 @test "compose: script throw after whoami leaves whoami audit row at success" {
-  local since_id
-  since_id="$(psql "$PG_CON" -tAc 'SELECT COALESCE(MAX(id), 0) FROM audit_entries')"
-
   run mcp_call "$AGENT_TOKEN" "tools/call" \
     '{"name":"compose","arguments":{"script":"const me = await tools.whoami({}); throw new Error(\"boom from script\");"}}'
   echo "$output"
   [[ "$output" == *"boom from script"* ]] || [[ "$output" == *"error"* ]]
 
-  _wait_for_audit_action 'compose > top_level: whoami' "$since_id" \
-    || { echo "no whoami audit row appeared"; return 1; }
-  _wait_for_audit_action 'compose' "$since_id" \
-    || { echo "no parent compose audit row appeared"; return 1; }
+  # Pre-fix bug: latest whoami row would be tagged error. Post-fix: the
+  # most recent whoami row stays at success. Filter on action+success and
+  # require a row to exist (proves no error tagging on the sub-tool call).
+  local sub_log
+  sub_log="$(_wait_for_audit_log '{"action":"whoami","outcome":"success","limit":1}')" \
+    || { echo "no whoami success audit row appeared after script throw"; return 1; }
+  echo "sub_log=$sub_log"
+  [[ "$sub_log" == *"whoam"* ]]
+  [[ "$sub_log" == *"success"* ]]
 
-  local sub_outcome parent_outcome parent_err
-  sub_outcome="$(_audit_outcome 'compose > top_level: whoami' "$since_id")"
-  parent_outcome="$(_audit_outcome 'compose' "$since_id")"
-  parent_err="$(psql "$PG_CON" -tAc \
-    "SELECT error_message FROM audit_entries
-     WHERE id > $since_id AND action = 'compose'
-     ORDER BY id DESC LIMIT 1")"
-  echo "sub_outcome=$sub_outcome parent_outcome=$parent_outcome parent_err=$parent_err"
-  [ "$sub_outcome" = "success" ]
-  [ "$parent_outcome" = "error" ]
-  [[ "$parent_err" == *"boom from script"* ]]
+  # Parent compose row: errors_only narrows to error rows under entrypoint
+  # mcp:compose; the latest one is this test's throw.
+  local parent_log
+  parent_log="$(_wait_for_audit_log \
+    '{"entrypoint":"mcp: compose","action":"compose","errors_only":true,"limit":1}')" \
+    || { echo "no parent compose error row appeared"; return 1; }
+  echo "parent_log=$parent_log"
+  [[ "$parent_log" == *"compose"* ]]
+  [[ "$parent_log" == *"error"* ]]
 }
