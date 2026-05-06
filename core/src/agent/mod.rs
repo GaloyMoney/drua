@@ -870,8 +870,14 @@ impl Agents {
     }
 
     /// Pre-step helper for the workflow runtime. Detaches a single
-    /// conflicting non-workflow Writer when the workflow agent is about
-    /// to attach in `Write` mode; no-op otherwise.
+    /// conflicting Writer when the caller is about to attach in `Write`
+    /// mode; no-op otherwise.
+    ///
+    /// `caller_workflow_id` is `Some` for workflow-runtime callers and
+    /// gates the cross-workflow protection: a workflow Writer is only
+    /// stolen when it belongs to the same workflow definition (a stale
+    /// claim from this workflow's prior run, or a sibling step of the
+    /// same run). Different workflows are never stolen from.
     ///
     /// Conflict policy:
     /// - `workflow_mode == Read`: never detach (Read is unbounded; we
@@ -879,10 +885,12 @@ impl Agents {
     /// - `workflow_mode == Write` and a non-workflow agent currently
     ///   holds Write: run the full detach choreography (agent event,
     ///   sandbox detach, session notification, skills refresh).
-    /// - `workflow_mode == Write` and the current Writer is itself a
-    ///   workflow agent (`workflow_run_id.is_some()`): no-op; the
-    ///   subsequent attach will surface `WriteSlotTaken` and the run
-    ///   will fail rather than steal between concurrent workflow runs.
+    /// - `workflow_mode == Write` and the current Writer is a workflow
+    ///   agent of the *same* workflow as `caller_workflow_id`: detach
+    ///   it (same-workflow steal — handles a prior run's stale claim).
+    /// - `workflow_mode == Write` and the current Writer is a workflow
+    ///   agent of a *different* workflow (or `caller_workflow_id` is
+    ///   `None`): no-op; protects concurrent unrelated runs.
     /// - `workflow_mode == Write` and only Readers (or nothing) are
     ///   attached: no-op; Read+Write is allowed at the entity layer.
     ///
@@ -892,13 +900,14 @@ impl Agents {
     #[instrument(
         name = "domain.agent.detach_conflicting_writer_in_op",
         skip(self, op),
-        fields(%sandbox_id, ?workflow_mode)
+        fields(%sandbox_id, ?workflow_mode, ?caller_workflow_id)
     )]
     pub async fn detach_conflicting_writer_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         sandbox_id: SandboxId,
         workflow_mode: SandboxAgentMode,
+        caller_workflow_id: Option<WorkflowDefinitionId>,
     ) -> Result<Vec<AgentId>, AgentError> {
         if workflow_mode != SandboxAgentMode::Write {
             return Ok(Vec::new());
@@ -917,8 +926,14 @@ impl Agents {
         };
 
         let mut agent = self.repo.find_by_id_in_op(&mut *op, agent_id).await?;
-        if agent.workflow_run_id.is_some() {
-            return Ok(Vec::new());
+        if let Some(writer_workflow_id) = agent.workflow_id {
+            match caller_workflow_id {
+                Some(caller_id) if caller_id == writer_workflow_id => {
+                    // Same workflow: stale claim from a prior run (or a
+                    // sibling step of this run) — fall through and detach.
+                }
+                _ => return Ok(Vec::new()),
+            }
         }
         let project_id = agent.project_id;
         if agent.sandbox_detached(sandbox_id).did_execute() {
