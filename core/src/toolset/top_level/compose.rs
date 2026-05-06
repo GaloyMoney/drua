@@ -10,10 +10,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
+use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
-use crate::audit::Audit;
+use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
 
 use super::super::config::ComposeConfig;
@@ -34,6 +35,7 @@ struct ComposeParams {
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+    audit: Arc<RwLock<Option<Arc<Audit>>>>,
     config: ComposeConfig,
 }
 
@@ -46,8 +48,16 @@ impl ComposeTool {
         Self {
             sets,
             top_level,
+            audit: Arc::new(RwLock::new(None)),
             config,
         }
+    }
+
+    /// Wires audit so each sub-tool dispatch in a compose script persists its
+    /// own audit row with its own outcome — without this, sub-tool actions
+    /// inherit the parent compose call's outcome (memory `019dfd6e`).
+    pub fn set_audit(&self, audit: Arc<Audit>) {
+        *self.audit.write().expect("audit lock poisoned") = Some(audit);
     }
 }
 
@@ -127,10 +137,18 @@ impl TopLevelTool for ComposeTool {
             format!("/*\n{dts}*/\n{}", params.script)
         };
 
+        let audit_snapshot = self
+            .audit
+            .read()
+            .expect("audit lock poisoned")
+            .as_ref()
+            .map(Arc::clone);
+
         let dispatcher = Arc::new(CatalogDispatcher {
             sets: Arc::clone(&self.sets),
             top_level: Arc::clone(&self.top_level),
             subject: subject.clone(),
+            audit: audit_snapshot,
         });
 
         let engine = js_engine::JsEngine::new()
@@ -188,6 +206,7 @@ struct CatalogDispatcher {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     subject: AuthSubject,
+    audit: Option<Arc<Audit>>,
 }
 
 #[async_trait::async_trait]
@@ -198,33 +217,39 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         if let Ok((set, tool_name, default_filter)) = self.find_set(name) {
-            Audit::record_action(format!("compose > catalog: {name}"));
+            let action = format!("compose > catalog: {name}");
+            let audit = self.audit.clone();
+            let subject = self.subject.clone();
+            let name_owned = name.to_string();
+            let args_for_meta = args.clone();
+            let parent_seed = EventContext::current().data();
 
-            let inner_args = match args {
-                serde_json::Value::Object(obj) => Some(obj),
-                serde_json::Value::Null => None,
-                _ => return Err(format!("Expected object arguments, got: {args}")),
-            };
+            return async move {
+                Audit::record_action(action);
+                Audit::record_interaction_type(InteractionType::McpCall);
+                Audit::record_metadata(serde_json::json!({
+                    "tool_name": name_owned,
+                    "arguments": args_for_meta,
+                }));
 
-            let result = set
-                .call(&self.subject, &tool_name, inner_args)
-                .await
-                .map_err(|e| with_hint(name, e.to_string()))?;
+                let start = std::time::Instant::now();
+                let result = run_searchable_call(set, &subject, &tool_name, args, default_filter)
+                    .await
+                    .map_err(|e| with_hint(&name_owned, e));
+                Audit::record_duration(start);
 
-            let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
-            let filtered = filter
-                .apply(result)
-                .map_err(|e| with_hint(name, e.to_string()))?;
+                match &result {
+                    Ok(_) => Audit::record_success(),
+                    Err(msg) => Audit::record_error(msg.clone()),
+                }
+                if let Some(audit) = audit.as_ref() {
+                    audit.record_from_context();
+                }
 
-            if let Some(structured) = &filtered.structured_content {
-                return Ok(structured.clone());
+                result
             }
-
-            let text = extract_text(&filtered);
-            return match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(v) => Ok(v),
-                Err(_) => Ok(serde_json::Value::String(text)),
-            };
+            .with_event_context(parent_seed)
+            .await;
         }
 
         self.call_top_level(name, args).await
@@ -270,28 +295,102 @@ impl CatalogDispatcher {
                 .ok_or_else(|| with_hint(name, format!("Tool not found: {name}")))?
         };
 
-        Audit::record_action(format!("compose > top_level: {name}"));
+        let action = format!("compose > top_level: {name}");
+        let audit = self.audit.clone();
+        let subject = self.subject.clone();
+        let name_owned = name.to_string();
+        let args_for_meta = args.clone();
+        let parent_seed = EventContext::current().data();
 
-        let inner_args = match args {
-            serde_json::Value::Object(obj) => Some(obj),
-            serde_json::Value::Null => None,
-            _ => return Err(format!("Expected object arguments, got: {args}")),
-        };
+        async move {
+            Audit::record_action(action);
+            Audit::record_interaction_type(InteractionType::McpCall);
+            Audit::record_metadata(serde_json::json!({
+                "tool_name": name_owned,
+                "arguments": args_for_meta,
+            }));
 
-        let result = tool
-            .call(&self.subject, inner_args)
-            .await
-            .map_err(|e| with_hint(name, e.to_string()))?;
+            let start = std::time::Instant::now();
+            let result = run_top_level_call(tool, &subject, args)
+                .await
+                .map_err(|e| with_hint(&name_owned, e));
+            Audit::record_duration(start);
 
-        if let Some(structured) = &result.structured_content {
-            return Ok(structured.clone());
+            match &result {
+                Ok(_) => Audit::record_success(),
+                Err(msg) => Audit::record_error(msg.clone()),
+            }
+            if let Some(audit) = audit.as_ref() {
+                audit.record_from_context();
+            }
+
+            result
         }
+        .with_event_context(parent_seed)
+        .await
+    }
+}
 
-        let text = extract_text(&result);
-        match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) => Ok(v),
-            Err(_) => Ok(serde_json::Value::String(text)),
-        }
+/// Inner dispatch for a [`SearchableToolSet`] — returns the raw `Result<_, String>`
+/// (no audit side-effects) so the surrounding child-context wrapper can attach
+/// the outcome to its own audit row.
+async fn run_searchable_call(
+    set: Arc<dyn SearchableToolSet>,
+    subject: &AuthSubject,
+    tool_name: &str,
+    args: serde_json::Value,
+    default_filter: Option<OutputFilter>,
+) -> Result<serde_json::Value, String> {
+    let inner_args = match args {
+        serde_json::Value::Object(obj) => Some(obj),
+        serde_json::Value::Null => None,
+        _ => return Err(format!("Expected object arguments, got: {args}")),
+    };
+
+    let result = set
+        .call(subject, tool_name, inner_args)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
+    let filtered = filter.apply(result).map_err(|e| e.to_string())?;
+
+    if let Some(structured) = &filtered.structured_content {
+        return Ok(structured.clone());
+    }
+
+    let text = extract_text(&filtered);
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => Ok(v),
+        Err(_) => Ok(serde_json::Value::String(text)),
+    }
+}
+
+/// Inner dispatch for a [`TopLevelTool`] — same shape as [`run_searchable_call`].
+async fn run_top_level_call(
+    tool: Arc<dyn TopLevelTool>,
+    subject: &AuthSubject,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let inner_args = match args {
+        serde_json::Value::Object(obj) => Some(obj),
+        serde_json::Value::Null => None,
+        _ => return Err(format!("Expected object arguments, got: {args}")),
+    };
+
+    let result = tool
+        .call(subject, inner_args)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(structured) = &result.structured_content {
+        return Ok(structured.clone());
+    }
+
+    let text = extract_text(&result);
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => Ok(v),
+        Err(_) => Ok(serde_json::Value::String(text)),
     }
 }
 
