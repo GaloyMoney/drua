@@ -113,7 +113,9 @@ pub(crate) async fn dispatch_view(
             )]))
         }
         ReadOp::Grep => {
-            let args = serde_json::Value::Object(op_args);
+            let args: sandbox::GrepInput =
+                serde_json::from_value(serde_json::Value::Object(op_args))
+                    .map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))?;
             let out = space_fs
                 .grep(subject, &space_path, &args)
                 .await?

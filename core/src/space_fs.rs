@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
 use tracing::instrument;
 
 use drua_library::{Space, SpaceError, Spaces};
@@ -370,7 +369,7 @@ impl SpaceFs {
         &self,
         sub: &AuthSubject,
         path: &str,
-        args: &Value,
+        args: &sandbox::GrepInput,
     ) -> Result<Option<String>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
@@ -428,41 +427,31 @@ fn glob_blobs(blobs: Vec<(String, Vec<u8>)>, pattern: &str) -> Result<Vec<String
 
 /// Run `grep` over already-walked blobs. Mirrors the curated subset of
 /// flags the `Grep` top-level tool accepts.
-fn grep_blobs(blobs: Vec<(String, Vec<u8>)>, args: &Value) -> Result<String, SpaceError> {
-    let pattern = args
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| io_err("grep: missing 'pattern'".to_string()))?;
-    let mode = args
-        .get("output_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("files_with_matches");
-    let case_insensitive = args.get("-i").and_then(|v| v.as_bool()).unwrap_or(false);
-    let multiline = args
-        .get("multiline")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+fn grep_blobs(
+    blobs: Vec<(String, Vec<u8>)>,
+    args: &sandbox::GrepInput,
+) -> Result<String, SpaceError> {
+    let mode = args.output_mode.unwrap_or_default();
+    let case_insensitive = args.case_insensitive;
+    let multiline = args.multiline;
     let glob_filter = args
-        .get("glob")
-        .and_then(|v| v.as_str())
+        .glob
+        .as_deref()
         .map(glob_to_regex)
         .transpose()
         .map_err(|e| io_err(format!("invalid glob filter: {e}")))?;
-    let show_line_nums = args.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
-    let context_after = args.get("-A").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-    let context_before = args.get("-B").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-    let context_around = args.get("-C").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-    let head_limit = args
-        .get("head_limit")
-        .and_then(|v| v.as_i64())
-        .map(|n| n.max(0) as usize);
+    let show_line_nums = args.line_numbers.unwrap_or(true);
+    let context_after = args.after_context.unwrap_or(0) as usize;
+    let context_before = args.before_context.unwrap_or(0) as usize;
+    let context_around = args.context.unwrap_or(0) as usize;
+    let head_limit = args.head_limit.map(|n| n as usize);
 
-    let regex = regex::RegexBuilder::new(pattern)
+    let regex = regex::RegexBuilder::new(&args.pattern)
         .case_insensitive(case_insensitive)
         .multi_line(multiline)
         .dot_matches_new_line(multiline)
         .build()
-        .map_err(|e| io_err(format!("invalid regex '{pattern}': {e}")))?;
+        .map_err(|e| io_err(format!("invalid regex '{}': {e}", args.pattern)))?;
 
     let before = context_before.max(context_around);
     let after = context_after.max(context_around);
@@ -479,18 +468,18 @@ fn grep_blobs(blobs: Vec<(String, Vec<u8>)>, args: &Value) -> Result<String, Spa
         };
 
         match mode {
-            "files_with_matches" => {
+            sandbox::GrepOutputMode::FilesWithMatches => {
                 if regex.is_match(content) {
                     output_lines.push(rel);
                 }
             }
-            "count" => {
+            sandbox::GrepOutputMode::Count => {
                 let n = regex.find_iter(content).count();
                 if n > 0 {
                     output_lines.push(format!("{rel}:{n}"));
                 }
             }
-            _ => {
+            sandbox::GrepOutputMode::Content => {
                 let lines: Vec<&str> = content.lines().collect();
                 let mut matched_idx: Vec<usize> = Vec::new();
                 for (i, line) in lines.iter().enumerate() {

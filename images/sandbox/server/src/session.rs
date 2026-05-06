@@ -17,7 +17,9 @@ use tokio::sync::Mutex;
 use crate::workspace_root;
 
 #[cfg(test)]
-use crate::DEFAULT_TIMEOUT_MS;
+use sandbox::BashCommandInput;
+#[cfg(test)]
+const DEFAULT_TIMEOUT_MS: u64 = BashCommandInput::DEFAULT_TIMEOUT_MS;
 
 const MARKER_PREFIX: &str = "___SANDBOX_EXIT_";
 const MARKER_SUFFIX: &str = "___";
