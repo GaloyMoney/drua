@@ -160,14 +160,13 @@ impl WorkflowStepDef {
 }
 
 /// Default `output_schema` injected when an `AgentStep` doesn't declare
-/// one. Forces every workflow agent to terminate with a
-/// `{success, reason, output}` payload so step results are always
-/// structured: `success`/`reason` carry the meta-status, `output`
-/// carries the step's actual deliverable.
+/// one. Forces every workflow agent to terminate with at least
+/// `{success, output}`; `reason` is optional and used on failure to
+/// cite evidence. `output` carries the step's actual deliverable.
 pub fn default_output_schema() -> OutputSchema {
     let value = serde_json::json!({
         "type": "object",
-        "required": ["success", "reason", "output"],
+        "required": ["success", "output"],
         "properties": {
             "success": {
                 "type": "boolean",
@@ -175,7 +174,7 @@ pub fn default_output_schema() -> OutputSchema {
             },
             "reason": {
                 "type": "string",
-                "description": "One paragraph explaining the outcome (citing evidence on failure)."
+                "description": "Optional one-paragraph meta-explanation of the outcome — typically used on failure to cite evidence."
             },
             "output": {
                 "type": "string",
