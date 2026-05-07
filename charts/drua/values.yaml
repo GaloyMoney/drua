@@ -44,9 +44,18 @@ galoyAgents:
           - name: deepseek/deepseek-v3.2
             maxTokensPerResponse: 8192
             contextWindowTokens: 131072
+          - name: deepseek/deepseek-v4-pro
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1048576
+          - name: deepseek/deepseek-v4-flash
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1048576
           - name: openai/gpt-5-mini
             maxTokensPerResponse: 8192
             contextWindowTokens: 400000
+          - name: anthropic/claude-sonnet-4.6
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 200000
     ## Per-role defaults applied when an agent with that role is created.
     ## All three of `projectLead`, `agent`, and `workflowStepAgent` are
     ## REQUIRED — the binary refuses to start if any of
