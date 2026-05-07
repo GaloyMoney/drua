@@ -515,6 +515,7 @@ async fn delete_detaches_attached_sandbox() {
                 cpu: "100m".to_string(),
                 memory: "128Mi".to_string(),
                 disk_size: "1Gi".to_string(),
+                dev_agent_token: None,
             },
             SandboxMode::Scratch,
         )
@@ -572,6 +573,7 @@ async fn fixture_for_detach_test(
                 cpu: "100m".to_string(),
                 memory: "128Mi".to_string(),
                 disk_size: "1Gi".to_string(),
+                dev_agent_token: None,
             },
             SandboxMode::Scratch,
         )

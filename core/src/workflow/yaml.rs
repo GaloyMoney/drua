@@ -72,6 +72,7 @@ impl ScratchYamlConfig {
                 cpu,
                 memory,
                 disk_size,
+                dev_agent_token: None,
             }),
             _ => None,
         }
@@ -102,6 +103,7 @@ impl RepoYamlConfig {
                 cpu,
                 memory,
                 disk_size,
+                dev_agent_token: None,
             }),
             _ => None,
         };
@@ -754,6 +756,7 @@ steps:
                         cpu: "1".to_string(),
                         memory: "2Gi".to_string(),
                         disk_size: "20Gi".to_string(),
+                        dev_agent_token: None,
                     }),
                 },
                 WorkflowSandboxDecl::Preexisting {

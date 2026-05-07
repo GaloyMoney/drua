@@ -189,6 +189,7 @@ impl TopLevelTool for ProjectSandbox {
                     cpu: params.cpu.unwrap_or_else(|| "500m".to_string()),
                     memory: params.memory.unwrap_or_else(|| "512Mi".to_string()),
                     disk_size: params.disk_size.unwrap_or_else(|| "10Gi".to_string()),
+                    dev_agent_token: None,
                 };
 
                 let sandbox = self

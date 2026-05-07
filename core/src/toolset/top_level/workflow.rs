@@ -164,6 +164,7 @@ fn specs_from_parts(
             cpu,
             memory,
             disk_size,
+            dev_agent_token: None,
         }),
         _ => None,
     }

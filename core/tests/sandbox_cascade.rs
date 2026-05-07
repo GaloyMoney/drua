@@ -27,6 +27,7 @@ fn specs() -> SandboxSpecs {
         cpu: "100m".into(),
         memory: "128Mi".into(),
         disk_size: "1Gi".into(),
+        dev_agent_token: None,
     }
 }
 

@@ -71,8 +71,9 @@ impl LocalAdminClient {
         name: &str,
         specs: &SandboxSpecs,
     ) -> Result<SandboxView, AdminError> {
-        // Specs are recorded in span fields but not enforced locally.
-        let _ = specs;
+        // CPU / memory / disk specs are recorded in span fields above
+        // but not enforced locally. `dev_agent_token` (when set) drives
+        // the per-sandbox gitconfig below.
         {
             let sandboxes = self.sandboxes.lock().await;
             if sandboxes.contains_key(name) {
@@ -87,18 +88,22 @@ impl LocalAdminClient {
 
         // Mirror the K8s image entrypoint locally: when DRUA_GIT_PROXY_URL
         // is in the parent (drua-server) env, write a per-sandbox
-        // gitconfig that rewrites github.com → proxy and inject an
-        // Authorization header from DRUA_DEV_AGENT_TOKEN (matching the
-        // dev-mode auth path the proxy accepts when
-        // `oauth.dev_mode_agent_tokens=true`). Surfaces as
+        // gitconfig that rewrites github.com → proxy. The Bearer token
+        // is sourced from `specs.dev_agent_token` (auto-derived by the
+        // orchestrator from the project's lead agent); env
+        // `DRUA_DEV_AGENT_TOKEN` is a fallback for callers that drive
+        // `LocalAdminClient` directly without going through the
+        // orchestrator (test fixtures). Surfaces as
         // `<sandbox_dir>/gitconfig` so an operator can `cat` it to
         // verify the wiring before driving traffic.
         let proxy_url = std::env::var("DRUA_GIT_PROXY_URL")
             .ok()
             .filter(|s| !s.is_empty());
-        let dev_agent_token = std::env::var("DRUA_DEV_AGENT_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty());
+        let dev_agent_token = specs.dev_agent_token.clone().or_else(|| {
+            std::env::var("DRUA_DEV_AGENT_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
         let gitconfig_path = if let Some(proxy_url) = proxy_url.as_deref() {
             let proxy_url = proxy_url.trim_end_matches('/');
             let path = sandbox_dir.join("gitconfig");
@@ -314,6 +319,7 @@ mod tests {
             cpu: "100m".into(),
             memory: "128Mi".into(),
             disk_size: "1Gi".into(),
+            dev_agent_token: None,
         }
     }
 
