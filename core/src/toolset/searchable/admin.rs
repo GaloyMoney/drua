@@ -75,6 +75,26 @@ fn deserialize_liberal_i64<'de, D: serde::Deserializer<'de>>(
     }
 }
 
+/// Caller must be explicit: provide `model_chain` to set, or
+/// `clear_model_chain: true` to clear. Omitting both used to silently
+/// unpin production overrides — now rejected.
+fn resolve_model_chain_update(
+    model_chain: Option<llm::ModelChain>,
+    clear: bool,
+) -> Result<Option<llm::ModelChain>, ToolSetsError> {
+    match (model_chain, clear) {
+        (Some(_), true) => Err(ToolSetsError::InvalidArgument(
+            "update_model_chain: provide either `model_chain` or `clear_model_chain: true`, not both"
+                .to_string(),
+        )),
+        (None, false) => Err(ToolSetsError::InvalidArgument(
+            "update_model_chain: must provide `model_chain` to set or `clear_model_chain: true` to clear"
+                .to_string(),
+        )),
+        (chain, _) => Ok(chain),
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum AgentCommand {
@@ -847,11 +867,8 @@ impl AdminToolSet {
                         "agent_id is required for update_model_chain".to_string(),
                     )
                 })?;
-                let chain = if params.clear_model_chain {
-                    None
-                } else {
-                    params.model_chain
-                };
+                let chain =
+                    resolve_model_chain_update(params.model_chain, params.clear_model_chain)?;
                 let agent = self
                     .agents
                     .update_model_chain(subject, agent_id, chain)
@@ -999,11 +1016,8 @@ impl AdminToolSet {
                         "project_id is required for update_model_chain".to_string(),
                     )
                 })?;
-                let chain = if params.clear_model_chain {
-                    None
-                } else {
-                    params.model_chain
-                };
+                let chain =
+                    resolve_model_chain_update(params.model_chain, params.clear_model_chain)?;
                 let project = self
                     .projects
                     .update_model_chain(subject, project_id, chain)
@@ -2588,5 +2602,31 @@ mod tests {
         for v in ["create", "list", "get", "update", "pin", "unpin", "delete"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
+    }
+
+    #[test]
+    fn resolve_model_chain_update_set() {
+        let chain = llm::ModelChain::from("claude-sonnet-4-5");
+        let resolved = resolve_model_chain_update(Some(chain.clone()), false).expect("ok");
+        assert_eq!(resolved, Some(chain));
+    }
+
+    #[test]
+    fn resolve_model_chain_update_clear() {
+        let resolved = resolve_model_chain_update(None, true).expect("ok");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_model_chain_update_rejects_neither() {
+        let err = resolve_model_chain_update(None, false).expect_err("must reject");
+        assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn resolve_model_chain_update_rejects_both() {
+        let chain = llm::ModelChain::from("claude-sonnet-4-5");
+        let err = resolve_model_chain_update(Some(chain), true).expect_err("must reject");
+        assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
     }
 }
