@@ -47,15 +47,6 @@ start_server() {
 }
 
 stop_server() {
-  # Always dump the tail of server.log to CI output so panics /
-  # errors aren't swallowed when a test fails. Cheap and surfaces
-  # the real cause when bats prints only the assertion line.
-  if [ -f "${BATS_FILE_TMPDIR:-}/server.log" ]; then
-    printf '===== server.log (last 200 lines) =====\n' >&2
-    tail -n 200 "$BATS_FILE_TMPDIR/server.log" >&2
-    printf '===== end server.log =====\n' >&2
-  fi
-
   if [ -f "$SERVER_PID_FILE" ]; then
     kill "$(cat "$SERVER_PID_FILE")" 2>/dev/null || true
     rm -f "$SERVER_PID_FILE"
