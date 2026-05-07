@@ -132,6 +132,13 @@ fn agents_config_for_tests() -> AgentsConfig {
             compaction: Default::default(),
         },
     );
+    builtin_roles.insert(
+        AgentRole::WorkflowStepAgent,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model.clone())),
+            compaction: Default::default(),
+        },
+    );
     let mut models = HashMap::new();
     models.insert(
         model.clone(),

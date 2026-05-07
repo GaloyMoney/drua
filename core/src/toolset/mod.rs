@@ -13,7 +13,7 @@ pub use searchable::*;
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
     Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog,
-    SkillTool, SpacesTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
+    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
 };
 pub use traits::*;
 
@@ -294,7 +294,12 @@ impl ToolSets {
 
     /// Top-level tools visible to `subject`. Included iff
     /// [`TopLevelTool::is_visible`] returns `true`.
-    pub fn top_level_tools(
+    /// Visible top-level tool *trait objects* for a subject. Used by
+    /// the MCP gateway and other consumers that need the raw tool
+    /// definitions; the agent layer should use [`Self::top_level_tool_defs`]
+    /// which also applies per-agent schema substitutions (e.g.
+    /// `submit_output`).
+    pub fn top_level_tool_arcs(
         &self,
         subject: &AuthSubject,
     ) -> impl Iterator<Item = Arc<dyn TopLevelTool>> {
@@ -304,6 +309,45 @@ impl ToolSets {
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    /// Visible top-level tools converted to wire `ToolDefinition`s
+    /// for the session layer. When `output_schema` is `Some` the
+    /// `submit_output` entry's `input_schema` is replaced with the
+    /// agent's per-step schema (overriding the global tool's
+    /// permissive placeholder); strict mode is also enabled.
+    pub fn top_level_tool_defs(
+        &self,
+        subject: &AuthSubject,
+        output_schema: Option<&crate::workflow::OutputSchema>,
+    ) -> Vec<crate::agent::session::message::ToolDefinition> {
+        use crate::agent::session::message::{ToolDefinition, SUBMIT_OUTPUT_TOOL_NAME};
+
+        let mut defs: Vec<ToolDefinition> = self
+            .top_level_tool_arcs(subject)
+            .map(|t| ToolDefinition::from(llm::prompt::Tool::from(t.as_ref())))
+            .collect();
+
+        if let Some(schema) = output_schema {
+            let real_input_schema = serde_json::to_value(schema.root_schema())
+                .expect("OutputSchema serialises to JSON");
+            let real_def = ToolDefinition {
+                name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
+                description: Some(
+                    "Call this exactly once to record this step's structured \
+                     result and finish the step."
+                        .to_string(),
+                ),
+                input_schema: real_input_schema,
+                strict: true,
+            };
+            match defs.iter().position(|t| t.name == SUBMIT_OUTPUT_TOOL_NAME) {
+                Some(idx) => defs[idx] = real_def,
+                None => defs.push(real_def),
+            }
+        }
+
+        defs
     }
 
     /// Records an audit entry when an [`Audit`] has been wired via [`set_audit`].

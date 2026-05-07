@@ -79,6 +79,9 @@ agents:
     agent:
       compaction:
         prune_after_seconds: 600
+    workflow_step_agent:
+      compaction:
+        prune_after_seconds: 600
 providers:
   - name: openai
     base_url: http://127.0.0.1:9

@@ -25,8 +25,8 @@ use crate::user::Users;
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{
-    next_cron_fire_at, parse_cron_schedule, parse_timezone, WorkflowSandboxDecl, WorkflowStepDef,
-    WorkflowTrigger,
+    default_output_schema, next_cron_fire_at, parse_cron_schedule, parse_timezone, OutputSchema,
+    OutputSchemaError, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
 };
 pub use entity::*;
 pub use error::*;
@@ -257,6 +257,10 @@ impl Workflows {
                             undeclared_sandboxes.push((name.clone(), sandbox_name.clone()));
                         }
                     }
+
+                    // `OutputSchema` enforces the `type: "object"` root
+                    // invariant at construction/deserialization
+                    // (memo 019dfc8c). Bad schemas can't reach here.
                 }
             }
         }

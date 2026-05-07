@@ -2,6 +2,16 @@ use serde::{Deserialize, Serialize};
 
 use super::thread::SessionThreadId;
 
+/// Name of the runtime-provided `submit_output` tool. Used by:
+/// - `crate::toolset::top_level::SubmitOutputTool` (the registered
+///   global tool).
+/// - `AgentSession::add_tool_results` to detect terminal turns.
+/// - The workflow executor's per-step `ToolDefinition` override.
+///
+/// Defined here (alongside `ToolDefinition`) so the session layer
+/// owns the constant; toolsets and workflow consume it.
+pub const SUBMIT_OUTPUT_TOOL_NAME: &str = "submit_output";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TargetThread {
@@ -104,6 +114,11 @@ pub struct ToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    /// Default-omitted; stale events hydrate as non-strict. Mirrors
+    /// the `strict: true` flag on `lib::llm::prompt::Tool` for
+    /// providers that honour Anthropic / OpenAI strict tool use.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +231,7 @@ impl From<ToolDefinition> for llm::prompt::Tool {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema,
+            strict: t.strict,
         }
     }
 }
@@ -324,6 +340,7 @@ impl From<llm::prompt::Tool> for ToolDefinition {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema,
+            strict: t.strict,
         }
     }
 }
@@ -382,5 +399,48 @@ pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> S
         SandboxOperation::Detach => {
             format!("<sandbox>\nDetached sandbox \"{sandbox_name}\".\n</sandbox>")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_definition_strict_default_omitted_on_serialize() {
+        let def = ToolDefinition {
+            name: "foo".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: false,
+        };
+        let json = serde_json::to_value(&def).unwrap();
+        assert!(json.get("strict").is_none());
+    }
+
+    #[test]
+    fn tool_definition_strict_round_trips_through_serde() {
+        let def = ToolDefinition {
+            name: "submit_output".into(),
+            description: Some("call once".into()),
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: true,
+        };
+        let json = serde_json::to_value(&def).unwrap();
+        assert_eq!(json.get("strict"), Some(&serde_json::json!(true)));
+        let back: ToolDefinition = serde_json::from_value(json).unwrap();
+        assert!(back.strict);
+    }
+
+    #[test]
+    fn tool_definition_to_llm_tool_preserves_strict() {
+        let def = ToolDefinition {
+            name: "submit_output".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: true,
+        };
+        let llm_tool: llm::prompt::Tool = def.into();
+        assert!(llm_tool.strict);
     }
 }

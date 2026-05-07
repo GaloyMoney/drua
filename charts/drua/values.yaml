@@ -48,9 +48,11 @@ galoyAgents:
             maxTokensPerResponse: 8192
             contextWindowTokens: 400000
     ## Per-role defaults applied when an agent with that role is created.
-    ## Both `projectLead` and `agent` are REQUIRED — the binary refuses
-    ## to start if either `agents.builtin_roles.project_lead` or
-    ## `agents.builtin_roles.agent` is missing.
+    ## All three of `projectLead`, `agent`, and `workflowStepAgent` are
+    ## REQUIRED — the binary refuses to start if any of
+    ## `agents.builtin_roles.project_lead`,
+    ## `agents.builtin_roles.agent`, or
+    ## `agents.builtin_roles.workflow_step_agent` is missing.
     ##
     ## Resolution precedence (highest first):
     ##   1. chain_override passed at the call site (workflow definition /
@@ -85,6 +87,14 @@ galoyAgents:
       agent:
         compaction:
           resetTimeDeltaSeconds: 600
+          pruneAfterSeconds: 300
+      workflowStepAgent:
+        ## Workflow-step agents share the default chain unless this
+        ## block sets its own. No `resetTimeDeltaSeconds` — workflow
+        ## step sessions are short-lived (one terminal `submit_output`
+        ## call); the time-based thread reset only makes sense for
+        ## long-lived interactive `projectLead` sessions.
+        compaction:
           pruneAfterSeconds: 300
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"

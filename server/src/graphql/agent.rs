@@ -144,6 +144,7 @@ impl From<SandboxAgentMode> for SandboxAttachmentMode {
 pub enum AgentRole {
     ProjectLead,
     Agent,
+    WorkflowStepAgent,
 }
 
 impl From<DomainAgentRole> for AgentRole {
@@ -151,6 +152,7 @@ impl From<DomainAgentRole> for AgentRole {
         match role {
             DomainAgentRole::ProjectLead => Self::ProjectLead,
             DomainAgentRole::Agent => Self::Agent,
+            DomainAgentRole::WorkflowStepAgent => Self::WorkflowStepAgent,
         }
     }
 }

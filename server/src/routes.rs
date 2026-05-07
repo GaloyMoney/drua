@@ -1294,6 +1294,7 @@ fn role_label(role: domain::agent::AgentRole) -> &'static str {
     match role {
         domain::agent::AgentRole::ProjectLead => "Project Lead",
         domain::agent::AgentRole::Agent => "Agent",
+        domain::agent::AgentRole::WorkflowStepAgent => "Workflow Step Agent",
     }
 }
 

@@ -6,6 +6,8 @@ use llm::ModelChain;
 
 use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+
+use super::definition::{default_output_schema, OutputSchema};
 use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
@@ -210,6 +212,8 @@ enum WorkflowStepYaml {
         timeout_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
+        #[serde(default = "default_output_schema")]
+        output_schema: OutputSchema,
     },
 }
 
@@ -223,6 +227,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                output_schema,
             } => WorkflowStepYaml::AgentStep {
                 name: name.clone(),
                 skill: skill.clone(),
@@ -230,6 +235,7 @@ impl WorkflowStepYaml {
                 sandbox_mode: *sandbox_mode,
                 timeout_seconds: *timeout_seconds,
                 model_chain: model_chain.clone(),
+                output_schema: output_schema.clone(),
             },
         }
     }
@@ -243,6 +249,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                output_schema,
             } => WorkflowStepDef::AgentStep {
                 name,
                 skill,
@@ -250,6 +257,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                output_schema,
             },
         }
     }
@@ -424,6 +432,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(120),
             model_chain: None,
+            output_schema: default_output_schema(),
         }]
     }
 
@@ -596,6 +605,76 @@ steps:
     #[test]
     fn workflow_yaml_returns_none_for_empty() {
         assert!(parse_workflow_yaml("", "runtime/workflows/x.yml").is_none());
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_custom_output_schema() {
+        let id = WorkflowDefinitionId::new();
+        let schema_value = serde_json::json!({
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {
+                "verdict": { "type": "string", "enum": ["pass", "fail"] }
+            }
+        });
+        let schema: OutputSchema = serde_json::from_value(schema_value.clone()).unwrap();
+        let steps = vec![WorkflowStepDef::AgentStep {
+            name: "judge".to_string(),
+            skill: "judge".to_string(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: schema,
+        }];
+        let content = render_workflow_yaml(
+            id,
+            "judge-flow",
+            None,
+            &WorkflowTrigger::Manual,
+            &steps,
+            &[],
+            None,
+            "2026-05-06T00:00:00Z",
+            "2026-05-06T00:00:00Z",
+        );
+        assert!(
+            content.contains("output_schema"),
+            "custom schema must round-trip into the YAML"
+        );
+        let path = canonical_workflow_path(id, "judge-flow", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert_eq!(parsed.steps.len(), 1);
+        match &parsed.steps[0] {
+            WorkflowStepDef::AgentStep { output_schema, .. } => {
+                let actual = serde_json::to_value(output_schema).unwrap();
+                assert_eq!(actual, schema_value);
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_round_trips_default_output_schema_for_old_workflows() {
+        // YAML written before the field existed (or with the field
+        // explicitly omitted on input) hydrates to the default schema
+        // and round-trips cleanly thereafter.
+        let yaml_without_field = "\
+name: simple-flow
+trigger:
+  type: manual
+steps:
+  - type: agent_step
+    name: step
+    skill: my-skill
+";
+        let parsed = parse_workflow_yaml(yaml_without_field, "runtime/workflows/simple-flow.yml")
+            .expect("parses");
+        let step = &parsed.steps[0];
+        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        let default = serde_json::to_value(default_output_schema()).unwrap();
+        assert_eq!(actual, default);
+        // Re-rendered YAML now contains the default schema explicitly.
+        assert!(parsed.rendered.contains("output_schema"));
     }
 
     #[test]

@@ -41,7 +41,8 @@ pub(super) fn event_belongs_to_thread(
         | AgentSessionEvent::ToolDefsUpdated { .. }
         | AgentSessionEvent::SystemBlockUpdated { .. }
         | AgentSessionEvent::ThreadStarted { .. }
-        | AgentSessionEvent::ToolResultsMasked { .. } => false,
+        | AgentSessionEvent::ToolResultsMasked { .. }
+        | AgentSessionEvent::OutputSubmitted { .. } => false,
     }
 }
 

@@ -54,6 +54,13 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             compaction: Default::default(),
         },
     );
+    builtin_roles.insert(
+        AgentRole::WorkflowStepAgent,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+        },
+    );
     let mut models = HashMap::new();
     models.insert(
         model_name.clone(),
@@ -739,6 +746,7 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer_from_other_workfl
             "wf-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
+            drua_core::workflow::default_output_schema(),
         )
         .await
         .expect("create workflow agent");
@@ -804,6 +812,7 @@ async fn detach_conflicting_writer_steals_from_same_workflow_writer() {
             "wf-stale",
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
+            drua_core::workflow::default_output_schema(),
         )
         .await
         .expect("create workflow agent");

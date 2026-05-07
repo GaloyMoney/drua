@@ -264,6 +264,19 @@ impl Sessions {
         Ok(self.repo.find_by_agent_id(agent_id).await?)
     }
 
+    /// Reads the latest persisted `OutputSubmitted` value for an
+    /// agent's session. `None` when no submit_output call has been
+    /// recorded. Workflow executor consumes this to populate
+    /// `StepResult.output`.
+    #[instrument(name = "domain.agent_session.submitted_output", skip(self))]
+    pub async fn submitted_output(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<serde_json::Value>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.submitted_output().cloned())
+    }
+
     #[instrument(name = "domain.agent_session.thread_infos", skip(self))]
     pub async fn thread_infos(
         &self,

@@ -7,9 +7,55 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use llm::ModelChain;
-use serde::{Deserialize, Serialize};
+use schemars::schema::{InstanceType, RootSchema, SingleOrVec};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
+
+/// JSON Schema for an AgentStep's structured output, validated at
+/// construction time. The MCP / Anthropic + OpenAI tool-use APIs
+/// require `type: "object"` at the root; tagged-union (`oneOf`/`anyOf`)
+/// roots are silently rejected (memo `019dfc8c`). This wrapper makes
+/// invalid roots unrepresentable.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(transparent)]
+pub struct OutputSchema(RootSchema);
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OutputSchemaError {
+    #[error(
+        "output_schema root must be `type: \"object\"`; tagged-union (oneOf/anyOf) \
+         roots are rejected by MCP — wrap the union under a struct field instead"
+    )]
+    NotObjectRoot,
+}
+
+impl OutputSchema {
+    pub fn new(schema: RootSchema) -> Result<Self, OutputSchemaError> {
+        match &schema.schema.instance_type {
+            Some(SingleOrVec::Single(t)) if **t == InstanceType::Object => {}
+            Some(SingleOrVec::Vec(types))
+                if types.len() == 1 && types[0] == InstanceType::Object => {}
+            _ => return Err(OutputSchemaError::NotObjectRoot),
+        }
+        Ok(Self(schema))
+    }
+
+    pub fn into_root_schema(self) -> RootSchema {
+        self.0
+    }
+
+    pub fn root_schema(&self) -> &RootSchema {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputSchema {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let schema = RootSchema::deserialize(deserializer)?;
+        OutputSchema::new(schema).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,6 +123,14 @@ pub enum WorkflowStepDef {
         /// Highest-precedence chain override; beats workflow + defaults.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
+        /// JSON Schema describing the structured payload the agent
+        /// must submit via the synthesised `submit_output` tool. The
+        /// root is guaranteed `type: "object"` (enforced by
+        /// [`OutputSchema`] validation on construction/deserialization).
+        /// Old workflows / inputs that omit the field hydrate as
+        /// [`default_output_schema`] (`{success, reason}`).
+        #[serde(default = "default_output_schema")]
+        output_schema: OutputSchema,
     },
 }
 
@@ -92,6 +146,45 @@ impl WorkflowStepDef {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
         }
     }
+
+    /// Every AgentStep produces a structured output via the
+    /// synthesised `submit_output` tool. The schema defaults to
+    /// [`default_output_schema`] (`{success, reason}`) when the step
+    /// doesn't declare its own; there is no schemaless free-text
+    /// passthrough.
+    pub fn output_schema(&self) -> &OutputSchema {
+        match self {
+            WorkflowStepDef::AgentStep { output_schema, .. } => output_schema,
+        }
+    }
+}
+
+/// Default `output_schema` injected when an `AgentStep` doesn't declare
+/// one. Forces every workflow agent to terminate with at least
+/// `{success, output}`; `reason` is optional and used on failure to
+/// cite evidence. `output` carries the step's actual deliverable.
+pub fn default_output_schema() -> OutputSchema {
+    let value = serde_json::json!({
+        "type": "object",
+        "required": ["success", "output"],
+        "properties": {
+            "success": {
+                "type": "boolean",
+                "description": "Did the step achieve its goal?"
+            },
+            "reason": {
+                "type": "string",
+                "description": "Optional one-paragraph meta-explanation of the outcome — typically used on failure to cite evidence."
+            },
+            "output": {
+                "type": "string",
+                "description": "The step's actual deliverable — the primary artifact, finding, or content the step produced. Distinct from `reason`, which is the meta-explanation."
+            }
+        }
+    });
+    let schema: RootSchema =
+        serde_json::from_value(value).expect("default schema is valid JSON Schema");
+    OutputSchema::new(schema).expect("default schema has type=object root")
 }
 
 /// Top-level sandbox declaration on a workflow.
@@ -134,6 +227,134 @@ impl WorkflowSandboxDecl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_output_schema_is_object_root() {
+        let schema = default_output_schema();
+        let value = serde_json::to_value(&schema).unwrap();
+        assert_eq!(
+            value.get("type").and_then(|t| t.as_str()),
+            Some("object"),
+            "MCP requires `type: object` at the schema root (memo 019dfc8c)"
+        );
+        let required = value
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("default schema declares required");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"success"));
+        assert!(names.contains(&"output"));
+        // `reason` is optional — present in `properties` but not
+        // `required`, since on success it's redundant with `output`.
+        assert!(!names.contains(&"reason"));
+        let properties = value
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("default schema declares properties");
+        assert!(properties.contains_key("reason"));
+    }
+
+    #[test]
+    fn output_schema_new_accepts_object_root() {
+        let schema: RootSchema = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "required": ["x"],
+        }))
+        .unwrap();
+        OutputSchema::new(schema).expect("object root accepted");
+    }
+
+    #[test]
+    fn output_schema_new_rejects_array_root() {
+        let schema: RootSchema =
+            serde_json::from_value(serde_json::json!({ "type": "array" })).unwrap();
+        assert_eq!(
+            OutputSchema::new(schema),
+            Err(OutputSchemaError::NotObjectRoot)
+        );
+    }
+
+    #[test]
+    fn output_schema_new_rejects_one_of_root() {
+        let schema: RootSchema = serde_json::from_value(serde_json::json!({
+            "oneOf": [
+                { "type": "object" },
+                { "type": "object" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            OutputSchema::new(schema),
+            Err(OutputSchemaError::NotObjectRoot)
+        );
+    }
+
+    #[test]
+    fn output_schema_deserialize_rejects_non_object_root() {
+        let res: Result<OutputSchema, _> =
+            serde_json::from_value(serde_json::json!({ "type": "array" }));
+        assert!(res.is_err(), "non-object roots must fail deserialization");
+    }
+
+    #[test]
+    fn output_schema_accessor_returns_declared() {
+        let custom_value = serde_json::json!({
+            "type": "object",
+            "required": ["verdict"],
+            "properties": { "verdict": {"type": "string"} }
+        });
+        let custom: OutputSchema = serde_json::from_value(custom_value.clone()).unwrap();
+        let step = WorkflowStepDef::AgentStep {
+            name: "judge".into(),
+            skill: "judge".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: custom,
+        };
+        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        assert_eq!(actual, custom_value);
+    }
+
+    #[test]
+    fn output_schema_defaults_when_yaml_omits_field() {
+        // Tagged-enum struct format with discriminator + flat fields.
+        let json = serde_json::json!({
+            "type": "agent_step",
+            "name": "noop",
+            "skill": "noop",
+            "sandbox": null,
+            "sandbox_mode": null,
+            "timeout_seconds": null
+        });
+        let step: WorkflowStepDef = serde_json::from_value(json).unwrap();
+        let default = serde_json::to_value(default_output_schema()).unwrap();
+        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        assert_eq!(actual, default);
+    }
+
+    #[test]
+    fn output_schema_default_round_trips_through_serde() {
+        let step = WorkflowStepDef::AgentStep {
+            name: "noop".into(),
+            skill: "noop".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: default_output_schema(),
+        };
+        let value = serde_json::to_value(&step).unwrap();
+        assert!(
+            value.get("output_schema").is_some(),
+            "output_schema is always serialized; never omitted"
+        );
+        let back: WorkflowStepDef = serde_json::from_value(value).unwrap();
+        let back_schema = serde_json::to_value(back.output_schema()).unwrap();
+        let default = serde_json::to_value(default_output_schema()).unwrap();
+        assert_eq!(back_schema, default);
+    }
 
     #[test]
     fn parse_cron_schedule_accepts_six_fields() {

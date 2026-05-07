@@ -30,6 +30,16 @@ es_entity::entity_id! {
     WorkflowRunId => job::JobId,
 }
 
+impl WorkflowRunId {
+    /// First UUID segment (8 hex chars). Used to build human-readable
+    /// agent / sandbox names that stay readable while still being
+    /// unique enough within a project.
+    pub fn short(&self) -> String {
+        let s = self.to_string();
+        s.split_once('-').map(|(p, _)| p.to_string()).unwrap_or(s)
+    }
+}
+
 /// Who owns a set of MCP credentials — either a human user or an internal agent.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

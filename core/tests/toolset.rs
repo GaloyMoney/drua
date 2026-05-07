@@ -32,6 +32,6 @@ async fn init_toolsets() {
     // trait defaults `is_visible` to `true`. Make sure init succeeded and
     // the registry exposes the catalog meta-tools.
     let subject = AuthSubject::Anonymous;
-    let visible: Vec<_> = toolsets.top_level_tools(&subject).collect();
+    let visible: Vec<_> = toolsets.top_level_tool_arcs(&subject).collect();
     assert!(visible.iter().any(|t| t.name() == "search_tools"));
 }

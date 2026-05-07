@@ -118,6 +118,35 @@ data:
             {{- end }}
           {{- end }}
         {{- end }}
+        {{- with .Values.galoyAgents.config.agents.workflowStepAgent }}
+        workflow_step_agent:
+          {{- with .chain }}
+          chain:
+            primary:
+              name: {{ .primary.name | quote }}
+              {{- with .primary.maxTokens }}
+              max_tokens: {{ . }}
+              {{- end }}
+            {{- with .fallbacks }}
+            fallbacks:
+              {{- range . }}
+              - name: {{ .name | quote }}
+                {{- with .maxTokens }}
+                max_tokens: {{ . }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- with .compaction }}
+          compaction:
+            {{- with .resetTimeDeltaSeconds }}
+            reset_time_delta_seconds: {{ . }}
+            {{- end }}
+            {{- with .pruneAfterSeconds }}
+            prune_after_seconds: {{ . }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
     toolsets:
       code_assistant:
         db_path: {{ .Values.galoyAgents.config.codeAssistant.dbPath | quote }}

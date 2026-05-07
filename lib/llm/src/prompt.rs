@@ -90,6 +90,15 @@ pub struct Tool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    /// Anthropic + OpenAI honour `strict: true`; providers that don't
+    /// silently ignore it. Schema-violation defence is the runtime's
+    /// post-hoc validation in `core::agent`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strict: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +252,7 @@ mod tests {
                     },
                     "required": ["location"]
                 }),
+                strict: false,
             }],
             tool_choice: None,
             max_tokens: Some(1024),
@@ -324,6 +334,34 @@ mod tests {
         b.cache_key = Some("session-b".to_string());
 
         assert_eq!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn tool_strict_roundtrips_through_serde() {
+        let strict_tool = Tool {
+            name: "submit_output".into(),
+            description: Some("call once".into()),
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: true,
+        };
+        let json = serde_json::to_value(&strict_tool).unwrap();
+        assert_eq!(json.get("strict"), Some(&serde_json::json!(true)));
+        let back: Tool = serde_json::from_value(json).unwrap();
+        assert!(back.strict);
+
+        let lax_tool = Tool {
+            name: "x".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: false,
+        };
+        let json = serde_json::to_value(&lax_tool).unwrap();
+        assert!(
+            json.get("strict").is_none(),
+            "strict: false should be omitted from wire JSON"
+        );
+        let back: Tool = serde_json::from_value(json).unwrap();
+        assert!(!back.strict);
     }
 
     #[test]

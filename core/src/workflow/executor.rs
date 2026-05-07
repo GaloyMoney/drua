@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
 use crate::agent::{Agent, Agents};
 use crate::primitives::{
     AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
@@ -126,11 +127,6 @@ impl Executor {
                 continue;
             }
 
-            // Between-steps cancellation: abort cleanly without
-            // `step_failed` so the rescheduled run picks up here. The
-            // pre-flight already brought sandboxes back to Ready and any
-            // in-flight `PromptSent` will be re-driven via
-            // [`Agents::resume_message`] on the next attempt.
             if cancel.load(Ordering::Relaxed) {
                 return Err(WorkflowError::Cancelled);
             }
@@ -225,8 +221,7 @@ impl Executor {
                     let existing = self
                         .sandboxes
                         .find_for_workflow(project_id, workflow_id, name)
-                        .await
-                        .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
+                        .await?;
 
                     let sandbox = match existing {
                         None => {
@@ -235,28 +230,15 @@ impl Executor {
                                 memory: "512Mi".to_string(),
                                 disk_size: "10Gi".to_string(),
                             });
-                            let mut op = self
-                                .sandboxes
-                                .begin_op()
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                            let sb = self
-                                .sandboxes
-                                .create_for_workflow_in_op(
-                                    &mut op,
+                            self.sandboxes
+                                .create_for_workflow(
                                     project_id,
                                     workflow_id,
                                     name.clone(),
                                     specs,
                                     mode.clone(),
                                 )
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                            op.commit()
-                                .await
-                                .map_err(|e| WorkflowError::Sandbox(e.to_string()))?;
-                            self.sandboxes.spawn_sandbox_creation(sb.id);
-                            sb
+                                .await?
                         }
                         Some(sb) => self.restart_if_dormant(sb, name).await?,
                     };
@@ -301,10 +283,7 @@ impl Executor {
                 "pre-flight: restarting sandbox in Errored state",
             );
         }
-        self.sandboxes
-            .restart_for_workflow(sandbox.id)
-            .await
-            .map_err(|e| WorkflowError::Sandbox(e.to_string()))
+        Ok(self.sandboxes.restart_for_workflow(sandbox.id).await?)
     }
 
     async fn suspend_workflow_sandboxes(
@@ -428,10 +407,6 @@ impl Executor {
                 let arguments = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
-                // `interpolate_skill` resolves the project's mounted-space
-                // skills internally via the held `SpaceMounts` — a workflow
-                // step naming a space-scoped skill resolves correctly as
-                // long as the workflow's project mounts the space.
                 let prompt = self
                     .skills
                     .interpolate_skill(skill, Some(project_id), sandbox_id, Some(&arguments))
@@ -439,21 +414,13 @@ impl Executor {
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?
                     .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
 
-                let run_id_short = {
-                    let s = run_id.to_string();
-                    s.split_once('-').map(|(p, _)| p.to_string()).unwrap_or(s)
-                };
-                let agent_name = format!("workflow-{run_id_short}-{name}");
+                let agent_name = format!("workflow-{}-{name}", run_id.short());
                 let mut op = self
                     .agents
                     .begin_op()
                     .await
                     .map_err(|e| WorkflowError::Agent(e.to_string()))?;
 
-                // Re-entrancy: on retry the prior attempt's agent already
-                // owns the sandbox write slot and carries its session
-                // history (incl. an unanswered `PromptSent` if killed
-                // mid-LLM-call). Reuse it; only create when absent.
                 let existing = self
                     .agents
                     .find_for_workflow_step_in_op(&mut op, run_id, &agent_name)
@@ -463,12 +430,6 @@ impl Executor {
                 let (agent, detached_agents) = if let Some(agent) = existing {
                     (agent, Vec::new())
                 } else {
-                    // Conflict-only steal: detach a non-workflow Writer
-                    // unconditionally, or a same-workflow Writer (stale
-                    // claim from a prior run / sibling step). Different
-                    // workflows are never stolen from. Same op as
-                    // create+attach so the sandbox is never observed
-                    // double-attached.
                     let detached_agents = match attach_sandbox {
                         Some((sandbox_id, mode)) => self
                             .agents
@@ -493,6 +454,7 @@ impl Executor {
                             &agent_name,
                             attach_sandbox,
                             chain_override,
+                            step.output_schema().clone(),
                         )
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?;
@@ -523,7 +485,7 @@ impl Executor {
                 }
 
                 let result = self
-                    .stream_agent_response(&agent, prompt, name, *timeout_seconds)
+                    .run_agent_until_submit_output(&agent, prompt, name, *timeout_seconds)
                     .await;
 
                 // Detach the sandbox unconditionally so the next step can
@@ -533,18 +495,68 @@ impl Executor {
                     self.detach_step_sandbox(sandbox_id, agent.id).await;
                 }
 
-                result.map(serde_json::Value::String)
+                result
             }
         }
     }
 
-    async fn stream_agent_response(
+    /// First the regular send/resume loop; if the agent finished without
+    /// calling `submit_output`, retry once with `tool_choice` forced to
+    /// the synthetic tool. After a second miss the step fails.
+    async fn run_agent_until_submit_output(
         &self,
         agent: &Agent,
         prompt: String,
         step_name: &str,
         timeout_seconds: Option<u64>,
-    ) -> Result<String, WorkflowError> {
+    ) -> Result<serde_json::Value, WorkflowError> {
+        if let Some(value) = self
+            .stream_agent_response(agent, Some(prompt), None, step_name, timeout_seconds)
+            .await?
+        {
+            return Ok(value);
+        }
+
+        // Forced retry: the agent ended its turn without calling
+        // `submit_output`. Nudge it with a fresh user message and
+        // `tool_choice: Tool { submit_output }` so the next assistant
+        // turn is constrained to the synthetic tool.
+        let nudge = "Investigation complete — call `submit_output` now to record the structured \
+             result for this step.";
+        if let Some(value) = self
+            .stream_agent_response(
+                agent,
+                Some(nudge.to_string()),
+                Some(llm::prompt::ToolChoice::Tool {
+                    name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
+                }),
+                step_name,
+                timeout_seconds,
+            )
+            .await?
+        {
+            return Ok(value);
+        }
+
+        Err(WorkflowError::StepFailed {
+            step: step_name.to_string(),
+            reason: "agent did not call submit_output after one forced retry".to_string(),
+        })
+    }
+
+    /// Drives one send/resume turn to completion. Returns the
+    /// structured output if the session reached `Done` via a
+    /// `submit_output` call (read from the persisted session event).
+    /// `None` means the turn closed without `submit_output` — the
+    /// caller decides whether to retry.
+    async fn stream_agent_response(
+        &self,
+        agent: &Agent,
+        user_prompt: Option<String>,
+        tool_choice: Option<llm::prompt::ToolChoice>,
+        step_name: &str,
+        timeout_seconds: Option<u64>,
+    ) -> Result<Option<serde_json::Value>, WorkflowError> {
         let agent_subject = agent.auth_subject();
         // Resume an in-flight prompt if a prior attempt was killed between
         // `PromptSent` and `AssistantResponseReceived`. Otherwise emit the
@@ -559,11 +571,14 @@ impl Executor {
             .map_err(|e| WorkflowError::Agent(e.to_string()))?
         {
             Some(rx) => rx,
-            None => self
-                .agents
-                .send_message(agent_subject, agent.id, prompt)
-                .await
-                .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+            None => match user_prompt {
+                Some(prompt) => self
+                    .agents
+                    .send_message_with_choice(agent_subject, agent.id, prompt, tool_choice)
+                    .await
+                    .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+                None => return Ok(None),
+            },
         };
 
         // Idle timeout: resets on every streamed event so a busy agent
@@ -573,7 +588,6 @@ impl Executor {
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(300));
 
-        let mut output = String::new();
         loop {
             let event = match tokio::time::timeout(idle_timeout, rx.recv()).await {
                 Ok(Some(event)) => event,
@@ -586,8 +600,6 @@ impl Executor {
                 }
             };
             match event {
-                ChatOutputEvent::AssistantText { text } => output.push_str(&text),
-                ChatOutputEvent::AssistantTextDelta { text } => output.push_str(&text),
                 ChatOutputEvent::AssistantDone { .. } => break,
                 ChatOutputEvent::Error { message } => {
                     return Err(WorkflowError::StepFailed {
@@ -598,7 +610,15 @@ impl Executor {
                 _ => {}
             }
         }
-        Ok(output)
+
+        // The session is the source of truth: `add_tool_results`
+        // pushed `OutputSubmitted` and returned `Done` when the agent
+        // called `submit_output`, which broke the agent loop and
+        // emitted `AssistantDone`. Read it back here.
+        self.agents
+            .submitted_output(agent.id)
+            .await
+            .map_err(|e| WorkflowError::Agent(e.to_string()))
     }
 
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {

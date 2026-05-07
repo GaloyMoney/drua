@@ -111,7 +111,7 @@ impl ServerHandler for McpGateway {
         let tools: Vec<Tool> = self
             .app
             .toolsets()
-            .top_level_tools(auth)
+            .top_level_tool_arcs(auth)
             .map(|t| to_mcp_tool(t.as_ref()))
             .collect();
         Ok(ListToolsResult {

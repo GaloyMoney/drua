@@ -180,6 +180,7 @@ fn convert_tool(tool: &Tool) -> AnthropicTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
         input_schema: tool.input_schema.clone(),
+        strict: if tool.strict { Some(true) } else { None },
         cache_control: None,
     }
 }

@@ -18,12 +18,18 @@ use crate::project::repo::ProjectRepo;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
-/// Lead → `ProjectAdmin`; Agent → `ProjectMember` (read-only). Sandbox
-/// scopes are added later via [`Agent::sandbox_attached`].
+/// Lead → `ProjectAdmin`; Agent → `ProjectMember`; WorkflowStepAgent →
+/// `ProjectMember` + `WorkflowStepAgent` marker (gates submit_output's
+/// visibility). Sandbox scopes are added later via
+/// [`Agent::sandbox_attached`].
 fn default_authz_scopes(role: AgentRole, project_id: ProjectId) -> Vec<AuthScope> {
     match role {
         AgentRole::ProjectLead => vec![AuthScope::ProjectAdmin(project_id)],
         AgentRole::Agent => vec![AuthScope::ProjectMember(project_id)],
+        AgentRole::WorkflowStepAgent => vec![
+            AuthScope::ProjectMember(project_id),
+            AuthScope::WorkflowStepAgent,
+        ],
     }
 }
 
@@ -243,6 +249,7 @@ impl Agents {
                 None,
                 None,
                 None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -278,6 +285,7 @@ impl Agents {
                 None,
                 None,
                 chain_override,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -286,6 +294,8 @@ impl Agents {
 
     /// Caller commits the op. Stamping `(workflow_id, workflow_run_id)`
     /// is what excludes the agent from [`Self::list_for_project`].
+    /// `output_schema` is persisted on the agent entity; the
+    /// `submit_output` tool reads it at call time to validate args.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
@@ -297,6 +307,7 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
         chain_override: Option<llm::ModelChain>,
+        output_schema: crate::workflow::OutputSchema,
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
         Audit::record_project_id(project_id);
@@ -309,13 +320,14 @@ impl Agents {
             op,
             id,
             project_id,
-            AgentRole::Agent,
+            AgentRole::WorkflowStepAgent,
             name,
             attach_sandbox,
             &project_name,
             Some(workflow_id),
             Some(workflow_run_id),
             chain_override,
+            Some(output_schema),
         )
         .await
     }
@@ -363,12 +375,13 @@ impl Agents {
             None,
             None,
             None,
+            None,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(name = "domain.agent.create_in_op", skip(self, op))]
+    #[instrument(name = "domain.agent.create_in_op", skip(self, op, output_schema))]
     async fn create_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
@@ -381,6 +394,7 @@ impl Agents {
         workflow_id: Option<WorkflowDefinitionId>,
         workflow_run_id: Option<WorkflowRunId>,
         chain_override: Option<llm::ModelChain>,
+        output_schema: Option<crate::workflow::OutputSchema>,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -416,7 +430,8 @@ impl Agents {
             .agent_role(agent_role)
             .name(name)
             .authz_scopes(authz_scopes)
-            .project_name(project_name);
+            .project_name(project_name)
+            .output_schema(output_schema.clone());
         if let Some(wf_id) = workflow_id {
             new_agent_builder.workflow_id(wf_id);
         }
@@ -428,16 +443,15 @@ impl Agents {
         let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
         let agent_subject = agent.auth_subject();
-        let tool_defs: Vec<session::message::ToolDefinition> = self
+        let tool_defs = self
             .toolsets
-            .top_level_tools(&agent_subject)
-            .map(|t| session::message::ToolDefinition::from(llm::prompt::Tool::from(t.as_ref())))
-            .collect();
+            .top_level_tool_defs(&agent_subject, output_schema.as_ref());
         let mut system_blocks = system_prompt::system_blocks_for_role(
             agent_role,
             &self.toolsets,
             &agent_subject,
             &agent.project_name,
+            output_schema.as_ref(),
         );
 
         // Apply attach to the entity first so the initial skills block reflects
@@ -562,6 +576,30 @@ impl Agents {
         Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent.id);
         Ok(agent)
+    }
+
+    /// Read-only accessor for an agent's persisted `output_schema`.
+    /// Used by `SubmitOutputTool::call` to validate the model's args
+    /// against the schema set at agent creation. No authz check —
+    /// the caller is the agent reading its own persisted state.
+    #[instrument(name = "domain.agent.output_schema_for_agent", skip(self))]
+    pub async fn output_schema_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<crate::workflow::OutputSchema>, AgentError> {
+        let agent = self.repo.find_by_id(agent_id).await?;
+        Ok(agent.output_schema.clone())
+    }
+
+    /// Reads the agent's session for a persisted `OutputSubmitted`
+    /// event. Workflow executor consumes this after
+    /// `AssistantDone` to populate `StepResult.output`.
+    #[instrument(name = "domain.agent.submitted_output", skip(self))]
+    pub async fn submitted_output(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<serde_json::Value>, AgentError> {
+        Ok(self.sessions.submitted_output(agent_id).await?)
     }
 
     /// Workflow-spawned agents are filtered out; see
@@ -1157,6 +1195,21 @@ impl Agents {
         id: AgentId,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
+        self.send_message_with_choice(subject, id, prompt, None)
+            .await
+    }
+
+    /// `tool_choice` is applied to the initial prompt only. The agent
+    /// loop's per-turn re-prompts inherit `Auto` from the session, so a
+    /// forced choice is a one-shot nudge rather than a sticky setting.
+    #[instrument(name = "domain.agent.send_message_with_choice", skip(self, prompt))]
+    pub async fn send_message_with_choice(
+        &self,
+        subject: AuthSubject,
+        id: AgentId,
+        prompt: String,
+        tool_choice: Option<llm::prompt::ToolChoice>,
+    ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
         // Agents may only message peers in their own project; anonymous rejected.
@@ -1195,6 +1248,7 @@ impl Agents {
             &self.toolsets,
             &agent_subject,
             &agent.project_name,
+            agent.output_schema.as_ref(),
         );
         proposed_system_blocks.extend(dynamic_blocks);
 
@@ -1251,6 +1305,9 @@ impl Agents {
             .await?;
         if let Some(c) = runtime_chain_override.clone() {
             prompt_state.chain = c;
+        }
+        if let Some(choice) = tool_choice {
+            prompt_state.tool_choice = Some(choice);
         }
 
         self.drive_session_loop(id, agent_subject, tx, prompt_state, runtime_chain_override)
@@ -1408,14 +1465,25 @@ impl Agents {
                         let results =
                             fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx).await;
 
-                        if let Err(e) = sessions.add_tool_results(id, results).await {
-                            emit_event(
-                                &tx,
-                                ChatOutputEvent::Error {
-                                    message: e.to_string(),
-                                },
-                            );
-                            return;
+                        // The session detects a terminal `submit_output`
+                        // call inside `add_tool_results` and returns
+                        // `Done` — the loop breaks below without a
+                        // follow-up prompt.
+                        let post = match sessions.add_tool_results(id, results).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                emit_event(
+                                    &tx,
+                                    ChatOutputEvent::Error {
+                                        message: e.to_string(),
+                                    },
+                                );
+                                return;
+                            }
+                        };
+
+                        if matches!(post, session::AgentSessionResponse::Done) {
+                            break;
                         }
 
                         match sessions.next_prompt(id, session::TargetThread::Main).await {
