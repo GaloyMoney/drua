@@ -39,6 +39,7 @@ pub struct AuthConfig {
     pub github_client_secret: String,
     pub github_redirect_uri: String,
     pub github_allowed_teams: Vec<String>,
+    pub dev_mode_agent_tokens: bool,
 }
 
 impl AuthConfig {

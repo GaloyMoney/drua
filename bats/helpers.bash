@@ -86,6 +86,114 @@ SQL
   export AGENT_TOKEN="$raw_token"
 }
 
+# Generates fresh project + agent UUIDs without touching PG. Call
+# this BEFORE `write_git_proxy_config` so the YAML allowlist binds to
+# the same project_id we'll later seed.
+gen_test_project_agent_ids() {
+  export PROJECT_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  export AGENT_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  export PROJECT_NAME="bats-${PROJECT_ID:0:8}"
+  export GIT_PROXY_TOKEN="dev-agent:$AGENT_ID"
+}
+
+# Persists the project + lead-agent SQL rows. Must run AFTER the
+# server is up (which brings up PG + applies migrations) and AFTER
+# `gen_test_project_agent_ids`.
+seed_test_project_agent() {
+  psql "$PG_CON" -q <<SQL
+    INSERT INTO projects (id, name, created_at) VALUES ('$PROJECT_ID', '$PROJECT_NAME', NOW());
+    INSERT INTO project_events (id, sequence, event_type, event, recorded_at)
+    VALUES ('$PROJECT_ID', 0, 'initialized',
+      '{"type":"initialized","id":"$PROJECT_ID","lead_agent_id":"$AGENT_ID","name":"$PROJECT_NAME","description":null}',
+      NOW());
+
+    INSERT INTO agents (id, project_id, created_at) VALUES ('$AGENT_ID', '$PROJECT_ID', NOW());
+    INSERT INTO agent_events (id, sequence, event_type, event, recorded_at)
+    VALUES ('$AGENT_ID', 0, 'initialized',
+      '{"type":"initialized","id":"$AGENT_ID","project_id":"$PROJECT_ID","agent_role":"project_lead","name":"lead","authz_scopes":["project:$PROJECT_ID:admin"],"project_name":"$PROJECT_NAME"}',
+      NOW());
+SQL
+}
+
+# Renders an isolated drua.yml with:
+#   * dev login + dev_mode_agent_tokens enabled
+#   * one git_proxy.allowlist entry per arg in the form
+#     "<owner>/<repo>:<modes>:<patterns>" — modes csv (pull,push),
+#     patterns csv. e.g. "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main"
+#   * project_id pinned to the current $PROJECT_ID
+write_git_proxy_config() {
+  local out="$BATS_FILE_TMPDIR/drua.yml"
+
+  cat > "$out" <<EOF
+server:
+  port: 4200
+  host: "0.0.0.0"
+  secure_cookies: false
+  mcp_endpoint: "http://localhost:4200/mcp"
+oauth:
+  login: dev
+  dev_mode_agent_tokens: true
+  github_redirect_uri: "http://localhost:4200/auth/github/callback"
+  github_client_id: "bats"
+  github_allowed_teams: []
+agents:
+  models:
+    bats-test-model:
+      model: bats-test-model
+      max_tokens_per_response: 1024
+      context_window_tokens: 4096
+  default_chain:
+    primary: { name: "bats-test-model", max_tokens: 1024 }
+  builtin_roles:
+    project_lead:
+      compaction:
+        prune_after_seconds: 600
+    agent:
+      compaction:
+        prune_after_seconds: 600
+sandbox:
+  backend:
+    provider: local
+    sandbox_spawn_cmd: "true"
+    local_repo_root: "."
+library:
+  repo_url: "https://github.com/galoymoney/drua-test-library"
+  skill_sync_interval_secs: 3600
+git_proxy:
+  allowlist:
+EOF
+
+  if [ "$#" -gt 0 ]; then
+    echo "    entries:" >> "$out"
+    for spec in "$@"; do
+      local owner_repo modes_patterns modes patterns owner repo_name
+      owner_repo="${spec%%:*}"
+      modes_patterns="${spec#*:}"
+      modes="${modes_patterns%%:*}"
+      patterns="${modes_patterns#*:}"
+      owner="${owner_repo%%/*}"
+      repo_name="${owner_repo#*/}"
+      echo "      - project_id: $PROJECT_ID" >> "$out"
+      echo "        owner: $owner" >> "$out"
+      echo "        repo: $repo_name" >> "$out"
+      echo "        modes:" >> "$out"
+      IFS=',' read -ra _modes <<< "$modes"
+      for m in "${_modes[@]}"; do
+        echo "          - $m" >> "$out"
+      done
+      echo "        allowed_ref_patterns:" >> "$out"
+      IFS=',' read -ra _pats <<< "$patterns"
+      for p in "${_pats[@]}"; do
+        echo "          - \"$p\"" >> "$out"
+      done
+    done
+  else
+    echo "    entries: []" >> "$out"
+  fi
+
+  export DRUA_CONFIG="$out"
+}
+
 mcp_call() {
   local token="$1"
   local method="$2"

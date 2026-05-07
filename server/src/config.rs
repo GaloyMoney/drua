@@ -180,6 +180,11 @@ pub struct OAuthConfig {
     pub github_client_secret: String,
     #[serde(default)]
     pub github_allowed_teams: Vec<String>,
+    /// Local-dev only. Accepts `dev-agent:<agent-uuid>` bearer tokens
+    /// in place of K8s SA JWTs so bats can drive the git-proxy
+    /// without minting projected tokens. NEVER set in prod values.yaml.
+    #[serde(default)]
+    pub dev_mode_agent_tokens: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -282,6 +287,7 @@ impl Config {
             github_client_secret: self.oauth.github_client_secret.clone(),
             github_redirect_uri: self.oauth.github_redirect_uri.clone(),
             github_allowed_teams: self.oauth.github_allowed_teams.clone(),
+            dev_mode_agent_tokens: self.oauth.dev_mode_agent_tokens,
         }
     }
 }

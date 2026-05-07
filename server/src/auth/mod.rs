@@ -126,6 +126,22 @@ async fn resolve_auth_context(
             }
         }
 
+        // Local-dev shortcut: `dev-agent:<uuid>` resolves to the named
+        // agent's full AuthSubject. Off in prod (config flag default
+        // false). Emits a tracing::warn at server boot when enabled.
+        if state.dev_mode_agent_tokens {
+            if let Some(rest) = raw_token.strip_prefix("dev-agent:") {
+                if let Ok(agent_uuid) = rest.parse::<uuid::Uuid>() {
+                    let agent_id = domain::primitives::AgentId::from(agent_uuid);
+                    let system_sub =
+                        AuthSubject::User(domain::primitives::UserId::from(uuid::Uuid::nil()));
+                    if let Ok(agent) = state.app.agents().find_by_id(&system_sub, agent_id).await {
+                        return agent.auth_subject();
+                    }
+                }
+            }
+        }
+
         // SA tokens from sandbox pods (projected ServiceAccount tokens).
         if sa_token::looks_like_jwt(&raw_token) {
             if let Some(ref validator) = state.sa_token_validator {
