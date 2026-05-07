@@ -82,9 +82,57 @@ impl LocalAdminClient {
 
         let sandbox_dir = self.sandboxes_root.join(name);
         let workspace = sandbox_dir.join("workspace");
-        let _ = sandbox_dir;
 
         create_dir_all(&workspace).await?;
+
+        // Mirror the K8s image entrypoint locally: when DRUA_GIT_PROXY_URL
+        // is in the parent (drua-server) env, write a per-sandbox
+        // gitconfig that rewrites github.com → proxy and inject an
+        // Authorization header from DRUA_DEV_AGENT_TOKEN (matching the
+        // dev-mode auth path the proxy accepts when
+        // `oauth.dev_mode_agent_tokens=true`). Surfaces as
+        // `<sandbox_dir>/gitconfig` so an operator can `cat` it to
+        // verify the wiring before driving traffic.
+        let proxy_url = std::env::var("DRUA_GIT_PROXY_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let dev_agent_token = std::env::var("DRUA_DEV_AGENT_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let gitconfig_path = if let Some(proxy_url) = proxy_url.as_deref() {
+            let proxy_url = proxy_url.trim_end_matches('/');
+            let path = sandbox_dir.join("gitconfig");
+            let mut body = format!(
+                "[user]\n\
+                     name = drua[bot]\n\
+                     email = drua[bot]@users.noreply.github.com\n\
+                 [url \"{proxy_url}/\"]\n\
+                     insteadOf = https://github.com/\n\
+                     insteadOf = git@github.com:\n"
+            );
+            if let Some(token) = dev_agent_token.as_deref() {
+                body.push_str(&format!(
+                    "[http \"{proxy_url}/\"]\n\
+                         extraHeader = Authorization: Bearer {token}\n"
+                ));
+            }
+            tokio::fs::write(&path, body)
+                .await
+                .map_err(|e| AdminError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
+            tracing::info!(
+                sandbox = %name,
+                gitconfig = %path.display(),
+                proxy_url = %proxy_url,
+                token_set = dev_agent_token.is_some(),
+                "wrote per-sandbox gitconfig"
+            );
+            Some(path)
+        } else {
+            None
+        };
 
         let port = allocate_port()?;
         let base_url = format!("http://127.0.0.1:{port}");
@@ -99,6 +147,9 @@ impl LocalAdminClient {
             .env("PORT", port.to_string())
             .env("WORKSPACE_ROOT", &workspace)
             .kill_on_drop(true);
+        if let Some(path) = gitconfig_path.as_deref() {
+            cmd.env("GIT_CONFIG_GLOBAL", path);
+        }
 
         let child = cmd.spawn().map_err(AdminError::Spawn)?;
 

@@ -207,8 +207,7 @@ EOF
       fi
       local owner="${owner_repo%%/*}"
       local repo_name="${owner_repo#*/}"
-      echo "      - project_id: $PROJECT_ID" >> "$out"
-      echo "        owner: $owner" >> "$out"
+      echo "      - owner: $owner" >> "$out"
       echo "        repo: $repo_name" >> "$out"
       if [ -n "$upstream_url" ]; then
         echo "        upstream_url: \"$upstream_url\"" >> "$out"

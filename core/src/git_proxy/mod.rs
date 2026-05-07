@@ -106,10 +106,17 @@ impl GitProxies {
     /// `git-receive-pack` POSTs the handler peeks the pkt-line stream
     /// and re-calls this with the parsed ref names.
     ///
-    /// Fail-closed: subject without project_id, non-Agent subject,
-    /// repo not in allow-list, mode missing, ref denied — all return
-    /// `Err(_)` so the caller records the rejection and responds 403
-    /// without ever spawning `git http-backend`.
+    /// The allow-list is GLOBAL — `sub`'s project_id is recorded in
+    /// the audit row but doesn't gate the policy. The subject must
+    /// still be `AuthSubject::Agent` (or `AgentOnBehalfOfUser`) so
+    /// only sandbox-issued tokens can drive the proxy; user sessions,
+    /// MCP creds, and anonymous traffic are all rejected upstream of
+    /// this call.
+    ///
+    /// Fail-closed: non-Agent subject, repo not in allow-list, mode
+    /// missing, ref denied — all return `Err(_)` so the caller records
+    /// the rejection and responds 403 without ever spawning
+    /// `git http-backend`.
     #[instrument(
         name = "domain.git_proxy.check_authorization",
         skip(self, sub, refs_in_request)
@@ -122,22 +129,14 @@ impl GitProxies {
         mode: GitProxyMode,
         refs_in_request: &[String],
     ) -> Result<&AllowlistEntry, GitProxyError> {
-        let project_id = sub
-            .project_id()
-            .ok_or(GitProxyError::SubjectMissingProject)?;
         if !sub.is_agent() {
             return Err(GitProxyError::Authorization(
                 AuthorizationError::AuthenticationRequired,
             ));
         }
-
-        let entry = self.allowlist.check_authorization(
-            project_id.into(),
-            owner,
-            repo,
-            mode,
-            refs_in_request,
-        )?;
+        let entry = self
+            .allowlist
+            .check_authorization(owner, repo, mode, refs_in_request)?;
         Ok(entry)
     }
 }

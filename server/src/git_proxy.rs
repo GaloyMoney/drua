@@ -4,9 +4,10 @@
 //! `AuthSubject` extension (already populated by the global
 //! `auth_middleware` from a projected SA token or, in dev, a
 //! `dev-agent:<uuid>` token), authorize the
-//! `(project_id, owner, repo, mode)` tuple against the per-project
-//! YAML allow-list, audit-log the decision, then forward to upstream
-//! `git http-backend` against the per-project bare mirror.
+//! `(owner, repo, mode, refs)` tuple against the global YAML
+//! allow-list, audit-log the decision (with project_id for
+//! attribution), then forward to upstream `git http-backend`
+//! against the bare mirror.
 //!
 //! The handler never touches a GitHub credential — the credential
 //! provider on `GitProxies` mints a fresh installation token per
@@ -235,13 +236,12 @@ async fn git_receive_pack(
     // Mirror the accepted refs upstream. If the push fails the proxy
     // logs but still returns the local receive-pack success body —
     // the audit row records the failure so ops can chase it.
-    let project_id = auth.project_id().expect("is_agent checked earlier");
     let mirror_path = state
         .app
         .git_proxies()
         .mirror()
         .expect("mirror configured")
-        .mirror_path(project_id.into(), &coord);
+        .mirror_path(&coord);
     let static_creds = drua_core::git_proxy::StaticCredential(String::new());
     let creds: &dyn drua_core::git_proxy::UpstreamCredentialProvider =
         if upstream_url.starts_with("file://") {
@@ -345,10 +345,7 @@ async fn forward_to_backend(
     fwd: Forward<'_>,
     attempt_id: Option<uuid::Uuid>,
 ) -> Response {
-    let project_id = match auth.project_id() {
-        Some(p) => p,
-        None => return reject_response(StatusCode::UNAUTHORIZED, "subject_missing_project"),
-    };
+    let _ = auth;
 
     let proxies = state.app.git_proxies();
     let Some(mirror) = proxies.mirror() else {
@@ -375,10 +372,7 @@ async fn forward_to_backend(
             }
         };
 
-    let mirror_path = match mirror
-        .ensure(project_id.into(), coord, upstream_url, creds)
-        .await
-    {
+    let mirror_path = match mirror.ensure(coord, upstream_url, creds).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "git-proxy: mirror ensure failed");
@@ -456,9 +450,7 @@ async fn render_authz_error(
     );
     let _ = audit_reject(state, auth, coord, service, code).await;
     let status = match err {
-        GitProxyError::Authorization(_) | GitProxyError::SubjectMissingProject => {
-            StatusCode::UNAUTHORIZED
-        }
+        GitProxyError::Authorization(_) => StatusCode::UNAUTHORIZED,
         GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::RepoNotAllowed {
             ..
         })

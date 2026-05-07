@@ -123,15 +123,17 @@ SVC_PULL="?service=git-upload-pack"
   [ "$status" -lt 500 ]
 }
 
-# ─── Cross-project isolation ───────────────────────────────────────────
+# ─── Allow-list is global ──────────────────────────────────────────────
 
-@test "git-proxy: a different project cannot reach this project's repos" {
-  # Spin up another project + agent. Its dev-agent token must NOT
-  # be able to pull GaloyMoney/drua (which is allow-listed to PROJECT_ID).
-  local other_proj other_agent_id
+@test "git-proxy: global allow-list — a different project's agent can hit allowed repos too" {
+  # Allow-list is global (no per-project entries). Any authenticated
+  # Agent — regardless of project — can address whatever the YAML
+  # permits. Project_id is recorded in the audit row for attribution
+  # but doesn't gate the policy.
+  local other_proj other_agent_id proj_short
   other_proj="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   other_agent_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  local proj_short="${other_proj:0:8}"
+  proj_short="${other_proj:0:8}"
   psql "$PG_CON" -q <<SQL
     INSERT INTO projects (id, name, created_at) VALUES ('$other_proj', 'bats-other-$proj_short', NOW());
     INSERT INTO project_events (id, sequence, event_type, event, recorded_at)
@@ -148,8 +150,12 @@ SQL
   status="$(curl -s -o "$BATS_TEST_TMPDIR/body" -w '%{http_code}' \
     -H "Authorization: Bearer dev-agent:$other_agent_id" \
     "$GP_URL/GaloyMoney/drua/info/refs$SVC_PULL")"
-  [ "$status" = "403" ]
-  grep -q 'repo_not_allowed' "$BATS_TEST_TMPDIR/body"
+  [ "$status" = "200" ]
+  grep -aq 'service=git-upload-pack' "$BATS_TEST_TMPDIR/body"
+
+  # Audit row should attribute the request to the other project_id.
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE project_id='$other_proj' AND owner='GaloyMoney' AND repo='drua' AND decision='accepted'")"
+  [ "$count" -ge 1 ]
 }
 
 # ─── git-client e2e — pull side ────────────────────────────────────────

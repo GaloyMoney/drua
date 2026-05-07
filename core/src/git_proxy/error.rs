@@ -18,8 +18,6 @@ pub enum GitProxyError {
     Authorization(#[from] AuthorizationError),
     #[error("GitProxyError - InvalidRepoCoord: owner={owner} repo={repo}")]
     InvalidRepoCoord { owner: String, repo: String },
-    #[error("GitProxyError - SubjectMissingProject")]
-    SubjectMissingProject,
 }
 
 impl GitProxyError {
@@ -29,7 +27,6 @@ impl GitProxyError {
         match self {
             GitProxyError::InvalidRepoCoord { .. } => "invalid_repo_coord",
             GitProxyError::Authorization(_) => "unauthorized",
-            GitProxyError::SubjectMissingProject => "subject_missing_project",
             GitProxyError::Allowlist(e) => e.reject_code(),
             GitProxyError::Sqlx(_) => "internal_error",
         }

@@ -1,4 +1,4 @@
-//! Per-project bare mirrors at `<root>/<project_id>/<owner>/<repo>.git`.
+//! Bare mirrors at `<root>/<owner>/<repo>.git`.
 //!
 //! Pull traffic flows through these mirrors so the proxy can:
 //!   * serve `git http-backend` from a stable on-disk repo (memo §2.2 Pattern A)
@@ -6,8 +6,10 @@
 //!   * apply per-mirror TTL gating so repeat clones in the same window
 //!     don't hammer github.com
 //!
-//! Push-side mirror writes (apply-then-forward) land in a follow-up
-//! commit; this module's API is shaped to extend cleanly.
+//! Allow-list is global per project pivot — every project that
+//! authenticates can address the same mirror set, so mirrors are
+//! NOT namespaced per project. Push-side writes land in `git
+//! http-backend` against the same paths.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +19,6 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
-use uuid::Uuid;
 
 use crate::primitives::RepoCoord;
 
@@ -75,7 +76,6 @@ pub struct MirrorManager {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct MirrorKey {
-    project_id: Uuid,
     owner: String,
     repo: String,
 }
@@ -94,20 +94,18 @@ impl MirrorManager {
 
     /// Returns the on-disk path for a mirror, opening / cloning + fetching
     /// from upstream if the mirror is missing or stale. Bare repo at
-    /// `<root>/<project_id>/<owner>/<repo>.git`.
+    /// `<root>/<owner>/<repo>.git`.
     ///
     /// Concurrent calls for the same mirror serialize on a per-mirror
     /// mutex so we don't kick off two fetches in parallel.
-    #[instrument(name = "git_proxy.mirror.ensure", skip_all, fields(project_id = %project_id, owner = %coord.owner, repo = %coord.repo))]
+    #[instrument(name = "git_proxy.mirror.ensure", skip_all, fields(owner = %coord.owner, repo = %coord.repo))]
     pub async fn ensure(
         &self,
-        project_id: Uuid,
         coord: &RepoCoord,
         upstream_url: &str,
         creds: &dyn UpstreamCredentialProvider,
     ) -> Result<PathBuf, MirrorError> {
         let key = MirrorKey {
-            project_id,
             owner: coord.owner.clone(),
             repo: coord.repo.clone(),
         };
@@ -117,7 +115,7 @@ impl MirrorManager {
         };
         let mut state = mirror_lock.lock().await;
 
-        let path = self.mirror_path(project_id, coord);
+        let path = self.mirror_path(coord);
         let exists = path.join("HEAD").exists();
         let stale = state
             .last_fetched_at
@@ -141,10 +139,9 @@ impl MirrorManager {
         Ok(path)
     }
 
-    pub fn mirror_path(&self, project_id: Uuid, coord: &RepoCoord) -> PathBuf {
+    pub fn mirror_path(&self, coord: &RepoCoord) -> PathBuf {
         self.config
             .root
-            .join(project_id.to_string())
             .join(&coord.owner)
             .join(format!("{}.git", coord.repo))
     }
@@ -222,21 +219,13 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn mirror_path_is_namespaced_per_project() {
+    fn mirror_path_is_owner_repo() {
         let tmp = TempDir::new().unwrap();
         let mgr = MirrorManager::new(MirrorConfig::new(tmp.path()));
-        let proj_a = Uuid::new_v4();
-        let proj_b = Uuid::new_v4();
         let coord = RepoCoord {
             owner: "GaloyMoney".into(),
             repo: "drua".into(),
         };
-        assert_ne!(
-            mgr.mirror_path(proj_a, &coord),
-            mgr.mirror_path(proj_b, &coord)
-        );
-        assert!(mgr
-            .mirror_path(proj_a, &coord)
-            .ends_with("GaloyMoney/drua.git"));
+        assert!(mgr.mirror_path(&coord).ends_with("GaloyMoney/drua.git"));
     }
 }
