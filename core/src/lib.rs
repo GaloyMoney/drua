@@ -290,7 +290,10 @@ impl App {
 
         // Read-only library lookup lives behind progressive disclosure;
         // notes/skill tools cover project-scoped writes.
-        toolsets.register_searchable(LibraryToolSet::new(Arc::clone(&search)));
+        toolsets.register_searchable(LibraryToolSet::new(
+            Arc::clone(&search),
+            Arc::clone(&spaces),
+        ));
 
         // Behind progressive disclosure to keep top-level list_tools small.
         toolsets.register_searchable(AdminToolSet::new(
@@ -300,6 +303,7 @@ impl App {
             Arc::clone(&projects),
             Arc::clone(&spaces),
             Arc::clone(&space_fs),
+            Arc::clone(&search),
             Arc::clone(&workflows),
             Arc::clone(&skills),
             Arc::clone(&notes),
