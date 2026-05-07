@@ -737,11 +737,17 @@ async fn initialize_inner(
     }
 }
 
-/// Write the GitHub token to `path` with mode 0600. Creates parent dirs as needed.
-/// The git credential helper baked into the sandbox image reads from this path.
+/// Write the GitHub token to `path` with mode 0600 and chowned to the
+/// agent UID (1000:1000). Creates parent dirs as needed.
 ///
-/// Also writes workspace-level `.git-credentials` so the UID-dropped agent user
-/// can authenticate git operations without access to `/run/secrets/`.
+/// Ownership matters: the credential helper baked into the sandbox
+/// image (`git-credential-github-token`) `cat`s this file, and runs
+/// as the calling git's UID. For agent git ops the helper runs as
+/// UID 1000, so the file must be readable by 1000. The original
+/// implementation chmod'd 0600 root:root which broke the agent path
+/// (root could read it, agent couldn't, the helper returned an empty
+/// password, and git rejected it as "Invalid username or token").
+/// Root still reads it after chown via DAC bypass.
 async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
     let path_buf = PathBuf::from(path);
     if let Some(parent) = path_buf.parent() {
@@ -756,73 +762,19 @@ async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        tokio::fs::set_permissions(&path_buf, perms)
+        tokio::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o600))
             .await
             .map_err(|e| format!("Failed to chmod github token: {e}"))?;
-    }
 
-    // Write workspace-level git credentials for the agent user (UID 1000)
-    write_workspace_git_credentials(token).await?;
-
-    Ok(())
-}
-
-/// Write `.git-credentials` and `.gh-token` into the workspace so the agent
-/// user (after UID drop) can push/pull and run `gh` without access to
-/// `/run/secrets/`. Also configures git to use the credential store.
-async fn write_workspace_git_credentials(token: &str) -> Result<(), String> {
-    write_workspace_git_credentials_at(&workspace_root(), token).await
-}
-
-/// Workspace-parameterised core of [`write_workspace_git_credentials`] —
-/// kept separate so tests can target a per-test directory without
-/// mutating the process-wide `WORKSPACE_ROOT` env var (which would race
-/// with other tests reading `workspace_root()`).
-async fn write_workspace_git_credentials_at(workspace: &str, token: &str) -> Result<(), String> {
-    let cred_path = format!("{workspace}/.git-credentials");
-    let content = format!("https://x-access-token:{token}@github.com\n");
-
-    write_agent_owned_file(&cred_path, content.as_bytes()).await?;
-
-    let gh_token_path = format!("{workspace}/.gh-token");
-    write_agent_owned_file(&gh_token_path, token.as_bytes()).await?;
-
-    let output = std::process::Command::new("git")
-        .args([
-            "config",
-            "--global",
-            "credential.helper",
-            &format!("store --file={cred_path}"),
-        ])
-        .output();
-    if let Err(e) = output {
-        tracing::warn!("Failed to configure git credential store (non-fatal): {e}");
-    }
-
-    Ok(())
-}
-
-/// Writes `bytes` to `path`, then chmods 0600 and chowns agent:agent (1000:1000)
-/// so the UID-dropped agent process can read it. Same trust boundary as
-/// `.git-credentials` — anyone with shell access as UID 1000 can read it.
-async fn write_agent_owned_file(path: &str, bytes: &[u8]) -> Result<(), String> {
-    tokio::fs::write(path, bytes)
-        .await
-        .map_err(|e| format!("Failed to write {path}: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .await
-            .map_err(|e| format!("Failed to chmod {path}: {e}"))?;
-
+        // chown to agent:agent (1000:1000) so the UID-dropped credential
+        // helper can read it. Best-effort: a chown failure leaves the
+        // token root-only, which keeps prior (root-only) behaviour and
+        // surfaces in the agent's first git op as "Permission denied".
         let output = std::process::Command::new("chown")
             .args(["1000:1000", path])
             .output();
         if let Err(e) = output {
-            tracing::warn!("Failed to chown {path} (non-fatal): {e}");
+            tracing::warn!("Failed to chown github token (non-fatal): {e}");
         }
     }
 
@@ -2301,48 +2253,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_workspace_git_credentials_writes_both_files() {
-        let workspace = fresh_test_dir("sandbox-cred-write");
-        write_workspace_git_credentials_at(&workspace, "ghs_test_token_42")
+    async fn write_github_token_writes_token_bytes() {
+        let dir = fresh_test_dir("sandbox-token-write");
+        let token_path = format!("{dir}/github-token");
+        write_github_token(&token_path, "ghs_test_token_42")
             .await
             .expect("write should succeed");
 
-        let creds = std::fs::read_to_string(format!("{workspace}/.git-credentials")).unwrap();
-        assert!(
-            creds.contains("x-access-token:ghs_test_token_42@github.com"),
-            "git-credentials missing token: {creds:?}"
-        );
-
-        let gh_token = std::fs::read_to_string(format!("{workspace}/.gh-token")).unwrap();
-        assert_eq!(
-            gh_token, "ghs_test_token_42",
-            "gh-token should be the bare token (no newline, no URL wrapping)"
-        );
+        let written = std::fs::read_to_string(&token_path).unwrap();
+        assert_eq!(written, "ghs_test_token_42");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn write_workspace_git_credentials_sets_0600_perms() {
+    async fn write_github_token_sets_0600_perms() {
         use std::os::unix::fs::PermissionsExt;
 
-        let workspace = fresh_test_dir("sandbox-cred-perms");
-        write_workspace_git_credentials_at(&workspace, "ghs_perms_check")
+        let dir = fresh_test_dir("sandbox-token-perms");
+        let token_path = format!("{dir}/github-token");
+        write_github_token(&token_path, "ghs_perms_check")
             .await
             .expect("write should succeed");
 
-        let creds_perms = std::fs::metadata(format!("{workspace}/.git-credentials"))
+        let perms = std::fs::metadata(&token_path)
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(creds_perms, 0o600, ".git-credentials must be 0600");
-
-        let gh_perms = std::fs::metadata(format!("{workspace}/.gh-token"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(gh_perms, 0o600, ".gh-token must be 0600");
+        assert_eq!(perms, 0o600, "github-token must be 0600");
     }
 
     /// Wire-shape smoke test: confirms the wire types deserialize and

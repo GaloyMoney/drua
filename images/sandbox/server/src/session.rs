@@ -163,11 +163,13 @@ fn try_spawn(
         .env("PS1", "")
         .current_dir(cwd);
 
-    // gh CLI reads GH_TOKEN from env. The token is written by the
-    // sandbox-server's refresh-credentials path to <workspace>/.gh-token
-    // (mode 0600, chowned 1000:1000). Read at spawn time so each
-    // post-attach session pick up a freshly-refreshed token.
-    if let Ok(token) = std::fs::read_to_string(format!("{workspace}/.gh-token")) {
+    // gh CLI reads GH_TOKEN from env. Read from the same canonical
+    // location the credential helper uses (/run/secrets/github-token)
+    // and inject it into the bash session's env so `gh` works without
+    // touching the workspace. The sandbox-server runs as root, so it
+    // can always read the token regardless of the chmod/chown applied
+    // for the agent user.
+    if let Ok(token) = std::fs::read_to_string("/run/secrets/github-token") {
         let trimmed = token.trim();
         if !trimmed.is_empty() {
             cmd.env("GH_TOKEN", trimmed);
