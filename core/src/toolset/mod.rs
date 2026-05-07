@@ -53,6 +53,77 @@ pub(crate) fn array_of_any_schema(
     })
 }
 
+// OpenAI strict-mode invariants: every key in `properties` must appear
+// in `required`, and every object must set `additionalProperties: false`.
+// `submit_output` ships with `strict: true`, so user-supplied output
+// schemas — which may reasonably mark fields as optional — must be lifted
+// to that shape. Naturally-optional fields stay semantically optional by
+// becoming nullable on the wire.
+fn normalize_for_strict(mut value: serde_json::Value) -> serde_json::Value {
+    normalize_for_strict_in_place(&mut value);
+    value
+}
+
+fn normalize_for_strict_in_place(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+
+    if obj.get("type").and_then(|t| t.as_str()) != Some("object") {
+        if let Some(items) = obj.get_mut("items") {
+            normalize_for_strict_in_place(items);
+        }
+        return;
+    }
+
+    let originally_required: std::collections::HashSet<String> = obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
+        let all_keys: Vec<String> = props.keys().cloned().collect();
+
+        for key in &all_keys {
+            let Some(prop) = props.get_mut(key) else {
+                continue;
+            };
+            normalize_for_strict_in_place(prop);
+
+            if !originally_required.contains(key) {
+                if let Some(prop_obj) = prop.as_object_mut() {
+                    if let Some(t) = prop_obj.get("type").cloned() {
+                        let new_type = match t {
+                            serde_json::Value::String(s) if s != "null" => {
+                                serde_json::json!([s, "null"])
+                            }
+                            serde_json::Value::Array(mut arr) => {
+                                if !arr.iter().any(|v| v.as_str() == Some("null")) {
+                                    arr.push(serde_json::json!("null"));
+                                }
+                                serde_json::Value::Array(arr)
+                            }
+                            other => other,
+                        };
+                        prop_obj.insert("type".to_string(), new_type);
+                    }
+                }
+            }
+        }
+
+        obj.insert("required".to_string(), serde_json::json!(all_keys));
+    } else {
+        obj.insert("required".to_string(), serde_json::json!([]));
+    }
+
+    obj.insert("additionalProperties".to_string(), serde_json::json!(false));
+}
+
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
@@ -329,8 +400,10 @@ impl ToolSets {
             .collect();
 
         if let Some(schema) = output_schema {
-            let real_input_schema = serde_json::to_value(schema.root_schema())
-                .expect("OutputSchema serialises to JSON");
+            let real_input_schema = normalize_for_strict(
+                serde_json::to_value(schema.root_schema())
+                    .expect("OutputSchema serialises to JSON"),
+            );
             let real_def = ToolDefinition {
                 name: SUBMIT_OUTPUT_TOOL_NAME.to_string(),
                 description: Some(
@@ -575,5 +648,183 @@ mod tests {
 
         toolsets.unregister_searchable_by_session(session);
         assert_eq!(toolsets.toolset_names_for_test(), vec!["concourse"]);
+    }
+
+    #[test]
+    fn normalize_for_strict_promotes_all_properties_to_required() {
+        let input = serde_json::json!({
+            "type": "object",
+            "required": ["a"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "string" }
+            }
+        });
+        let out = normalize_for_strict(input);
+        let mut required: Vec<String> = out["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        required.sort();
+        assert_eq!(required, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn normalize_for_strict_makes_optional_fields_nullable() {
+        let input = serde_json::json!({
+            "type": "object",
+            "required": [],
+            "properties": {
+                "a": { "type": "string" }
+            }
+        });
+        let out = normalize_for_strict(input);
+        assert_eq!(
+            out["properties"]["a"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn normalize_for_strict_keeps_originally_required_fields_non_nullable() {
+        let input = serde_json::json!({
+            "type": "object",
+            "required": ["a"],
+            "properties": {
+                "a": { "type": "string" }
+            }
+        });
+        let out = normalize_for_strict(input);
+        assert_eq!(out["properties"]["a"]["type"], serde_json::json!("string"));
+    }
+
+    #[test]
+    fn normalize_for_strict_sets_additional_properties_false() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string" }
+            }
+        });
+        let out = normalize_for_strict(input);
+        assert_eq!(out["additionalProperties"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn normalize_for_strict_idempotent_on_already_strict_schema() {
+        let strict = serde_json::json!({
+            "type": "object",
+            "required": ["a", "b"],
+            "additionalProperties": false,
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": ["string", "null"] }
+            }
+        });
+        let out = normalize_for_strict(strict.clone());
+        assert_eq!(out, strict);
+    }
+
+    #[test]
+    fn normalize_for_strict_recurses_into_nested_objects() {
+        let input = serde_json::json!({
+            "type": "object",
+            "required": ["nested"],
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "inner": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let out = normalize_for_strict(input);
+        assert_eq!(
+            out["properties"]["nested"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            out["properties"]["nested"]["required"],
+            serde_json::json!(["inner"])
+        );
+        assert_eq!(
+            out["properties"]["nested"]["properties"]["inner"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn normalize_for_strict_default_output_schema() {
+        let schema = crate::workflow::default_output_schema();
+        let value = serde_json::to_value(schema.root_schema()).expect("serialises");
+        let out = normalize_for_strict(value);
+        assert_eq!(out["additionalProperties"], serde_json::json!(false));
+        let mut required: Vec<String> = out["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        required.sort();
+        assert_eq!(
+            required,
+            vec![
+                "output".to_string(),
+                "reason".to_string(),
+                "success".to_string()
+            ]
+        );
+        assert_eq!(
+            out["properties"]["reason"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            out["properties"]["output"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            out["properties"]["success"]["type"],
+            serde_json::json!("boolean")
+        );
+    }
+
+    #[test]
+    fn top_level_tool_defs_emits_strict_compatible_submit_output() {
+        use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
+
+        let toolsets = ToolSets::empty_for_test();
+        let schema = crate::workflow::default_output_schema();
+        let defs = toolsets.top_level_tool_defs(&AuthSubject::Anonymous, Some(&schema));
+        let submit = defs
+            .into_iter()
+            .find(|d| d.name == SUBMIT_OUTPUT_TOOL_NAME)
+            .expect("submit_output emitted when output_schema is Some");
+
+        assert!(submit.strict, "submit_output must be strict");
+        assert_eq!(
+            submit.input_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+
+        let required: std::collections::HashSet<String> = submit.input_schema["required"]
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        let props: std::collections::HashSet<String> = submit.input_schema["properties"]
+            .as_object()
+            .expect("properties is an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            required, props,
+            "every key in properties must appear in required for strict mode"
+        );
     }
 }
