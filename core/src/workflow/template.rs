@@ -76,13 +76,19 @@ pub struct TemplateContext<'a> {
 impl TemplateContext<'_> {
     fn build_cel_context(&self) -> Result<Context<'static>, TemplateError> {
         let mut ctx = Context::default();
-        ctx.add_variable("trigger", self.trigger.clone())
-            .map_err(|e| {
-                TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}"))
-            })?;
-        // GHA / Swamp convention: `steps.<id>.outputs.<field>`. Wrap
-        // each step's recorded output under an `outputs` key so the
-        // literal namespace traverses naturally as a CEL field access.
+        // GHA / Swamp convention: `${{ trigger.payload.X }}` for the
+        // run's user payload, leaving room for future trigger
+        // metadata (`trigger.received_at`, etc.) without breaking
+        // existing references. The executor passes the raw payload;
+        // wrapping happens here so callers don't have to.
+        let trigger_value = serde_json::json!({ "payload": self.trigger.clone() });
+        ctx.add_variable("trigger", trigger_value).map_err(|e| {
+            TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}"))
+        })?;
+        // Same convention for `${{ steps.<id>.outputs.<field> }}` —
+        // wrap each step's recorded output under an `outputs` key so
+        // the literal namespace traverses naturally as a CEL field
+        // access.
         let steps_value = Value::Object(
             self.steps
                 .iter()
@@ -382,7 +388,10 @@ mod tests {
 
     #[test]
     fn embedded_stringifies_scalars_naturally() {
-        let trigger = json!({ "payload": { "build": 1234, "pipeline": "galoy-bank" } });
+        // `TemplateContext.trigger` is the raw user payload; the
+        // resolver wraps it under `payload` automatically so
+        // `${{ trigger.payload.X }}` matches the GHA convention.
+        let trigger = json!({ "build": 1234, "pipeline": "galoy-bank" });
         let steps = HashMap::new();
         let ctx = TemplateContext {
             trigger: &trigger,
@@ -397,7 +406,7 @@ mod tests {
 
     #[test]
     fn embedded_json_encodes_non_scalars() {
-        let trigger = json!({ "payload": { "list": [1, 2, 3] } });
+        let trigger = json!({ "list": [1, 2, 3] });
         let steps = HashMap::new();
         let ctx = TemplateContext {
             trigger: &trigger,
@@ -409,7 +418,7 @@ mod tests {
 
     #[test]
     fn missing_path_resolves_to_null_in_splice() {
-        let trigger = json!({ "payload": {} });
+        let trigger = json!({});
         let steps = HashMap::new();
         let ctx = TemplateContext {
             trigger: &trigger,
@@ -429,7 +438,7 @@ mod tests {
             steps: &steps,
         };
         assert_eq!(
-            substitute_in_string("[${{ trigger.x }}]", &ctx).unwrap(),
+            substitute_in_string("[${{ trigger.payload.x }}]", &ctx).unwrap(),
             "[]"
         );
     }

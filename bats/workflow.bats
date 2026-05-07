@@ -66,16 +66,36 @@ extract_id_field() {
   project_id="$(echo "$output" | jq -r '.data.projectCreate.project.id')"
   [ -n "$project_id" ] && [ "$project_id" != "null" ]
 
-  # 2. Manual-trigger workflow with a single tool_step calling `whoami`.
-  #    `manual: true` keeps the trigger surface tiny — `trigger` /
-  #    `await_run` fire it directly without a webhook.
+  # 2. Manual-trigger workflow with two tool_steps. Step 1 calls
+  #    `whoami` to surface the synthesised auth subject; step 2
+  #    interpolates the trigger payload AND step 1's output into a
+  #    `notes store` call. The second step exists specifically to
+  #    exercise `${{ trigger.* }}` and `${{ steps.<n>.outputs.* }}`
+  #    substitution at runtime — the resulting note's `title` and
+  #    `tags` are surfaced in the step's structured output, which
+  #    `format_run` echoes back so the assertions below can grep
+  #    for the substituted values.
   run admin_call "workflow" "$(jq -nc --arg pid "$project_id" '{
     command: "create",
     project_id: $pid,
     name: "tool-step-whoami",
     manual: true,
     steps: [
-      { type: "tool_step", name: "identify", tool: "whoami", params: {} }
+      { type: "tool_step", name: "identify", tool: "whoami", params: {} },
+      {
+        type: "tool_step",
+        name: "store-note",
+        tool: "notes",
+        params: {
+          command: "store",
+          title: "run-${{ steps.identify.outputs.workflow_run_id }}",
+          content: "Build ${{ trigger.payload.build }} on ${{ trigger.payload.pipeline }} acked by ${{ steps.identify.outputs.type }}",
+          tags: [
+            "${{ trigger.payload.pipeline }}",
+            "build-${{ trigger.payload.build }}"
+          ]
+        }
+      }
     ]
   }')"
   echo "$output"
@@ -103,23 +123,42 @@ extract_id_field() {
   echo "$output"
   [[ "$output" == *"state: succeeded"* ]]
 
-  # 5. Pull the run's structured step output out of the
-  #    JSON-in-JSON envelope and assert against the parsed shape.
-  #    The synthesised identity must report the workflow_executor
-  #    variant, this project's id, and the implicit `ProjectAdmin`
-  #    scope minted by `AuthSubject::workflow_executor`.
-  local step_output
-  step_output="$(echo "$output" \
-    | jq -r '.result.content[0].text' \
-    | sed -n 's/^[[:space:]]*output: //p' \
-    | head -n1)"
-  echo "step output JSON: $step_output"
-  [ "$(echo "$step_output" | jq -r '.type')" = "workflow_executor" ]
-  [ "$(echo "$step_output" | jq -r '.project_id')" = "$project_id" ]
-  [[ "$(echo "$step_output" | jq -r '.scopes[]')" == *"project:$project_id:admin"* ]]
+  # 5. Pull each step's structured output out of `format_run`'s
+  #    inline-JSON envelope. `format_run` emits one
+  #    `      output: { … }` line per step; sed peels them off in
+  #    declaration order.
+  local outputs_text
+  outputs_text="$(echo "$output" | jq -r '.result.content[0].text')"
+  local step1_output step2_output
+  step1_output="$(echo "$outputs_text" | sed -n 's/^[[:space:]]*output: //p' | sed -n '1p')"
+  step2_output="$(echo "$outputs_text" | sed -n 's/^[[:space:]]*output: //p' | sed -n '2p')"
+  echo "step1 output: $step1_output"
+  echo "step2 output: $step2_output"
 
-  # 6. Read-back path: `run` after the run is already terminal must
-  #    surface the same step output shape.
+  # 6. Step 1 (whoami) — synthesised identity must report the
+  #    workflow_executor variant, this project's id, and the implicit
+  #    `ProjectAdmin` scope minted by `AuthSubject::workflow_executor`.
+  [ "$(echo "$step1_output" | jq -r '.type')" = "workflow_executor" ]
+  [ "$(echo "$step1_output" | jq -r '.project_id')" = "$project_id" ]
+  [[ "$(echo "$step1_output" | jq -r '.scopes[]')" == *"project:$project_id:admin"* ]]
+  local run_id_from_step1
+  run_id_from_step1="$(echo "$step1_output" | jq -r '.workflow_run_id')"
+  [ "$run_id_from_step1" = "$run_id" ]
+
+  # 7. Step 2 (notes store) — proves that `${{ trigger.* }}` and
+  #    `${{ steps.<n>.outputs.* }}` references substituted at run
+  #    time. The stored note's title and tags surface in the step's
+  #    structured output; the title carries the cross-step run_id
+  #    reference, the tags carry the trigger payload (one as a
+  #    whole-string splice, one as embedded interpolation).
+  [ "$(echo "$step2_output" | jq -r '.title')" = "run-$run_id" ]
+  local tags
+  tags="$(echo "$step2_output" | jq -r '.tags | join(",")')"
+  [[ "$tags" == *"galoy-bank"* ]]
+  [[ "$tags" == *"build-1234"* ]]
+
+  # 8. Read-back path: `run` after the run is already terminal must
+  #    surface the same shape.
   run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
     command: "run", run_id: $rid
   }')"
