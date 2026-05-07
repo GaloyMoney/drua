@@ -243,7 +243,15 @@ mod tests {
             .expect("default schema declares required");
         let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(names.contains(&"success"));
-        assert!(names.contains(&"reason"));
+        assert!(names.contains(&"output"));
+        // `reason` is optional — present in `properties` but not
+        // `required`, since on success it's redundant with `output`.
+        assert!(!names.contains(&"reason"));
+        let properties = value
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("default schema declares properties");
+        assert!(properties.contains_key("reason"));
     }
 
     #[test]

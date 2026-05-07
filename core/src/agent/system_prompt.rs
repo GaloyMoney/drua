@@ -252,6 +252,7 @@ mod tests {
         // separate appearance in the `submit_output` tool def.
         assert!(role_text.contains("\"type\": \"object\""));
         assert!(role_text.contains("success"));
+        assert!(role_text.contains("output"));
         assert!(role_text.contains("reason"));
     }
 }
