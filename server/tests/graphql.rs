@@ -78,6 +78,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
     for role in [
         drua_core::agent::AgentRole::ProjectLead,
         drua_core::agent::AgentRole::Agent,
+        drua_core::agent::AgentRole::WorkflowStepAgent,
     ] {
         builtin_roles.insert(
             role,
