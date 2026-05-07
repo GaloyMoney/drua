@@ -934,6 +934,7 @@ fn run_state_str(state: WorkflowRunState) -> &'static str {
         WorkflowRunState::Running => "running",
         WorkflowRunState::Succeeded => "succeeded",
         WorkflowRunState::Failed => "failed",
+        WorkflowRunState::Errored => "errored",
     }
 }
 
@@ -1141,7 +1142,12 @@ fn format_runs_text(runs: &[WorkflowRun]) -> String {
             truncate(&output.replace('\n', " "), max_chars)
         ));
     }
-    if runs.iter().any(|r| r.state == WorkflowRunState::Failed) {
+    if runs.iter().any(|r| {
+        matches!(
+            r.state,
+            WorkflowRunState::Failed | WorkflowRunState::Errored
+        )
+    }) {
         lines.push(String::new());
         lines.push("Inspect a run with: workflow command=run run_id=<id>".to_string());
     }

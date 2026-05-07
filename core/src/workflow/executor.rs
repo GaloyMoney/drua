@@ -52,7 +52,7 @@ impl Executor {
     /// ([`WorkflowError::Cancelled`]).
     ///
     /// `cancel` is polled between steps; when set, the run aborts cleanly
-    /// without recording `step_failed` so the next attempt resumes the
+    /// without recording `step_errored` so the next attempt resumes the
     /// in-progress step. Callers that don't need cancellation pass a
     /// fresh `Arc<AtomicBool>` initialized to `false`.
     #[tracing::instrument(name = "core.workflow.execute_run", skip_all, fields(run_id = %run_id))]
@@ -65,7 +65,7 @@ impl Executor {
 
         if matches!(
             run.state,
-            WorkflowRunState::Succeeded | WorkflowRunState::Failed
+            WorkflowRunState::Succeeded | WorkflowRunState::Failed | WorkflowRunState::Errored
         ) {
             return Ok(());
         }
@@ -100,10 +100,10 @@ impl Executor {
                 if run.step_started(step_name.clone()).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
-                if run.step_failed(step_name, err.to_string()).did_execute() {
+                if run.step_errored(step_name, err.to_string()).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
-                if run.run_completed(WorkflowRunState::Failed).did_execute() {
+                if run.run_completed().did_execute() {
                     self.runs.update(&mut run).await?;
                 }
                 self.suspend_workflow_sandboxes(project_id, workflow_id, &HashSet::new())
@@ -112,7 +112,6 @@ impl Executor {
             }
         };
 
-        let mut any_failed = run.any_step_failed();
         // Preexisting sandboxes the workflow successfully attached to.
         // Drives the post-flight suspend decision: a Preexisting sandbox
         // is suspended at end-of-run only if (a) we attached at least
@@ -156,8 +155,7 @@ impl Executor {
                     }
                 }
                 Err(err) => {
-                    any_failed = true;
-                    if run.step_failed(step_name, err.to_string()).did_execute() {
+                    if run.step_errored(step_name, err.to_string()).did_execute() {
                         self.runs.update(&mut run).await?;
                     }
                     break;
@@ -165,12 +163,7 @@ impl Executor {
             }
         }
 
-        let terminal = if any_failed {
-            WorkflowRunState::Failed
-        } else {
-            WorkflowRunState::Succeeded
-        };
-        if run.run_completed(terminal).did_execute() {
+        if run.run_completed().did_execute() {
             self.runs.update(&mut run).await?;
         }
 
@@ -538,7 +531,7 @@ impl Executor {
             return Ok(value);
         }
 
-        Err(WorkflowError::StepFailed {
+        Err(WorkflowError::StepErrored {
             step: step_name.to_string(),
             reason: "agent did not call submit_output after one forced retry".to_string(),
         })
@@ -593,7 +586,7 @@ impl Executor {
                 Ok(Some(event)) => event,
                 Ok(None) => break,
                 Err(_) => {
-                    return Err(WorkflowError::StepFailed {
+                    return Err(WorkflowError::StepErrored {
                         step: step_name.to_string(),
                         reason: format!("idle for {}s", idle_timeout.as_secs()),
                     });
@@ -602,7 +595,7 @@ impl Executor {
             match event {
                 ChatOutputEvent::AssistantDone { .. } => break,
                 ChatOutputEvent::Error { message } => {
-                    return Err(WorkflowError::StepFailed {
+                    return Err(WorkflowError::StepErrored {
                         step: step_name.to_string(),
                         reason: message,
                     });

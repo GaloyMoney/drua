@@ -263,13 +263,13 @@ impl drua_library::LibrarySynced for WorkflowDefinition {
             scope_id: Some(self.project_id.into()),
             scope_slug: project_name.map(str::to_string),
             name: self.name.clone(),
-            path: Some(canonical_workflow_path(self.id, &self.name, project_name)),
+            path: Some(canonical_workflow_path(&self.name, project_name)),
             content: self.description.clone().unwrap_or_default(),
         }
     }
 
     fn write_op(&self) -> WriteOp {
-        let canonical = canonical_workflow_path(self.id, &self.name, self.project_name.as_deref());
+        let canonical = canonical_workflow_path(&self.name, self.project_name.as_deref());
         let content = self.rendered().into_bytes();
         let id_uuid: uuid::Uuid = self.id.into();
         let message = format!(

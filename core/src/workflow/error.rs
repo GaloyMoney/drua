@@ -49,8 +49,8 @@ pub enum WorkflowError {
     UndeclaredSandbox(String),
     #[error("WorkflowError - SandboxNotReady: {name} is in state {state}")]
     SandboxNotReady { name: String, state: String },
-    #[error("WorkflowError - StepFailed: {step}: {reason}")]
-    StepFailed { step: String, reason: String },
+    #[error("WorkflowError - StepErrored: {step}: {reason}")]
+    StepErrored { step: String, reason: String },
     #[error("WorkflowError - Agent: {0}")]
     Agent(String),
     #[error("WorkflowError - Skill: {0}")]
