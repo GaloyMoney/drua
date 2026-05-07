@@ -20,43 +20,6 @@ fn default_search_limit() -> usize {
     10
 }
 
-/// Validate and normalise a caller-supplied list of path prefixes for
-/// `spaces.search`. Empty strings are silently dropped; trailing
-/// slashes are stripped (so `"triggers"` and `"triggers/"` are
-/// equivalent). Leading `/`, `..` segments, and glob metacharacters
-/// (`*`, `?`, `[`) are rejected — globs are explicitly out of scope
-/// in v1.
-fn normalize_path_prefixes(paths: Vec<String>) -> Result<Vec<String>, ToolSetsError> {
-    let mut out = Vec::with_capacity(paths.len());
-    for raw in paths {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('/') {
-            return Err(ToolSetsError::InvalidArgument(format!(
-                "spaces.search paths entry must not start with '/': {raw:?}"
-            )));
-        }
-        if trimmed.split('/').any(|seg| seg == "..") {
-            return Err(ToolSetsError::InvalidArgument(format!(
-                "spaces.search paths entry must not contain '..': {raw:?}"
-            )));
-        }
-        if trimmed.contains(['*', '?', '[']) {
-            return Err(ToolSetsError::InvalidArgument(format!(
-                "spaces.search does not support glob patterns in paths: {raw:?}"
-            )));
-        }
-        let normalized = trimmed.trim_end_matches('/');
-        if normalized.is_empty() {
-            continue;
-        }
-        out.push(normalized.to_string());
-    }
-    Ok(out)
-}
-
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum SpacesParams {
@@ -238,6 +201,45 @@ impl SpacesTool {
             space_fs,
             search,
         }
+    }
+
+    /// Validate and normalise caller-supplied path prefixes for any
+    /// space-scoped search (`spaces.search`, `drua_admin_spaces`
+    /// `search`, `library_search.paths`). Empty entries are dropped;
+    /// trailing slashes stripped. Leading `/`, `..` segments, and
+    /// glob metacharacters (`*`, `?`, `[`) are rejected — globs are
+    /// out of scope.
+    pub(crate) fn normalize_path_prefixes(
+        paths: Vec<String>,
+    ) -> Result<Vec<String>, ToolSetsError> {
+        let mut out = Vec::with_capacity(paths.len());
+        for raw in paths {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('/') {
+                return Err(ToolSetsError::InvalidArgument(format!(
+                    "path prefix entry must not start with '/': {raw:?}"
+                )));
+            }
+            if trimmed.split('/').any(|seg| seg == "..") {
+                return Err(ToolSetsError::InvalidArgument(format!(
+                    "path prefix entry must not contain '..': {raw:?}"
+                )));
+            }
+            if trimmed.contains(['*', '?', '[']) {
+                return Err(ToolSetsError::InvalidArgument(format!(
+                    "path prefix does not support glob patterns: {raw:?}"
+                )));
+            }
+            let normalized = trimmed.trim_end_matches('/');
+            if normalized.is_empty() {
+                continue;
+            }
+            out.push(normalized.to_string());
+        }
+        Ok(out)
     }
 }
 
@@ -422,7 +424,7 @@ impl TopLevelTool for SpacesTool {
                 limit,
             } => {
                 let space = self.projects.space_for_subject(subject, &slug).await?;
-                let path_prefixes = normalize_path_prefixes(paths)?;
+                let path_prefixes = Self::normalize_path_prefixes(paths)?;
                 let hits = self
                     .search
                     .search(
@@ -577,61 +579,65 @@ mod tests {
 
     #[test]
     fn normalize_paths_empty() {
-        assert!(normalize_path_prefixes(Vec::new()).unwrap().is_empty());
+        assert!(SpacesTool::normalize_path_prefixes(Vec::new())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn normalize_paths_drops_trailing_slash() {
-        let got = normalize_path_prefixes(vec!["triggers/".into()]).unwrap();
+        let got = SpacesTool::normalize_path_prefixes(vec!["triggers/".into()]).unwrap();
         assert_eq!(got, vec!["triggers".to_string()]);
     }
 
     #[test]
     fn normalize_paths_no_trailing_slash_kept() {
-        let got = normalize_path_prefixes(vec!["triggers".into()]).unwrap();
+        let got = SpacesTool::normalize_path_prefixes(vec!["triggers".into()]).unwrap();
         assert_eq!(got, vec!["triggers".to_string()]);
     }
 
     #[test]
     fn normalize_paths_multiple_prefixes() {
-        let got = normalize_path_prefixes(vec!["triggers/".into(), "runbooks".into()]).unwrap();
+        let got = SpacesTool::normalize_path_prefixes(vec!["triggers/".into(), "runbooks".into()])
+            .unwrap();
         assert_eq!(got, vec!["triggers".to_string(), "runbooks".to_string()]);
     }
 
     #[test]
     fn normalize_paths_keeps_exact_file_path() {
-        let got = normalize_path_prefixes(vec!["triggers/account-locked.md".into()]).unwrap();
+        let got =
+            SpacesTool::normalize_path_prefixes(vec!["triggers/account-locked.md".into()]).unwrap();
         assert_eq!(got, vec!["triggers/account-locked.md".to_string()]);
     }
 
     #[test]
     fn normalize_paths_silently_drops_empty_strings() {
-        let got = normalize_path_prefixes(vec!["".into(), "  ".into()]).unwrap();
+        let got = SpacesTool::normalize_path_prefixes(vec!["".into(), "  ".into()]).unwrap();
         assert!(got.is_empty());
     }
 
     #[test]
     fn normalize_paths_bare_slash_rejected_as_leading() {
-        let err = normalize_path_prefixes(vec!["/".into()]).unwrap_err();
+        let err = SpacesTool::normalize_path_prefixes(vec!["/".into()]).unwrap_err();
         assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
     }
 
     #[test]
     fn normalize_paths_rejects_leading_slash() {
-        let err = normalize_path_prefixes(vec!["/triggers".into()]).unwrap_err();
+        let err = SpacesTool::normalize_path_prefixes(vec!["/triggers".into()]).unwrap_err();
         assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
     }
 
     #[test]
     fn normalize_paths_rejects_dotdot_segment() {
-        let err = normalize_path_prefixes(vec!["triggers/../etc".into()]).unwrap_err();
+        let err = SpacesTool::normalize_path_prefixes(vec!["triggers/../etc".into()]).unwrap_err();
         assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
     }
 
     #[test]
     fn normalize_paths_rejects_glob_metacharacters() {
         for raw in ["triggers/*.md", "trig?ers", "trig[ab]"] {
-            let err = normalize_path_prefixes(vec![raw.into()]).unwrap_err();
+            let err = SpacesTool::normalize_path_prefixes(vec![raw.into()]).unwrap_err();
             assert!(
                 matches!(err, ToolSetsError::InvalidArgument(_)),
                 "expected InvalidArgument for {raw:?}",

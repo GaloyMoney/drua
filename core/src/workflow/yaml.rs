@@ -371,7 +371,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &yaml.updated,
     );
 
-    let canonical_path = canonical_workflow_path(workflow_id, &name, project_name.as_deref());
+    let canonical_path = canonical_workflow_path(&name, project_name.as_deref());
     let needs_rewrite = !has_id || canonical_path != path;
 
     Some(ParsedWorkflow {
@@ -391,17 +391,11 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
     })
 }
 
-pub fn canonical_workflow_path(
-    id: WorkflowDefinitionId,
-    name: &str,
-    project_name: Option<&str>,
-) -> String {
-    let id_uuid = uuid::Uuid::from(id);
-    let id_prefix = &id_uuid.to_string()[..8];
+pub fn canonical_workflow_path(name: &str, project_name: Option<&str>) -> String {
     let slug = slugify(name);
     match project_name {
-        Some(project) => format!("runtime/projects/{project}/workflows/{slug}-{id_prefix}.yml"),
-        None => format!("runtime/workflows/{slug}-{id_prefix}.yml"),
+        Some(project) => format!("runtime/projects/{project}/workflows/{slug}.yml"),
+        None => format!("runtime/workflows/{slug}.yml"),
     }
 }
 
@@ -480,7 +474,7 @@ mod tests {
         );
         assert!(!content.contains("whsec_should-not-be-serialized"));
 
-        let path = canonical_workflow_path(id, "alert-response", None);
+        let path = canonical_workflow_path("alert-response", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert!(!parsed.needs_rewrite);
 
@@ -514,7 +508,7 @@ mod tests {
             &WorkflowTrigger::Manual,
             &sample_sandboxes(),
         );
-        let path = canonical_workflow_path(id, "alert-response", None);
+        let path = canonical_workflow_path("alert-response", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 1);
         assert_eq!(parsed.sandboxes[0].name(), "investigation");
@@ -529,12 +523,22 @@ mod tests {
 
     #[test]
     fn workflow_yaml_project_scoped_path() {
-        let id = WorkflowDefinitionId::new();
-        let id_prefix = &id.to_string()[..8];
-        let path = format!("runtime/projects/team/workflows/foo-{id_prefix}.yml");
+        let path = "runtime/projects/team/workflows/foo.yml";
         assert_eq!(
-            project_name_from_workflow_path(&path),
+            project_name_from_workflow_path(path),
             Some("team".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_workflow_path_omits_id_suffix() {
+        assert_eq!(
+            canonical_workflow_path("Hello World Workflow", Some("test")),
+            "runtime/projects/test/workflows/hello-world-workflow.yml"
+        );
+        assert_eq!(
+            canonical_workflow_path("alert-response", None),
+            "runtime/workflows/alert-response.yml"
         );
     }
 
@@ -568,7 +572,7 @@ steps:
         assert!(content.contains("schedule:"));
         assert!(content.contains("timezone: America/New_York"));
 
-        let path = canonical_workflow_path(id, "scheduled", None);
+        let path = canonical_workflow_path("scheduled", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         match parsed.trigger {
             WorkflowTrigger::Cron { schedule, timezone } => {
@@ -642,7 +646,7 @@ steps:
             content.contains("output_schema"),
             "custom schema must round-trip into the YAML"
         );
-        let path = canonical_workflow_path(id, "judge-flow", None);
+        let path = canonical_workflow_path("judge-flow", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.steps.len(), 1);
         match &parsed.steps[0] {
@@ -712,7 +716,7 @@ steps:
         assert!(content.contains("type: repo"));
         assert!(content.contains("type: preexisting"));
         assert!(content.contains("config:"));
-        let path = canonical_workflow_path(id, "alert-response", None);
+        let path = canonical_workflow_path("alert-response", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 3);
     }
@@ -731,7 +735,7 @@ steps:
         );
         assert!(content.contains("type: preexisting"));
 
-        let path = canonical_workflow_path(id, "uses-existing", None);
+        let path = canonical_workflow_path("uses-existing", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert_eq!(parsed.sandboxes.len(), 1);
         assert!(matches!(

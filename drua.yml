@@ -19,9 +19,18 @@ providers:
       - name: deepseek/deepseek-v3.2
         max_tokens_per_response: 8192
         context_window_tokens: 131072
+      - name: deepseek/deepseek-v4-pro
+        max_tokens_per_response: 8192
+        context_window_tokens: 1048576
+      - name: deepseek/deepseek-v4-flash
+        max_tokens_per_response: 8192
+        context_window_tokens: 1048576
       - name: openai/gpt-5-mini
         max_tokens_per_response: 8192
         context_window_tokens: 400000
+      - name: anthropic/claude-sonnet-4.6
+        max_tokens_per_response: 8192
+        context_window_tokens: 200000
 agents:
   # Resolution precedence (highest first):
   #   1. chain_override passed at the call site (workflow definition /
