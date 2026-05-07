@@ -16,7 +16,6 @@ use sandbox::instance_client::{
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
 use crate::audit::Audit;
-use crate::github_app::GitHubAppTokenProvider;
 
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -33,15 +32,10 @@ use crate::auth::AuthSubject;
 pub struct Sandboxes {
     repo: SandboxRepo,
     admin: Arc<dyn AdminClient>,
-    github_app: Option<Arc<GitHubAppTokenProvider>>,
 }
 
 impl Sandboxes {
-    pub async fn init(
-        pool: &sqlx::PgPool,
-        config: SandboxConfig,
-        github_app: Option<Arc<GitHubAppTokenProvider>>,
-    ) -> Result<Self, SandboxError> {
+    pub async fn init(pool: &sqlx::PgPool, config: SandboxConfig) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
             SandboxBackendConfig::Local {
                 sandbox_spawn_cmd,
@@ -78,7 +72,6 @@ impl Sandboxes {
         Ok(Self {
             repo: SandboxRepo::new(pool),
             admin,
-            github_app,
         })
     }
 
@@ -213,19 +206,11 @@ impl Sandboxes {
             return;
         };
         let instance = InstanceClient::new(base_url);
-        // Without the token, `/initialize` can't clone private repos.
-        let github_token = match self.github_app.as_ref() {
-            Some(provider) => match provider.generate_token().await {
-                Ok(t) => Some(t.token),
-                Err(e) => {
-                    self.record_error(id, &name, "github_app_token", e.to_string())
-                        .await;
-                    return;
-                }
-            },
-            None => None,
-        };
-        let init_req = InitializeRequest::from_mode(&sandbox.mode, github_token);
+        // No GitHub token is sent to the sandbox: clones go through the
+        // drua git-proxy, authenticated by the sandbox's projected SA
+        // token. Memo `019dfebc` M4 — the sandbox no longer holds any
+        // GitHub credential.
+        let init_req = InitializeRequest::from_mode(&sandbox.mode);
         let response = match instance.initialize(&init_req).await {
             Ok(r) => r,
             Err(e) => {

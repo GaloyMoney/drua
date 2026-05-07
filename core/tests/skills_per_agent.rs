@@ -13,7 +13,7 @@ async fn pool() -> sqlx::PgPool {
 
 async fn build_skills(pool: &sqlx::PgPool) -> Skills {
     let sandboxes = Arc::new(
-        Sandboxes::init(pool, SandboxConfig::default(), None)
+        Sandboxes::init(pool, SandboxConfig::default())
             .await
             .expect("init sandboxes"),
     );

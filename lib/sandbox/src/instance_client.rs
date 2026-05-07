@@ -239,25 +239,20 @@ pub struct InitializeRequest {
     pub repo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub github_token: Option<String>,
 }
 
 impl InitializeRequest {
-    /// `github_token` is written to `GITHUB_TOKEN_PATH` inside the sandbox.
-    pub fn from_mode(mode: &SandboxMode, github_token: Option<String>) -> Self {
+    pub fn from_mode(mode: &SandboxMode) -> Self {
         match mode {
             SandboxMode::Scratch => Self {
                 mode: "scratch".to_string(),
                 repo_url: None,
                 branch: None,
-                github_token,
             },
             SandboxMode::Repo { repo_url, branch } => Self {
                 mode: "repo".to_string(),
                 repo_url: Some(repo_url.clone()),
                 branch: branch.clone(),
-                github_token,
             },
         }
     }

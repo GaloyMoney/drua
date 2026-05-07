@@ -111,10 +111,10 @@ impl App {
             None
         };
 
-        // Built before Sandboxes::init so the provider can mint a fresh
-        // installation token for `/initialize` to clone private repos.
-        // Verify by generating a token at startup — crash on failure rather
-        // than silently skip.
+        // GitHub App credentials live behind the git-proxy now —
+        // sandboxes never see a token. Provider stays for the proxy's
+        // upstream-fetch path. Verify by generating a token at startup
+        // so a misconfigured PEM crashes boot, not first push.
         let github_app = match config.github_app {
             Some(ref gh_config) => {
                 let provider = GitHubAppTokenProvider::new(gh_config)
@@ -187,7 +187,7 @@ impl App {
         let context_generation = ContextGeneration::new();
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
-        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
+        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox).await?);
 
         // Bad ref-pattern in YAML must crash boot, not silently fail every push.
         let allowlist = drua_git_proxy::Allowlist::from_config(&config.git_proxy.allowlist)

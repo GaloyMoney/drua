@@ -32,7 +32,7 @@ fn specs() -> SandboxSpecs {
 
 async fn build_sandboxes(pool: &sqlx::PgPool) -> Arc<Sandboxes> {
     Arc::new(
-        Sandboxes::init(pool, SandboxConfig::default(), None)
+        Sandboxes::init(pool, SandboxConfig::default())
             .await
             .expect("init sandboxes"),
     )

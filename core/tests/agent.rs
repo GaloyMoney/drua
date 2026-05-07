@@ -82,7 +82,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             .expect("init toolsets"),
     );
     let sandboxes = Arc::new(
-        Sandboxes::init(pool, SandboxConfig::default(), None)
+        Sandboxes::init(pool, SandboxConfig::default())
             .await
             .expect("init sandboxes"),
     );
@@ -141,7 +141,7 @@ async fn send_message_round_trip_via_prompt_channel() {
     );
 
     let sandboxes = Arc::new(
-        Sandboxes::init(&pool, SandboxConfig::default(), None)
+        Sandboxes::init(&pool, SandboxConfig::default())
             .await
             .expect("init sandboxes"),
     );
@@ -301,7 +301,7 @@ async fn send_message_dispatches_registered_tool_call() {
     let toolsets = Arc::new(toolsets);
 
     let sandboxes = Arc::new(
-        Sandboxes::init(&pool, SandboxConfig::default(), None)
+        Sandboxes::init(&pool, SandboxConfig::default())
             .await
             .expect("init sandboxes"),
     );
