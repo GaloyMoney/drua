@@ -756,31 +756,16 @@ impl Sandboxes {
     }
 
     /// POST `/attach` to the sandbox-server. Resolves `base_url` via
-    /// the admin client (k8s pod IP / local port). Carries a fresh
-    /// GitHub App installation token in the attach body so a long-lived
-    /// sandbox doesn't run the smoke test with a stale (>1h) token —
-    /// installation tokens expire after 1h and `git push` / `gh` would
-    /// otherwise fail with `Authentication failed`.
+    /// the admin client (k8s pod IP / local port). The sandbox no
+    /// longer holds a GitHub credential (memo `019dfebc` M4 — git
+    /// auth flows through the drua git-proxy via the projected SA
+    /// token), so the attach body is empty.
     async fn notify_sandbox_attach(&self, sandbox: &Sandbox) -> Result<(), SandboxError> {
         let view = self.admin.get_sandbox(&sandbox.resource_name()).await?;
         let Some(client) = InstanceClient::from_sandbox(&view) else {
             return Ok(());
         };
-        let github_token = match self.github_app.as_ref() {
-            Some(provider) => match provider.generate_token().await {
-                Ok(t) => Some(t.token),
-                Err(e) => {
-                    tracing::warn!(
-                        sandbox_id = %sandbox.id,
-                        error = %e,
-                        "github_app.generate_token failed; attach proceeds with stale token"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-        client.attach(&AttachRequest { github_token }).await?;
+        client.attach(&AttachRequest::default()).await?;
         Ok(())
     }
 

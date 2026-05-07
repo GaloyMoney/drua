@@ -86,13 +86,6 @@ impl InstanceClient {
     /// The server resets per-tenant state — currently the persistent
     /// bash session's cwd — so the new agent doesn't inherit the
     /// prior tenant's `cd`. Idempotent.
-    ///
-    /// When `req.github_token` is `Some`, the server also rewrites
-    /// `/run/secrets/github-token`, `/workspace/.git-credentials`, and
-    /// `/workspace/.gh-token` before the smoke test — installation
-    /// tokens expire after 1h and persistent sandboxes outlive that,
-    /// so the orchestrator passes a fresh token on every workflow-run
-    /// attach.
     #[instrument(name = "sandbox.instance.attach", skip_all)]
     pub async fn attach(&self, req: &AttachRequest) -> Result<(), InstanceError> {
         self.http
@@ -296,16 +289,11 @@ pub struct ExecuteResponse {
     pub is_error: bool,
 }
 
+/// Empty per memo `019dfebc` M4 — the sandbox no longer holds any
+/// GitHub credential. Git auth flows through the drua git-proxy via
+/// the projected SA token; nothing is passed in the attach body.
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct AttachRequest {
-    /// Fresh GitHub App installation token. When `Some`, the server
-    /// rewrites `/run/secrets/github-token` and the workspace credential
-    /// files before running the smoke test. Installation tokens expire
-    /// after 1h, so the orchestrator passes a fresh token on every
-    /// workflow-run attach.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub github_token: Option<String>,
-}
+pub struct AttachRequest {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResetRepoResponse {
