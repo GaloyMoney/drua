@@ -22,6 +22,11 @@ struct GlobalSearchHit {
     title: String,
     content: String,
     score: f64,
+    /// Set only when the hit is a `space_file` row — mirrors
+    /// `fields_to_file`'s slug attribution rule.
+    space_slug: Option<String>,
+    /// Set only when the hit is a `space_file` row.
+    relative_path: Option<String>,
 }
 
 /// Tool-shaped fetched library file. Translated from
@@ -39,12 +44,20 @@ struct LibraryFile {
 }
 
 fn hit_to_global(hit: SearchHit) -> GlobalSearchHit {
+    let is_space = hit.fields.doc_type == SPACE_DOC_TYPE;
+    let (space_slug, relative_path) = if is_space {
+        (hit.fields.scope_slug, hit.fields.path)
+    } else {
+        (None, None)
+    };
     GlobalSearchHit {
         doc_id: hit.fields.doc_id,
         doc_type: hit.fields.doc_type,
         title: hit.fields.name,
         content: hit.fields.content,
         score: hit.score,
+        space_slug,
+        relative_path,
     }
 }
 
@@ -186,6 +199,13 @@ struct LibrarySearchHit {
     snippet: String,
     score: f64,
     tags: Vec<String>,
+    /// Populated only for `space_file` hits. The space's slug.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    space_slug: Option<String>,
+    /// Populated only for `space_file` hits. The file's path inside
+    /// `spaces/<space_slug>/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relative_path: Option<String>,
 }
 
 impl From<GlobalSearchHit> for LibrarySearchHit {
@@ -197,6 +217,8 @@ impl From<GlobalSearchHit> for LibrarySearchHit {
             snippet: make_snippet(&hit.content, SNIPPET_CHARS),
             score: hit.score,
             tags: Vec::new(),
+            space_slug: hit.space_slug,
+            relative_path: hit.relative_path,
         }
     }
 }
@@ -291,10 +313,13 @@ impl LibraryToolSet {
         let tools = vec![
             tool_entry(
                 "search",
-                "Cross-type, cross-project library search across skills and notes. \
-                 Hybrid FTS + semantic similarity. Always global — results span every \
-                 project the subject can read. Returns ranked snippets; pair with \
-                 `get_files` to load full bodies. Workflows are git-synced but not \
+                "Cross-type, cross-project library search across skills, notes, \
+                 and space files. Hybrid FTS + semantic similarity. Always \
+                 global — results span every project the subject can read. \
+                 Returns ranked snippets; `space_file` hits also carry \
+                 `space_slug` and `relative_path` so callers can route to \
+                 the file without a second lookup. Pair with `get_files` to \
+                 load full bodies. Workflows are git-synced but not \
                  search-indexed.",
                 (*SEARCH_INPUT_SCHEMA).clone(),
                 (*SEARCH_OUTPUT_SCHEMA).clone(),
@@ -350,13 +375,16 @@ impl LibraryToolSet {
             let body = hits
                 .iter()
                 .map(|h| {
-                    format!(
-                        "[{}] {} (score {:.3})\n  {}",
-                        h.type_str(),
-                        h.title,
-                        h.score,
-                        h.snippet,
-                    )
+                    let header = match (&h.space_slug, &h.relative_path) {
+                        (Some(slug), Some(path)) => format!(
+                            "[{}] [{slug}] {path} — {} (score {:.3})",
+                            h.type_str(),
+                            h.title,
+                            h.score,
+                        ),
+                        _ => format!("[{}] {} (score {:.3})", h.type_str(), h.title, h.score,),
+                    };
+                    format!("{header}\n  {}", h.snippet)
                 })
                 .collect::<Vec<_>>()
                 .join("\n---\n");
@@ -699,5 +727,75 @@ mod tests {
     fn workflow_doc_type_collapses_to_note() {
         let lft: LibraryFileType = DocType::new("workflow").into();
         assert!(matches!(lft, LibraryFileType::Note));
+    }
+
+    fn make_hit(doc_type: DocType, scope_slug: Option<&str>, path: Option<&str>) -> SearchHit {
+        SearchHit {
+            score: 0.5,
+            fields: SearchableFields {
+                doc_id: uuid::Uuid::new_v4(),
+                doc_type,
+                scope_id: scope_slug.map(|_| uuid::Uuid::new_v4()),
+                scope_slug: scope_slug.map(str::to_string),
+                name: "title".into(),
+                path: path.map(str::to_string),
+                content: "body".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn space_hit_carries_slug_and_path() {
+        let hit = make_hit(
+            SPACE_DOC_TYPE,
+            Some("drua-dev"),
+            Some("research/ha-readiness.md"),
+        );
+        let global = hit_to_global(hit);
+        assert_eq!(global.space_slug.as_deref(), Some("drua-dev"));
+        assert_eq!(
+            global.relative_path.as_deref(),
+            Some("research/ha-readiness.md")
+        );
+        let out = LibrarySearchHit::from(global);
+        assert_eq!(out.space_slug.as_deref(), Some("drua-dev"));
+        assert_eq!(
+            out.relative_path.as_deref(),
+            Some("research/ha-readiness.md")
+        );
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["space_slug"].as_str(), Some("drua-dev"));
+        assert_eq!(
+            v["relative_path"].as_str(),
+            Some("research/ha-readiness.md")
+        );
+    }
+
+    #[test]
+    fn skill_hit_omits_slug_and_path() {
+        let hit = make_hit(SKILL_DOC_TYPE, Some("project-name"), Some("skill.md"));
+        let global = hit_to_global(hit);
+        assert!(global.space_slug.is_none());
+        assert!(global.relative_path.is_none());
+        let out = LibrarySearchHit::from(global);
+        let v = serde_json::to_value(&out).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("space_slug"));
+        assert!(!v.as_object().unwrap().contains_key("relative_path"));
+    }
+
+    #[test]
+    fn note_hit_omits_slug_and_path() {
+        let hit = make_hit(NOTE_DOC_TYPE, Some("project-name"), Some("note.md"));
+        let global = hit_to_global(hit);
+        assert!(global.space_slug.is_none());
+        assert!(global.relative_path.is_none());
+    }
+
+    #[test]
+    fn search_output_schema_advertises_slug_and_path() {
+        let schema = &*SEARCH_OUTPUT_SCHEMA;
+        let s = schema.to_string();
+        assert!(s.contains("space_slug"));
+        assert!(s.contains("relative_path"));
     }
 }
