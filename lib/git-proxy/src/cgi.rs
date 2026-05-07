@@ -86,6 +86,13 @@ pub async fn spawn_http_backend(
     cmd.env("QUERY_STRING", req.query_string);
     cmd.env("REQUEST_METHOD", req.method);
     cmd.env("CONTENT_LENGTH", req.body.len().to_string());
+    // git http-backend treats unauthenticated callers as read-only,
+    // refusing receive-pack. We've already authenticated upstream
+    // (auth_middleware → AuthSubject::Agent → allow-list); set
+    // REMOTE_USER so http-backend enables receive-pack. The value is
+    // not used for upstream attribution (the App-installation push
+    // handles that); it's just the trigger for "auth'd → write OK".
+    cmd.env("REMOTE_USER", "drua-git-proxy");
     if let Some(ct) = req.content_type {
         cmd.env("CONTENT_TYPE", ct);
     }

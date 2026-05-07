@@ -7,6 +7,7 @@ edition.workspace = true
 async-trait = "0.1"
 bytes = "1"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+gix-packetline = { version = "0.19", features = ["blocking-io"] }
 globset = { workspace = true }
 http = "1"
 serde = { workspace = true }

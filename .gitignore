@@ -20,6 +20,7 @@ code-assistant/models/
 test-sandbox.sh
 .sandboxes/
 .library/
+.git-proxy-mirrors/
 .bacon-locations
 style-agent/
 tmp

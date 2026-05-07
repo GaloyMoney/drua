@@ -173,12 +173,54 @@ SQL
   ( cd ./clone && git log --oneline | head -1 | grep -q "fixture initial" )
 }
 
-# ─── push-side e2e (M1.6 — next commit) ────────────────────────────────
+# ─── push-side e2e ─────────────────────────────────────────────────────
 
-@test "git-proxy: git push to bot/* succeeds (M1.6)" {
-  skip "M1.6: requires receive-pack pkt-line peek + upstream forward"
+@test "git-proxy: git push to bot/* succeeds and forwards upstream" {
+  cd "$BATS_TEST_TMPDIR"
+  rm -rf push-clone
+  git -c "http.extraHeader=Authorization: Bearer $GIT_PROXY_TOKEN" \
+      clone "$GP_URL/GaloyMoney/drua" ./push-clone
+  cd ./push-clone
+  git config user.email "bats@example.com"
+  git config user.name "bats"
+  git checkout -b bot/e2e-test
+  date > marker.txt
+  git add marker.txt
+  git commit -q -m "e2e push test"
+  run git -c "http.extraHeader=Authorization: Bearer $GIT_PROXY_TOKEN" \
+        push origin bot/e2e-test
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Upstream got the new ref via the proxy's forward step.
+  upstream_dir="${UPSTREAM_DRUA#file://}"
+  git -C "$upstream_dir" rev-parse --verify refs/heads/bot/e2e-test >/dev/null
 }
 
-@test "git-proxy: git push to refs/heads/main rejected by ref-pattern (M1.6)" {
-  skip "M1.6: requires receive-pack pkt-line peek"
+@test "git-proxy: git push to refs/heads/release rejected by ref-pattern" {
+  cd "$BATS_TEST_TMPDIR"
+  if [ ! -d ./push-clone/.git ]; then
+    git -c "http.extraHeader=Authorization: Bearer $GIT_PROXY_TOKEN" \
+        clone "$GP_URL/GaloyMoney/drua" ./push-clone
+    cd ./push-clone
+    git config user.email "bats@example.com"
+    git config user.name "bats"
+  else
+    cd ./push-clone
+  fi
+  git checkout -B release
+  date > release-marker.txt
+  git add release-marker.txt
+  git commit -q -m "should be denied"
+  run git -c "http.extraHeader=Authorization: Bearer $GIT_PROXY_TOKEN" \
+        push origin release
+  echo "$output"
+  [ "$status" -ne 0 ]
+  # `git` swallows the response body but surfaces the HTTP status. The
+  # proxy rejects with 403 — accept either "HTTP 403" or curl's
+  # "error: 22" wrapper.
+  echo "$output" | grep -E "HTTP 403|error: 22" >/dev/null
+
+  # Audit row should record ref_pattern_denied for the receive-pack POST.
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE owner='GaloyMoney' AND repo='drua' AND service='git-receive-pack' AND decision='rejected' AND reject_reason='ref_pattern_denied'")"
+  [ "$count" -ge 1 ]
 }

@@ -131,13 +131,19 @@ async fn git_receive_pack(
     Extension(auth): Extension<AuthSubject>,
     State(state): State<AppState>,
     Path((owner, repo)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
 ) -> Response {
     tracing::Span::current().record("owner", owner.as_str());
     tracing::Span::current().record("repo", repo.as_str());
-    // Push-side handling (pkt-line peek + ref-pattern enforcement +
-    // upstream forward) lands in the next commit. Returning 501 here
-    // keeps the route's auth + allow-list contract live without
-    // pretending we accept the body.
+    let body_bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to buffer receive-pack body");
+            return reject_response(StatusCode::BAD_REQUEST, "body_read_error");
+        }
+    };
+
     let coord = match RepoCoord::parse(&owner, &repo) {
         Some(c) => c,
         None => return reject_response(StatusCode::BAD_REQUEST, "invalid_repo_coord"),
@@ -153,21 +159,107 @@ async fn git_receive_pack(
         .await;
         return reject_response(StatusCode::UNAUTHORIZED, "unauthorized");
     }
-    match state.app.git_proxies().check_authorization(
+
+    // Peek the pkt-line cmd list BEFORE spawning git-http-backend so we
+    // can deny non-allowed refs before any object touches disk.
+    let updates = match drua_core::git_proxy::parse_command_list(&body_bytes) {
+        Ok(refs) => refs,
+        Err(e) => {
+            tracing::warn!(error = %e, "git-proxy: failed to peek receive-pack pkt-line");
+            let _ = audit_reject(
+                &state,
+                &auth,
+                &coord,
+                GitService::GitReceivePack,
+                "malformed_receive_pack",
+            )
+            .await;
+            return reject_response(StatusCode::BAD_REQUEST, "malformed_receive_pack");
+        }
+    };
+    let ref_names: Vec<String> = updates.iter().map(|u| u.ref_name.clone()).collect();
+
+    let upstream_url = match state.app.git_proxies().check_authorization(
         &auth,
         &coord.owner,
         &coord.repo,
         GitService::GitReceivePack.mode(),
-        &[],
+        &ref_names,
     ) {
-        Ok(_) => (
-            StatusCode::NOT_IMPLEMENTED,
-            [(axum::http::header::CONTENT_TYPE, "text/plain")],
-            "git-proxy: receive-pack lands in next commit\n",
+        Ok(entry) => entry.upstream_url.clone(),
+        Err(err) => {
+            return render_authz_error(&state, &auth, &coord, GitService::GitReceivePack, err).await
+        }
+    };
+
+    let attempt_id = match state
+        .app
+        .git_proxies()
+        .audit()
+        .record_attempt(
+            auth.acting_agent_id(),
+            auth.project_id(),
+            &coord.owner,
+            &coord.repo,
+            GitService::GitReceivePack,
+            serde_json::to_value(&updates).unwrap_or(serde_json::Value::Null),
+            drua_core::git_proxy::GitProxyDecision::Accepted,
+            None,
         )
-            .into_response(),
-        Err(e) => render_authz_error(&state, &auth, &coord, GitService::GitReceivePack, e).await,
+        .await
+    {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::error!(error = %e, "audit accept insert failed");
+            None
+        }
+    };
+
+    let cgi_response = forward_to_backend(
+        &state,
+        &auth,
+        &coord,
+        &upstream_url,
+        GitService::GitReceivePack,
+        Forward {
+            method: "POST",
+            path_info: "/git-receive-pack",
+            query_string: "",
+            headers: &headers,
+            body: body_bytes,
+        },
+        attempt_id,
+    )
+    .await;
+
+    // Mirror the accepted refs upstream. If the push fails the proxy
+    // logs but still returns the local receive-pack success body —
+    // the audit row records the failure so ops can chase it.
+    let project_id = auth.project_id().expect("is_agent checked earlier");
+    let mirror_path = state
+        .app
+        .git_proxies()
+        .mirror()
+        .expect("mirror configured")
+        .mirror_path(project_id.into(), &coord);
+    let static_creds = drua_core::git_proxy::StaticCredential(String::new());
+    let creds: &dyn drua_core::git_proxy::UpstreamCredentialProvider =
+        if upstream_url.starts_with("file://") {
+            &static_creds
+        } else {
+            state
+                .app
+                .git_proxies()
+                .credentials()
+                .unwrap_or(&static_creds)
+        };
+    if let Err(e) =
+        drua_core::git_proxy::push_to_upstream(&mirror_path, &upstream_url, &updates, creds).await
+    {
+        tracing::warn!(error = %e, "git-proxy: upstream forward failed");
     }
+
+    cgi_response
 }
 
 /// Forwarding inputs the handler needs for a CGI-spawn dispatch.

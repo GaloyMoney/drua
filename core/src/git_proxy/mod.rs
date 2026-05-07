@@ -8,9 +8,10 @@ use tracing::instrument;
 
 pub use audit::GitProxyAuditLog;
 pub use drua_git_proxy::{
-    spawn_http_backend, Allowlist, AllowlistConfig, AllowlistEntry, AllowlistError, CgiError,
-    CgiRequest, CgiResponse, GitProxyDecision, GitProxyMode, GitService, MirrorConfig, MirrorError,
-    MirrorManager, RefPatternSet, RepoCoord, StaticCredential, UpstreamCredentialProvider,
+    parse_command_list, push_to_upstream, spawn_http_backend, Allowlist, AllowlistConfig,
+    AllowlistEntry, AllowlistError, CgiError, CgiRequest, CgiResponse, GitProxyDecision,
+    GitProxyMode, GitService, MirrorConfig, MirrorError, MirrorManager, PktLineError,
+    RefPatternSet, RefUpdate, RepoCoord, StaticCredential, UpstreamCredentialProvider,
 };
 pub use error::GitProxyError;
 
