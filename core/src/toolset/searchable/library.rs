@@ -291,7 +291,7 @@ impl LibraryToolSet {
         let tools = vec![
             tool_entry(
                 "search",
-                "Cross-type, cross-project library search across skills and notes. \
+                "Cross-type, cross-project library search across skills, notes, and space files. \
                  Hybrid FTS + semantic similarity. Always global — results span every \
                  project the subject can read. Returns ranked snippets; pair with \
                  `get_files` to load full bodies. Workflows are git-synced but not \
