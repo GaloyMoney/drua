@@ -9,10 +9,14 @@
 load helpers
 
 setup_file() {
-  gen_test_project_agent_ids
+  # Allow-list is global → no per-project SQL seeding needed. The
+  # dev-mode auth path accepts the literal `dev-agent` Bearer token
+  # (no UUID; auth_middleware synthesises an AuthSubject::Agent with
+  # nil project_id + agent_id) so we don't need a real agent in the DB.
+  export GIT_PROXY_TOKEN="dev-agent"
+
   # Bring up the test bare upstream(s) BEFORE rendering the config so
   # we can plug their file:// URLs into the allow-list entries.
-  : > "$BATS_FILE_TMPDIR/setup.log" 2>/dev/null || true
   mkdir -p "$BATS_FILE_TMPDIR/upstream"
   UPSTREAM_DRUA="$(mk_upstream_repo GaloyMoney drua)"
   UPSTREAM_RO="$(mk_upstream_repo GaloyMoney drua-readonly)"
@@ -21,7 +25,6 @@ setup_file() {
     "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main:$UPSTREAM_DRUA" \
     "GaloyMoney/drua-readonly:pull:refs/heads/main:$UPSTREAM_RO"
   start_server
-  seed_test_project_agent
 }
 
 teardown_file() {
@@ -48,16 +51,19 @@ SVC_PULL="?service=git-upload-pack"
   [ "$count" -ge 1 ]
 }
 
-@test "git-proxy: bogus dev-agent uuid rejected with 401" {
+@test "git-proxy: dev-agent token with extra suffix rejected with 401" {
+  # Strict match — only the literal `dev-agent` is accepted. Anything
+  # else is unauthorised so a stray space / typo doesn't accidentally
+  # succeed.
   status="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer dev-agent:00000000-0000-0000-0000-000000000000" \
     "$GP_URL/GaloyMoney/drua/info/refs$SVC_PULL")"
   [ "$status" = "401" ]
 }
 
-@test "git-proxy: malformed dev-agent token rejected with 401" {
+@test "git-proxy: random non-dev-agent string rejected with 401" {
   status="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer dev-agent:not-a-uuid" \
+    -H "Authorization: Bearer not-a-real-token" \
     "$GP_URL/GaloyMoney/drua/info/refs$SVC_PULL")"
   [ "$status" = "401" ]
 }
@@ -91,11 +97,11 @@ SVC_PULL="?service=git-upload-pack"
   # + `# service=git-upload-pack` literal somewhere in the first frame.
   grep -aq 'service=git-upload-pack' "$BATS_TEST_TMPDIR/body"
 
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE project_id='$PROJECT_ID' AND owner='GaloyMoney' AND repo='drua' AND decision='accepted'")"
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE owner='GaloyMoney' AND repo='drua' AND decision='accepted'")"
   [ "$count" -ge 1 ]
 }
 
-@test "git-proxy: pull on repo absent from project's allow-list rejected 403" {
+@test "git-proxy: pull on repo absent from the global allow-list rejected 403" {
   status="$(curl -s -o "$BATS_TEST_TMPDIR/body" -w '%{http_code}' \
     -H "Authorization: Bearer $GIT_PROXY_TOKEN" \
     "$GP_URL/attacker/exfil/info/refs$SVC_PULL")"
@@ -121,41 +127,6 @@ SVC_PULL="?service=git-upload-pack"
   # URL-decoded `dr/ua` would inject path traversal — must 4xx.
   [ "$status" -ge 400 ]
   [ "$status" -lt 500 ]
-}
-
-# ─── Allow-list is global ──────────────────────────────────────────────
-
-@test "git-proxy: global allow-list — a different project's agent can hit allowed repos too" {
-  # Allow-list is global (no per-project entries). Any authenticated
-  # Agent — regardless of project — can address whatever the YAML
-  # permits. Project_id is recorded in the audit row for attribution
-  # but doesn't gate the policy.
-  local other_proj other_agent_id proj_short
-  other_proj="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  other_agent_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  proj_short="${other_proj:0:8}"
-  psql "$PG_CON" -q <<SQL
-    INSERT INTO projects (id, name, created_at) VALUES ('$other_proj', 'bats-other-$proj_short', NOW());
-    INSERT INTO project_events (id, sequence, event_type, event, recorded_at)
-    VALUES ('$other_proj', 0, 'initialized',
-      '{"type":"initialized","id":"$other_proj","lead_agent_id":"$other_agent_id","name":"bats-other-$proj_short","description":null}',
-      NOW());
-    INSERT INTO agents (id, project_id, created_at) VALUES ('$other_agent_id', '$other_proj', NOW());
-    INSERT INTO agent_events (id, sequence, event_type, event, recorded_at)
-    VALUES ('$other_agent_id', 0, 'initialized',
-      '{"type":"initialized","id":"$other_agent_id","project_id":"$other_proj","agent_role":"project_lead","name":"lead","authz_scopes":["project:$other_proj:admin"],"project_name":"bats-other-$proj_short"}',
-      NOW());
-SQL
-
-  status="$(curl -s -o "$BATS_TEST_TMPDIR/body" -w '%{http_code}' \
-    -H "Authorization: Bearer dev-agent:$other_agent_id" \
-    "$GP_URL/GaloyMoney/drua/info/refs$SVC_PULL")"
-  [ "$status" = "200" ]
-  grep -aq 'service=git-upload-pack' "$BATS_TEST_TMPDIR/body"
-
-  # Audit row should attribute the request to the other project_id.
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE project_id='$other_proj' AND owner='GaloyMoney' AND repo='drua' AND decision='accepted'")"
-  [ "$count" -ge 1 ]
 }
 
 # ─── git-client e2e — pull side ────────────────────────────────────────

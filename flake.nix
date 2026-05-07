@@ -515,11 +515,15 @@
             # Production sandboxes (K8s) ignore both — the projected
             # SA token + chart's `sandbox.gitProxyUrl` cover that path.
             #
-            # `DRUA_DEV_AGENT_TOKEN` must be set manually (or in
-            # `.envrc.local`) once you know which agent UUID you want
-            # the sandbox to authenticate as. Format: `dev-agent:<uuid>`.
+            # The dev token is the literal string `dev-agent` — when
+            # `oauth.dev_mode_agent_tokens=true` in `drua.yml` the
+            # auth middleware accepts it and synthesises an
+            # `AuthSubject::Agent` with nil project_id + agent_id (no
+            # DB lookup required). Audit rows mark dev traffic with
+            # nil UUIDs so it's grep-able after the fact.
             : "''${DRUA_GIT_PROXY_URL:=http://localhost:4200/git}"
-            export DRUA_GIT_PROXY_URL
+            : "''${DRUA_DEV_AGENT_TOKEN:=dev-agent}"
+            export DRUA_GIT_PROXY_URL DRUA_DEV_AGENT_TOKEN
 
             echo "drua dev shell loaded (engine: $ENGINE_DEFAULT)"
           '';

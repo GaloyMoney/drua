@@ -126,20 +126,20 @@ async fn resolve_auth_context(
             }
         }
 
-        // Local-dev shortcut: `dev-agent:<uuid>` resolves to the named
-        // agent's full AuthSubject. Off in prod (config flag default
-        // false). Emits a tracing::warn at server boot when enabled.
-        if state.dev_mode_agent_tokens {
-            if let Some(rest) = raw_token.strip_prefix("dev-agent:") {
-                if let Ok(agent_uuid) = rest.parse::<uuid::Uuid>() {
-                    let agent_id = domain::primitives::AgentId::from(agent_uuid);
-                    let system_sub =
-                        AuthSubject::User(domain::primitives::UserId::from(uuid::Uuid::nil()));
-                    if let Ok(agent) = state.app.agents().find_by_id(&system_sub, agent_id).await {
-                        return agent.auth_subject();
-                    }
-                }
-            }
+        // Local-dev shortcut: a literal `dev-agent` Bearer token
+        // synthesises an `AuthSubject::Agent` with nil project_id +
+        // agent_id, granting access to anything the global git-proxy
+        // allow-list permits. No DB lookup. The nil UUIDs land in
+        // `sandbox_git_proxy_attempts` so dev traffic is grep-able
+        // (`WHERE project_id = '00000000-…'`). Off in prod (config
+        // flag default false). Emits a `tracing::warn!` at server
+        // boot when enabled.
+        if state.dev_mode_agent_tokens && raw_token == "dev-agent" {
+            return AuthSubject::Agent(
+                domain::primitives::ProjectId::from(uuid::Uuid::nil()),
+                domain::primitives::AgentId::from(uuid::Uuid::nil()),
+                Vec::new(),
+            );
         }
 
         // SA tokens from sandbox pods (projected ServiceAccount tokens).

@@ -86,16 +86,6 @@ SQL
   export AGENT_TOKEN="$raw_token"
 }
 
-# Generates fresh project + agent UUIDs without touching PG. Call
-# this BEFORE `write_git_proxy_config` so the YAML allowlist binds to
-# the same project_id we'll later seed.
-gen_test_project_agent_ids() {
-  export PROJECT_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  export AGENT_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  export PROJECT_NAME="bats-${PROJECT_ID:0:8}"
-  export GIT_PROXY_TOKEN="dev-agent:$AGENT_ID"
-}
-
 # Renders an isolated bare upstream repo at $BATS_FILE_TMPDIR/<owner>-<repo>.git
 # with one commit on `main`. Returns its `file://` URL via stdout so
 # the caller can plug it into write_git_proxy_config's upstream override.
@@ -120,31 +110,13 @@ mk_upstream_repo() {
   echo "file://$bare"
 }
 
-# Persists the project + lead-agent SQL rows. Must run AFTER the
-# server is up (which brings up PG + applies migrations) and AFTER
-# `gen_test_project_agent_ids`.
-seed_test_project_agent() {
-  psql "$PG_CON" -q <<SQL
-    INSERT INTO projects (id, name, created_at) VALUES ('$PROJECT_ID', '$PROJECT_NAME', NOW());
-    INSERT INTO project_events (id, sequence, event_type, event, recorded_at)
-    VALUES ('$PROJECT_ID', 0, 'initialized',
-      '{"type":"initialized","id":"$PROJECT_ID","lead_agent_id":"$AGENT_ID","name":"$PROJECT_NAME","description":null}',
-      NOW());
-
-    INSERT INTO agents (id, project_id, created_at) VALUES ('$AGENT_ID', '$PROJECT_ID', NOW());
-    INSERT INTO agent_events (id, sequence, event_type, event, recorded_at)
-    VALUES ('$AGENT_ID', 0, 'initialized',
-      '{"type":"initialized","id":"$AGENT_ID","project_id":"$PROJECT_ID","agent_role":"project_lead","name":"lead","authz_scopes":["project:$PROJECT_ID:admin"],"project_name":"$PROJECT_NAME"}',
-      NOW());
-SQL
-}
-
 # Renders an isolated drua.yml with:
-#   * dev login + dev_mode_agent_tokens enabled
+#   * dev login + dev_mode_agent_tokens enabled (accepts the literal
+#     `dev-agent` Bearer token; no agent row needs to exist in PG)
 #   * one git_proxy.allowlist entry per arg in the form
-#     "<owner>/<repo>:<modes>:<patterns>" — modes csv (pull,push),
-#     patterns csv. e.g. "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main"
-#   * project_id pinned to the current $PROJECT_ID
+#     "<owner>/<repo>:<modes>:<patterns>[:<upstream_url>]"
+#     — modes csv (pull,push), patterns csv. e.g.
+#       "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main"
 write_git_proxy_config() {
   local out="$BATS_FILE_TMPDIR/drua.yml"
 
