@@ -11,6 +11,7 @@ use drua_core::prompt_executor::{
 };
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
+use drua_core::GitProxyAppConfig;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +34,8 @@ pub struct Config {
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(default)]
     pub library: LibraryConfig,
+    #[serde(default)]
+    pub git_proxy: GitProxyAppConfig,
     #[serde(skip)]
     pub anthropic_api_key: String,
     #[serde(skip)]

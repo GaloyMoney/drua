@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentsConfig;
 use crate::encryption::EncryptionKey;
@@ -7,6 +7,7 @@ use crate::library::LibraryConfig;
 use crate::prompt_executor::PromptExecutorConfig;
 use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
+use drua_git_proxy::AllowlistConfig;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AppConfig {
@@ -26,6 +27,16 @@ pub struct AppConfig {
     pub github_app: Option<GitHubAppConfig>,
     #[serde(default)]
     pub library: LibraryConfig,
+    /// YAML-driven allow-list for the smart-HTTP git proxy. Restart
+    /// the server to apply edits (no live reload — memo `019dfebc` §7.2).
+    #[serde(default)]
+    pub git_proxy: GitProxyAppConfig,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GitProxyAppConfig {
+    #[serde(default)]
+    pub allowlist: AllowlistConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

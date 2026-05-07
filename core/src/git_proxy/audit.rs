@@ -2,9 +2,9 @@ use sqlx::PgPool;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::primitives::{AgentId, ProjectId};
+use drua_git_proxy::{GitProxyDecision, GitService};
 
-use super::primitives::{GitProxyDecision, GitService};
+use crate::primitives::{AgentId, ProjectId};
 
 /// Append-only writer for the `sandbox_git_proxy_attempts` table.
 /// One row per smart-HTTP request, immediately after the policy decision.

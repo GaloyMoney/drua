@@ -1,46 +1,13 @@
--- Drua Git Proxy: per-project repo allow-list (es-entity) + per-request audit log.
+-- Drua Git Proxy: per-request audit log.
 --
--- Per memo 019dfebc:
--- * git_proxy_allowlist_entries / _events — event-sourced policy
---   (project_id, owner, repo, allowed_ref_patterns, modes).
--- * sandbox_git_proxy_attempts — append-only decision log for every
---   smart-HTTP request (accepted or rejected).
+-- Per memo 019dfebc §4.2: append-only decision row per smart-HTTP
+-- request. Every accept and every reject lands here; ops dashboards
+-- consume it to surface policy decisions alongside sandbox events.
+--
+-- The allow-list itself lives in `drua.yml` (per memo §7.2 — admin
+-- UI deferred), parsed at boot into an in-memory `drua_git_proxy::Allowlist`.
+-- Restart the server to apply config changes.
 
-CREATE TABLE public.git_proxy_allowlist_entries (
-    id uuid NOT NULL,
-    project_id uuid NOT NULL,
-    owner character varying NOT NULL,
-    repo character varying NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    deleted boolean DEFAULT false NOT NULL
-);
-
-CREATE TABLE public.git_proxy_allowlist_entry_events (
-    id uuid NOT NULL,
-    sequence integer NOT NULL,
-    event_type character varying NOT NULL,
-    event jsonb NOT NULL,
-    context jsonb,
-    recorded_at timestamp with time zone NOT NULL
-);
-
-ALTER TABLE ONLY public.git_proxy_allowlist_entries
-    ADD CONSTRAINT git_proxy_allowlist_entries_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.git_proxy_allowlist_entries
-    ADD CONSTRAINT git_proxy_allowlist_entries_project_owner_repo_key
-    UNIQUE (project_id, owner, repo);
-
-ALTER TABLE ONLY public.git_proxy_allowlist_entry_events
-    ADD CONSTRAINT git_proxy_allowlist_entry_events_id_sequence_key
-    UNIQUE (id, sequence);
-
-CREATE INDEX git_proxy_allowlist_entries_project_idx
-    ON public.git_proxy_allowlist_entries (project_id)
-    WHERE deleted = FALSE;
-
--- Append-only attempt log. NOT event-sourced: every row is an
--- independent decision record consumed by ops dashboards.
 CREATE TABLE public.sandbox_git_proxy_attempts (
     id uuid NOT NULL,
     agent_id uuid,

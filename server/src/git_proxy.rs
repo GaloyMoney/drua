@@ -130,12 +130,13 @@ async fn handle(
         return reject_response(StatusCode::UNAUTHORIZED, "unauthorized");
     }
 
-    match state
-        .app
-        .git_proxies()
-        .check_authorization(auth, &coord.owner, &coord.repo, mode, refs_in_request)
-        .await
-    {
+    match state.app.git_proxies().check_authorization(
+        auth,
+        &coord.owner,
+        &coord.repo,
+        mode,
+        refs_in_request,
+    ) {
         Ok(_entry) => {
             let _ = state
                 .app
@@ -187,13 +188,20 @@ async fn handle(
                 GitProxyError::Authorization(_) | GitProxyError::SubjectMissingProject => {
                     StatusCode::UNAUTHORIZED
                 }
-                GitProxyError::RepoNotAllowed { .. }
-                | GitProxyError::ModeNotAllowed { .. }
-                | GitProxyError::RefPatternDenied { .. } => StatusCode::FORBIDDEN,
-                GitProxyError::InvalidRepoCoord { .. } | GitProxyError::InvalidRefPattern(_) => {
-                    StatusCode::BAD_REQUEST
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
+                GitProxyError::Allowlist(
+                    drua_core::git_proxy::AllowlistError::RepoNotAllowed { .. },
+                )
+                | GitProxyError::Allowlist(
+                    drua_core::git_proxy::AllowlistError::ModeNotAllowed { .. },
+                )
+                | GitProxyError::Allowlist(
+                    drua_core::git_proxy::AllowlistError::RefPatternDenied { .. },
+                ) => StatusCode::FORBIDDEN,
+                GitProxyError::InvalidRepoCoord { .. }
+                | GitProxyError::Allowlist(
+                    drua_core::git_proxy::AllowlistError::InvalidRefPattern(_),
+                ) => StatusCode::BAD_REQUEST,
+                GitProxyError::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             reject_response(status, code)
         }

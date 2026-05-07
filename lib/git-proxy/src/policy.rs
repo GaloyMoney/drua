@@ -1,6 +1,6 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::primitives::GitProxyMode;
+use crate::primitives::GitProxyMode;
 
 /// Compiled set of ref-name globs (e.g. `refs/heads/bot/*`).
 /// Empty set means "no refs allowed" — fail-closed by construction.

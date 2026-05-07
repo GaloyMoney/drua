@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-es_entity::entity_id! { GitProxyAllowlistEntryId }
-
 /// Operations a sandbox may perform against a repo through the proxy.
-/// Stored as a serde-tagged enum so the policy is human-readable in DB rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitProxyMode {
@@ -76,8 +73,8 @@ impl GitProxyDecision {
     }
 }
 
-/// Identifies the (owner, repo) target on the GitHub side. Validated at
-/// parse time — owner + repo must match GitHub's character set so a
+/// Identifies the (owner, repo) target on the GitHub side. Validated
+/// at parse time — owner + repo must match GitHub's character set so a
 /// malicious sandbox can't inject path-traversal into the mirror layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoCoord {
@@ -96,7 +93,6 @@ impl RepoCoord {
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
         }
-        // ".git" suffix is part of the URL convention but not the canonical name.
         let repo = repo.strip_suffix(".git").unwrap_or(repo);
         if !ok(owner) || !ok(repo) {
             return None;

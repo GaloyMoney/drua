@@ -189,7 +189,14 @@ impl App {
 
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
 
-        let git_proxies = Arc::new(GitProxies::new(pool));
+        // Bad ref-pattern in YAML must crash boot, not silently fail every push.
+        let allowlist = drua_git_proxy::Allowlist::from_config(&config.git_proxy.allowlist)
+            .map_err(|e| AppError::GitProxy(format!("invalid allowlist config: {e}")))?;
+        tracing::info!(
+            entries = allowlist.entries().len(),
+            "git-proxy allow-list loaded"
+        );
+        let git_proxies = Arc::new(GitProxies::new(pool, allowlist));
 
         // Read facade for the project↔space mount relationship. Built
         // before `Skills` so Skills can resolve mounted-space skills
@@ -512,4 +519,6 @@ pub enum AppError {
     Job(String),
     #[error("AppError - Library: {0}")]
     Library(String),
+    #[error("AppError - GitProxy: {0}")]
+    GitProxy(String),
 }

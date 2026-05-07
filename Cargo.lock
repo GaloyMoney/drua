@@ -1484,12 +1484,12 @@ dependencies = [
  "concourse-client",
  "cron",
  "derive_builder",
+ "drua-git-proxy",
  "drua-library",
  "es-entity",
  "futures",
  "git2",
  "github-app",
- "globset",
  "hex",
  "http",
  "job",
@@ -1520,6 +1520,17 @@ dependencies = [
  "tracing-opentelemetry",
  "uuid",
  "zenduty-client",
+]
+
+[[package]]
+name = "drua-git-proxy"
+version = "0.1.0"
+dependencies = [
+ "globset",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

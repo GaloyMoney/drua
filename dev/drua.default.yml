@@ -46,4 +46,7 @@ library:
   data_dir: null
   repo_url: null
   skill_sync_interval_secs: 20
+git_proxy:
+  allowlist:
+    entries: []
 

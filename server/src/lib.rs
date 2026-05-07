@@ -158,6 +158,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         sandbox: config.sandbox.clone(),
         github_app: github_app_config,
         library: config.library.clone(),
+        git_proxy: config.git_proxy.clone(),
     };
 
     let app = domain::App::init(&pool, app_config).await?;
