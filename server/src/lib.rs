@@ -204,8 +204,13 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         );
     }
 
-    if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await {
-        tracing::info!("SA token validator initialized (in-cluster)");
+    // Audience must match `sandbox.saTokenAudience` in values.yaml; if
+    // they diverge, every TokenReview call fails. Configurable via env
+    // for ops cutovers (renaming the audience without a code change).
+    let sa_audience =
+        std::env::var("DRUA_SA_TOKEN_AUDIENCE").unwrap_or_else(|_| "galoy-agents-git".to_string());
+    if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env(&sa_audience).await {
+        tracing::info!(audience = %sa_audience, "SA token validator initialized (in-cluster)");
         app_state = app_state.with_sa_token_validator(validator);
     }
 

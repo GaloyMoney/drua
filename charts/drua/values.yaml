@@ -314,8 +314,19 @@ sandbox:
   networkPolicyManagement: Managed
   ## MCP gateway URL for sandbox pods (e.g. "http://drua.drua.svc.cluster.local:5254/mcp")
   mcpGatewayUrl: ""
-  ## Audience claim for the projected SA token (must match gateway validation)
-  saTokenAudience: "galoy-agents-mcp"
+  ## drua git-proxy URL for sandbox pods. When set, the sandbox image's
+  ## entrypoint adds an `[url …] insteadOf = https://github.com/`
+  ## rewrite + a `drua-sa` credential helper so all `git clone` /
+  ## `git push` traffic flows through drua, not directly to github.com.
+  ## Pair with `sandbox.saTokenAudience = "galoy-agents-git"` (default).
+  ## Required for M5 — without this, the kill-switch NetworkPolicy
+  ## leaves the sandbox unable to reach github.com.
+  gitProxyUrl: ""
+  ## Audience claim for the projected SA token (must match drua's
+  ## SaTokenValidator audience). Repurposed from the prior
+  ## `galoy-agents-mcp` audience per memo `019dfebc` §3.2 — one token
+  ## covers MCP + git-proxy + future SA-authed paths.
+  saTokenAudience: "galoy-agents-git"
   image:
     repository: us.gcr.io/galoyorg/sandbox
     digest: ""

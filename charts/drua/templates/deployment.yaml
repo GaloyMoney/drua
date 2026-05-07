@@ -130,6 +130,8 @@ spec:
         env:
         - name: DRUA_CONFIG
           value: "/config/drua.yml"
+        - name: DRUA_SA_TOKEN_AUDIENCE
+          value: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-git" | quote }}
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
         - name: OTEL_SERVICE_NAME

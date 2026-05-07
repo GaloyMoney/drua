@@ -57,14 +57,21 @@ spec:
         - name: MCP_GATEWAY_URL
           value: {{ .Values.sandbox.mcpGatewayUrl | quote }}
         {{- end }}
+        {{- if .Values.sandbox.gitProxyUrl }}
+        - name: DRUA_GIT_PROXY_URL
+          value: {{ .Values.sandbox.gitProxyUrl | quote }}
+        {{- end }}
         {{- if or .Values.sandbox.nixSubstituters .Values.sandbox.nixNetrc.enabled }}
         - name: NIX_CONFIG
           value: |-
 {{ include "galoyAgents.sandbox.nixConfig" . | indent 12 }}
         {{- end }}
         volumeMounts:
-        - name: mcp-token
-          mountPath: /var/run/secrets/galoy-agents
+        # Repurposed from the previous MCP-only volume (memo `019dfebc`
+        # §3.2). Audience is now the git-proxy audience; same projected
+        # token covers MCP + git-proxy + future SA-authed paths.
+        - name: sa-token
+          mountPath: /var/run/secrets/galoy-agents-git
           readOnly: true
         - name: project-secrets
           mountPath: /run/secrets
@@ -78,11 +85,11 @@ spec:
       - name: project-secrets
         emptyDir:
           medium: Memory
-      - name: mcp-token
+      - name: sa-token
         projected:
           sources:
           - serviceAccountToken:
-              audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-mcp" }}
+              audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-git" }}
               expirationSeconds: 3600
               path: token
       {{- if .Values.sandbox.nixNetrc.enabled }}
