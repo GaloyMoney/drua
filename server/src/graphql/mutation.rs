@@ -150,7 +150,6 @@ impl Mutation {
             cpu: input.cpu,
             memory: input.memory,
             disk_size: input.disk_size,
-            dev_agent_token: None,
         };
         let mode = match input.mode {
             SandboxCreateMode::Scratch => drua_core::sandbox::SandboxMode::Scratch,

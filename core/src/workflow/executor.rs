@@ -326,7 +326,6 @@ impl Executor {
                                 cpu: "500m".to_string(),
                                 memory: "512Mi".to_string(),
                                 disk_size: "10Gi".to_string(),
-                                dev_agent_token: None,
                             });
                             self.sandboxes
                                 .create_for_workflow(

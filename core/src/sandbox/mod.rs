@@ -32,7 +32,6 @@ use crate::auth::AuthSubject;
 pub struct Sandboxes {
     repo: SandboxRepo,
     admin: Arc<dyn AdminClient>,
-    pool: sqlx::PgPool,
 }
 
 impl Sandboxes {
@@ -73,30 +72,7 @@ impl Sandboxes {
         Ok(Self {
             repo: SandboxRepo::new(pool),
             admin,
-            pool: pool.clone(),
         })
-    }
-
-    /// Returns the project's first non-deleted agent (typically the
-    /// `ProjectLead` created at project-init time). Used by the local
-    /// dev path to mint a `dev-agent:<uuid>` token for the
-    /// per-sandbox gitconfig — the audit row attributes git traffic
-    /// to this agent regardless of which agent later attaches. None
-    /// when the project has no agents (shouldn't happen post-init).
-    async fn project_lead_agent_id(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Option<uuid::Uuid>, SandboxError> {
-        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT id FROM agents \
-             WHERE project_id = $1 AND deleted = FALSE \
-             ORDER BY created_at ASC LIMIT 1",
-        )
-        .bind(uuid::Uuid::from(project_id))
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(SandboxError::Sqlx)?;
-        Ok(row.map(|(id,)| id))
     }
 
     #[instrument(name = "domain.sandbox.create", skip(self, sub))]
@@ -194,37 +170,7 @@ impl Sandboxes {
             }
         }
 
-        // Local-dev: when the parent has DRUA_GIT_PROXY_URL set, derive
-        // a `dev-agent:<uuid>` token from the project's lead agent so
-        // the local LocalAdminClient can write a per-sandbox gitconfig
-        // without the operator having to export a token. K8s backend
-        // ignores the field — production sandboxes carry a projected
-        // SA token instead.
-        let mut specs = sandbox.specs.clone();
-        if std::env::var("DRUA_GIT_PROXY_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .is_some()
-            && specs.dev_agent_token.is_none()
-        {
-            match self.project_lead_agent_id(sandbox.project_id).await {
-                Ok(Some(agent_uuid)) => {
-                    specs.dev_agent_token = Some(format!("dev-agent:{agent_uuid}"));
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        sandbox = %name,
-                        project_id = %sandbox.project_id,
-                        "no agent found for project; gitconfig will skip Authorization header"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "lead-agent lookup failed; skipping dev_agent_token");
-                }
-            }
-        }
-
-        if let Err(e) = self.admin.create_sandbox(&name, &specs).await {
+        if let Err(e) = self.admin.create_sandbox(&name, &sandbox.specs).await {
             self.record_error(id, &name, "create_sandbox", e.to_string())
                 .await;
             return;

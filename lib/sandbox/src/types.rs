@@ -25,13 +25,6 @@ pub struct SandboxSpecs {
     pub memory: String,
     /// e.g. `"10Gi"`.
     pub disk_size: String,
-    /// Local-dev only: when set, the local backend writes a per-sandbox
-    /// gitconfig with this Bearer token. Populated by the orchestrator
-    /// from the sandbox's project's lead agent UUID when
-    /// `oauth.dev_mode_agent_tokens` is on. K8s backend ignores it
-    /// (production sandboxes carry a projected SA token instead).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dev_agent_token: Option<String>,
 }
 
 /// Mirrors the Kubernetes view; the local backend fills `None` for
