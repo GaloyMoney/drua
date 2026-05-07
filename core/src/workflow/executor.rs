@@ -65,7 +65,7 @@ impl Executor {
 
         if matches!(
             run.state,
-            WorkflowRunState::Succeeded | WorkflowRunState::Failed
+            WorkflowRunState::Succeeded | WorkflowRunState::Failed | WorkflowRunState::Errored
         ) {
             return Ok(());
         }
@@ -103,7 +103,7 @@ impl Executor {
                 if run.step_failed(step_name, err.to_string()).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
-                if run.run_completed(WorkflowRunState::Failed).did_execute() {
+                if run.run_completed(WorkflowRunState::Errored).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
                 self.suspend_workflow_sandboxes(project_id, workflow_id, &HashSet::new())
@@ -112,7 +112,6 @@ impl Executor {
             }
         };
 
-        let mut any_failed = run.any_step_failed();
         // Preexisting sandboxes the workflow successfully attached to.
         // Drives the post-flight suspend decision: a Preexisting sandbox
         // is suspended at end-of-run only if (a) we attached at least
@@ -156,7 +155,6 @@ impl Executor {
                     }
                 }
                 Err(err) => {
-                    any_failed = true;
                     if run.step_failed(step_name, err.to_string()).did_execute() {
                         self.runs.update(&mut run).await?;
                     }
@@ -165,11 +163,7 @@ impl Executor {
             }
         }
 
-        let terminal = if any_failed {
-            WorkflowRunState::Failed
-        } else {
-            WorkflowRunState::Succeeded
-        };
+        let terminal = run.classify_terminal_state();
         if run.run_completed(terminal).did_execute() {
             self.runs.update(&mut run).await?;
         }

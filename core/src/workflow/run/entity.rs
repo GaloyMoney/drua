@@ -7,6 +7,13 @@ use es_entity::*;
 use crate::primitives::*;
 use crate::workflow::definition::WorkflowStepDef;
 
+/// Terminal states distinguish how a run ended:
+/// - `Succeeded`: every step finished and reported semantic success.
+/// - `Failed`: at least one step finished cleanly but the agent
+///   self-reported failure via `output.success == false`.
+/// - `Errored`: at least one step hit an infrastructure-level error
+///   (sandbox not ready, idle timeout, executor / agent error, etc.).
+///   Errored takes precedence over Failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRunState {
@@ -14,6 +21,7 @@ pub enum WorkflowRunState {
     Running,
     Succeeded,
     Failed,
+    Errored,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,8 +87,33 @@ impl WorkflowRun {
             .expect("entity_first_persisted_at not found")
     }
 
-    pub fn any_step_failed(&self) -> bool {
+    /// True when any step hit an infrastructure-level error
+    /// (`StepResult.error` populated by the executor) — sandbox failures,
+    /// idle timeouts, agent errors, etc.
+    pub fn any_step_errored(&self) -> bool {
         self.step_results.iter().any(|r| r.error.is_some())
+    }
+
+    /// True when at least one step completed cleanly but the agent
+    /// self-reported failure via top-level `output.success == false`.
+    /// Excludes infrastructure-errored steps (those count as `Errored`,
+    /// not `Failed`).
+    pub fn any_step_reported_failure(&self) -> bool {
+        self.step_results.iter().any(step_reported_agent_failure)
+    }
+
+    /// Three-way run-state classification:
+    /// - any errored step → `Errored`
+    /// - else any agent-reported failure → `Failed`
+    /// - else → `Succeeded`
+    pub fn classify_terminal_state(&self) -> WorkflowRunState {
+        if self.any_step_errored() {
+            WorkflowRunState::Errored
+        } else if self.any_step_reported_failure() {
+            WorkflowRunState::Failed
+        } else {
+            WorkflowRunState::Succeeded
+        }
     }
 
     pub fn step_already_terminal(&self, step_name: &str) -> bool {
@@ -197,6 +230,25 @@ impl WorkflowRun {
         });
         Idempotent::Executed(())
     }
+}
+
+/// True when a cleanly-completed step's structured output carries
+/// `success: false` (top-level boolean). Infrastructure-errored steps
+/// return false here — they're classified as `Errored`, not `Failed`.
+/// Missing or non-boolean `success` defaults to "no agent-reported
+/// failure" (back-compat for non-default-schema steps).
+fn step_reported_agent_failure(step: &StepResult) -> bool {
+    if step.error.is_some() {
+        return false;
+    }
+    let reported_success = step
+        .output
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("success"))
+        .and_then(|s| s.as_bool())
+        .unwrap_or(true);
+    !reported_success
 }
 
 impl core::fmt::Display for WorkflowRun {
@@ -327,5 +379,162 @@ impl IntoEvents<WorkflowRunEvent> for NewWorkflowRun {
                 steps_snapshot: self.steps_snapshot,
             }],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::super::super::definition::default_output_schema;
+    use super::*;
+
+    fn sample_step(name: &str) -> WorkflowStepDef {
+        WorkflowStepDef::AgentStep {
+            name: name.to_string(),
+            skill: "echo-test".to_string(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: default_output_schema(),
+        }
+    }
+
+    fn fresh_run(step_names: &[&str]) -> WorkflowRun {
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(ProjectId::new())
+            .trigger_context(json!({}))
+            .steps_snapshot(step_names.iter().map(|n| sample_step(n)).collect())
+            .build()
+            .unwrap();
+        WorkflowRun::try_from_events(new.into_events()).unwrap()
+    }
+
+    fn start(run: &mut WorkflowRun, name: &str) {
+        run.step_started(name.into()).did_execute();
+    }
+
+    fn complete(run: &mut WorkflowRun, name: &str, output: serde_json::Value) {
+        run.step_completed(name.into(), output).did_execute();
+    }
+
+    fn fail(run: &mut WorkflowRun, name: &str, err: &str) {
+        run.step_failed(name.into(), err.into()).did_execute();
+    }
+
+    fn finalize(run: &mut WorkflowRun) -> WorkflowRunState {
+        let terminal = run.classify_terminal_state();
+        run.run_completed(terminal).did_execute();
+        run.state
+    }
+
+    #[test]
+    fn run_state_succeeded_when_all_steps_completed_with_success_true() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        complete(
+            &mut run,
+            "only",
+            json!({ "success": true, "reason": "ok", "output": "did the thing" }),
+        );
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn run_state_failed_when_step_completed_with_success_false() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        complete(
+            &mut run,
+            "only",
+            json!({
+                "success": false,
+                "reason": "gave up: cargo fmt unavailable",
+                "output": "gave-up | already_formatted | build #592",
+            }),
+        );
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Failed);
+    }
+
+    #[test]
+    fn run_state_succeeded_when_step_has_no_success_field() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        complete(
+            &mut run,
+            "only",
+            json!({ "verdict": "pass", "notes": "looks good" }),
+        );
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn run_state_succeeded_when_step_output_is_non_object() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        complete(&mut run, "only", json!("free-text completion"));
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn run_state_errored_when_step_hits_infrastructure_error() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        fail(&mut run, "only", "sandbox not ready");
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Errored);
+    }
+
+    #[test]
+    fn errored_takes_precedence_over_agent_reported_failure() {
+        let mut run = fresh_run(&["a", "b"]);
+        start(&mut run, "a");
+        complete(
+            &mut run,
+            "a",
+            json!({ "success": false, "reason": "agent gave up", "output": "" }),
+        );
+        start(&mut run, "b");
+        fail(&mut run, "b", "idle timeout");
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Errored);
+    }
+
+    #[test]
+    fn run_state_failed_when_first_step_succeeds_but_second_returns_success_false() {
+        let mut run = fresh_run(&["a", "b"]);
+        start(&mut run, "a");
+        complete(
+            &mut run,
+            "a",
+            json!({ "success": true, "reason": "", "output": "done" }),
+        );
+        start(&mut run, "b");
+        complete(
+            &mut run,
+            "b",
+            json!({ "success": false, "reason": "no", "output": "gave-up" }),
+        );
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Failed);
+    }
+
+    #[test]
+    fn run_state_handles_non_bool_success_field_as_succeeded() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        complete(
+            &mut run,
+            "only",
+            json!({ "success": "yes", "reason": "string-typed" }),
+        );
+
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
     }
 }

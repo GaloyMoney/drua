@@ -652,7 +652,7 @@ impl Workflows {
         )?;
         if matches!(
             run.state,
-            WorkflowRunState::Succeeded | WorkflowRunState::Failed
+            WorkflowRunState::Succeeded | WorkflowRunState::Failed | WorkflowRunState::Errored
         ) {
             return Ok(run);
         }
