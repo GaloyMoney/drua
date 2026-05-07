@@ -508,6 +508,19 @@
 
             export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
 
+            # Local-dev: route the in-cluster sandbox image's git ops at
+            # the dev-mode drua-server's git-proxy. LocalAdminClient
+            # picks these up at sandbox-spawn time and renders a per-
+            # sandbox `gitconfig` with `insteadOf` + a Bearer token.
+            # Production sandboxes (K8s) ignore both — the projected
+            # SA token + chart's `sandbox.gitProxyUrl` cover that path.
+            #
+            # `DRUA_DEV_AGENT_TOKEN` must be set manually (or in
+            # `.envrc.local`) once you know which agent UUID you want
+            # the sandbox to authenticate as. Format: `dev-agent:<uuid>`.
+            : "''${DRUA_GIT_PROXY_URL:=http://localhost:4200/git}"
+            export DRUA_GIT_PROXY_URL
+
             echo "drua dev shell loaded (engine: $ENGINE_DEFAULT)"
           '';
         };
