@@ -18,89 +18,11 @@
 # GitHub dependency.
 
 load helpers
+load library-helpers
 
 setup_file() {
-  # When sharing PG with other tests / repeated runs (SKIP_COMPOSE),
-  # `spawn_unique` on `library.sync` from a prior run leaves a stale
-  # row in `jobs` that prevents the job from re-queuing — so the
-  # importer never runs. Wipe the prior library/job state before
-  # the server boots. Skill / project rows from prior test cycles
-  # also linger; clean them to avoid name-uniqueness collisions.
-  if [ "${SKIP_COMPOSE:-0}" = "1" ]; then
-    psql "${PG_CON:-postgres://user:password@localhost:5432/drua}" \
-      -q -c "TRUNCATE job_events, job_executions CASCADE;" \
-      -c "DELETE FROM jobs;" \
-      -c "DELETE FROM skill_events; DELETE FROM skills;" \
-      -c "DELETE FROM library_documents;" \
-      > /dev/null 2>&1 || true
-  fi
-
-  # Stand up an isolated upstream library — a bare git repo seeded with
-  # one commit on `main`. The library service clones from this; writes
-  # flow back via git push (which works on the bare repo).
-  UPSTREAM_REPO="$BATS_FILE_TMPDIR/upstream.git"
-  WORKING_REPO="$BATS_FILE_TMPDIR/upstream-working"
-  mkdir -p "$WORKING_REPO"
-  git init --bare --initial-branch=main "$UPSTREAM_REPO" >/dev/null
-  git -C "$WORKING_REPO" init -q -b main
-  git -C "$WORKING_REPO" config user.email test@drua
-  git -C "$WORKING_REPO" config user.name "Drua Test"
-  # Spaces live at the repo root (`spaces/<slug>/...`) — not under
-  # `runtime/`. Seed the directory so the bare repo's HEAD has a tree
-  # the importer can diff against.
-  mkdir -p "$WORKING_REPO/spaces"
-  : > "$WORKING_REPO/spaces/.gitkeep"
-  git -C "$WORKING_REPO" add -A
-  git -C "$WORKING_REPO" commit -q -m "init"
-  git -C "$WORKING_REPO" remote add origin "$UPSTREAM_REPO"
-  git -C "$WORKING_REPO" push -q origin main
-
-  # Render a per-file drua.yml pointing at the upstream + an isolated
-  # data_dir. `skill_sync_interval_secs: 1` makes the importer tick
-  # every second so polls finish quickly.
-  cat > "$BATS_FILE_TMPDIR/drua.yml" <<EOF
-server:
-  port: 4200
-  host: "0.0.0.0"
-  secure_cookies: false
-  mcp_endpoint: "http://localhost:4200/mcp"
-oauth:
-  login: github
-  github_client_id: "test-client-id"
-  github_redirect_uri: "http://localhost:4200/auth/github/callback"
-  github_allowed_teams: []
-agents:
-  default_chain:
-    primary: { name: test-model }
-  builtin_roles:
-    project_lead:
-      compaction:
-        prune_after_seconds: 600
-    agent:
-      compaction:
-        prune_after_seconds: 600
-    workflow_step_agent:
-      compaction:
-        prune_after_seconds: 600
-providers:
-  - name: openai
-    base_url: http://127.0.0.1:9
-    models:
-      - name: test-model
-        max_tokens_per_response: 1024
-        context_window_tokens: 4096
-library:
-  data_dir: "$BATS_FILE_TMPDIR/library"
-  repo_url: "file://$UPSTREAM_REPO"
-  skill_sync_interval_secs: 1
-sandbox:
-  backend:
-    provider: local
-    sandbox_spawn_cmd: "true"
-    local_repo_root: "."
-EOF
-  export DRUA_CONFIG="$BATS_FILE_TMPDIR/drua.yml"
-  start_server
+  reset_library_tables skill_events skills
+  setup_isolated_library spaces
 }
 
 teardown_file() {
@@ -117,21 +39,6 @@ render_skill_md() {
   local body="$4"
   printf -- '---\nid: %s\nname: "%s"\ndescription: "%s"\ncreated: \nupdated: \n---\n\n%s\n' \
     "$id" "$name" "$description" "$body"
-}
-
-# Calls a searchable admin tool. The MCP gateway exposes admin tools
-# under the `drua_admin_<tool>` prefixed name dispatched through the
-# top-level `call_tool` meta-tool — same shape as other searchable
-# toolsets (honeycomb, github, etc.).
-admin_call() {
-  local tool_name="$1"
-  local args_json="$2"
-  local body
-  body="$(jq -nc --arg t "drua_admin_$tool_name" --argjson a "$args_json" '{
-    name: "call_tool",
-    arguments: { tool_name: $t, arguments: $a }
-  }')"
-  mcp_call "$AGENT_TOKEN" "tools/call" "$body"
 }
 
 # Drop a skill markdown file into a space via `spaces edit op=write`.

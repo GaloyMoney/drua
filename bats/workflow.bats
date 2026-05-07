@@ -19,108 +19,18 @@
 # tool_step path.
 
 load helpers
+load library-helpers
 
 setup_file() {
-  # When sharing PG with other tests / repeated runs (SKIP_COMPOSE),
-  # `spawn_unique` on `library.sync` from a prior run leaves a stale
-  # row in `jobs` that prevents the job from re-queuing — so the
-  # importer never runs. Wipe the prior library/job state before the
-  # server boots. Workflow rows from prior cycles also linger;
-  # clean them to avoid name-uniqueness collisions on the
-  # `(project_id, name)` index.
-  if [ "${SKIP_COMPOSE:-0}" = "1" ]; then
-    psql "${PG_CON:-postgres://user:password@localhost:5432/drua}" \
-      -q -c "TRUNCATE job_events, job_executions CASCADE;" \
-      -c "DELETE FROM jobs;" \
-      -c "DELETE FROM workflow_run_events; DELETE FROM workflow_runs;" \
-      -c "DELETE FROM workflow_definition_events; DELETE FROM workflow_definitions;" \
-      -c "DELETE FROM library_documents;" \
-      > /dev/null 2>&1 || true
-  fi
-
-  # Stand up an isolated upstream library — a bare git repo seeded
-  # with one commit on `main`. Workflow creation through the admin
-  # MCP triggers a reverse-sync write into the library, so the
-  # service needs a writable upstream; the bare repo handles that.
-  # Same shape as `bats/skills.bats` so the two patterns stay
-  # interchangeable.
-  UPSTREAM_REPO="$BATS_FILE_TMPDIR/upstream.git"
-  WORKING_REPO="$BATS_FILE_TMPDIR/upstream-working"
-  mkdir -p "$WORKING_REPO"
-  git init --bare --initial-branch=main "$UPSTREAM_REPO" >/dev/null
-  git -C "$WORKING_REPO" init -q -b main
-  git -C "$WORKING_REPO" config user.email test@drua
-  git -C "$WORKING_REPO" config user.name "Drua Test"
-  # Seed an empty `runtime/workflows/` so the bare repo's HEAD has a
-  # tree the workflow importer can diff against without complaining.
-  mkdir -p "$WORKING_REPO/runtime/workflows"
-  : > "$WORKING_REPO/runtime/workflows/.gitkeep"
-  git -C "$WORKING_REPO" add -A
-  git -C "$WORKING_REPO" commit -q -m "init"
-  git -C "$WORKING_REPO" remote add origin "$UPSTREAM_REPO"
-  git -C "$WORKING_REPO" push -q origin main
-
-  cat > "$BATS_FILE_TMPDIR/drua.yml" <<EOF
-server:
-  port: 4200
-  host: "0.0.0.0"
-  secure_cookies: false
-  mcp_endpoint: "http://localhost:4200/mcp"
-oauth:
-  login: github
-  github_client_id: "test-client-id"
-  github_redirect_uri: "http://localhost:4200/auth/github/callback"
-  github_allowed_teams: []
-agents:
-  default_chain:
-    primary: { name: test-model }
-  builtin_roles:
-    project_lead:
-      compaction:
-        prune_after_seconds: 600
-    agent:
-      compaction:
-        prune_after_seconds: 600
-    workflow_step_agent:
-      compaction:
-        prune_after_seconds: 600
-providers:
-  - name: openai
-    base_url: http://127.0.0.1:9
-    models:
-      - name: test-model
-        max_tokens_per_response: 1024
-        context_window_tokens: 4096
-library:
-  data_dir: "$BATS_FILE_TMPDIR/library"
-  repo_url: "file://$UPSTREAM_REPO"
-  skill_sync_interval_secs: 1
-sandbox:
-  backend:
-    provider: local
-    sandbox_spawn_cmd: "true"
-    local_repo_root: "."
-EOF
-  export DRUA_CONFIG="$BATS_FILE_TMPDIR/drua.yml"
-  start_server
+  reset_library_tables \
+    workflow_run_events workflow_runs \
+    workflow_definition_events workflow_definitions
+  setup_isolated_library runtime/workflows
   create_test_agent
 }
 
 teardown_file() {
   stop_server
-}
-
-# Same admin-tier dispatch helper skills.bats uses — wraps
-# `drua_admin_<tool>` in the `call_tool` meta-tool envelope.
-admin_call() {
-  local tool_name="$1"
-  local args_json="$2"
-  local body
-  body="$(jq -nc --arg t "drua_admin_$tool_name" --argjson a "$args_json" '{
-    name: "call_tool",
-    arguments: { tool_name: $t, arguments: $a }
-  }')"
-  mcp_call "$AGENT_TOKEN" "tools/call" "$body"
 }
 
 # Admin tier renders `id: <uuid>` on a stable line in the create
