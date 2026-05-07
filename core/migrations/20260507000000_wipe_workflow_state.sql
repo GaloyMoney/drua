@@ -31,12 +31,9 @@ DELETE FROM public.workflow_runs;
 DELETE FROM public.workflow_definition_events;
 DELETE FROM public.workflow_definitions;
 
--- Library search-store entries for workflow docs.
-DELETE FROM public.library_search_data
+-- Search-store entries. `library_documents` is the unified search table
+-- (per `20260501100000_library_documents.sql`); the old per-domain
+-- `library_search_data` / `space_search_data` were dropped in
+-- `20260502120000_drop_old_search_tables.sql`.
+DELETE FROM public.library_documents
  WHERE doc_type = 'workflow';
-
--- Space search-store entries for workflow YAML files
--- (`runtime/workflows/*.yml` and `runtime/projects/*/workflows/*.yml`).
-DELETE FROM public.space_search_data
- WHERE relative_path LIKE 'runtime/workflows/%.yml'
-    OR relative_path LIKE 'runtime/projects/%/workflows/%.yml';
