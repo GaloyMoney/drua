@@ -2275,11 +2275,7 @@ mod tests {
             .await
             .expect("write should succeed");
 
-        let perms = std::fs::metadata(&token_path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let perms = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(perms, 0o600, "github-token must be 0600");
     }
 
