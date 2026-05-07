@@ -2067,6 +2067,7 @@ fn format_run(r: &WorkflowRun) -> String {
         WorkflowRunState::Running => "running",
         WorkflowRunState::Succeeded => "succeeded",
         WorkflowRunState::Failed => "failed",
+        WorkflowRunState::Errored => "errored",
     };
     let mut out = format!(
         "Run:\n  id: {}\n  definition_id: {}\n  project_id: {}\n  state: {}\n",

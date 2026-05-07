@@ -759,7 +759,7 @@ impl Executor {
         let result = match tokio::time::timeout(timeout, call).await {
             Ok(r) => r.map_err(|e| WorkflowError::ToolDispatch(e.to_string()))?,
             Err(_) => {
-                return Err(WorkflowError::StepFailed {
+                return Err(WorkflowError::StepErrored {
                     step: step_name.to_string(),
                     reason: format!("tool '{tool_name}' timed out after {}s", timeout.as_secs()),
                 })
@@ -769,7 +769,7 @@ impl Executor {
         if result.is_error.unwrap_or(false) {
             let detail = first_text_content(&result)
                 .unwrap_or_else(|| "tool returned is_error: true with no text content".to_string());
-            return Err(WorkflowError::StepFailed {
+            return Err(WorkflowError::StepErrored {
                 step: step_name.to_string(),
                 reason: format!("tool '{tool_name}' failed: {detail}"),
             });
@@ -777,7 +777,7 @@ impl Executor {
 
         result
             .structured_content
-            .ok_or_else(|| WorkflowError::StepFailed {
+            .ok_or_else(|| WorkflowError::StepErrored {
                 step: step_name.to_string(),
                 reason: format!(
                     "tool '{tool_name}' returned no structured_content; tool_step requires it"
