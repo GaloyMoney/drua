@@ -31,11 +31,37 @@ pub(crate) struct StreamOptions {
 pub(crate) struct OpenAiMessage {
     pub role: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<OpenAiMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAiRequestToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+/// String form is the Chat Completions default; the array form is required
+/// when any block needs `cache_control` (Anthropic-on-OpenRouter).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum OpenAiMessageContent {
+    Text(String),
+    Blocks(Vec<OpenAiContentBlock>),
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct OpenAiContentBlock {
+    pub r#type: &'static str,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<OpenAiCacheControl>,
+}
+
+/// OpenRouter forwards this to Anthropic verbatim; direct OpenAI ignores it.
+/// `ttl` defaults to 5 minutes when omitted; `"1h"` is the only other value.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct OpenAiCacheControl {
+    pub r#type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +81,8 @@ pub(crate) struct OpenAiFunction {
 pub(crate) struct OpenAiTool {
     pub r#type: &'static str,
     pub function: OpenAiToolFunction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<OpenAiCacheControl>,
 }
 
 #[derive(Debug, Serialize)]
