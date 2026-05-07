@@ -103,7 +103,7 @@ impl Executor {
                 if run.step_failed(step_name, err.to_string()).did_execute() {
                     self.runs.update(&mut run).await?;
                 }
-                if run.run_completed(WorkflowRunState::Errored).did_execute() {
+                if run.run_completed().did_execute() {
                     self.runs.update(&mut run).await?;
                 }
                 self.suspend_workflow_sandboxes(project_id, workflow_id, &HashSet::new())
@@ -163,8 +163,7 @@ impl Executor {
             }
         }
 
-        let terminal = run.classify_terminal_state();
-        if run.run_completed(terminal).did_execute() {
+        if run.run_completed().did_execute() {
             self.runs.update(&mut run).await?;
         }
 

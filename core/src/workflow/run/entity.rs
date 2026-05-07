@@ -87,33 +87,12 @@ impl WorkflowRun {
             .expect("entity_first_persisted_at not found")
     }
 
-    /// True when any step hit an infrastructure-level error
-    /// (`StepResult.error` populated by the executor) — sandbox failures,
-    /// idle timeouts, agent errors, etc.
-    pub fn any_step_errored(&self) -> bool {
+    fn any_step_errored(&self) -> bool {
         self.step_results.iter().any(|r| r.error.is_some())
     }
 
-    /// True when at least one step completed cleanly but the agent
-    /// self-reported failure via top-level `output.success == false`.
-    /// Excludes infrastructure-errored steps (those count as `Errored`,
-    /// not `Failed`).
-    pub fn any_step_reported_failure(&self) -> bool {
+    fn any_step_reported_failure(&self) -> bool {
         self.step_results.iter().any(step_reported_agent_failure)
-    }
-
-    /// Three-way run-state classification:
-    /// - any errored step → `Errored`
-    /// - else any agent-reported failure → `Failed`
-    /// - else → `Succeeded`
-    pub fn classify_terminal_state(&self) -> WorkflowRunState {
-        if self.any_step_errored() {
-            WorkflowRunState::Errored
-        } else if self.any_step_reported_failure() {
-            WorkflowRunState::Failed
-        } else {
-            WorkflowRunState::Succeeded
-        }
     }
 
     pub fn step_already_terminal(&self, step_name: &str) -> bool {
@@ -215,12 +194,25 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
+    /// Finalises the run, classifying its terminal state from the
+    /// recorded step results:
+    /// - any errored step → `Errored`
+    /// - else any agent-reported failure (`output.success == false`) → `Failed`
+    /// - else → `Succeeded`
+    ///
     /// No-op if the run already reached a terminal state.
-    pub fn run_completed(&mut self, state: WorkflowRunState) -> Idempotent<()> {
+    pub fn run_completed(&mut self) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: WorkflowRunEvent::RunCompleted { .. },
         );
+        let state = if self.any_step_errored() {
+            WorkflowRunState::Errored
+        } else if self.any_step_reported_failure() {
+            WorkflowRunState::Failed
+        } else {
+            WorkflowRunState::Succeeded
+        };
         let now = Utc::now();
         self.state = state;
         self.completed_at = Some(now);
@@ -425,8 +417,7 @@ mod tests {
     }
 
     fn finalize(run: &mut WorkflowRun) -> WorkflowRunState {
-        let terminal = run.classify_terminal_state();
-        run.run_completed(terminal).did_execute();
+        run.run_completed().did_execute();
         run.state
     }
 
