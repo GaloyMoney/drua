@@ -155,6 +155,8 @@ jobs:
         GCS_CREDS_JSON: #@ data.values.gcs_creds_json
         CONCOURSE_USERNAME: #@ data.values.deploy_concourse_username
         CONCOURSE_PASSWORD: #@ data.values.deploy_concourse_password
+        LANA_BANK_CACHIX_AUTH_TOKEN: #@ data.values.deploy_lana_bank_cachix_auth_token
+        LANA_BANK_CACHIX_PUBLIC_KEY: #@ data.values.deploy_lana_bank_cachix_public_key
         HONEYCOMB_API_KEY: #@ data.values.honeycomb_api_key
         GITHUB_PAT: #@ data.values.github_pat
         LINGO_API_KEY: #@ data.values.lingo_api_key
@@ -172,6 +174,31 @@ jobs:
 
             DIGEST=$(cat edge-image/digest)
             SANDBOX_DIGEST=$(cat sandbox-edge-image/digest)
+            LANA_BANK_CACHIX_ENABLED=false
+            if [ -n "$LANA_BANK_CACHIX_AUTH_TOKEN" ]; then
+              if [ -z "$LANA_BANK_CACHIX_PUBLIC_KEY" ]; then
+                cachix_home=$(mktemp -d)
+                CACHIX_AUTH_TOKEN="$LANA_BANK_CACHIX_AUTH_TOKEN" \
+                  HOME="$cachix_home" XDG_CONFIG_HOME="$cachix_home/.config" \
+                  cachix use lana-bank-github-actions --mode user-nixconf
+                LANA_BANK_CACHIX_PUBLIC_KEY=$(
+                  awk '
+                    /^trusted-public-keys =/ {
+                      for (i = 2; i <= NF; i++) {
+                        if ($i ~ /^lana-bank-github-actions\.cachix\.org-1:/) {
+                          print $i
+                        }
+                      }
+                    }
+                  ' "$cachix_home/.config/nix/nix.conf"
+                )
+                if [ -z "$LANA_BANK_CACHIX_PUBLIC_KEY" ]; then
+                  echo "Failed to derive lana-bank-github-actions Cachix public key" >&2
+                  exit 1
+                fi
+              fi
+              LANA_BANK_CACHIX_ENABLED=true
+            fi
 
             cp -r repo/ci/deploy/drua deployment/tf
             cp -r repo/charts/drua deployment/tf/chart
@@ -183,6 +210,9 @@ jobs:
             github_client_secret = "${GITHUB_CLIENT_SECRET}"
             concourse_username = "${CONCOURSE_USERNAME}"
             concourse_password = "${CONCOURSE_PASSWORD}"
+            lana_bank_cachix_enabled = ${LANA_BANK_CACHIX_ENABLED}
+            lana_bank_cachix_auth_token = "${LANA_BANK_CACHIX_AUTH_TOKEN}"
+            lana_bank_cachix_public_key = "${LANA_BANK_CACHIX_PUBLIC_KEY}"
             honeycomb_api_key = "${HONEYCOMB_API_KEY}"
             github_pat = "${GITHUB_PAT}"
             lingo_api_key = "${LINGO_API_KEY}"

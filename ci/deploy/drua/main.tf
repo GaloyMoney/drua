@@ -3,6 +3,16 @@ variable "sandbox_image_digest" {}
 variable "github_client_secret" {}
 variable "concourse_username" {}
 variable "concourse_password" {}
+variable "lana_bank_cachix_enabled" {
+  default = false
+}
+variable "lana_bank_cachix_auth_token" {
+  default   = ""
+  sensitive = true
+}
+variable "lana_bank_cachix_public_key" {
+  default = ""
+}
 variable "honeycomb_api_key" {
   default = ""
 }
@@ -96,6 +106,21 @@ resource "kubernetes_secret" "galoy_agents" {
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
+}
+
+resource "kubernetes_secret" "sandbox_nix_netrc" {
+  count = var.lana_bank_cachix_enabled ? 1 : 0
+
+  metadata {
+    name      = "sandbox-nix-netrc"
+    namespace = local.sandbox_namespace
+  }
+
+  data = {
+    netrc = "machine lana-bank-github-actions.cachix.org password ${var.lana_bank_cachix_auth_token}\n"
+  }
+
+  depends_on = [kubernetes_namespace.sandbox]
 }
 
 resource "google_container_node_pool" "gvisor" {
@@ -194,10 +219,12 @@ resource "helm_release" "galoy_agents" {
 
   values = [
     templatefile("${path.module}/prod-values.yml.tmpl", {
-      image_digest         = var.image_digest
-      sandbox_image_digest = var.sandbox_image_digest
-      secret_checksum      = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
-      tunnel_deployments   = local.tunnel_deployments
+      image_digest                = var.image_digest
+      sandbox_image_digest        = var.sandbox_image_digest
+      secret_checksum             = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
+      tunnel_deployments          = local.tunnel_deployments
+      lana_bank_cachix_enabled    = var.lana_bank_cachix_enabled
+      lana_bank_cachix_public_key = var.lana_bank_cachix_public_key
     })
   ]
 
@@ -206,6 +233,7 @@ resource "helm_release" "galoy_agents" {
 
   depends_on = [
     kubernetes_secret.galoy_agents,
+    kubernetes_secret.sandbox_nix_netrc,
     kubernetes_namespace.sandbox,
     google_container_node_pool.gvisor,
     kubectl_manifest.sandbox_controller,
