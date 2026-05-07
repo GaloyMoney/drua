@@ -44,6 +44,18 @@ locals {
   github_app_private_key = fileexists("${path.module}/github-app-private-key.pem") ? file("${path.module}/github-app-private-key.pem") : ""
 
   tunnel_deployments = fileexists("${path.module}/tunnel-deployments-public-keys.json") ? jsondecode(file("${path.module}/tunnel-deployments-public-keys.json")) : {}
+
+  # The helm provider diffs `helm_release` on chart name + version + values,
+  # NOT on the chart's file contents. With `chart = "./chart"` and
+  # `Chart.yaml` pinned to a static version, edits to the bundled chart
+  # (e.g. `values.yaml` provider list) silently fail to upgrade. Hashing
+  # every file under ./chart and feeding the digest in via a synthetic
+  # `set` makes any chart edit produce a `values` diff and force an
+  # upgrade.
+  chart_files_hash = sha256(join("", [
+    for f in sort(fileset("${path.module}/chart", "**")) :
+    filesha256("${path.module}/chart/${f}")
+  ]))
 }
 
 module "postgresql" {
@@ -227,6 +239,13 @@ resource "helm_release" "galoy_agents" {
       lana_bank_cachix_public_key = var.lana_bank_cachix_public_key
     })
   ]
+
+  # Forces a `values` diff whenever any file under ./chart changes — see
+  # local.chart_files_hash. The chart itself ignores the value.
+  set {
+    name  = "chartFilesHash"
+    value = local.chart_files_hash
+  }
 
   dependency_update = true
   timeout           = 900 # 15 minutes
