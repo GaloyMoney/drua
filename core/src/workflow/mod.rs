@@ -38,43 +38,27 @@ use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
 use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
-use template::{PathSegment, TemplateRef};
+use template::TemplateRef;
 
 /// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
-/// validated yet. Trigger refs always pass (their schema check is
-/// deferred — memo `019e01a4` open Q6: skip provider-payload
-/// validation in MVP).
+/// validated yet. Trigger refs always pass (provider payload schema
+/// validation deferred — memo `019e01a4` open Q6).
 fn validate_ref_against_prior_steps(
     step_name: &str,
     r: &TemplateRef,
     seen: &std::collections::HashSet<String>,
 ) -> Result<(), WorkflowError> {
-    let mut iter = r.path.iter();
-    match iter.next() {
-        Some(PathSegment::Field(s)) if s == "trigger" => Ok(()),
-        Some(PathSegment::Field(s)) if s == "steps" => {
-            let target = match iter.next() {
-                Some(PathSegment::Field(n)) => n.clone(),
-                _ => {
-                    return Err(WorkflowError::InvalidTemplateRef(format!(
-                        "step '{step_name}': {} — `steps.<name>` requires a step name",
-                        r.raw
-                    )))
-                }
-            };
-            if !seen.contains(&target) {
-                return Err(WorkflowError::InvalidTemplateRef(format!(
-                    "step '{step_name}': {} — references step '{target}' which is not declared earlier in the workflow",
-                    r.raw
-                )));
-            }
-            Ok(())
+    template::validate_root(r)
+        .map_err(|e| WorkflowError::InvalidTemplateRef(format!("step '{step_name}': {e}")))?;
+    for target in template::referenced_step_names(r) {
+        if !seen.contains(&target) {
+            return Err(WorkflowError::InvalidTemplateRef(format!(
+                "step '{step_name}': {} — references step '{target}' which is not declared earlier in the workflow",
+                r.raw
+            )));
         }
-        _ => Err(WorkflowError::InvalidTemplateRef(format!(
-            "step '{step_name}': {} — root must be `trigger` or `steps`",
-            r.raw
-        ))),
     }
+    Ok(())
 }
 
 #[derive(Clone)]

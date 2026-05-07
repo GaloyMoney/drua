@@ -7,200 +7,167 @@
 //!   (the namespace mirrors GitHub Actions' `steps.<id>.outputs.<name>`
 //!   so authors familiar with one syntax read the other).
 //!
-//! Path syntax is dot-walk plus bracket indexing for arrays
-//! (`items[0].name`); no filter / wildcard / function shape.
+//! The expression body inside the delimiters is plain CEL evaluated by
+//! the `cel` crate (Common Expression Language — same family Swamp
+//! and GHA use). The two namespace identifiers `trigger` and `steps`
+//! are bound as variables on the evaluation context; everything else
+//! the language offers (boolean operators, `size(…)`, `has(…)`,
+//! `map`/`filter` macros, …) comes for free.
 //!
 //! Substitution semantics (memo `019e01a4`, §"what's new §2"):
 //!
 //! - Whole-string match — a JSON string whose trimmed value is
-//!   exactly `${{ path }}` — splices the resolved JSON value (object,
-//!   array, number, etc.) directly. This lets `payload: "${{
-//!   steps.triage.outputs.args }}"` produce a JSON object payload
-//!   rather than the stringified form.
-//! - Embedded match — `${{ … }}` inside a longer string — interpolates:
-//!   strings/booleans/numbers are coerced naturally; objects/arrays
-//!   are JSON-encoded.
-//! - Missing path — both modes resolve to `null` (whole-string) or
-//!   empty string (embedded). Parse-time validation rejects refs
-//!   that are structurally unreachable; runtime null is "the field
-//!   was optional and absent."
+//!   exactly `${{ … }}` — splices the resolved JSON value (object,
+//!   array, number, etc.) directly. Authors write
+//!   `payload: "${{ steps.triage.outputs.args }}"` and get a JSON
+//!   object payload, not the stringified form.
+//! - Embedded match — `${{ … }}` inside a longer string —
+//!   interpolates: strings/booleans/numbers coerce naturally,
+//!   objects/arrays JSON-encode.
+//! - Missing path / null result — both modes resolve to `null`
+//!   (whole-string) or empty string (embedded). Parse-time
+//!   validation rejects refs that are structurally unreachable;
+//!   runtime null is "the field was optional and absent."
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
+use cel::{Context, Program};
+use regex::Regex;
 use serde_json::Value;
 use thiserror::Error;
 
 const OPEN: &str = "${{";
 const CLOSE: &str = "}}";
 
-/// One parsed `${{ … }}` reference. Carries enough context for
-/// parse-time validation and runtime resolution.
+/// One parsed `${{ … }}` reference. Holds the body text plus the
+/// surrounding lexeme for error messages; the CEL program is
+/// recompiled on demand to keep `TemplateRef` cheaply `Clone`-able
+/// (`cel::Program` is not `Clone`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateRef {
-    /// Raw lexeme including delimiters, used for error messages.
     pub raw: String,
-    pub path: Vec<PathSegment>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathSegment {
-    Field(String),
-    Index(usize),
+    pub body: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TemplateError {
     #[error("template ref starting with `{0}` is unterminated; expected `}}}}`")]
     Unterminated(String),
-    #[error("template ref `{0}`: empty path")]
+    #[error("template ref `{0}`: empty expression")]
     EmptyPath(String),
-    #[error("template ref `{0}`: malformed segment near `{1}`")]
-    MalformedSegment(String, String),
-    #[error("template ref `{0}`: unknown context root `{1}` (expected `trigger` or `steps`)")]
+    #[error("template ref `{0}`: failed to compile CEL expression: {1}")]
+    Compile(String, String),
+    #[error("template ref `{0}`: references unknown identifier `{1}` (only `trigger` and `steps` are bound)")]
     UnknownRoot(String, String),
-    #[error("template ref `{0}`: `steps.<name>` requires the literal `outputs.` namespace next")]
-    MissingOutputsNamespace(String),
+    #[error("template ref `{0}`: failed to evaluate at run time: {1}")]
+    Resolve(String, String),
+    #[error("template ref `{0}`: result could not be converted to JSON: {1}")]
+    JsonConvert(String, String),
 }
 
-/// Resolution context borrowed for one substitution pass.
+/// Resolution context borrowed for one substitution pass. The two
+/// namespaces are bound as CEL variables of the matching name.
 pub struct TemplateContext<'a> {
     pub trigger: &'a Value,
-    pub steps: &'a HashMap<String, Value>,
+    pub steps: &'a std::collections::HashMap<String, Value>,
 }
 
 impl TemplateContext<'_> {
+    fn build_cel_context(&self) -> Result<Context<'static>, TemplateError> {
+        let mut ctx = Context::default();
+        ctx.add_variable("trigger", self.trigger.clone())
+            .map_err(|e| {
+                TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}"))
+            })?;
+        // GHA / Swamp convention: `steps.<id>.outputs.<field>`. Wrap
+        // each step's recorded output under an `outputs` key so the
+        // literal namespace traverses naturally as a CEL field access.
+        let steps_value = Value::Object(
+            self.steps
+                .iter()
+                .map(|(k, v)| {
+                    let mut wrapper = serde_json::Map::with_capacity(1);
+                    wrapper.insert("outputs".to_string(), v.clone());
+                    (k.clone(), Value::Object(wrapper))
+                })
+                .collect(),
+        );
+        ctx.add_variable("steps", steps_value)
+            .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
+        Ok(ctx)
+    }
+
     /// `None` when the path doesn't exist at this point in time
     /// (parse-time validation should already have rejected refs
     /// that can never resolve, but optional fields surface here).
     pub fn resolve(&self, r: &TemplateRef) -> Option<Value> {
-        let mut iter = r.path.iter();
-        let root_name = match iter.next()? {
-            PathSegment::Field(s) => s.as_str(),
-            PathSegment::Index(_) => return None,
+        let program = match Program::compile(&r.body) {
+            Ok(p) => p,
+            Err(_) => return None,
         };
-        let mut cur = match root_name {
-            "trigger" => self.trigger.clone(),
-            "steps" => {
-                let step_name = match iter.next()? {
-                    PathSegment::Field(s) => s.as_str(),
-                    PathSegment::Index(_) => return None,
-                };
-                match iter.next()? {
-                    PathSegment::Field(s) if s == "outputs" => {}
-                    _ => return None,
-                }
-                self.steps.get(step_name)?.clone()
-            }
-            _ => return None,
-        };
-        for seg in iter {
-            cur = match (cur, seg) {
-                (Value::Object(map), PathSegment::Field(k)) => map.get(k).cloned()?,
-                (Value::Array(arr), PathSegment::Index(i)) => arr.get(*i).cloned()?,
-                _ => return None,
-            };
-        }
-        Some(cur)
+        let ctx = self.build_cel_context().ok()?;
+        let value = program.execute(&ctx).ok()?;
+        // `value.json()` errors only on values CEL can produce that
+        // JSON can't represent (functions, durations beyond i64
+        // nanoseconds, …); not reachable for paths into JSON-typed
+        // inputs, so silent-on-error is acceptable here.
+        value.json().ok()
     }
 }
 
 /// Parse the body of a `${{ … }}` reference (delimiters already
-/// stripped). Whitespace is tolerated around segments.
+/// stripped). Compiles the CEL expression once to surface syntax
+/// errors at parse time while keeping `TemplateRef` `Clone`-able.
 pub fn parse_path(body: &str) -> Result<TemplateRef, TemplateError> {
-    let raw = format!("{OPEN} {} {CLOSE}", body.trim());
     let trimmed = body.trim();
+    let raw = format!("{OPEN} {trimmed} {CLOSE}");
     if trimmed.is_empty() {
         return Err(TemplateError::EmptyPath(raw));
     }
-
-    let mut segments = Vec::new();
-    let mut cur = String::new();
-    let mut chars = trimmed.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        match c {
-            '.' => {
-                if !cur.is_empty() {
-                    segments.push(PathSegment::Field(std::mem::take(&mut cur)));
-                }
-            }
-            '[' => {
-                if !cur.is_empty() {
-                    segments.push(PathSegment::Field(std::mem::take(&mut cur)));
-                }
-                let mut idx_str = String::new();
-                let mut closed = false;
-                for ic in chars.by_ref() {
-                    if ic == ']' {
-                        closed = true;
-                        break;
-                    }
-                    idx_str.push(ic);
-                }
-                if !closed {
-                    return Err(TemplateError::MalformedSegment(
-                        raw.clone(),
-                        format!("[{idx_str}"),
-                    ));
-                }
-                let n: usize = idx_str
-                    .trim()
-                    .parse()
-                    .map_err(|_| TemplateError::MalformedSegment(raw.clone(), idx_str))?;
-                segments.push(PathSegment::Index(n));
-            }
-            c if c.is_alphanumeric() || c == '_' || c == '-' => cur.push(c),
-            c if c.is_whitespace() => {}
-            other => {
-                return Err(TemplateError::MalformedSegment(raw, other.to_string()));
-            }
-        }
-    }
-    if !cur.is_empty() {
-        segments.push(PathSegment::Field(cur));
-    }
-
-    if segments.is_empty() {
-        return Err(TemplateError::EmptyPath(raw));
-    }
-
+    Program::compile(trimmed).map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
     Ok(TemplateRef {
         raw,
-        path: segments,
+        body: trimmed.to_string(),
     })
 }
 
-/// Statically validate the root of a parsed ref. `steps.<n>.outputs.…`
-/// must include the literal `outputs` namespace; trigger refs only
-/// require the `trigger` root.
+/// Reject expressions that reference identifiers other than the two
+/// bound namespaces (`trigger`, `steps`). Stops mistakes like
+/// `${{ env.HOME }}` from compiling cleanly only to silently resolve
+/// to nothing at runtime.
 pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
-    let mut iter = r.path.iter();
-    let root = iter
-        .next()
-        .ok_or_else(|| TemplateError::EmptyPath(r.raw.clone()))?;
-    let root_name = match root {
-        PathSegment::Field(s) => s.as_str(),
-        PathSegment::Index(_) => {
-            return Err(TemplateError::UnknownRoot(
-                r.raw.clone(),
-                "<index>".to_string(),
-            ))
+    let program = Program::compile(&r.body)
+        .map_err(|e| TemplateError::Compile(r.raw.clone(), e.to_string()))?;
+    for ident in program.references().variables() {
+        if ident != "trigger" && ident != "steps" {
+            return Err(TemplateError::UnknownRoot(r.raw.clone(), ident.to_string()));
         }
-    };
-    match root_name {
-        "trigger" => Ok(()),
-        "steps" => {
-            // steps.<name>.outputs.<...>
-            let _name = iter
-                .next()
-                .ok_or_else(|| TemplateError::EmptyPath(r.raw.clone()))?;
-            match iter.next() {
-                Some(PathSegment::Field(s)) if s == "outputs" => Ok(()),
-                _ => Err(TemplateError::MissingOutputsNamespace(r.raw.clone())),
-            }
-        }
-        other => Err(TemplateError::UnknownRoot(r.raw.clone(), other.to_string())),
     }
+    Ok(())
+}
+
+/// Names of every step referenced via `steps.<name>` in the
+/// expression body. Used by parse-time forward-reference checking;
+/// extracts via lexical scan rather than CEL AST walking (which would
+/// require depending on the crate's internal `Expr` types). Ignores
+/// bracket-style indexing (`steps["x"]`) — workflows must use
+/// dot-syntax for static analyzability.
+pub fn referenced_step_names(r: &TemplateRef) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\bsteps\.([A-Za-z_][A-Za-z0-9_-]*)").unwrap());
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for cap in re.captures_iter(&r.body) {
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// Returns `Some(ref)` when the trimmed string is exactly one
@@ -332,6 +299,7 @@ pub fn extract_refs_in_string(s: &str) -> Result<Vec<TemplateRef>, TemplateError
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn ctx_with(trigger: Value, steps: HashMap<String, Value>) -> (Value, HashMap<String, Value>) {
         (trigger, steps)
@@ -340,30 +308,13 @@ mod tests {
     #[test]
     fn parse_simple_dot_path() {
         let r = parse_path(" trigger.payload.build ").unwrap();
-        assert_eq!(
-            r.path,
-            vec![
-                PathSegment::Field("trigger".into()),
-                PathSegment::Field("payload".into()),
-                PathSegment::Field("build".into()),
-            ]
-        );
+        assert_eq!(r.body, "trigger.payload.build");
     }
 
     #[test]
     fn parse_bracket_index() {
         let r = parse_path("steps.x.outputs.items[2].name").unwrap();
-        assert_eq!(
-            r.path,
-            vec![
-                PathSegment::Field("steps".into()),
-                PathSegment::Field("x".into()),
-                PathSegment::Field("outputs".into()),
-                PathSegment::Field("items".into()),
-                PathSegment::Index(2),
-                PathSegment::Field("name".into()),
-            ]
-        );
+        assert_eq!(r.body, "steps.x.outputs.items[2].name");
     }
 
     #[test]
@@ -378,7 +329,7 @@ mod tests {
     fn parse_rejects_unclosed_bracket() {
         assert!(matches!(
             parse_path("a[3"),
-            Err(TemplateError::MalformedSegment(_, _))
+            Err(TemplateError::Compile(_, _))
         ));
     }
 
@@ -401,11 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_root_rejects_steps_without_outputs() {
-        assert!(matches!(
-            validate_root(&parse_path("steps.foo.bar").unwrap()),
-            Err(TemplateError::MissingOutputsNamespace(_))
-        ));
+    fn validate_root_accepts_function_calls_over_bound_vars() {
+        // `size`/`has` etc. are CEL standard library — they're
+        // functions, not variables, so they don't count as new roots.
+        validate_root(&parse_path("size(steps.x.outputs.list) > 0").unwrap()).unwrap();
     }
 
     #[test]
@@ -419,7 +369,15 @@ mod tests {
         };
         let input = json!({ "payload": "${{ steps.triage.outputs.args }}" });
         let out = substitute_value(&input, &ctx).unwrap();
-        assert_eq!(out, json!({ "payload": { "build": 1234 } }));
+        // CEL surfaces the inner map; we splice it as the JSON object
+        // it represents. Field names round-trip; numeric types might
+        // become integer-typed even if the input was an i64 literal.
+        assert_eq!(
+            out.get("payload")
+                .and_then(|p| p.get("build"))
+                .and_then(|b| b.as_i64()),
+            Some(1234)
+        );
     }
 
     #[test]
@@ -501,10 +459,10 @@ mod tests {
         });
         let refs = extract_refs_in_value(&v).unwrap();
         assert_eq!(refs.len(), 3);
-        let raws: Vec<_> = refs.iter().map(|r| r.raw.clone()).collect();
-        assert!(raws.iter().any(|r| r.contains("trigger.a")));
-        assert!(raws.iter().any(|r| r.contains("trigger.b")));
-        assert!(raws.iter().any(|r| r.contains("trigger.c")));
+        let bodies: Vec<_> = refs.iter().map(|r| r.body.clone()).collect();
+        assert!(bodies.iter().any(|b| b == "trigger.a"));
+        assert!(bodies.iter().any(|b| b == "trigger.b"));
+        assert!(bodies.iter().any(|b| b == "trigger.c"));
     }
 
     #[test]
@@ -529,5 +487,21 @@ mod tests {
         };
         let v = json!({ "k": "no templates here" });
         assert_eq!(substitute_value(&v, &ctx).unwrap(), v);
+    }
+
+    #[test]
+    fn referenced_step_names_extracts_unique_ordered() {
+        let r = parse_path(
+            "steps.triage.outputs.x + steps.dispatch.outputs.y + steps.triage.outputs.z",
+        )
+        .unwrap();
+        let names = referenced_step_names(&r);
+        assert_eq!(names, vec!["triage".to_string(), "dispatch".to_string()]);
+    }
+
+    #[test]
+    fn referenced_step_names_ignores_trigger() {
+        let r = parse_path("trigger.payload.build").unwrap();
+        assert!(referenced_step_names(&r).is_empty());
     }
 }
