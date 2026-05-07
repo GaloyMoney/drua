@@ -57,7 +57,12 @@ struct AttachRequest {
 
 #[derive(Debug, Serialize)]
 struct ResetRepoResponse {
-    /// True iff every reset step exited 0. Best-effort callers can ignore this.
+    /// `true` when the workspace is in the expected post-reset state:
+    /// either every reset step succeeded (script printed
+    /// `__reset_done__`) or the cwd had no `.git` so reset was a no-op
+    /// (script printed `__reset_skipped_no_git__`). `false` means at
+    /// least one reset step failed and the workspace state is
+    /// unspecified — caller should treat as a soft warning.
     ok: bool,
     /// Concatenated stdout/stderr of the reset script, for observability.
     output: String,
@@ -659,31 +664,45 @@ async fn attach(
 
 /// Resets the cloned repo at the bash session's cwd to a clean baseline:
 /// `git fetch origin main && git checkout main && git reset --hard origin/main
-/// && git clean -fd`, then drops any leftover `bot/*` branches. Best-effort:
-/// individual steps may fail (e.g. `fetch` if the token is stale) and the
-/// remaining steps still run. Runs through the existing bash session so the
-/// commands inherit the UID-drop and the agent's git config.
+/// && git clean -fd`, then drops any leftover `bot/*` branches.
 ///
-/// No-op (returns `ok=true`) when the cwd does not contain a `.git` dir —
-/// e.g. scratch-mode sandboxes.
+/// Runs through the existing bash session so the commands inherit the
+/// UID-drop and the agent's git config. The script body runs in a
+/// **subshell** with `set -e` so a failing step (e.g. `git fetch` on a
+/// stale token) aborts the chain without printing the success marker —
+/// AND without `exit` killing the persistent shell.
+///
+/// Markers (mutually exclusive — at most one prints to stdout):
+/// - `__reset_done__` — every reset step succeeded.
+/// - `__reset_skipped_no_git__` — cwd has no `.git`; nothing to reset
+///   (e.g. scratch-mode sandboxes).
+/// - neither — at least one reset step failed; workspace state is
+///   unspecified.
+///
+/// `ok = output.contains(__reset_done__) || output.contains(__reset_skipped_no_git__)`.
 #[instrument(name = "sandbox.server.reset_repo", skip_all)]
 async fn reset_repo(State(session): State<SharedSession>) -> Json<ResetRepoResponse> {
     let cwd = session.current_cwd().await;
+    // Subshell `( ... )` confines `exit` so the no-`.git` short-circuit
+    // and any `set -e` abort don't terminate the persistent bash
+    // session. Outer `|| true` keeps the session's last exit code 0
+    // (the script itself is success-via-marker, not via exit code).
     let script = format!(
-        r#"set +e; cd {cwd} 2>/dev/null || exit 0; \
-[ -d .git ] || exit 0; \
+        r#"( set -e; cd {cwd}; [ -d .git ] || {{ echo __reset_skipped_no_git__; exit 0; }}; \
 git fetch origin main; \
 git checkout main 2>/dev/null || git checkout -B main origin/main; \
 git reset --hard origin/main; \
 git clean -fd; \
-for b in $(git branch --list 'bot/*' | sed 's/^[* ]*//'); do git branch -D "$b" 2>/dev/null || true; done; \
-echo __reset_done__"#
+for b in $(git branch --list 'bot/*' | sed 's/^[* ]*//'); do git branch -D "$b" || true; done; \
+echo __reset_done__ ) || true"#
     );
 
     const RESET_TIMEOUT_MS: u64 = 60_000;
     match session.execute(&script, RESET_TIMEOUT_MS).await {
         Ok(r) => Json(ResetRepoResponse {
-            ok: !r.shell_died && r.output.contains("__reset_done__"),
+            ok: !r.shell_died
+                && (r.output.contains("__reset_done__")
+                    || r.output.contains("__reset_skipped_no_git__")),
             output: r.output,
         }),
         Err(e) => Json(ResetRepoResponse {
@@ -2352,19 +2371,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_repo_is_noop_when_cwd_has_no_git_dir() {
+    async fn reset_repo_skipped_when_cwd_has_no_git_dir() {
         let workspace = fresh_test_dir("sandbox-reset-nogit");
         let session: SharedSession = Arc::new(BashSession::new());
         session.set_cwd(workspace).await;
 
         let resp = reset_repo(State(session)).await;
-        // Best-effort: no .git → script exits 0 immediately. The marker
-        // never echoes (we exit before it), so `ok` is false but the
-        // call succeeds without error.
+        // No `.git` → subshell prints `__reset_skipped_no_git__` and
+        // exits 0. `ok` reports the workspace is in the expected
+        // baseline state (a no-op skip is a fine outcome).
         assert!(
-            !resp.0.ok || resp.0.output.is_empty() || !resp.0.output.contains("__reset_done__"),
-            "no-git case should not falsely claim success: {:?}",
+            resp.0.ok,
+            "no-git skip case should be ok=true: {:?}",
             resp.0
+        );
+        assert!(
+            resp.0.output.contains("__reset_skipped_no_git__"),
+            "expected skip marker in output: {:?}",
+            resp.0.output
+        );
+        assert!(
+            !resp.0.output.contains("__reset_done__"),
+            "must not falsely emit reset_done marker: {:?}",
+            resp.0.output
+        );
+    }
+
+    /// Regression test for the "exit 0 kills the persistent shell" bug
+    /// (Bugbot finding on PR #286): the reset script's early-return
+    /// must run in a subshell so the persistent `BashSession` survives
+    /// and a follow-up `execute` doesn't have to respawn.
+    #[tokio::test]
+    async fn reset_repo_does_not_kill_persistent_shell() {
+        let workspace = fresh_test_dir("sandbox-reset-shell-survives");
+        let session: SharedSession = Arc::new(BashSession::new());
+        session.set_cwd(workspace).await;
+
+        let _ = reset_repo(State(session.clone())).await;
+
+        // If the subshell isolation is broken, this command will
+        // either fail with `shell_died` or come back from a brand-new
+        // respawned shell. Either way it's a regression.
+        let post = session
+            .execute("echo persistent_shell_alive", 5_000)
+            .await
+            .expect("post-reset execute must succeed");
+        assert!(
+            !post.shell_died,
+            "shell must survive reset; output={:?}",
+            post.output
+        );
+        assert!(
+            post.output.contains("persistent_shell_alive"),
+            "follow-up command must run on the same shell; output={:?}",
+            post.output
         );
     }
 }
