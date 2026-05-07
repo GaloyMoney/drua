@@ -7,9 +7,16 @@ use llm::stream::StreamDelta;
 use llm::StopReason;
 
 use crate::types::{
-    OpenAiFunction, OpenAiMessage, OpenAiRequest, OpenAiRequestToolCall, OpenAiStreamChunk,
-    OpenAiTool, OpenAiToolChoice, OpenAiToolChoiceFunction, OpenAiToolFunction, StreamOptions,
+    OpenAiCacheControl, OpenAiContentBlock, OpenAiFunction, OpenAiMessage, OpenAiMessageContent,
+    OpenAiRequest, OpenAiRequestToolCall, OpenAiStreamChunk, OpenAiTool, OpenAiToolChoice,
+    OpenAiToolChoiceFunction, OpenAiToolFunction, StreamOptions,
 };
+
+/// OpenRouter routes any model id starting with `anthropic/` to Anthropic
+/// upstream, where prompt caching only engages on requests carrying explicit
+/// `cache_control` markers. The OpenAI Chat Completions request shape carries
+/// these as a passthrough field.
+const ANTHROPIC_MODEL_PREFIX: &str = "anthropic/";
 
 pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
     let mut messages: Vec<OpenAiMessage> = Vec::new();
@@ -19,7 +26,7 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
             SystemBlock::Text { text, .. } => {
                 messages.push(OpenAiMessage {
                     role: "system",
-                    content: Some(text.clone()),
+                    content: Some(OpenAiMessageContent::Text(text.clone())),
                     tool_calls: None,
                     tool_call_id: None,
                 });
@@ -39,7 +46,7 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
 
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
-    OpenAiRequest {
+    let mut request = OpenAiRequest {
         model: prompt.chain.primary.name.clone(),
         messages,
         prompt_cache_key: prompt.cache_key.clone(),
@@ -51,7 +58,59 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
+    };
+
+    if request.model.starts_with(ANTHROPIC_MODEL_PREFIX) {
+        apply_anthropic_prompt_caching(&mut request);
     }
+
+    request
+}
+
+/// Stamps a single `{type:"ephemeral"}` marker on the highest-value cacheable
+/// block: last user/system message → last tool definition. Anthropic
+/// auto-checks earlier breakpoints, so one marker covers the prefix. Mirrors
+/// `lib/anthropic-client/src/convert.rs::apply_prompt_caching`.
+fn apply_anthropic_prompt_caching(req: &mut OpenAiRequest) {
+    let marker = OpenAiCacheControl {
+        r#type: "ephemeral",
+        ttl: None,
+    };
+
+    if let Some(last_msg) = req.messages.last_mut() {
+        if mark_message(last_msg, &marker) {
+            return;
+        }
+    }
+    if let Some(tool) = req.tools.as_mut().and_then(|v| v.last_mut()) {
+        tool.cache_control = Some(marker);
+    }
+}
+
+/// Promotes the message content to array-of-blocks shape (required by the
+/// Chat Completions caching extension) and marks the last text block.
+/// Returns false when the message has no text content (pure tool_calls).
+fn mark_message(msg: &mut OpenAiMessage, marker: &OpenAiCacheControl) -> bool {
+    let text = match msg.content.take() {
+        Some(OpenAiMessageContent::Text(t)) => t,
+        Some(OpenAiMessageContent::Blocks(mut blocks)) => {
+            if let Some(block) = blocks.last_mut() {
+                block.cache_control = Some(marker.clone());
+                msg.content = Some(OpenAiMessageContent::Blocks(blocks));
+                return true;
+            }
+            msg.content = Some(OpenAiMessageContent::Blocks(blocks));
+            return false;
+        }
+        None => return false,
+    };
+
+    msg.content = Some(OpenAiMessageContent::Blocks(vec![OpenAiContentBlock {
+        r#type: "text",
+        text,
+        cache_control: Some(marker.clone()),
+    }]));
+    true
 }
 
 fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
@@ -74,7 +133,7 @@ fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
                         if !text_parts.is_empty() {
                             out.push(OpenAiMessage {
                                 role: "user",
-                                content: Some(text_parts.join("\n")),
+                                content: Some(OpenAiMessageContent::Text(text_parts.join("\n"))),
                                 tool_calls: None,
                                 tool_call_id: None,
                             });
@@ -89,7 +148,7 @@ fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
                             .join("\n");
                         out.push(OpenAiMessage {
                             role: "tool",
-                            content: Some(text),
+                            content: Some(OpenAiMessageContent::Text(text)),
                             tool_calls: None,
                             tool_call_id: Some(tool_use_id.clone()),
                         });
@@ -99,7 +158,7 @@ fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
             if !text_parts.is_empty() {
                 out.push(OpenAiMessage {
                     role: "user",
-                    content: Some(text_parts.join("\n")),
+                    content: Some(OpenAiMessageContent::Text(text_parts.join("\n"))),
                     tool_calls: None,
                     tool_call_id: None,
                 });
@@ -135,7 +194,7 @@ fn convert_message(message: &Message, out: &mut Vec<OpenAiMessage>) {
             let content = if text_parts.is_empty() {
                 None
             } else {
-                Some(text_parts.join("\n"))
+                Some(OpenAiMessageContent::Text(text_parts.join("\n")))
             };
 
             let tool_calls_field = if tool_calls.is_empty() {
@@ -163,6 +222,7 @@ fn convert_tool(tool: &Tool) -> OpenAiTool {
             parameters: tool.input_schema.clone(),
             strict: if tool.strict { Some(true) } else { None },
         },
+        cache_control: None,
     }
 }
 
@@ -349,6 +409,23 @@ impl DeltaSynthesizer {
 mod tests {
     use super::*;
 
+    fn content_text(msg: &OpenAiMessage) -> Option<String> {
+        match msg.content.as_ref()? {
+            OpenAiMessageContent::Text(t) => Some(t.clone()),
+            OpenAiMessageContent::Blocks(blocks) => Some(
+                blocks
+                    .iter()
+                    .map(|b| b.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+    }
+
+    fn cache_marker(block: &OpenAiContentBlock) -> Option<&OpenAiCacheControl> {
+        block.cache_control.as_ref()
+    }
+
     fn sample_prompt() -> llm::Prompt {
         llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
@@ -433,7 +510,7 @@ mod tests {
         assert!(req.messages[0].tool_calls.is_some());
         assert_eq!(req.messages[1].role, "tool");
         assert_eq!(req.messages[1].tool_call_id.as_deref(), Some("call_123"));
-        assert_eq!(req.messages[1].content.as_deref(), Some("72F"));
+        assert_eq!(content_text(&req.messages[1]), Some("72F".to_string()));
     }
 
     #[test]
@@ -460,7 +537,10 @@ mod tests {
 
         let req = prompt_to_request(&prompt);
         assert_eq!(req.messages.len(), 1);
-        assert_eq!(req.messages[0].content.as_deref(), Some("visible response"));
+        assert_eq!(
+            content_text(&req.messages[0]),
+            Some("visible response".to_string())
+        );
         assert!(req.messages[0].tool_calls.is_none());
     }
 
@@ -755,5 +835,129 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(&deltas[0], StreamDelta::ToolCallDelta { id, .. } if id == "call_2"));
+    }
+
+    fn anthropic_via_openrouter_prompt() -> llm::Prompt {
+        llm::Prompt {
+            chain: llm::ModelChain::new("anthropic/claude-sonnet-4.6"),
+            system: vec![SystemBlock::Text {
+                text: "system instructions".to_string(),
+            }],
+            messages: vec![Message::User {
+                content: vec![UserBlock::Text {
+                    text: "user question".to_string(),
+                }],
+            }],
+            tools: vec![Tool {
+                name: "fetch".to_string(),
+                description: None,
+                input_schema: serde_json::json!({"type": "object"}),
+                strict: false,
+            }],
+            tool_choice: None,
+            max_tokens: Some(1024),
+            cache_key: None,
+        }
+    }
+
+    #[test]
+    fn anthropic_via_openrouter_marks_last_user_text_block() {
+        let req = prompt_to_request(&anthropic_via_openrouter_prompt());
+
+        let last = req.messages.last().expect("messages present");
+        assert_eq!(last.role, "user");
+        let blocks = match last.content.as_ref().expect("content present") {
+            OpenAiMessageContent::Blocks(b) => b,
+            OpenAiMessageContent::Text(_) => {
+                panic!("expected array-of-blocks shape for cache_control")
+            }
+        };
+        let marker = blocks.last().and_then(cache_marker).expect("cache marker");
+        assert_eq!(marker.r#type, "ephemeral");
+        assert_eq!(marker.ttl, None, "default 5m TTL — omit field");
+
+        // Earlier non-marked blocks (system) keep the plain string shape so we
+        // don't churn requests for non-Anthropic-targeted system text.
+        let system = req.messages.first().expect("system message");
+        assert!(matches!(
+            system.content,
+            Some(OpenAiMessageContent::Text(_))
+        ));
+        assert!(req
+            .tools
+            .as_ref()
+            .and_then(|v| v.last())
+            .and_then(|t| t.cache_control.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn non_anthropic_model_emits_plain_string_content() {
+        let mut prompt = anthropic_via_openrouter_prompt();
+        prompt.chain = llm::ModelChain::new("openai/gpt-5-mini");
+
+        let req = prompt_to_request(&prompt);
+
+        for msg in &req.messages {
+            assert!(
+                matches!(msg.content, Some(OpenAiMessageContent::Text(_)) | None),
+                "non-Anthropic models must keep plain-string content"
+            );
+        }
+        assert!(req
+            .tools
+            .as_ref()
+            .and_then(|v| v.last())
+            .and_then(|t| t.cache_control.as_ref())
+            .is_none());
+
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            !json.to_string().contains("cache_control"),
+            "wire JSON must not contain cache_control for non-Anthropic models"
+        );
+    }
+
+    #[test]
+    fn anthropic_falls_through_to_tool_when_messages_empty() {
+        let mut prompt = anthropic_via_openrouter_prompt();
+        prompt.messages.clear();
+        prompt.system.clear();
+
+        let req = prompt_to_request(&prompt);
+
+        let tool = req
+            .tools
+            .as_ref()
+            .and_then(|v| v.last())
+            .expect("tool present");
+        let marker = tool.cache_control.as_ref().expect("tool cache marker");
+        assert_eq!(marker.r#type, "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_serialised_request_has_cache_control_inside_content_block() {
+        let req = prompt_to_request(&anthropic_via_openrouter_prompt());
+        let json = serde_json::to_value(&req).unwrap();
+
+        // Wire-format check: the marker is nested inside a content block on
+        // the user message. This is what OpenRouter forwards to Anthropic.
+        let user_msg = json["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "user")
+            .unwrap();
+        let last_block = user_msg["content"].as_array().unwrap().last().unwrap();
+        assert_eq!(last_block["type"], "text");
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+        assert!(
+            last_block
+                .get("cache_control")
+                .unwrap()
+                .get("ttl")
+                .is_none(),
+            "default TTL should be omitted from wire JSON"
+        );
     }
 }
